@@ -7,8 +7,66 @@
 
 Bootstrapped. `PLAN.md` and `SESSIONS.md` read in full (session 1). Git
 repo initialized, planning docs committed as baseline (`3c44891`). Local
-toolchain checked (see below). Working block 1: T0 §1 (QEMU install
-harness).
+toolchain checked (see below). Block 1 (T0 §1, QEMU install harness):
+harness + libraries + unit tests written and passing; full end-to-end run
+against a real ISO not yet verified (environment gap, see below).
+
+### T0 §1 deliverables (session 1)
+
+Flat files (per `CLAUDE.md`'s no-subdirectories rule — the task file's
+`./test/vm-install-test.sh` example path was not followed literally;
+everything lives at the repo root with a `vm-`/`test-vm-` prefix instead):
+
+- `vm-disk-image.sh` — rootless GPT partition-table reading and partition
+  extraction from a raw disk image file (`sfdisk --json` + `dd`, no loop
+  device/root needed — verified interactively before relying on it).
+- `vm-assertions.sh` — the actual done-when checks: partition table, UKI
+  files present, Limine config contains expected entries (probes the same
+  5 candidate paths as Omarchy's own `limine-snapper.sh`, PLAN.md §8.2),
+  package set installed, systemd units enabled. Deliberately split into an
+  "extraction" half (reads the disk) and a "checking" half (pure logic),
+  so checking logic is unit-testable without a real install.
+- `vm-cidata.sh` — builds the `cidata` autoinstall drive (FAT-labeled, not
+  ISO9660 — no `xorriso`/`genisoimage`/`mkisofs` on this machine) from the
+  archinstall-schema JSON found by session-1 research.
+- `vm-install-test.sh` — orchestrates all three: boot ISO headless in
+  QEMU with the cidata drive attached, wait for guest poweroff (bounded by
+  `VM_INSTALL_TIMEOUT_SEC`), convert the qcow2 disk to raw, run the
+  assertions, exit non-zero with a preserved work dir on any failure.
+- `test-vm-disk-image.sh`, `test-vm-assertions.sh`, `test-vm-cidata.sh` —
+  31 assertions total, all passing, all against real hand-built fixture
+  images (GPT+FAT32+btrfs via `parted`/`mkfs.vfat`/`mkfs.btrfs` directly on
+  regular files — no loop device, no root). Every check has a confirmed-
+  failing negative case (e.g. missing ESP, wrong UKI name, unmet package,
+  disabled unit) — satisfies the "verify a test can fail" failure mode at
+  the unit level. Caught one real bug while writing these (ESP fixture
+  needed an actual `mkfs.vfat` before mtools could write to it — parted
+  alone only writes the partition table entry).
+
+**Known gap — not yet run end-to-end against a real ISO.** See the
+"KNOWN GAP" comment at the top of `vm-install-test.sh` for the full
+detail. Two independent blockers:
+1. This dev machine has no Docker (upstream's ISO build needs it), no
+   `kvm` group membership, and no passwordless sudo — see "Local
+   dev-machine limitations" below. Can't build or KVM-accelerate a real
+   install here to test against.
+2. Even with an ISO: unmodified upstream `omarchy-iso` doesn't
+   auto-poweroff after a non-interactive cidata install (only
+   `OMARCHY_UI_INTERACTIVE=no` is automatic; `OMARCHY_UI_AUTO_REBOOT` /
+   `OMARCHY_UI_FAILURE_ACTION` aren't, so `omarchy-install-dashboard`
+   leaves an interactive confirm-and-reboot prompt at the end). This
+   harness's completion signal (QEMU process exit) needs T5's eventual
+   Deck ISO fork to add one line to `.automated_script.sh`'s cidata
+   branch (`export OMARCHY_UI_AUTO_REBOOT=no OMARCHY_UI_FAILURE_ACTION=exit`
+   + `systemctl poweroff` after the dashboard returns, non-interactive
+   only). Until then, running this against stock upstream will correctly
+   time out rather than hang or false-pass — that's honest behavior, not
+   a bug, but it means the "exits non-zero on a deliberately broken
+   build" done-when criterion is unverified end-to-end, only at the unit
+   level.
+`shellcheck` is not installed locally (see toolchain table) — all four
+`vm-*.sh`/`test-vm-*.sh` files pass `bash -n`, but haven't been run
+through shellcheck yet.
 
 ### Local toolchain check (2026-08-07)
 
@@ -30,7 +88,7 @@ human" below instead.
 
 | Task | Status | Notes |
 |---|---|---|
-| T0 Test infrastructure | not started | Do first — collapses the edit-test loop |
+| T0 Test infrastructure | **in progress** — §1 built, run unverified | §1 harness+libs+31 unit tests done; §2–6 (Ventoy doc, override loader, deck-sync.sh, CI, shellcheck baseline) not started |
 | R1 Research questions | not started | Can run parallel; 10.4 is highest stakes |
 | T1 Kernel and boot | not started | Opus. Draft script exists, unexecuted |
 | T2 Gamepad input spike | not started | Opus. Determines T4's entire scope |
@@ -160,5 +218,9 @@ See `PLAN.md` §10 — six documented questions with hypotheses, worked in R1.
 
 ## Next session should start with
 
-Read `START-HERE.md` in full, then `SESSIONS.md`, then `PLAN.md` (the one
-time you should read it whole). Begin block 1: `TASK-T0-test-infrastructure.md` §1.
+Bootstrap is done — skip straight to block 2: `TASK-T0-test-infrastructure.md`
+§2–6 (Ventoy doc, script-override loader, `deck-sync.sh`/snapshot scripts,
+CI, shellcheck baseline), per `SESSIONS.md`'s block table. Before that,
+ideally resolve the T0 §1 environment gap above (Docker + `kvm` group, or
+confirm CI has what's needed) so `vm-install-test.sh` can get a real
+end-to-end run rather than staying unit-tested-only.
