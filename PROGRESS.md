@@ -44,6 +44,77 @@ human" below instead.
 Nothing confirmed yet. `PLAN.md` §8 and §10 contain **hypotheses**, not
 findings — as each is confirmed or killed, record it here with evidence.
 
+### ⚠️ Foundational assumption in PLAN.md §4/§5/§10.2 is wrong
+
+`OMARCHY_INSTALLER_REPO` / `OMARCHY_INSTALLER_REF` — the env-var hook pair
+PLAN.md's architecture diagram (§4) and repo plan (§5) assume connects
+`omarchy-deck-iso` to a forked installer repo — **does not exist** in
+`omacom-io/omarchy-iso`. Confirmed by full-repo grep (session 1, subagent
+research): zero occurrences of `OMARCHY_INSTALLER_REPO`;
+`OMARCHY_INSTALLER_REF` appears exactly once (in a `--quattro` flag
+handler) and is never read — looks vestigial.
+
+What the repo actually does: Omarchy installs as a **pacman package**
+(`omarchy`/`omarchy-dev`) pulled from a custom repo baked into the ISO's
+offline mirror — not a git-cloned installer repo chain-launched at
+install time. The real extension points are:
+- The `[omarchy]` repo `Server=` URL in `configs/pacman-online-*.conf`
+  (or the offline equivalent) — point it at a Deck-specific package repo.
+- `bin/omarchy-iso-make --local-source <omarchy-checkout> <pkgs-checkout>`
+  — mounts a local checkout into the build container and builds
+  `omarchy*` packages from source instead of pulling published ones.
+- In-target, `omarchy-setup-system`/`omarchy-finalize-user` (run via
+  `arch-chroot` after pacstrap) ship **inside** the `omarchy`/`omarchy-dev`
+  package itself — they're basecamp/omarchy's own scripts, not something
+  omarchy-iso separately clones.
+
+**This changes the shape of the three/four-repo architecture in PLAN.md
+§4–§5** — there's no clean "fork omarchy-iso, point it at a forked
+installer repo via env var" path. The Deck-specific installer logic likely
+needs to become its own pacman package (built via `--local-source`) or a
+pacman-repo-server-swap, not a git-repo swap. **This needs operator input
+before T5 locks in an approach** — flagging per `START-HERE.md` §3's
+"foundational assumption is wrong" escalation rule, not silently working
+around it. R1 10.2 should be re-scoped around this finding rather than the
+original hypothesis.
+
+### Useful finding: `cidata` autoinstall mechanism (for T0 §1)
+
+`omacom-io/omarchy-iso` already ships an unattended-install path that's a
+better fit for T0's QEMU harness than upstream's own OCR-based
+`bin/omarchy-iso-test`: a second virtio drive labeled `cidata` (cloud-init
+NoCloud convention) carrying `user_configuration.json` +
+`user_credentials.json` (required pair; optional: `user_full_name.txt`,
+`user_email_address.txt`, `user_encrypt_installation.txt`,
+`authorized_keys`, `tailscale_authkey`). `omarchy-cidata-load` copies these
+to `/root` and the orchestrator (`orchestrator/main.py`) skips the `gum`
+wizard entirely. Building `test/vm-install-test.sh` around this instead of
+keystroke/OCR injection. Exact JSON schema for the two required files is
+being confirmed against `archinstall_adapter.py` before hand-authoring a
+fixture (session 1, in progress) — do not guess the schema; a wrong guess
+here reproduces the exact "prints success, does nothing" failure class
+this project exists to prevent (§8.1).
+
+### Local dev-machine limitations affecting T0 §1
+
+- No Docker (`omarchy-iso-make`'s ISO build runs in a privileged Docker
+  container) — full ISO builds aren't runnable on this machine without it.
+- Operator's user account is not in the `kvm` group (`/dev/kvm` exists,
+  group `kvm`, but `groups` shows only `video input wheel`) — KVM
+  acceleration unavailable; QEMU would fall back to slow TCG emulation.
+- No passwordless `sudo` — blocks root-required steps in the disk-image
+  assertion layer (`qemu-nbd` connect, mounting the btrfs root partition).
+  `udisksctl loop-setup` works rootless, but the resulting `/dev/loopN`
+  node is `root:disk` and the user isn't in `disk` either, so even
+  loop-mapped raw block access is blocked.
+- Net effect: this session can write and unit-test the harness logic
+  (fixture-based, using rootless tools like `mtools` for FAT/ESP reads)
+  but **cannot fully verify T0 §1's "done when" criterion** (run against a
+  real build, confirm failure detection) without one of: Docker + `kvm`
+  group membership + passwordless sudo (or at least group `disk`), or
+  running the harness in CI instead, or the operator granting these
+  locally. Added to "Blocked on human" below.
+
 Carried over from the operator's manual install session (already validated
 on real hardware, treat as fact):
 
@@ -63,6 +134,17 @@ on real hardware, treat as fact):
   Not installed automatically per `CLAUDE.md` — install with
   `sudo pacman -S archiso shellcheck`, plus `ventoy-bin` from the AUR for
   the USB workflow, when convenient.
+- **Docker + `kvm` group + passwordless sudo (or `disk` group), for
+  actually running/verifying T0's QEMU harness end to end.** See
+  "Local dev-machine limitations" under Findings above. Without at least
+  one of these, T0 §1's done-criteria can be built and unit-tested but not
+  fully verified locally — CI (which typically has full root) may cover
+  the gap instead, or the operator can grant one of these locally:
+  `sudo usermod -aG kvm,disk $USER` (needs re-login) + install `docker`.
+- **PLAN.md §4/§5 architecture needs revisiting**: the
+  `OMARCHY_INSTALLER_REPO` hook it assumes doesn't exist upstream (see
+  Findings above). Needs a decision before T5 on the replacement approach
+  (pacman-repo-server-swap vs. `--local-source` package build).
 - Any write to the physical Deck
 - Any public action (repos, upstream issues, outreach)
 - **Scope decision: v0 vs v1 first** (see `PLAN.md` §3.1). Recommended is
