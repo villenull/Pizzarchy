@@ -64,9 +64,81 @@ detail. Two independent blockers:
    a bug, but it means the "exits non-zero on a deliberately broken
    build" done-when criterion is unverified end-to-end, only at the unit
    level.
-`shellcheck` is not installed locally (see toolchain table) — all four
-`vm-*.sh`/`test-vm-*.sh` files pass `bash -n`, but haven't been run
-through shellcheck yet.
+Note: at the time this was written, `shellcheck` was not installed via
+pacman locally — a rootless static v0.11.0 binary was fetched from
+GitHub releases directly into the job's scratch dir to unblock T0 §6
+(see below) rather than waiting. That binary isn't on `PATH` outside this
+session; the operator should still get `shellcheck` installed properly
+(`sudo pacman -S shellcheck`) for normal day-to-day use — CI installs its
+own copy via `apt-get` regardless.
+
+### T0 §2–6 deliverables (session 1, continued — operator granted
+permission to install missing packages themselves rather than blocking on
+them; proceeded without waiting since none of §2–6 turned out to need
+them)
+
+- **§2 `FINDING-testing-usb.md`** — Ventoy one-time-setup + day-to-day
+  workflow, written from `PLAN.md` §9.3's reasoning. Not executed (no
+  physical USB access from this environment) — flagged as such in the doc
+  itself.
+- **§3 `vm-script-loader.sh` + `test-vm-script-loader.sh`** — script-
+  override resolution (prefer an override copy of an installer script over
+  the ISO's baked-in one, if present). The ISO's real mount layout isn't
+  decided yet (T5), so the override-root search path is a parameter
+  (`OMARCHY_DECK_OVERRIDE_ROOT` env var + a `/run/media/*/omarchy-deck`
+  glob default), not a hardcoded assumption — expect to revise once T5
+  lands. 8 unit tests, all passing, each failure mode covered (missing
+  override, override missing this one script, override entry is a
+  directory not a file, script missing everywhere → fails loudly).
+- **§4 `deck-sync.sh`, `deck-snapshot.sh`, `deck-rollback.sh`** — SSH
+  iterate-in-place loop + btrfs snapshot/rollback, all parameterized via
+  `DECK_HOST`/`DECK_USER`/`DECK_SSH_PORT` env vars (defaults:
+  `deck@steamdeck`). **Not run against real hardware** — no Deck reachable
+  from this environment, and the task file explicitly allows this
+  ("untested against real hardware is OK here — flag it for the
+  operator"). Only local, SSH-independent argument-validation was
+  exercised (missing args, bad snapshot number, missing stage file — all
+  fail fast with the right exit code before attempting a connection).
+  **Confirmed before writing these** (per PLAN.md §9.4's own suggestion
+  to check first): Omarchy's installer already sets up a Snapper config
+  at `/etc/snapper/configs/root` with Limine-sync integration (found in
+  `omarchy-iso`'s `orchestrator/phases_impl.py` — it hard-fails the
+  install if that path is missing). So `deck-snapshot.sh`/
+  `deck-rollback.sh` wrap `snapper create`/`snapper rollback` rather than
+  hand-rolling raw btrfs subvolume management. Note `snapper rollback`
+  doesn't take effect until reboot — `deck-rollback.sh` prints that
+  instruction rather than auto-rebooting the physical Deck, unless
+  `DECK_ROLLBACK_AUTO_REBOOT=1` is explicitly set (rebooting physical
+  hardware unprompted isn't something to default to).
+- **§5 `.github/workflows/ci.yml`** — the one exception to the
+  no-subdirectories rule (GitHub-mandated path). Two jobs: `lint-and-
+  unit-test` (every push — shellcheck + `bash -n` + all `test-vm-*.sh`
+  suites, all of which are rootless and need no special CI privileges)
+  and `iso-install-test` (tags only — build the ISO, run
+  `vm-install-test.sh`). The ISO-build step is a documented placeholder
+  (`exit 1` with a TODO(T5) message) since no build entry point exists
+  yet. **Not verified against a real GitHub Actions run** — no remote
+  configured for this repo (see "Blocked on human"), so only YAML
+  validity (via `js-yaml`) and the job logic by inspection were checked,
+  not an actual green run.
+  - Fixed while writing this: GitHub-hosted runners have no `/dev/kvm`
+    (confirmed absent from upstream `omarchy-iso`'s own CI for the same
+    reason). `vm-install-test.sh` now detects `/dev/kvm` and falls back
+    to TCG software emulation with a loud warning instead of hard-
+    requiring KVM.
+  - Also fixed: `vm-install-test.sh` had hardcoded Arch's OVMF firmware
+    path (`/usr/share/edk2/x64/...`), which doesn't exist on Debian/
+    Ubuntu CI runners. Now probes several known distro paths, overridable
+    via `VM_OVMF_CODE`/`VM_OVMF_VARS`.
+- **§6 shellcheck baseline** — ran the fetched shellcheck v0.11.0 against
+  every `*.sh` in the repo, including `omarchy-deck-kernel.sh` (T1's
+  draft, never executed — came back clean with zero findings on the first
+  run). Found and fixed 7 real findings across the new files (one
+  genuine variable-name collision across sourced files, a couple of
+  QEMU-arg/glob patterns shellcheck couldn't distinguish from mistakes —
+  quoted or suppressed with an inline justification comment rather than
+  silently ignored). **Repo is now shellcheck-clean** (verified: `shellcheck
+  *.sh` exits 0, no output).
 
 ### Local toolchain check (2026-08-07)
 
@@ -88,7 +160,7 @@ human" below instead.
 
 | Task | Status | Notes |
 |---|---|---|
-| T0 Test infrastructure | **in progress** — §1 built, run unverified | §1 harness+libs+31 unit tests done; §2–6 (Ventoy doc, override loader, deck-sync.sh, CI, shellcheck baseline) not started |
+| T0 Test infrastructure | **§1–6 all built; two verification gaps remain** | §1 harness unit-tested (31 assertions) but not run end-to-end against a real ISO; §2–6 done (Ventoy doc, override loader + 8 tests, deck-sync/snapshot/rollback untested against hardware, CI workflow untested against a real Actions run, shellcheck clean repo-wide). See T0 §1/§2–6 deliverables above for exact gaps. |
 | R1 Research questions | not started | Can run parallel; 10.4 is highest stakes |
 | T1 Kernel and boot | not started | Opus. Draft script exists, unexecuted |
 | T2 Gamepad input spike | not started | Opus. Determines T4's entire scope |
@@ -187,18 +259,17 @@ on real hardware, treat as fact):
 ## Blocked on human
 
 - Ventoy setup on the test USB (T0 step 2)
-- Missing local packages needed for full T0 work: `archiso` (mkarchiso,
-  for ISO builds later) and `shellcheck` (static analysis, T0 §5–6).
-  Not installed automatically per `CLAUDE.md` — install with
-  `sudo pacman -S archiso shellcheck`, plus `ventoy-bin` from the AUR for
-  the USB workflow, when convenient.
-- **Docker + `kvm` group + passwordless sudo (or `disk` group), for
-  actually running/verifying T0's QEMU harness end to end.** See
-  "Local dev-machine limitations" under Findings above. Without at least
-  one of these, T0 §1's done-criteria can be built and unit-tested but not
-  fully verified locally — CI (which typically has full root) may cover
-  the gap instead, or the operator can grant one of these locally:
-  `sudo usermod -aG kvm,disk $USER` (needs re-login) + install `docker`.
+- **Operator agreed (session 1) to handle the local package/permission
+  installs Claude Code can't do itself** (needs root, or a password
+  prompt Claude Code can't answer): `sudo pacman -S archiso shellcheck
+  docker`, `ventoy-bin` from the AUR, and `sudo usermod -aG kvm,disk
+  $USER` (needs re-login to take effect) for QEMU KVM acceleration and
+  rootless-enough disk-image access. **Not yet confirmed done as of this
+  write-up** — re-check with `which docker shellcheck mkarchiso; groups`
+  next session before assuming it landed. Once it has, T0 §1's
+  `vm-install-test.sh` should get its first real end-to-end run (see gap
+  noted under T0 §1 deliverables above) and shellcheck can run without the
+  session-scratch static-binary workaround.
 - **PLAN.md §4/§5 architecture needs revisiting**: the
   `OMARCHY_INSTALLER_REPO` hook it assumes doesn't exist upstream (see
   Findings above). Needs a decision before T5 on the replacement approach
@@ -218,9 +289,16 @@ See `PLAN.md` §10 — six documented questions with hypotheses, worked in R1.
 
 ## Next session should start with
 
-Bootstrap is done — skip straight to block 2: `TASK-T0-test-infrastructure.md`
-§2–6 (Ventoy doc, script-override loader, `deck-sync.sh`/snapshot scripts,
-CI, shellcheck baseline), per `SESSIONS.md`'s block table. Before that,
-ideally resolve the T0 §1 environment gap above (Docker + `kvm` group, or
-confirm CI has what's needed) so `vm-install-test.sh` can get a real
-end-to-end run rather than staying unit-tested-only.
+T0 §1–6 are all built (see deliverables above). Before starting block 3
+(R1 research, per `SESSIONS.md`'s block table):
+
+1. Check whether the operator's package/permission installs landed
+   (`which docker shellcheck mkarchiso; groups` — as of this write-up,
+   none had yet). If they have: run `./vm-install-test.sh` against a real
+   built ISO for the first time (needs an ISO — none exists until T5, so
+   this may mean building upstream's own unmodified `omarchy-iso` first
+   just to exercise the harness, separate from this project's own fork
+   work) and push/verify the CI workflow on an actual GitHub Actions run
+   once a remote exists.
+2. Otherwise, proceed to block 3 (R1 research questions) — T0 isn't fully
+   hardware/CI-verified but isn't blocking further work either.

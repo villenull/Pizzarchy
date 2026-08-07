@@ -64,6 +64,7 @@ jq empty "$creds" || fail "render_credentials produces valid JSON"
 pass "render_credentials produces valid JSON"
 
 hash=$(jq -r '.root_enc_password' "$creds")
+# shellcheck disable=SC2016 # deliberately literal: matching the $6$ prefix, not expanding it
 [[ $hash == '$6$'* ]] || fail "password hash uses SHA-512 crypt (\$6\$), matching the configurator's own openssl passwd -6" "$hash"
 user_hash=$(jq -r '.users[0].enc_password' "$creds")
 [[ $hash == "$user_hash" ]] || fail "root and user share the same hash for the same input password"
@@ -76,9 +77,9 @@ pass "render_credentials produces a correctly-shaped users[] entry with a real S
 # --- build_image: real FAT filesystem, readable back via mtools --------
 
 img="$work/cidata.img"
-extra="$work/authorized_keys"
-echo "ssh-ed25519 AAAA test" >"$extra"
-cidata::build_image "$img" "$config" "$creds" "$extra"
+extra_file="$work/authorized_keys"
+echo "ssh-ed25519 AAAA test" >"$extra_file"
+cidata::build_image "$img" "$config" "$creds" "$extra_file"
 
 [[ -f $img ]] || fail "build_image produces a file"
 label=$(MTOOLS_SKIP_CHECK=1 mdir -i "$img" :: 2>/dev/null | grep -i 'Volume in drive' || true)

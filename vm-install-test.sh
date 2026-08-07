@@ -74,14 +74,53 @@ read -ra EXPECT_LIMINE_REF <<<"${VM_EXPECT_LIMINE_REF:-}"
 read -ra EXPECT_PACKAGES <<<"${VM_EXPECT_PACKAGES:-base-devel git omarchy-keyring omarchy-settings omarchy}"
 read -ra EXPECT_UNITS <<<"${VM_EXPECT_UNITS:-}"
 
-OVMF_CODE=/usr/share/edk2/x64/OVMF_CODE.4m.fd
-OVMF_VARS_TEMPLATE=/usr/share/edk2/x64/OVMF_VARS.4m.fd
-
 log() { printf '[vm-install-test] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
 
-[[ -f $OVMF_CODE && -f $OVMF_VARS_TEMPLATE ]] || fail "OVMF firmware not found at $OVMF_CODE / $OVMF_VARS_TEMPLATE (package edk2-ovmf) — see 'Escalate if' in TASK-T0-test-infrastructure.md, this is a Blocked-on-human item, not something to work around"
+# OVMF's install path isn't consistent across distros (Arch's edk2-ovmf
+# vs. Debian/Ubuntu's ovmf vs. Fedora's edk2-ovmf all differ) and this
+# needs to work both on the operator's Arch dev machine and on whatever
+# CI runner (currently Ubuntu-based GitHub Actions) ends up running this.
+# Probe known candidates; VM_OVMF_CODE/VM_OVMF_VARS override outright.
+# Prints the first existing candidate path, or nothing (exit 1) if none
+# exist — runs inside a command substitution below, so it must not call
+# fail()/exit itself; a subshell's `exit` only ends the subshell, and a
+# failure here has to actually stop the script, not silently continue
+# with an empty path.
+find_ovmf() {
+  local c
+  for c in "$@"; do
+    [[ -f $c ]] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+OVMF_CODE=${VM_OVMF_CODE:-$(find_ovmf \
+  /usr/share/edk2/x64/OVMF_CODE.4m.fd \
+  /usr/share/OVMF/OVMF_CODE_4M.fd \
+  /usr/share/OVMF/OVMF_CODE.fd \
+  /usr/share/edk2/ovmf/OVMF_CODE.fd)}
+OVMF_VARS_TEMPLATE=${VM_OVMF_VARS:-$(find_ovmf \
+  /usr/share/edk2/x64/OVMF_VARS.4m.fd \
+  /usr/share/OVMF/OVMF_VARS_4M.fd \
+  /usr/share/OVMF/OVMF_VARS.fd \
+  /usr/share/edk2/ovmf/OVMF_VARS.fd)}
+[[ -n $OVMF_CODE && -f $OVMF_CODE ]] || fail "OVMF CODE firmware not found — package edk2-ovmf (Arch) / ovmf (Debian/Ubuntu). See 'Escalate if' in TASK-T0-test-infrastructure.md: this is a Blocked-on-human item, not something to work around. Override with VM_OVMF_CODE."
+[[ -n $OVMF_VARS_TEMPLATE && -f $OVMF_VARS_TEMPLATE ]] || fail "OVMF VARS firmware not found — package edk2-ovmf (Arch) / ovmf (Debian/Ubuntu). Override with VM_OVMF_VARS."
+
 command -v qemu-system-x86_64 >/dev/null || fail "qemu-system-x86_64 not found"
+
+# KVM acceleration isn't universal (notably: standard GitHub-hosted CI
+# runners have no /dev/kvm — confirmed absent from upstream omarchy-iso's
+# own CI for the same reason, session 1 research). Degrade to software
+# emulation (TCG) rather than hard-failing when it's unavailable; just
+# say so loudly, since TCG is dramatically slower and a timeout under TCG
+# doesn't mean the same thing as a timeout under KVM.
+if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+  ACCEL_ARGS=(-cpu host -enable-kvm -machine "q35,accel=kvm")
+else
+  log "WARNING: /dev/kvm not accessible — falling back to TCG (software emulation, much slower). Consider a higher VM_INSTALL_TIMEOUT_SEC."
+  ACCEL_ARGS=(-cpu max -machine "q35,accel=tcg")
+fi
 
 mkdir -p "$WORK"
 log "work dir: $WORK"
@@ -110,7 +149,7 @@ cidata::build_image "$cidata_img" "$config_json" "$creds_json"
 
 log "booting ISO headless (timeout ${INSTALL_TIMEOUT}s)"
 qemu-system-x86_64 \
-  -cpu host -enable-kvm -machine q35,accel=kvm \
+  "${ACCEL_ARGS[@]}" \
   -smp "$SMP" -m "$MEM_MB" \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file="$ovmf_vars" \
