@@ -5,12 +5,26 @@
 
 ## Status summary
 
-Project not yet started. This folder contains planning artifacts only:
-a full plan (`PLAN.md`), hard constraints (`CLAUDE.md`), eight task
-specifications (`TASK-*.md`), and one draft implementation script
-(`omarchy-deck-kernel.sh`, never executed).
+Bootstrapped. `PLAN.md` and `SESSIONS.md` read in full (session 1). Git
+repo initialized, planning docs committed as baseline (`3c44891`). Local
+toolchain checked (see below). Working block 1: T0 §1 (QEMU install
+harness).
 
-Next action: read `START-HERE.md`, then `SESSIONS.md`, then begin block 1 (T0 §1).
+### Local toolchain check (2026-08-07)
+
+| Tool | Status |
+|---|---|
+| `qemu-system-x86_64` | present, 11.0.2 |
+| `edk2-ovmf` (UEFI firmware for QEMU) | present, 202605-1 |
+| `git` | present, 2.55.0 |
+| `archiso` (`mkarchiso`) | **missing** |
+| `shellcheck` | **missing** |
+| `ventoy-bin` | **missing** |
+
+`archiso` and `shellcheck` are needed for T0 §1/§6; `ventoy-bin` is needed
+for the human-executed USB setup (T0 §2, already slated for
+"Blocked on human"). Not installed per `CLAUDE.md` — added to "Blocked on
+human" below instead.
 
 ## Task status
 
@@ -44,6 +58,11 @@ on real hardware, treat as fact):
 ## Blocked on human
 
 - Ventoy setup on the test USB (T0 step 2)
+- Missing local packages needed for full T0 work: `archiso` (mkarchiso,
+  for ISO builds later) and `shellcheck` (static analysis, T0 §5–6).
+  Not installed automatically per `CLAUDE.md` — install with
+  `sudo pacman -S archiso shellcheck`, plus `ventoy-bin` from the AUR for
+  the USB workflow, when convenient.
 - Any write to the physical Deck
 - Any public action (repos, upstream issues, outreach)
 - **Scope decision: v0 vs v1 first** (see `PLAN.md` §3.1). Recommended is
