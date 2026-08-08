@@ -1,224 +1,809 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # omarchy-deck-kernel.sh
 #
-# Self-contained Neptune kernel + Limine UKI setup for Steam Deck.
-# Fixes (see project plan Section 8):
-#   8.1 - No longer depends on a separate common-script.sh fetched via
-#         relative path. Safe to run via `curl | bash`.
-#   8.2 - Adds real Limine detection instead of failing with
-#         "No supported bootloader detected".
-#   8.3 - Detects the real ESP mount point instead of assuming /efi or /boot.
-#   8.4 - Does NOT install any AUR helper as a side effect.
-#   8.5 - Fixes /boot fmask/dmask so user-space scripts (including Omarchy's
-#         own limine-snapper.sh) can read the Limine config, via a full
-#         umount/mount cycle (a soft remount does not re-apply fmask/dmask
-#         on vfat -- confirmed the hard way).
+# Self-contained Neptune kernel + Limine UKI setup for Steam Deck, for a
+# system installed from Omarchy Quattro (archinstall + Limine + UKI).
 #
-# Designed to be idempotent: safe to re-run. Aborts loudly (set -euo
-# pipefail) rather than silently no-op'ing on a missing dependency --
-# this is the direct fix for the failure mode in bug 8.1, where the
-# original script printed "success" while having done almost nothing.
+# Fixes the upstream bugs in PLAN.md §8:
+#   8.1 - No dependency on a separate common-script.sh fetched via a
+#         relative path. Safe to run via `curl | bash`. Every stage
+#         verifies the state it claims to have produced, so no code path
+#         can print progress while having done nothing.
+#   8.2 - Real Limine support instead of "No supported bootloader
+#         detected". The Limine config path is probed across all five
+#         candidate locations, never hardcoded.
+#   8.3 - The real ESP is detected, never assumed to be /boot or /efi.
+#   8.4 - No AUR helper is installed as a side effect.
+#   8.5 - The ESP's fmask/dmask is loosened so user-space scripts
+#         (including Omarchy's own limine-snapper.sh) can read the Limine
+#         config, via a full umount/mount cycle -- a soft `mount -o
+#         remount` does NOT re-apply fmask/dmask on vfat. See the
+#         SECURITY TRADEOFF note in stage_esp_permissions().
 #
-# TODO for Claude Code (Track A, Opus recommended -- see plan Section 12):
-#   - Replace the hardcoded package name `linux-neptune-611` with dynamic
-#     detection (pacman -Ss '^linux-neptune-[0-9]+$' or similar), since this
-#     is exactly the kernel-version-churn fragility documented in plan
-#     Section 11. This script currently hardcodes 611 deliberately, matching
-#     what was validated live -- generalize it before relying on it long-term.
-#   - Add the pacman hook (plan Section 11) that re-runs the UKI+Limine-entry
-#     steps automatically on any linux-neptune* package upgrade.
-#   - Wire this into the omarchy-deck-installer post-install hook chain
-#     (plan Section 5, item 3) rather than running it standalone.
-#   - Add non-interactive flags so it can run inside the T1 automated QEMU
-#     install (plan Section 9.2) with assertable exit codes.
+# Idempotent and re-runnable: running it twice in a row leaves byte-identical
+# state (proven, not asserted -- see vm-kernel-idempotency-test.sh).
 #
-# KNOWN ISSUE (found in review, not yet fixed -- fix during T1):
-#   The awk pattern that extracts the stock cmdline uses a PREFIX match on
-#   `/Arch Linux (linux)`, which would also match `/Arch Linux (linux-neptune-611)`.
-#   The idempotency guard above it currently prevents this from being reached
-#   in the normal path, but it is fragile: on a system where a neptune entry
-#   exists under a different name, the wrong cmdline could be extracted.
-#   Anchor the match properly.
+# ---------------------------------------------------------------------------
+# T1 REVIEW FINDINGS (2026-08-08) -- why this is a rewrite, not a tidy-up
+# ---------------------------------------------------------------------------
+# The previous draft of this file was written from a manual install done on
+# an older package set and had never been executed anywhere. Reviewing it
+# against a real Omarchy Quattro install image and against the packages
+# Valve actually publishes today turned up four premises that no longer
+# hold. All four would have caused a hard failure or a wrong boot entry:
+#
+#   1. Valve's kernel packages no longer ship /boot/vmlinuz-<pkg>, and no
+#      longer ship an /etc/mkinitcpio.d/<pkg>.preset at all. Verified by
+#      unpacking linux-neptune-611-6.11.11.valve29-1 and
+#      linux-neptune-618-6.18.39.valve1-1: each contains exactly
+#      usr/lib/modules/<kver>/{pkgbase,vmlinuz} and nothing under /boot or
+#      /etc. The draft's existence checks for both files, and its entire
+#      "patch default_uki in the preset" stage, were therefore dead ends.
+#      PLAN.md §8.3's preset bug is real but is now moot on current
+#      packages -- there is no preset to be wrong.
+#
+#   2. Omarchy Quattro does not use mkinitcpio presets to build UKIs. It
+#      uses limine-mkinitcpio-hook, whose pacman hook enumerates
+#      /usr/lib/modules/*/pkgbase and builds
+#      $ESP/EFI/Linux/<prefix>_<pkgbase>.efi for every installed kernel,
+#      then registers it with `limine-entry-tool --add-uki`. <prefix> is
+#      CUSTOM_UKI_NAME from /etc/default/limine when set ("omarchy" on
+#      Quattro) and the machine-id otherwise -- so the path is discovered,
+#      never constructed (see find_uki_for).
+#      Installing the Neptune kernel is therefore *most* of the job; this
+#      script's real work is making sure that machinery actually ran and
+#      producing a loud failure when it did not.
+#
+#   3. The stock Limine config on a real Omarchy Quattro install has no
+#      `/Arch Linux (linux)` entry. It is a nested tree written by
+#      limine-entry-tool (`/+Omarchy` -> `//linux`), and the `path:` line
+#      carries a blake2b hash of the UKI. The draft's awk cmdline
+#      extraction matched nothing there, and its hand-rolled `tee -a` of a
+#      flat top-level entry would have appended an entry outside the OS
+#      branch, with no hash, that limine-entry-tool would later clobber.
+#      Both are gone: the cmdline now comes from the supported source
+#      (/etc/default/limine via limine-entry-tool) and entries are created
+#      by limine-entry-tool itself.
+#
+#   4. `linux-neptune-611` is four series behind. Valve currently ships
+#      series 60, 61, 65, 68, 611, 615, 616, 618 and 72. See the
+#      NEPTUNE_SERIES constant below for why this script still pins 611
+#      and how to move the pin.
+#
+# Deliberate scope decision: this script supports the limine-mkinitcpio-hook
+# UKI mechanism only. A plain-archinstall Limine system without that hook
+# gets a loud, actionable failure rather than an untested attempt to hand-
+# write its boot chain. Shipping an untested code path that mutates a boot
+# chain is the same class of defect as PLAN.md §8.1 -- it looks like it
+# worked right up until the device does not boot.
+#
+# Still TODO in later T1 steps (not this change):
+#   - The pacman hook (PLAN.md §11 / task step 3).
+#   - Non-interactive flags + independently runnable stages (steps 4, 6).
+#   - The §8.5 upstream reproduction and issue (step 5).
 
 set -euo pipefail
 
-log()  { printf '[omarchy-deck-kernel] %s\n' "$1"; }
-fail() { printf '[omarchy-deck-kernel] ERROR: %s\n' "$1" >&2; exit 1; }
+readonly PROG=omarchy-deck-kernel
+
+log()  { printf '[%s] %s\n' "$PROG" "$*"; }
+fail() { printf '[%s] ERROR: %s\n' "$PROG" "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-# 0. Preconditions
+# The kernel version constant. This is the ONLY place a Neptune version
+# appears in this script -- package name, UKI filename and Limine entry name
+# are all derived from it, and every regeneration/prune path below is keyed
+# on the `linux-neptune-*` glob rather than on this value.
+#
+# WHY PINNED RATHER THAN "TRACK LATEST" (PLAN.md §11, task step 2):
+#
+#   * The series suffix is not orderable. Valve's published series are
+#     60, 61, 65, 68, 611, 615, 616, 618, 72. Sorted as integers, 618 > 72;
+#     sorted as text, "68" > "618". Neither is right -- 72 (7.2.x) is the
+#     newest. "Latest" cannot be computed from the package name at all, so
+#     any auto-latest scheme is guessing.
+#   * "Latest" is currently a release candidate. linux-neptune-72 is
+#     7.2.0.rc3.valve.beta1. Auto-tracking would silently move users onto a
+#     beta kernel during a routine `pacman -Syu`.
+#   * The whole point of this project is that a wrong boot-chain guess is
+#     expensive to discover. A pin that needs a one-line human bump is the
+#     cheap failure; an auto-bump onto an unvalidated kernel is not.
+#
+# What *is* dynamic: the script reads the repos to confirm the pinned series
+# actually exists, and tells you exactly which series are available if it
+# does not (see stage_kernel). It never silently falls back to another one.
+#
+# TO MOVE THE PIN: change NEPTUNE_SERIES_DEFAULT, test on hardware, and note
+# the validated series in PROGRESS.md. Override for a one-off test with
+# OMARCHY_DECK_NEPTUNE_SERIES=618 ./omarchy-deck-kernel.sh
+#
+# 611 is the series validated live on the operator's OLED Deck. Nothing
+# newer has been validated on hardware, and per CLAUDE.md untested hardware
+# claims do not ship.
+# ---------------------------------------------------------------------------
+readonly NEPTUNE_SERIES_DEFAULT=611
+
+NEPTUNE_SERIES=${OMARCHY_DECK_NEPTUNE_SERIES:-$NEPTUNE_SERIES_DEFAULT}
+[[ $NEPTUNE_SERIES =~ ^[0-9]+$ ]] ||
+  fail "OMARCHY_DECK_NEPTUNE_SERIES must be digits only (e.g. 611, 618, 72), got: '$NEPTUNE_SERIES'"
+readonly NEPTUNE_SERIES
+readonly KERNEL_PKG="linux-neptune-${NEPTUNE_SERIES}"
+
+# Glob (not the pinned version) used by every enumerate/prune path, so a
+# version bump reconciles stale entries instead of stacking duplicates.
+readonly NEPTUNE_PKGBASE_GLOB='linux-neptune-*'
+
+# Valve repos. steamdeck-dsp and linux-firmware-neptune both live in
+# jupiter-staging; holo-staging is added because Omarchy's Deck packages
+# expect it to be present, not because this script pulls from it.
+readonly -a VALVE_REPOS=(jupiter-staging holo-staging)
+# shellcheck disable=SC2016 # $repo/$arch are pacman's own variables and must reach pacman.conf unexpanded
+readonly VALVE_MIRROR='https://steamdeck-packages.steamos.cloud/archlinux-mirror/$repo/os/$arch'
+
+# Limine config candidate locations, relative to the ESP. Limine's config
+# path is not stable across versions (PLAN.md §8.2); Omarchy's own
+# limine-snapper.sh probes exactly these five. Never hardcode one.
+readonly -a LIMINE_CONFIG_CANDIDATES=(
+  /EFI/arch-limine/limine.conf
+  /EFI/BOOT/limine.conf
+  /EFI/limine/limine.conf
+  /limine/limine.conf
+  /limine.conf
+)
+
+# Set by stage_preconditions/stage_esp_detect, consumed by later stages.
+SUDO=""
+ESP_PATH=""
+LIMINE_CONFIG=""
+
+# ---------------------------------------------------------------------------
+# Stage 0: preconditions
 # ---------------------------------------------------------------------------
 
-command -v pacman >/dev/null 2>&1 || fail "pacman not found -- this script only supports Arch"
-command -v sudo   >/dev/null 2>&1 || fail "sudo not found"
+stage_preconditions() {
+  local tool
+  for tool in pacman findmnt mount umount install; do
+    command -v "$tool" >/dev/null 2>&1 ||
+      fail "required tool '$tool' not found -- this script only supports Arch-based systems"
+  done
 
-# Confirm we're actually on Deck hardware before doing anything Deck-specific.
-if ! grep -qi "steam deck\|jupiter\|galileo" /sys/class/dmi/id/product_name 2>/dev/null \
-   && ! grep -qi "valve" /sys/class/dmi/id/sys_vendor 2>/dev/null; then
-    fail "This does not look like Steam Deck hardware (check /sys/class/dmi/id/product_name). Refusing to proceed."
-fi
-log "Steam Deck hardware confirmed."
+  if [[ $EUID -eq 0 ]]; then
+    SUDO=""
+  else
+    command -v sudo >/dev/null 2>&1 ||
+      fail "not running as root and sudo not found"
+    SUDO="sudo"
+    # Prove escalation actually works now rather than failing halfway
+    # through a boot-chain edit.
+    $SUDO -n true 2>/dev/null || $SUDO true ||
+      fail "sudo escalation failed -- re-run as root or fix sudo before touching the boot chain"
+  fi
 
-KERNEL_PKG="linux-neptune-611"
-KERNEL_PRESET="/etc/mkinitcpio.d/${KERNEL_PKG}.preset"
+  # Deck hardware gate. product_name is "Jupiter" (LCD) or "Galileo" (OLED);
+  # sys_vendor is "Valve". Only OLED is verified hardware (CLAUDE.md) -- the
+  # LCD string is accepted here because refusing to run is worse than running
+  # on an untested-but-plausible Deck, but nothing downstream claims LCD
+  # support.
+  local product="" vendor=""
+  if [[ -r /sys/class/dmi/id/product_name ]]; then product=$(</sys/class/dmi/id/product_name); fi
+  if [[ -r /sys/class/dmi/id/sys_vendor ]];   then vendor=$(</sys/class/dmi/id/sys_vendor);   fi
+  if ! [[ ${product,,} =~ (steam\ deck|jupiter|galileo) || ${vendor,,} == *valve* ]]; then
+    fail "not Steam Deck hardware (DMI product_name='${product:-<unreadable>}' sys_vendor='${vendor:-<unreadable>}'). Refusing to modify the boot chain."
+  fi
+  log "hardware: ${vendor:-unknown} ${product:-unknown}"
 
-# ---------------------------------------------------------------------------
-# 1. Add Valve's repos if not already present
-# ---------------------------------------------------------------------------
+  # The UKI mechanism this script drives. See T1 REVIEW FINDINGS #2 above.
+  command -v limine-entry-tool >/dev/null 2>&1 ||
+    fail "limine-entry-tool not found. This script drives Omarchy Quattro's limine-mkinitcpio-hook UKI mechanism and does not hand-write boot entries. Install limine-mkinitcpio-hook (and limine), or boot-chain setup has to be done another way -- see the scope note at the top of this file."
+  command -v limine-mkinitcpio >/dev/null 2>&1 ||
+    fail "limine-mkinitcpio not found although limine-entry-tool is present -- the limine-mkinitcpio-hook install looks broken. Reinstall it rather than continuing."
 
-add_repo_if_missing() {
-    local repo_name="$1"
-    if ! grep -q "^\[${repo_name}\]" /etc/pacman.conf; then
-        log "Adding ${repo_name} to pacman.conf"
-        sudo tee -a /etc/pacman.conf > /dev/null << EOF
-
-[${repo_name}]
-Server = https://steamdeck-packages.steamos.cloud/archlinux-mirror/\$repo/os/\$arch
-SigLevel = Never
-EOF
-    else
-        log "${repo_name} already present in pacman.conf, skipping"
-    fi
 }
 
-add_repo_if_missing "jupiter-staging"
-add_repo_if_missing "holo-staging"
-
-sudo pacman -Sy || fail "pacman -Sy failed -- check network/repo config"
-
 # ---------------------------------------------------------------------------
-# 2. Install the Neptune kernel + firmware (idempotent: pacman no-ops if
-#    already installed and up to date)
+# Stage 1: Valve repos
 # ---------------------------------------------------------------------------
 
-log "Installing ${KERNEL_PKG} and firmware..."
-sudo pacman -S --needed --noconfirm \
+stage_repos() {
+  local repo added=0
+  for repo in "${VALVE_REPOS[@]}"; do
+    if grep -qE "^\[${repo}\]" /etc/pacman.conf; then
+      log "repo ${repo}: already in /etc/pacman.conf"
+      continue
+    fi
+    log "repo ${repo}: adding to /etc/pacman.conf"
+    # SigLevel = Never: Valve's mirror is unsigned for these repos. This is
+    # a real trust reduction, scoped to these two repo sections only.
+    $SUDO tee -a /etc/pacman.conf >/dev/null <<EOF
+
+[${repo}]
+Server = ${VALVE_MIRROR}
+SigLevel = Never
+EOF
+    # Verify the append landed. `tee` can succeed into a full or read-only
+    # filesystem in ways that leave nothing behind (PLAN.md §8.1).
+    grep -qE "^\[${repo}\]" /etc/pacman.conf ||
+      fail "wrote [${repo}] to /etc/pacman.conf but it is not there on re-read -- is / read-only or full?"
+    added=$((added + 1))
+  done
+
+  log "syncing package databases"
+  $SUDO pacman -Sy --noconfirm >/dev/null ||
+    fail "pacman -Sy failed -- check network and the Valve mirror"
+
+  # Verify the sync actually produced usable databases for the repos we
+  # just claimed to add, instead of trusting pacman's exit code.
+  for repo in "${VALVE_REPOS[@]}"; do
+    pacman -Sl "$repo" >/dev/null 2>&1 ||
+      fail "repo '${repo}' has no usable package database after pacman -Sy"
+  done
+  log "repos ready (${added} added this run, $(( ${#VALVE_REPOS[@]} - added )) already present)"
+}
+
+# ---------------------------------------------------------------------------
+# Stage 2: ESP detection (PLAN.md §8.3 -- never assume a path)
+#
+# Replaces the previous draft's findmnt-into-findmnt chain, which could
+# return multiple lines when one device is mounted at several points, and
+# which never checked that what it found was actually a FAT ESP.
+# ---------------------------------------------------------------------------
+
+# esp_is_valid <path> -- mounted, vfat, and looks like an ESP.
+esp_is_valid() {
+  local path=$1 fstype
+  findmnt --mountpoint "$path" >/dev/null 2>&1 || return 1
+  fstype=$(findmnt -n -o FSTYPE --mountpoint "$path" 2>/dev/null) || return 1
+  [[ $fstype == vfat ]] || return 1
+  # Elevated: before stage_esp_permissions runs, the ESP is mounted 0700 and
+  # an unprivileged `[[ -d /boot/EFI ]]` is false for a directory that exists.
+  # That is bug §8.5 itself, and testing it unprivileged here would make the
+  # real ESP look like it was not an ESP.
+  $SUDO test -d "$path/EFI" || return 1
+  return 0
+}
+
+stage_esp_detect() {
+  local -a candidates=()
+
+  # /etc/default/limine is authoritative on a limine-mkinitcpio-hook system:
+  # it is the same value the UKI-building hook itself uses, so agreeing with
+  # it is what keeps this script and the hook writing to the same place.
+  if [[ -r /etc/default/limine ]]; then
+    local declared
+    declared=$(sed -nE 's/^[[:space:]]*ESP_PATH[[:space:]]*=[[:space:]]*"?([^"#]*[^"#[:space:]])"?.*/\1/p' \
+      /etc/default/limine | tail -n 1)
+    if [[ -n $declared ]]; then candidates+=("$declared"); fi
+  fi
+  candidates+=(/boot /efi /boot/efi)
+
+  local c
+  for c in "${candidates[@]}"; do
+    if esp_is_valid "$c"; then
+      ESP_PATH=$c
+      break
+    fi
+  done
+  [[ -n $ESP_PATH ]] ||
+    fail "no mounted vfat ESP found at any of: ${candidates[*]}. Run 'findmnt -t vfat' and mount the ESP before re-running."
+  readonly ESP_PATH
+
+  log "ESP: ${ESP_PATH} ($(findmnt -n -o SOURCE --mountpoint "$ESP_PATH"))"
+
+  # Limine config: probe all five candidates (PLAN.md §8.2). Read as root --
+  # on an unfixed ESP the invoking user cannot traverse /boot at all, which
+  # is exactly bug §8.5 and would make every candidate look absent.
+  local candidate
+  for candidate in "${LIMINE_CONFIG_CANDIDATES[@]}"; do
+    if $SUDO test -f "${ESP_PATH}${candidate}"; then
+      LIMINE_CONFIG="${ESP_PATH}${candidate}"
+      break
+    fi
+  done
+  [[ -n $LIMINE_CONFIG ]] ||
+    fail "no Limine config at any candidate location under ${ESP_PATH}: ${LIMINE_CONFIG_CANDIDATES[*]}. This project requires Limine (PLAN.md §6.3) -- GRUB and systemd-boot are not supported."
+  log "Limine config: ${LIMINE_CONFIG}"
+  readonly LIMINE_CONFIG
+}
+
+# ---------------------------------------------------------------------------
+# Stage 3: kernel + firmware
+# ---------------------------------------------------------------------------
+
+# neptune_series_available -- every linux-neptune-<digits> package name the
+# configured repos offer, one per line. Excludes -headers, -wip, -kasan,
+# -drm-exec and similar variants.
+neptune_series_available() {
+  local repo
+  for repo in "${VALVE_REPOS[@]}"; do
+    pacman -Sl "$repo" 2>/dev/null | awk '$2 ~ /^linux-neptune-[0-9]+$/ { print $2 }'
+  done | sort -u
+}
+
+# installed_neptune_pkgbases -- pkgbase of every installed Neptune kernel,
+# read from /usr/lib/modules/*/pkgbase (the same source limine-mkinitcpio-hook
+# uses). Glob-keyed, so it sees every version, not just the pinned one.
+installed_neptune_pkgbases() {
+  local f name
+  for f in /usr/lib/modules/*/pkgbase; do
+    [[ -f $f ]] || continue
+    name=$(<"$f")
+    # shellcheck disable=SC2053 # intentional glob match, not a string compare
+    if [[ $name == $NEPTUNE_PKGBASE_GLOB ]]; then printf '%s\n' "$name"; fi
+  done | sort -u
+}
+
+# kernel_module_dir <pkgbase> -- /usr/lib/modules/<kver> for an installed
+# kernel, or empty.
+kernel_module_dir() {
+  local want=$1 f
+  for f in /usr/lib/modules/*/pkgbase; do
+    if [[ -f $f && $(<"$f") == "$want" ]]; then
+      printf '%s\n' "${f%/pkgbase}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# colliding_arch_firmware -- installed linux-firmware* packages that Valve's
+# linux-firmware-neptune will collide with on disk.
+#
+# Arch split linux-firmware into per-vendor subpackages
+# (linux-firmware-amdgpu, -atheros, -other, ...) with the old name kept as a
+# metapackage. Valve's linux-firmware-neptune still declares
+# conflicts/replaces against only `linux-firmware` and `linux-firmware-whence`,
+# so pacman happily removes those two and then dies in the file-conflict
+# check against the ten subpackages nobody declared anything about:
+#   "linux-firmware-neptune: /usr/lib/firmware/... exists in filesystem
+#    (owned by linux-firmware-other)"
+# Found by running this script in a VM (vm-kernel-idempotency-test.sh), not
+# by reading the PKGBUILDs. This is an upstream packaging gap on Valve's side
+# and a candidate for the DRAFT-upstream-bugs report.
+#
+# Prints one package name per line; empty output means nothing collides.
+colliding_arch_firmware() {
+  pacman -Qq 2>/dev/null |
+    grep -E '^linux-firmware(-[a-z0-9-]+)?$' |
+    grep -vE 'neptune|^linux-firmware-whence$' || true
+}
+
+# stage_firmware_swap -- make room for Valve's firmware, idempotently.
+#
+# NOT done with --overwrite: overwriting would leave the Arch subpackages
+# still owning those paths, so the next `pacman -Syu` would silently restore
+# Arch's firmware over Valve's and nobody would find out until hardware
+# misbehaved. Removing the packages is the honest end state, and it is what
+# SteamOS itself ships.
+stage_firmware_swap() {
+  local -a colliding=()
+  mapfile -t colliding < <(colliding_arch_firmware)
+
+  if [[ ${#colliding[@]} -eq 0 ]]; then
+    log "firmware: no Arch linux-firmware packages left to displace"
+    return 0
+  fi
+
+  if pacman -Qq linux-firmware-neptune >/dev/null 2>&1; then
+    log "firmware: linux-firmware-neptune already installed alongside ${colliding[*]} -- leaving them alone"
+    return 0
+  fi
+
+  log "firmware: removing Arch's split linux-firmware packages so Valve's can be installed: ${colliding[*]}"
+  # -dd because linux-firmware is a hard dependency of every installed kernel;
+  # the replacement is installed immediately below, in the same script run.
+  $SUDO pacman -Rdd --noconfirm "${colliding[@]}" ||
+    fail "could not remove Arch's linux-firmware packages (${colliding[*]}). Nothing has been changed; the system still has its original firmware."
+
+  local remaining
+  remaining=$(colliding_arch_firmware | tr '\n' ' ')
+  [[ -z ${remaining// /} ]] ||
+    fail "pacman -Rdd exited 0 but these are still installed: ${remaining}. THE SYSTEM MAY NOW HAVE PARTIAL FIRMWARE -- run 'pacman -S linux-firmware' before rebooting."
+}
+
+stage_kernel() {
+  local -a available
+  mapfile -t available < <(neptune_series_available)
+  [[ ${#available[@]} -gt 0 ]] ||
+    fail "the Valve repos returned no linux-neptune-* packages at all -- the mirror layout may have changed"
+
+  local found=0 pkg
+  for pkg in "${available[@]}"; do
+    if [[ $pkg == "$KERNEL_PKG" ]]; then found=1; break; fi
+  done
+  # Loud, actionable, never a silent fallback to a different kernel.
+  [[ $found -eq 1 ]] ||
+    fail "pinned kernel '${KERNEL_PKG}' is not available in the Valve repos. Available: ${available[*]}. Update NEPTUNE_SERIES_DEFAULT in this script (and validate on hardware) rather than picking one at runtime."
+
+  log "installing ${KERNEL_PKG} + firmware (pinned series ${NEPTUNE_SERIES}; ${#available[@]} series available upstream)"
+
+  # --ask=4 is ALPM_QUESTION_CONFLICT_PKG, and it is load-bearing.
+  #
+  # linux-firmware-neptune declares `replaces`/`conflicts`/`provides` against
+  # stock linux-firmware. pacman only honours `replaces` during a full -Su;
+  # under a targeted -S it surfaces as "linux-firmware-neptune and
+  # linux-firmware are in conflict. Remove linux-firmware? [y/N]", whose
+  # default is *No* -- so plain --noconfirm aborts the whole transaction with
+  # "unresolvable package conflicts". Found by running this in a VM
+  # (vm-kernel-idempotency-test.sh); it is the same shape of bug as PLAN.md
+  # §8.4's yay/yay-bin conflict.
+  #
+  # --ask=4 pre-answers only the conflict question, not every question, so a
+  # corrupted package or an unexpected provider choice still stops the run.
+  # A whole-system -Syu would also work but would drag an unrelated full
+  # upgrade into a kernel script.
+  $SUDO pacman -S --needed --noconfirm --ask=4 \
     "${KERNEL_PKG}" \
     "${KERNEL_PKG}-headers" \
     linux-firmware-neptune \
-    steamdeck-dsp \
-    || fail "Kernel/firmware package installation failed"
+    steamdeck-dsp ||
+    fail "kernel/firmware package installation failed. If stage_firmware_swap removed Arch's linux-firmware packages just before this, the system is currently without firmware -- run 'pacman -S linux-firmware' before rebooting."
 
-[[ -f "/boot/vmlinuz-${KERNEL_PKG}" ]] || fail "Kernel image not found after install -- pacman reported success but the file is missing. Do not proceed."
-[[ -f "$KERNEL_PRESET" ]] || fail "mkinitcpio preset not found at $KERNEL_PRESET -- package layout may have changed, check plan Section 11"
+  # Verify against the filesystem and the local db, not pacman's exit code
+  # (PLAN.md §8.1).
+  local moddir
+  moddir=$(kernel_module_dir "$KERNEL_PKG") ||
+    fail "pacman reported success but no /usr/lib/modules/*/pkgbase contains '${KERNEL_PKG}'. Nothing was actually installed; do not reboot."
+  [[ -f "$moddir/vmlinuz" ]] ||
+    fail "kernel modules dir ${moddir} exists but has no vmlinuz -- the package layout changed, see PLAN.md §11"
+
+  local p
+  for p in "${KERNEL_PKG}" "${KERNEL_PKG}-headers" linux-firmware-neptune steamdeck-dsp; do
+    pacman -Qq "$p" >/dev/null 2>&1 ||
+      fail "pacman exited 0 but '${p}' is not in the local package database"
+  done
+
+  log "kernel installed: ${KERNEL_PKG} (${moddir##*/})"
+}
 
 # ---------------------------------------------------------------------------
-# 3. Detect the real ESP (fixes bug 8.3 -- do not assume /boot or /efi)
+# Stage 4: UKI + Limine entry
+#
+# limine-mkinitcpio-hook's pacman hook does this automatically on a fresh
+# install. This stage exists to (a) verify it really happened and (b)
+# reconcile the case where it did not run -- notably a re-run where
+# `pacman -S --needed` is a no-op, so no hook fires.
 # ---------------------------------------------------------------------------
 
-ESP_PATH=$(findmnt -n -o TARGET --source "$(findmnt -n -o SOURCE /boot 2>/dev/null || true)" 2>/dev/null || true)
-if [[ -z "$ESP_PATH" ]]; then
-    # Fall back to checking the two conventional mountpoints directly.
-    if findmnt /boot >/dev/null 2>&1; then
-        ESP_PATH="/boot"
-    elif findmnt /efi >/dev/null 2>&1; then
-        ESP_PATH="/efi"
-    else
-        fail "Could not detect ESP mount point at /boot or /efi. Run 'findmnt' manually and adjust ESP_PATH."
+# find_uki_for <pkgbase> -- the UKI limine-mkinitcpio-hook built for a kernel,
+# discovered rather than constructed.
+#
+# The filename prefix is NOT predictable: limine-mkinitcpio-install uses
+# CUSTOM_UKI_NAME from /etc/default/limine when it is set and matches
+# ^[a-z0-9]+$, and the machine-id otherwise. Omarchy Quattro sets it to
+# "omarchy", so the real files are `omarchy_linux.efi`,
+# `omarchy_linux-neptune-611.efi` -- an earlier version of this script
+# assumed the machine-id form and looked for a file that never existed.
+# Discovering the path keeps the "never assume a path" property that the
+# whole of PLAN.md §8.3 is about.
+#
+# Prints the path, or nothing (exit 1) if there is no match. Fails loudly on
+# more than one match: two prefixes for the same kernel means two boot
+# entries, and picking either silently would hide that.
+find_uki_for() {
+  local pkgbase=$1
+  local -a matches=()
+  mapfile -t matches < <($SUDO find "$ESP_PATH/EFI/Linux" -maxdepth 1 -type f \
+    -name "*_${pkgbase}.efi" 2>/dev/null | LC_ALL=C sort)
+  case ${#matches[@]} in
+    0) return 1 ;;
+    1) printf '%s\n' "${matches[0]}" ;;
+    *) fail "found ${#matches[@]} UKIs for '${pkgbase}' on the ESP (${matches[*]}). Two boot entries for one kernel -- resolve this by hand before rebooting." ;;
+  esac
+}
+
+# limine_entry_count <uki-path> -- how many times the Limine config references
+# this UKI. limine-entry-tool writes the filename into the entry's `path:`
+# line (with a #<blake2b> suffix), so matching the basename is enough.
+limine_entry_count() {
+  local uki=$1
+  $SUDO grep -cF -- "${uki##*/}" "$LIMINE_CONFIG" || true
+}
+
+stage_uki() {
+  local uki moddir
+  moddir=$(kernel_module_dir "$KERNEL_PKG") ||
+    fail "internal error: stage_uki ran without an installed ${KERNEL_PKG}"
+  uki=$(find_uki_for "$KERNEL_PKG") || uki=""
+
+  # Idempotency rule. Regenerating unconditionally would be *correct* but not
+  # idempotent: an initramfs is not byte-reproducible, so a rebuilt UKI has
+  # different bytes, and limine-entry-tool writes the UKI's blake2b hash into
+  # the config -- so the config would change on every run too. Skip only when
+  # the artifacts are provably current: the UKI exists, is newer than the
+  # kernel image it was built from, and is registered in the Limine config.
+  if [[ -z ${OMARCHY_DECK_FORCE_UKI:-} && -n $uki ]] &&
+    $SUDO test "$uki" -nt "$moddir/vmlinuz" &&
+    [[ $(limine_entry_count "$uki") -eq 1 ]]; then
+    log "UKI up to date: ${uki} (newer than ${moddir}/vmlinuz, registered once in ${LIMINE_CONFIG##*/})"
+  else
+    log "building UKI for ${KERNEL_PKG} via limine-mkinitcpio"
+    $SUDO limine-mkinitcpio ||
+      fail "limine-mkinitcpio failed -- see output above. The boot entry was not updated."
+
+    uki=$(find_uki_for "$KERNEL_PKG") ||
+      fail "limine-mkinitcpio exited 0 but no *_${KERNEL_PKG}.efi appeared in ${ESP_PATH}/EFI/Linux. Do not reboot; this is exactly the PLAN.md §8.1 failure mode."
+
+    # limine-mkinitcpio registers the entry itself. If it did not, register
+    # explicitly -- and verify afterwards rather than assuming the call worked.
+    if [[ $(limine_entry_count "$uki") -eq 0 ]]; then
+      log "registering Limine entry for ${KERNEL_PKG}"
+      $SUDO limine-entry-tool --add-uki "$KERNEL_PKG" "$uki" \
+        --comment "Neptune kernel (${moddir##*/})" ||
+        fail "limine-entry-tool --add-uki failed for ${KERNEL_PKG}"
     fi
-fi
-log "Detected ESP at: ${ESP_PATH}"
+  fi
 
-UKI_PATH="${ESP_PATH}/EFI/Linux/arch-${KERNEL_PKG}.efi"
+  # Post-conditions, checked every run including the skip path.
+  $SUDO test -f "$uki" || fail "UKI missing at ${uki} after stage_uki"
+  local refs
+  refs=$(limine_entry_count "$uki")
+  [[ $refs -eq 1 ]] ||
+    fail "expected exactly 1 Limine entry referencing ${uki##*/}, found ${refs}. The kernel is installed but its boot entry is wrong -- inspect ${LIMINE_CONFIG} before rebooting."
+
+  log "boot entry verified: ${uki} referenced once in ${LIMINE_CONFIG##*/}"
+}
 
 # ---------------------------------------------------------------------------
-# 4. Patch the mkinitcpio preset to emit a UKI at the correct path
-#    (fixes bug 8.3 -- the shipped preset defaults to a wrong, commented-out
-#    /efi/... path regardless of where the ESP actually is)
+# Stage 5: prune stale Neptune artifacts (glob-keyed, per task step 2)
+#
+# Keyed on the linux-neptune-* glob, never on the pinned version, so moving
+# the pin removes the old series' entry instead of leaving a stale one that
+# boots a kernel whose modules have been uninstalled.
 # ---------------------------------------------------------------------------
 
-if grep -q "^default_uki=" "$KERNEL_PRESET"; then
-    CURRENT_UKI_LINE=$(grep "^default_uki=" "$KERNEL_PRESET")
-    if [[ "$CURRENT_UKI_LINE" == "default_uki=\"${UKI_PATH}\"" ]]; then
-        log "Preset already correctly configured, skipping patch"
-    else
-        log "Preset has a default_uki line pointing elsewhere ($CURRENT_UKI_LINE) -- correcting"
-        sudo sed -i "s|^default_uki=.*|default_uki=\"${UKI_PATH}\"|" "$KERNEL_PRESET"
+stage_prune() {
+  local -a installed=()
+  mapfile -t installed < <(installed_neptune_pkgbases)
+
+  # Enumerate with an elevated `find`, not a shell glob. Until
+  # stage_esp_permissions has run, the ESP is mounted 0700, so a glob
+  # expanded as the invoking user matches nothing and this stage would
+  # cheerfully report "nothing stale" without ever having been able to look
+  # -- PLAN.md §8.1's failure mode, reintroduced.
+  local -a uki_files=()
+  mapfile -t uki_files < <($SUDO find "$ESP_PATH/EFI/Linux" -maxdepth 1 -type f \
+    -name "*_${NEPTUNE_PKGBASE_GLOB}.efi" 2>/dev/null | LC_ALL=C sort)
+
+  local removed=0 f base keep
+  for f in "${uki_files[@]}"; do
+    [[ -n $f ]] || continue
+    base=${f##*/}
+    base=${base#*_}
+    base=${base%.efi}
+    base=${base%-fallback}
+
+    keep=0
+    local p
+    for p in "${installed[@]}"; do
+      if [[ $p == "$base" ]]; then keep=1; break; fi
+    done
+    if [[ $keep -eq 1 ]]; then continue; fi
+
+    log "pruning stale boot artifact for uninstalled kernel '${base}'"
+    $SUDO limine-entry-tool --remove-uki "$base" ||
+      fail "limine-entry-tool --remove-uki '${base}' failed -- ${LIMINE_CONFIG} may now reference a kernel that is not installed"
+    # Verify the removal instead of trusting the exit code.
+    if $SUDO test -f "$f"; then
+      $SUDO rm -f "$f" || fail "could not remove stale UKI ${f}"
     fi
-else
-    log "Uncommenting and setting default_uki in preset"
-    sudo sed -i "s|^#default_uki=.*|default_uki=\"${UKI_PATH}\"|" "$KERNEL_PRESET"
-    # If there was no commented line to uncomment at all, append one.
-    if ! grep -q "^default_uki=" "$KERNEL_PRESET"; then
-        echo "default_uki=\"${UKI_PATH}\"" | sudo tee -a "$KERNEL_PRESET" > /dev/null
+    if $SUDO grep -qF -- "${base}.efi" "$LIMINE_CONFIG"; then
+      fail "removed the UKI for '${base}' but ${LIMINE_CONFIG} still references it"
     fi
-fi
+    removed=$((removed + 1))
+  done
 
-log "Regenerating UKI for ${KERNEL_PKG}..."
-sudo mkinitcpio -p "${KERNEL_PKG}" || fail "mkinitcpio failed -- check output above"
-[[ -f "$UKI_PATH" ]] || fail "UKI was not created at expected path: $UKI_PATH"
-log "UKI confirmed at ${UKI_PATH}"
-
-# ---------------------------------------------------------------------------
-# 5. Fix /boot mount permissions (fixes bug 8.5)
-#    A soft `mount -o remount` does NOT re-apply fmask/dmask on vfat --
-#    confirmed empirically. Full umount/mount cycle required.
-# ---------------------------------------------------------------------------
-
-if grep -q "fmask=0077,dmask=0077" /etc/fstab; then
-    log "Loosening ${ESP_PATH} permissions so user-space scripts can read it (fmask=0133,dmask=0022)"
-    sudo sed -i 's/fmask=0077,dmask=0077/fmask=0133,dmask=0022/' /etc/fstab
-    sudo systemctl daemon-reload
-    sudo umount "$ESP_PATH" || fail "Could not unmount ${ESP_PATH} -- if 'target is busy', reboot and re-run this script instead of forcing it"
-    sudo mount "$ESP_PATH"
-    mount | grep "$ESP_PATH" | grep -q "fmask=0133" || fail "Permission fix did not take effect after remount"
-else
-    log "fstab already has non-default fmask/dmask, or none at all -- skipping (verify manually if unexpected)"
-fi
+  if [[ $removed -eq 0 ]]; then
+    # State the evidence, not just the verdict: "nothing to do" and "could not
+    # look" must never print the same line.
+    log "prune: nothing stale (${#uki_files[@]} Neptune UKI(s) on the ESP; installed Neptune kernels: ${installed[*]:-none})"
+  else
+    log "prune: removed ${removed} stale Neptune boot artifact(s)"
+  fi
+}
 
 # ---------------------------------------------------------------------------
-# 6. Detect Limine config and add a boot entry (fixes bug 8.2)
-#    Probes the same candidate paths Omarchy's own limine-snapper.sh checks,
-#    per plan Section 8.2 -- do not hardcode a single path.
+# Stage 6: ESP permissions (PLAN.md §8.5)
+#
+# SECURITY TRADEOFF -- deliberately visible, not buried:
+#   archinstall hardens the ESP to fmask=0077,dmask=0077 on UKI setups, on
+#   the defensible grounds that UKIs are bootable executables. Omarchy's own
+#   limine-snapper.sh then does `[[ -f <limine.conf> ]]` as the invoking
+#   user, which cannot traverse a 0700 /boot, and reports "Limine config not
+#   found" for a file that exists. Loosening the mount to
+#   fmask=0133,dmask=0022 unblocks that, but it is a global permission
+#   loosening applied to work around one script's permission assumption:
+#   afterwards, every local user can read the ESP, including the UKIs.
+#   The cleaner fix belongs upstream (elevate the existence check). This
+#   workaround stays until that lands -- see TASK-T1 step 5.
+#
+# Also: `mount -o remount` does NOT re-apply fmask/dmask on vfat. A full
+# umount/mount cycle is required. This cost real time to learn; do not
+# "simplify" it back to a remount.
+#
+# The check below tests the actual §8.5 symptom (can a non-root user read
+# the Limine config?) rather than pattern-matching fstab text, so it cannot
+# report success on a system where fstab says one thing and the live mount
+# says another.
 # ---------------------------------------------------------------------------
 
-LIMINE_CANDIDATES=(
-    "${ESP_PATH}/EFI/arch-limine/limine.conf"
-    "${ESP_PATH}/EFI/BOOT/limine.conf"
-    "${ESP_PATH}/EFI/limine/limine.conf"
-    "${ESP_PATH}/limine/limine.conf"
-    "${ESP_PATH}/limine.conf"
-)
+# esp_user_readable -- can an unprivileged user stat the Limine config?
+# When already running as root there is no invoking user to test as, so
+# fall back to reading the live mount options.
+esp_user_readable() {
+  local target_user=${SUDO_USER:-}
+  if [[ $EUID -ne 0 ]]; then
+    [[ -r $LIMINE_CONFIG ]]
+    return
+  fi
+  if [[ -n $target_user && $target_user != root ]]; then
+    runuser -u "$target_user" -- test -r "$LIMINE_CONFIG"
+    return
+  fi
+  # No unprivileged user available: infer from the live mount options.
+  local opts
+  opts=$(findmnt -n -o OPTIONS --mountpoint "$ESP_PATH")
+  [[ $opts == *fmask=0133* && $opts == *dmask=0022* ]]
+}
 
-LIMINE_CONFIG=""
-for candidate in "${LIMINE_CANDIDATES[@]}"; do
-    if sudo test -f "$candidate"; then
-        LIMINE_CONFIG="$candidate"
-        break
+# esp_holders -- best-effort description of what is keeping the ESP busy, for
+# the error message. fuser/lsof are not guaranteed to be installed, so fall
+# back to walking /proc rather than printing nothing useful.
+esp_holders() {
+  if command -v fuser >/dev/null 2>&1; then
+    $SUDO fuser -vm "$ESP_PATH" 2>&1 | head -n 20
+    return
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    $SUDO lsof +D "$ESP_PATH" 2>/dev/null | head -n 20
+    return
+  fi
+  local link pid
+  for link in /proc/[0-9]*/cwd /proc/[0-9]*/root; do
+    if [[ $($SUDO readlink -f "$link" 2>/dev/null) == "$ESP_PATH"* ]]; then
+      pid=${link#/proc/}
+      pid=${pid%%/*}
+      printf '  pid %s: %s\n' "$pid" "$($SUDO cat "/proc/$pid/comm" 2>/dev/null)"
     fi
-done
+  done
+}
 
-[[ -n "$LIMINE_CONFIG" ]] || fail "No Limine config found in any expected location. Is Limine actually installed? See plan Section 6.3 -- this project requires Limine, not GRUB/systemd-boot."
-log "Found Limine config at: ${LIMINE_CONFIG}"
+# esp_umount_mount_cycle -- unmount and remount the ESP so vfat re-applies
+# fmask/dmask (a soft `mount -o remount` does not).
+#
+# On an Omarchy Quattro system limine-snapper-sync is a running daemon that
+# keeps the ESP busy, so a bare umount fails with "target is busy" -- found in
+# a VM, not by reading code. Stop only the units known to hold it, and restart
+# whatever was stopped no matter how the rest of this goes; leaving Limine's
+# snapshot sync dead because a permission tweak failed would be a worse
+# outcome than the permission problem.
+esp_umount_mount_cycle() {
+  local -a esp_units=(limine-snapper-sync.service limine-snapper-watcher.service)
+  local -a stopped=()
+  local unit
 
-if sudo grep -q "arch-${KERNEL_PKG}" "$LIMINE_CONFIG"; then
-    log "Limine entry for ${KERNEL_PKG} already exists, skipping"
-else
-    log "Adding Limine boot entry for ${KERNEL_PKG}..."
-    # Reuse the existing stock entry's cmdline rather than hand-constructing
-    # one -- this is the exact class of typo that cost real time when done
-    # by hand (a heredoc-wrapped cmdline silently split across two lines).
-    STOCK_CMDLINE=$(sudo awk '
-        /^\/Arch Linux \(linux\)/ { found=1 }
-        found && /cmdline:/ { sub(/^[ \t]*cmdline:[ \t]*/, ""); print; exit }
-    ' "$LIMINE_CONFIG")
+  restore_units() {
+    local u
+    for u in "${stopped[@]}"; do
+      $SUDO systemctl start "$u" >/dev/null 2>&1 ||
+        log "WARNING: could not restart ${u} -- start it by hand"
+    done
+    stopped=()
+  }
 
-    [[ -n "$STOCK_CMDLINE" ]] || fail "Could not extract cmdline from existing stock entry in $LIMINE_CONFIG -- inspect the file manually, its format may differ from what this script expects"
+  if ! $SUDO umount "$ESP_PATH" 2>/dev/null; then
+    for unit in "${esp_units[@]}"; do
+      if $SUDO systemctl is-active --quiet "$unit"; then
+        log "stopping ${unit} (it holds ${ESP_PATH} open) for the umount/mount cycle"
+        $SUDO systemctl stop "$unit" >/dev/null 2>&1 && stopped+=("$unit")
+      fi
+    done
 
-    sudo tee -a "$LIMINE_CONFIG" > /dev/null << EOF
+    if ! $SUDO umount "$ESP_PATH"; then
+      local holders
+      holders=$(esp_holders)
+      restore_units
+      fail "could not unmount ${ESP_PATH} -- it is still busy after stopping ${esp_units[*]}. Nothing has been unmounted; /etc/fstab has been updated, so a reboot will apply the new options. Holders:
+${holders:-  (could not determine -- install psmisc for fuser)}"
+    fi
+  fi
 
-/Arch Linux (${KERNEL_PKG})
-    protocol: efi
-    path: boot():/EFI/Linux/arch-${KERNEL_PKG}.efi
-    cmdline: ${STOCK_CMDLINE}
-EOF
+  if ! $SUDO mount "$ESP_PATH"; then
+    restore_units
+    fail "unmounted ${ESP_PATH} but could not mount it again. THE ESP IS CURRENTLY UNMOUNTED -- run 'mount ${ESP_PATH}' before rebooting."
+  fi
+  restore_units
+}
 
-    # Verify the write actually produced a well-formed, single-line cmdline
-    # entry -- catches the exact bug hit by hand this session.
-    ENTRY_LINE_COUNT=$(sudo grep -c "^/Arch Linux (${KERNEL_PKG})" "$LIMINE_CONFIG")
-    [[ "$ENTRY_LINE_COUNT" -eq 1 ]] || fail "Limine entry write produced unexpected result (expected exactly 1 matching entry, found $ENTRY_LINE_COUNT). Inspect $LIMINE_CONFIG manually before rebooting."
-fi
+stage_esp_permissions() {
+  if esp_user_readable; then
+    log "ESP permissions already allow user-space reads of ${LIMINE_CONFIG##*/} (options: $(findmnt -n -o OPTIONS --mountpoint "$ESP_PATH"))"
+    return 0
+  fi
 
-log "Done. Reboot and select 'Arch Linux (${KERNEL_PKG})' from the Limine menu."
-log "After boot, confirm with: uname -r"
-log "Expected output to contain: ${KERNEL_PKG#linux-}"
+  local fstab_line
+  fstab_line=$(awk -v mp="$ESP_PATH" '$0 !~ /^[[:space:]]*#/ && $2 == mp { print NR; exit }' /etc/fstab) ||
+    fstab_line=""
+  [[ -n $fstab_line ]] ||
+    fail "${ESP_PATH} is not readable by user-space and has no /etc/fstab entry to fix. Add one (or fix the mount options by hand) before re-running."
+
+  log "loosening ${ESP_PATH} mount options to fmask=0133,dmask=0022 (see SECURITY TRADEOFF note in this script)"
+  # Never overwrite an existing backup: on a re-run after a failed umount the
+  # live fstab is already the edited one, and clobbering the backup with it
+  # would destroy the only copy of the original.
+  if [[ ! -e "/etc/fstab.${PROG}.bak" ]]; then
+    $SUDO cp -a /etc/fstab "/etc/fstab.${PROG}.bak" ||
+      fail "could not back up /etc/fstab -- refusing to edit it"
+  fi
+
+  local tmp_fstab
+  tmp_fstab=$(mktemp) || fail "mktemp failed"
+
+  # Field-aware rewrite of the ESP's line only, never a global sed: an
+  # unanchored substitution would rewrite every vfat entry in fstab. Operating
+  # on the options *field* rather than on the raw line means a line whose
+  # options happen to lack fmask/dmask gets a well-formed comma-separated
+  # value appended instead of a regex splice that could produce an
+  # unmountable fstab -- and an unmountable /boot is an unbootable machine.
+  # shellcheck disable=SC2016 # awk program: $NF/$4 are awk fields, not shell variables
+  awk -v ln="$fstab_line" '
+    NR != ln { print; next }
+    {
+      n = split($4, opt, ",")
+      out = ""; seen_f = 0; seen_d = 0
+      for (i = 1; i <= n; i++) {
+        if (opt[i] ~ /^fmask=/) { opt[i] = "fmask=0133"; seen_f = 1 }
+        else if (opt[i] ~ /^dmask=/) { opt[i] = "dmask=0022"; seen_d = 1 }
+        out = (out == "" ? opt[i] : out "," opt[i])
+      }
+      if (!seen_f) out = out ",fmask=0133"
+      if (!seen_d) out = out ",dmask=0022"
+      $4 = out
+      print
+    }
+  ' /etc/fstab >"$tmp_fstab" ||
+    fail "failed to rewrite /etc/fstab (original untouched)"
+
+  # Validate the rewrite before installing it. Both checks matter: the right
+  # options, and a line that still has fstab's six fields.
+  awk -v ln="$fstab_line" 'NR == ln { exit !(NF == 6 && $4 ~ /fmask=0133/ && $4 ~ /dmask=0022/) }' \
+    "$tmp_fstab" ||
+    fail "the rewritten /etc/fstab line is malformed or missing the new masks -- refusing to install it. Original untouched; the candidate is at ${tmp_fstab}."
+
+  $SUDO install -m 0644 "$tmp_fstab" /etc/fstab ||
+    fail "could not install the rewritten /etc/fstab (backup at /etc/fstab.${PROG}.bak)"
+  rm -f "$tmp_fstab"
+
+  $SUDO systemctl daemon-reload ||
+    fail "systemctl daemon-reload failed after editing /etc/fstab"
+
+  # Full cycle -- a remount does not re-apply fmask/dmask on vfat.
+  esp_umount_mount_cycle
+
+  local opts
+  opts=$(findmnt -n -o OPTIONS --mountpoint "$ESP_PATH") ||
+    fail "${ESP_PATH} is not mounted after the umount/mount cycle"
+  [[ $opts == *fmask=0133* && $opts == *dmask=0022* ]] ||
+    fail "remounted ${ESP_PATH} but the options did not take effect (got: ${opts}). A soft remount does not re-apply fmask/dmask on vfat -- if this happened after a full cycle, inspect /etc/fstab."
+  esp_user_readable ||
+    fail "mount options are correct (${opts}) but ${LIMINE_CONFIG} is still not readable by user-space -- check the on-disk permissions of the ESP's directory tree"
+
+  log "ESP permissions fixed (options: ${opts})"
+}
+
+# ---------------------------------------------------------------------------
+
+main() {
+  stage_preconditions
+  stage_repos
+  stage_esp_detect
+  stage_firmware_swap
+  stage_kernel
+  stage_uki
+  stage_prune
+  stage_esp_permissions
+
+  log "done. Reboot and select the '${KERNEL_PKG}' entry from the Limine menu."
+  log "after boot, confirm with: uname -r  (expect it to contain 'neptune-${NEPTUNE_SERIES}')"
+}
+
+main "$@"

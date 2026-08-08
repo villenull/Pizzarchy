@@ -26,6 +26,17 @@ kernel mount (`udisksctl loop-setup` + `mount`), which is also just a
 better approach generally. Task #4 ("verify harness can actually fail")
 is done: it caught two real bugs before this ever touches hardware.
 
+**Session 4: T1 steps 1–2 done** (review/harden `omarchy-deck-kernel.sh` +
+generalize the kernel version). The draft script had never run anywhere; it
+does now, and it took a near-total rewrite to get there — four of its design
+premises were false against the packages Valve ships today and against a real
+Omarchy Quattro install. `shellcheck` clean; **idempotency proven, not
+asserted**: two consecutive runs in a QEMU VM, both exit 0, byte-identical
+end state, via a new `vm-kernel-idempotency-test.sh`. Six VM iterations were
+needed and each of the first five failed on a *different* real bug — see
+"T1 — omarchy-deck-kernel.sh review" under Findings. Steps 3–6 (pacman hook,
+CI flags, §8.5 upstream repro, stage split) are untouched.
+
 ### T0 §1 deliverables (session 1)
 
 Flat files (per `CLAUDE.md`'s no-subdirectories rule — the task file's
@@ -177,7 +188,7 @@ human" below instead.
 |---|---|---|
 | T0 Test infrastructure | **§1–6 all built; two verification gaps remain** | §1 harness unit-tested (31 assertions) but not run end-to-end against a real ISO; §2–6 done (Ventoy doc, override loader + 8 tests, deck-sync/snapshot/rollback untested against hardware, CI workflow untested against a real Actions run, shellcheck clean repo-wide). See T0 §1/§2–6 deliverables above for exact gaps. |
 | R1 Research questions | not started | Can run parallel; 10.4 is highest stakes |
-| T1 Kernel and boot | not started | Opus. Draft script exists, unexecuted |
+| T1 Kernel and boot | **steps 1–2 done; 3–6 not started** | Script rewritten and now actually executes: shellcheck clean, idempotency proven in a VM (`vm-kernel-idempotency-test.sh`, run twice, byte-identical end state), kernel version reduced to one documented constant (`NEPTUNE_SERIES_DEFAULT=611`) with glob-keyed entry regeneration. Still to do: pacman hook (§3), CI flags (§4), §8.5 upstream repro (§5), stage split (§6). |
 | T2 Gamepad input spike | not started | Opus. Determines T4's entire scope |
 | T3 Gaming Mode | not started | Needs T0's deck-sync.sh to be efficient |
 | T4 Installer UI | not started | Blocked on T2's finding |
@@ -402,6 +413,95 @@ three parallel agents. Headline results (full hypotheses/results now also in
   operator has decided to hold entirely — nothing sent or posted, no
   timeline to revisit.
 
+### T1 — `omarchy-deck-kernel.sh` review (session 4)
+
+The draft encoded a manual install done on an older package set. Verified
+against a real Omarchy Quattro disk image (session 2's `vm-test-work6`) and
+against `jupiter-staging`'s current packages. **Four of its premises were
+false**, each a hard failure or a wrong boot entry:
+
+- **PLAN.md §8.3's preset bug is now moot — CONFIRMED OBSOLETE.** Valve's
+  kernel packages ship no `/etc/mkinitcpio.d/*.preset` and no
+  `/boot/vmlinuz-*` at all. Unpacked `linux-neptune-611-6.11.11.valve29-1`
+  and `linux-neptune-618-6.18.39.valve1-1`: each contains exactly
+  `usr/lib/modules/<kver>/{pkgbase,vmlinuz}`. There is no preset left to be
+  wrong, so the draft's `[[ -f $KERNEL_PRESET ]]` check and its whole
+  `default_uki` patching stage were dead ends.
+- **Omarchy Quattro builds UKIs with `limine-mkinitcpio-hook`, not presets.**
+  Its pacman hook enumerates `/usr/lib/modules/*/pkgbase` and produces
+  `$ESP/EFI/Linux/<prefix>_<pkgbase>.efi`, then registers it with
+  `limine-entry-tool --add-uki`. Installing the kernel is most of the job;
+  the script's real work is *verifying that machinery ran* and failing loudly
+  when it did not.
+- **The stock Limine config has no `/Arch Linux (linux)` entry.** It is a
+  nested tree written by `limine-entry-tool` (`/+Omarchy` → `//linux`) and
+  the `path:` line carries a blake2b hash of the UKI. The draft's `awk`
+  cmdline extraction matched nothing, and its `tee -a` would have appended a
+  flat, hash-less entry outside the OS branch that `limine-entry-tool` would
+  later clobber. Both are gone.
+- **The UKI filename prefix is not the machine-id.**
+  `limine-mkinitcpio-install` uses `CUSTOM_UKI_NAME` from
+  `/etc/default/limine` when set; Quattro sets it to `omarchy`, so the real
+  files are `omarchy_linux.efi` / `omarchy_linux-neptune-611.efi`. The script
+  now *discovers* the UKI path instead of constructing it.
+
+**PLAN.md §8.2 — CONFIRMED, with a correction.** The config is at
+`$ESP/limine.conf` (the fifth of the five candidates, so the five-way probe
+was right to exist). `limine-common-functions` hardcodes
+`LIMINE_CONFIG_PATH="${ESP_PATH}/limine.conf"`.
+
+**PLAN.md §8.5 — REPRODUCED on a stock Omarchy Quattro install.** Its
+`/etc/fstab` mounts `/boot` `fmask=0077,dmask=0077` with no Deck packages
+involved, which is the evidence T1 step 5 needs to argue this is a generic
+Omarchy-on-archinstall problem rather than Deck-specific.
+
+**Two new upstream bugs, found by running it (not by reading it):**
+
+1. **`linux-firmware-neptune` collides with Arch's split `linux-firmware`.**
+   Arch split `linux-firmware` into per-vendor subpackages with the old name
+   kept as a metapackage. Valve's package still declares
+   `conflicts`/`replaces` against only `linux-firmware` and
+   `linux-firmware-whence`, so pacman removes those two and then dies in the
+   file-conflict check against the other ten
+   (`/usr/lib/firmware/... exists in filesystem (owned by
+   linux-firmware-other)`). The script now removes the ten explicitly rather
+   than using `--overwrite`, because overwriting would leave the Arch
+   packages owning those paths and the next `pacman -Syu` would silently
+   restore Arch's firmware over Valve's.
+2. **`pacman --noconfirm` answers *No* to a conflict question.** The prompt
+   is `Remove linux-firmware? [y/N]`, so plain `--noconfirm` aborts the whole
+   transaction with "unresolvable package conflicts". Fixed with `--ask=4`
+   (`ALPM_QUESTION_CONFLICT_PKG` only — not a blanket yes). Same shape as
+   PLAN.md §8.4's yay/yay-bin conflict.
+
+**Also learned:** `limine-snapper-sync.service` holds the ESP open, so the
+§8.5 `umount`/`mount` cycle needs it stopped and restarted (the script does,
+with restart guaranteed on every exit path). And the first "target is busy"
+turned out to be the *test harness's own probe script* running out of
+`/boot` — bash holds an open fd on the script it is executing. The holder
+diagnostic added to `stage_esp_permissions` is what identified both.
+
+**Kernel-version churn, measured (PLAN.md §11).** `jupiter-staging` ships
+series `60, 61, 65, 68, 611, 615, 616, 618, 72`. **The suffix is not
+orderable** — as integers `618 > 72`, as text `"68" > "618"`, and neither is
+right because 72 is 7.2.x and newest. "Latest" is also currently
+`7.2.0.rc3.valve.beta1`, a release candidate. That kills "track latest" on
+evidence and is why the script pins, via a single documented
+`NEPTUNE_SERIES_DEFAULT=611` constant (override:
+`OMARCHY_DECK_NEPTUNE_SERIES`), validates the pin against the live repos, and
+keys every regeneration/prune path on the `linux-neptune-*` glob.
+
+**Idempotency evidence.** `vm-kernel-idempotency-test.sh` boots session 2's
+installed disk image, runs the script twice, and diffs snapshots of the ESP
+tree (with per-file sha256), the Limine config, `/etc/fstab`,
+`/etc/pacman.conf`, the live mount options and the full package set. Result:
+`run1_exit=0 run2_exit=0 state_diff_exit=0`. The before/after diff is
+substantive — new `omarchy_linux-neptune-611.efi` (38.5 MB), new
+`//linux-neptune-611` Limine entry, `/boot` options `0077` → `0133/0022` —
+so the pass is not vacuous. The harness injects rootlessly (mtools onto the
+ESP + SMBIOS type-11 systemd credentials); it never needs sudo on the host,
+so it can run in CI.
+
 ## Blocked on human
 
 - Ventoy setup on the test USB (T0 step 2)
@@ -426,6 +526,14 @@ three parallel agents. Headline results (full hypotheses/results now also in
   precedents), plus one `pre-refresh-pacman.d/` hook for durability. See
   `FINDING-R1-10.1.md` and `FINDING-R1-10.2.md`. No longer blocked; ready to
   inform T5.
+- **New (T1, session 4): moving the Neptune kernel pin needs a hardware
+  session.** The script pins `linux-neptune-611` because that is what was
+  validated live on the operator's OLED Deck; `618` (6.18.39.valve1) is the
+  newest non-RC series. Bumping is a one-line change to
+  `NEPTUNE_SERIES_DEFAULT`, but it should not ship without a boot test on
+  hardware. Also unvalidated on hardware: replacing Arch's split
+  `linux-firmware-*` with Valve's `linux-firmware-neptune` (correct in the
+  VM, but Wi-Fi/BT/audio can only be checked on the Deck).
 - Any write to the physical Deck
 - Any public action (repos, upstream issues, outreach) — **now includes two
   concrete staged drafts awaiting approval**: `DRAFT-outreach-28allday.md`
