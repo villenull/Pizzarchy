@@ -78,16 +78,41 @@
 # worked right up until the device does not boot.
 #
 # Still TODO in later T1 steps (not this change):
-#   - The pacman hook (PLAN.md §11 / task step 3).
 #   - Non-interactive flags + independently runnable stages (steps 4, 6).
 #   - The §8.5 upstream reproduction and issue (step 5).
+#
+# ---------------------------------------------------------------------------
+# T1 STEP 3 (2026-08-08) -- the pacman hook, and what upstream already does
+# ---------------------------------------------------------------------------
+# See the long comment block in hook_text() below, which is written verbatim
+# into /etc/pacman.d/hooks/95-omarchy-deck-kernel.hook so the reasoning lives
+# next to the artifact on the installed system. Summary: upstream's
+# limine-mkinitcpio-hook already covers UKI *generation* on install/upgrade
+# and *deregistration* on remove, so this script's hook does not rebuild
+# anything by default -- it verifies what upstream produced and repairs it
+# only when the verification fails. Usage:
+#
+#   omarchy-deck-kernel.sh              full install run (unchanged)
+#   omarchy-deck-kernel.sh reconcile    verify/repair UKIs + Limine entries
+#                                       only; what the pacman hook calls.
 
 set -euo pipefail
 
 readonly PROG=omarchy-deck-kernel
 
 log()  { printf '[%s] %s\n' "$PROG" "$*"; }
-fail() { printf '[%s] ERROR: %s\n' "$PROG" "$*" >&2; exit 1; }
+
+# Failures also go to syslog. When this runs from the pacman hook the console
+# output is one line among a hundred and scrolls away immediately, and a
+# PostTransaction hook cannot roll anything back -- so the only thing that
+# makes the failure findable afterwards is the journal.
+fail() {
+  printf '[%s] ERROR: %s\n' "$PROG" "$*" >&2
+  if command -v logger >/dev/null 2>&1; then
+    logger -p err -t "$PROG" -- "$*" 2>/dev/null || true
+  fi
+  exit 1
+}
 
 # ---------------------------------------------------------------------------
 # The kernel version constant. This is the ONLY place a Neptune version
@@ -150,6 +175,19 @@ readonly -a LIMINE_CONFIG_CANDIDATES=(
   /limine/limine.conf
   /limine.conf
 )
+
+# The pacman hook installed by stage_hook, and the copy of this script it
+# calls. /etc/pacman.d/hooks is the admin hook directory; /usr/share/libalpm/
+# hooks is for package-shipped hooks. This is installed by a script today, so
+# /etc is the correct location -- and when the Deck logic becomes its own
+# pacman package (FINDING-R1-10.1), the package can ship the SAME basename
+# under /usr/share/libalpm/hooks: pacman de-duplicates hooks by filename with
+# /etc winning, so the two never both fire, and removing the /etc copy hands
+# over cleanly to the packaged one.
+readonly HOOK_DIR=/etc/pacman.d/hooks
+readonly HOOK_NAME=95-omarchy-deck-kernel.hook
+readonly HOOK_PATH="${HOOK_DIR}/${HOOK_NAME}"
+readonly HOOK_SCRIPT_PATH=/usr/local/bin/omarchy-deck-kernel
 
 # Set by stage_preconditions/stage_esp_detect, consumed by later stages.
 SUDO=""
@@ -499,11 +537,18 @@ limine_entry_count() {
   $SUDO grep -cF -- "${uki##*/}" "$LIMINE_CONFIG" || true
 }
 
-stage_uki() {
+# reconcile_uki <pkgbase> -- verify, and repair only if verification fails,
+# the UKI and Limine entry for ONE installed Neptune kernel.
+#
+# Parameterised by pkgbase (rather than closing over KERNEL_PKG) because the
+# pacman hook has to reconcile whatever is installed, which after a pin move
+# or a partial upgrade is not necessarily the pinned series.
+reconcile_uki() {
+  local pkgbase=$1
   local uki moddir
-  moddir=$(kernel_module_dir "$KERNEL_PKG") ||
-    fail "internal error: stage_uki ran without an installed ${KERNEL_PKG}"
-  uki=$(find_uki_for "$KERNEL_PKG") || uki=""
+  moddir=$(kernel_module_dir "$pkgbase") ||
+    fail "internal error: reconcile_uki called for '${pkgbase}', which has no /usr/lib/modules/*/pkgbase"
+  uki=$(find_uki_for "$pkgbase") || uki=""
 
   # Idempotency rule. Regenerating unconditionally would be *correct* but not
   # idempotent: an initramfs is not byte-reproducible, so a rebuilt UKI has
@@ -516,31 +561,37 @@ stage_uki() {
     [[ $(limine_entry_count "$uki") -eq 1 ]]; then
     log "UKI up to date: ${uki} (newer than ${moddir}/vmlinuz, registered once in ${LIMINE_CONFIG##*/})"
   else
-    log "building UKI for ${KERNEL_PKG} via limine-mkinitcpio"
+    log "building UKI for ${pkgbase} via limine-mkinitcpio"
     $SUDO limine-mkinitcpio ||
       fail "limine-mkinitcpio failed -- see output above. The boot entry was not updated."
 
-    uki=$(find_uki_for "$KERNEL_PKG") ||
-      fail "limine-mkinitcpio exited 0 but no *_${KERNEL_PKG}.efi appeared in ${ESP_PATH}/EFI/Linux. Do not reboot; this is exactly the PLAN.md §8.1 failure mode."
+    uki=$(find_uki_for "$pkgbase") ||
+      fail "limine-mkinitcpio exited 0 but no *_${pkgbase}.efi appeared in ${ESP_PATH}/EFI/Linux. Do not reboot; this is exactly the PLAN.md §8.1 failure mode."
 
     # limine-mkinitcpio registers the entry itself. If it did not, register
     # explicitly -- and verify afterwards rather than assuming the call worked.
     if [[ $(limine_entry_count "$uki") -eq 0 ]]; then
-      log "registering Limine entry for ${KERNEL_PKG}"
-      $SUDO limine-entry-tool --add-uki "$KERNEL_PKG" "$uki" \
+      log "registering Limine entry for ${pkgbase}"
+      $SUDO limine-entry-tool --add-uki "$pkgbase" "$uki" \
         --comment "Neptune kernel (${moddir##*/})" ||
-        fail "limine-entry-tool --add-uki failed for ${KERNEL_PKG}"
+        fail "limine-entry-tool --add-uki failed for ${pkgbase}"
     fi
   fi
 
   # Post-conditions, checked every run including the skip path.
-  $SUDO test -f "$uki" || fail "UKI missing at ${uki} after stage_uki"
+  $SUDO test -f "$uki" || fail "UKI missing at ${uki} after reconcile_uki ${pkgbase}"
   local refs
   refs=$(limine_entry_count "$uki")
   [[ $refs -eq 1 ]] ||
     fail "expected exactly 1 Limine entry referencing ${uki##*/}, found ${refs}. The kernel is installed but its boot entry is wrong -- inspect ${LIMINE_CONFIG} before rebooting."
 
   log "boot entry verified: ${uki} referenced once in ${LIMINE_CONFIG##*/}"
+}
+
+stage_uki() {
+  kernel_module_dir "$KERNEL_PKG" >/dev/null ||
+    fail "internal error: stage_uki ran without an installed ${KERNEL_PKG}"
+  reconcile_uki "$KERNEL_PKG"
 }
 
 # ---------------------------------------------------------------------------
@@ -602,7 +653,221 @@ stage_prune() {
 }
 
 # ---------------------------------------------------------------------------
-# Stage 6: ESP permissions (PLAN.md §8.5)
+# Stage 6: the pacman hook (PLAN.md §11, TASK-T1 step 3)
+# ---------------------------------------------------------------------------
+
+# stage_reconcile -- what the pacman hook runs. Glob-keyed over every
+# installed Neptune kernel, then prune.
+#
+# Deliberately does NOT include stage_repos (a `pacman -Sy` inside a pacman
+# transaction would deadlock on the database lock) or stage_esp_permissions
+# (unmounting the ESP mid-transaction, while pacman may still have files open
+# on it, is not something a hook gets to do). Everything it does call is
+# read-only against the pacman database -- `pacman -Q*` queries take no lock,
+# which is also why upstream's own PostTransaction hook can call `pacman -Qqo`.
+stage_reconcile() {
+  local -a installed=()
+  mapfile -t installed < <(installed_neptune_pkgbases)
+
+  if [[ ${#installed[@]} -eq 0 ]]; then
+    log "reconcile: no linux-neptune-* kernel is installed -- pruning only"
+  else
+    log "reconcile: verifying ${#installed[@]} installed Neptune kernel(s): ${installed[*]}"
+    local pkgbase
+    for pkgbase in "${installed[@]}"; do
+      reconcile_uki "$pkgbase"
+    done
+  fi
+
+  stage_prune
+}
+
+# hook_text -- the ALPM hook, written to stdout.
+#
+# The comment block is part of the artifact on purpose: it is the answer to
+# "why does this exist when limine-mkinitcpio-hook already does all of this",
+# and the person who asks that is reading the hook file, not this script.
+hook_text() {
+  cat <<HOOK
+# ${HOOK_NAME} -- installed by ${PROG}.sh (TASK-T1 step 3, PLAN.md §11).
+# Not shipped by any package yet. Remove this file and ${HOOK_SCRIPT_PATH}
+# together; leaving the hook without the script makes every pacman
+# transaction fail with "unable to run hook".
+#
+# ===========================================================================
+# WHAT UPSTREAM ALREADY DOES -- verified against limine-mkinitcpio-hook
+# 1.36.0-1, by reading the hooks and scripts it actually installs.
+# ===========================================================================
+#
+# This hook does NOT build UKIs and does NOT register Limine entries as its
+# normal path, because limine-mkinitcpio-hook already does both, correctly,
+# for every kernel package including linux-neptune-*:
+#
+#   INSTALL / UPGRADE -- /etc/pacman.d/hooks/90-mkinitcpio-install.hook
+#     (shipped by limine-mkinitcpio-hook into /etc, where it shadows
+#     mkinitcpio's own same-named hook in /usr/share/libalpm/hooks).
+#     Triggers: Type=Path, Operation=Install|Upgrade,
+#     Target=usr/lib/modules/*/pkgbase  -- plus a second trigger on
+#     usr/lib/firmware/* and friends that forces a rebuild of *every*
+#     kernel. PostTransaction, NeedsTargets. Runs
+#     /usr/share/libalpm/scripts/limine-mkinitcpio-install, which reads each
+#     pkgbase file, builds \$ESP/EFI/Linux/<prefix>_<pkgbase>.efi (prefix =
+#     CUSTOM_UKI_NAME from /etc/default/limine, else the machine-id) and
+#     calls limine-entry-tool --add-uki. A plain \`pacman -S linux-neptune-*\`
+#     reinstall counts as Upgrade (libalpm classifies a reinstall as an
+#     upgrade because the package is already in the local db), so a reinstall
+#     is fully covered.
+#
+#   REMOVE -- 60-limine-mkinitcpio-remove-pre.hook (PreTransaction, records
+#     the pkgbase names into /var/lib/limine/removed_kernels.list) plus
+#     90-limine-mkinitcpio-remove-post.hook (PostTransaction, runs
+#     limine-mkinitcpio-remove post, which drops the Limine entries and
+#     deletes the UKI files -- limine-entry-tool --remove-all deletes files
+#     unless --keep-files is passed). So \`pacman -Rns linux-neptune-611\`
+#     after a bump to -612 IS cleaned up; that is not the gap.
+#
+# ===========================================================================
+# THE GAPS THIS HOOK ACTUALLY CLOSES
+# ===========================================================================
+#
+# 1. limine-mkinitcpio-install can fail and still exit 0. Every one of its
+#    per-kernel error paths is \`error_msg ...; continue\`: a failed
+#    mkinitcpio, an empty pkgbase, a missing cmdline. The loop moves on, the
+#    script exits 0, and pacman prints nothing unusual -- while the Limine
+#    entry still points at the PREVIOUS UKI, whose modules directory the
+#    upgrade just deleted. That is PLAN.md §8.1's failure mode exactly:
+#    progress printed, nothing done, success reported. The machine looks fine
+#    until it is rebooted.
+#
+# 2. Its whole-run failure path is also quiet. \`initialize_header || exit 1\`
+#    fires when the ESP is not mounted (which on this project's systems is
+#    one failed umount/mount cycle away, see PLAN.md §8.5). A PostTransaction
+#    hook exiting non-zero cannot roll the transaction back, so the kernel is
+#    installed with no UKI behind a single terse pacman error line.
+#
+# 3. limine-mkinitcpio-remove's post_remove never checks whether the removal
+#    worked -- limine-entry-tool --remove-all is called unchecked and then
+#    /var/lib/limine/removed_kernels.list is deleted unconditionally, so a
+#    failed removal is forgotten permanently. The result is a Limine entry
+#    pointing at a UKI that is gone. Nothing upstream ever revisits it.
+#    stage_prune (glob-keyed on linux-neptune-*, not on any pinned version)
+#    reconciles that on the next transaction.
+#
+# So: this hook VERIFIES, and only repairs when verification fails. For every
+# installed linux-neptune-* it asserts the UKI exists, is newer than the
+# vmlinuz it was built from, and is referenced exactly once in the Limine
+# config; it rebuilds via limine-mkinitcpio only when one of those is false,
+# and it prunes UKIs/entries belonging to Neptune kernels that are no longer
+# installed. That makes it idempotent by construction -- the healthy path
+# writes nothing, so repeat runs cannot duplicate entries.
+#
+# ===========================================================================
+# WHAT THIS HOOK DELIBERATELY DOES NOT DO
+# ===========================================================================
+#
+# The linux-firmware-neptune conflict (the --ask=4 fix in ${PROG}.sh's
+# stage_kernel) is NOT handled here, and no ALPM hook can handle it: libalpm
+# asks "Remove linux-firmware? [y/N]" during transaction *preparation*, before
+# any hook -- including PreTransaction hooks -- has run. There is nothing to
+# hook. In practice it only bites on the first swap, which stage_kernel owns;
+# once Arch's split linux-firmware-* packages are gone there is nothing left
+# to conflict with and a routine \`pacman -Syu\` upgrades
+# linux-firmware-neptune in place. It recurs only if something drags Arch's
+# linux-firmware back in as a dependency, and the fix for that belongs in
+# packaging (a \`conflicts\` entry on the Deck package, T5), not in a hook.
+#
+# ===========================================================================
+
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = linux-neptune-*
+Target = linux-firmware-neptune
+
+[Action]
+Description = Verifying Neptune UKIs and Limine entries (omarchy-deck)
+When = PostTransaction
+Exec = ${HOOK_SCRIPT_PATH} reconcile
+HOOK
+}
+
+# script_source_path -- an absolute path to the file this script is running
+# from, so stage_hook can install a copy for the hook to call.
+#
+# Returns non-zero when there is no such file, which is the \`curl | bash\`
+# case: bash has already consumed the pipe, so the source cannot be recovered
+# from /proc/self/fd either. stage_hook turns that into a loud, actionable
+# failure rather than quietly skipping hook installation -- a run that
+# reports success without leaving the hook behind would be the §8.1 defect
+# in this script instead of in upstream's.
+script_source_path() {
+  local src=${OMARCHY_DECK_SCRIPT_PATH:-${BASH_SOURCE[0]:-}}
+  [[ -n $src && -f $src && -r $src ]] || return 1
+  local dir base
+  dir=$(cd -- "$(dirname -- "$src")" && pwd) || return 1
+  base=$(basename -- "$src")
+  printf '%s/%s\n' "$dir" "$base"
+}
+
+stage_hook() {
+  local src
+  src=$(script_source_path) ||
+    fail "cannot install the pacman hook: this script is not running from a readable file (\$0='${0}'). Piping it straight into bash works for everything else, but the hook has to call a copy of it on disk. Download it to a file and re-run, or set OMARCHY_DECK_SCRIPT_PATH to its path."
+
+  $SUDO install -d -m 0755 "$HOOK_DIR" ||
+    fail "could not create ${HOOK_DIR}"
+
+  # The callable copy. Compared byte-for-byte rather than copied every run:
+  # an unconditional copy would change the mtime on every invocation, which
+  # is exactly the kind of "idempotent except for the bits nobody snapshots"
+  # claim this project does not accept.
+  if $SUDO cmp -s "$src" "$HOOK_SCRIPT_PATH" 2>/dev/null; then
+    log "hook: ${HOOK_SCRIPT_PATH} already current"
+  else
+    log "hook: installing ${HOOK_SCRIPT_PATH}"
+    $SUDO install -D -m 0755 "$src" "$HOOK_SCRIPT_PATH" ||
+      fail "could not install ${HOOK_SCRIPT_PATH}"
+  fi
+
+  local tmp_hook
+  tmp_hook=$(mktemp) || fail "mktemp failed"
+  hook_text >"$tmp_hook" || { rm -f "$tmp_hook"; fail "could not render the pacman hook"; }
+
+  if $SUDO cmp -s "$tmp_hook" "$HOOK_PATH" 2>/dev/null; then
+    log "hook: ${HOOK_PATH} already current"
+  else
+    log "hook: installing ${HOOK_PATH}"
+    $SUDO install -D -m 0644 "$tmp_hook" "$HOOK_PATH" ||
+      { rm -f "$tmp_hook"; fail "could not install ${HOOK_PATH}"; }
+  fi
+  rm -f "$tmp_hook"
+
+  # Verify what is on disk, not what install(1) reported (PLAN.md §8.1).
+  $SUDO test -x "$HOOK_SCRIPT_PATH" ||
+    fail "${HOOK_SCRIPT_PATH} is missing or not executable after installing it"
+  $SUDO cmp -s "$src" "$HOOK_SCRIPT_PATH" ||
+    fail "${HOOK_SCRIPT_PATH} differs from ${src} after installing it -- is / read-only or full?"
+
+  # An Exec= line pointing at something that does not exist turns every
+  # future pacman transaction into a failure, so parse it back out of the
+  # installed file and check the target rather than assuming the heredoc
+  # rendered correctly.
+  local exec_target
+  exec_target=$($SUDO sed -nE 's/^Exec[[:space:]]*=[[:space:]]*([^[:space:]]+).*/\1/p' "$HOOK_PATH" | head -n 1)
+  [[ -n $exec_target ]] ||
+    fail "wrote ${HOOK_PATH} but it has no Exec= line on re-read"
+  [[ $exec_target == "$HOOK_SCRIPT_PATH" ]] ||
+    fail "${HOOK_PATH}'s Exec= points at '${exec_target}', expected '${HOOK_SCRIPT_PATH}'"
+  $SUDO test -x "$exec_target" ||
+    fail "${HOOK_PATH} would run '${exec_target}', which is not executable -- every pacman transaction would fail. Refusing to leave that in place."
+
+  log "pacman hook ready: ${HOOK_PATH} -> ${HOOK_SCRIPT_PATH} reconcile"
+}
+
+# ---------------------------------------------------------------------------
+# Stage 7: ESP permissions (PLAN.md §8.5)
 #
 # SECURITY TRADEOFF -- deliberately visible, not buried:
 #   archinstall hardens the ESP to fmask=0077,dmask=0077 on UKI setups, on
@@ -792,18 +1057,65 @@ stage_esp_permissions() {
 
 # ---------------------------------------------------------------------------
 
-main() {
-  stage_preconditions
-  stage_repos
-  stage_esp_detect
-  stage_firmware_swap
-  stage_kernel
-  stage_uki
-  stage_prune
-  stage_esp_permissions
+# Minimal argument dispatch. TASK-T1 step 6 will split the install path into
+# independently runnable stages; this is deliberately just the two entry
+# points step 3 needs, so that work has a clean slate.
+usage() {
+  cat <<USAGE
+usage: ${PROG}.sh [install|reconcile]
 
-  log "done. Reboot and select the '${KERNEL_PKG}' entry from the Limine menu."
-  log "after boot, confirm with: uname -r  (expect it to contain 'neptune-${NEPTUNE_SERIES}')"
+  install    (default) full run: Valve repos, kernel + firmware, UKI, Limine
+             entry, pacman hook, ESP permissions.
+  reconcile  verify -- and repair only if verification fails -- the UKI and
+             Limine entry of every installed linux-neptune-* kernel, then
+             prune artifacts of ones that are no longer installed. This is
+             what ${HOOK_PATH} runs; it touches no repos, installs nothing,
+             and never unmounts the ESP.
+
+environment:
+  OMARCHY_DECK_NEPTUNE_SERIES  override the pinned series (digits only)
+  OMARCHY_DECK_FORCE_UKI       rebuild the UKI even when it verifies clean
+  OMARCHY_DECK_SCRIPT_PATH     path to install as ${HOOK_SCRIPT_PATH}
+USAGE
+}
+
+main() {
+  local cmd=${1:-install}
+  case $cmd in
+    install)
+      stage_preconditions
+      stage_repos
+      stage_esp_detect
+      stage_firmware_swap
+      stage_kernel
+      stage_uki
+      stage_prune
+      # Before stage_esp_permissions on purpose: the hook is what keeps the
+      # boot chain correct across future updates, and it should not be
+      # hostage to a umount/mount cycle that can legitimately fail on a busy
+      # ESP. After the kernel stages, also on purpose: the hook is only
+      # worth installing once this run has proven the machinery it verifies
+      # actually works here.
+      stage_hook
+      stage_esp_permissions
+
+      log "done. Reboot and select the '${KERNEL_PKG}' entry from the Limine menu."
+      log "after boot, confirm with: uname -r  (expect it to contain 'neptune-${NEPTUNE_SERIES}')"
+      ;;
+    reconcile)
+      stage_preconditions
+      stage_esp_detect
+      stage_reconcile
+      log "reconcile: done"
+      ;;
+    -h | --help | help)
+      usage
+      ;;
+    *)
+      usage >&2
+      fail "unknown command '${cmd}'"
+      ;;
+  esac
 }
 
 main "$@"
