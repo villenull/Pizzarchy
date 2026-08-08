@@ -867,14 +867,13 @@ installer, so if any BIOS step *is* needed (entering setup via Vol+ + Power,
 changing boot order), it must be documented with photos before first boot, not
 discovered mid-install. Confirm on your own device and write it down.
 
-**Result: PARTIAL / blocked on operator** (`FINDING-R1-10.5.md`). Cannot be
-resolved from inside this worktree or by any automated tooling — there's no
-VM/emulator equivalent that reproduces the Deck's actual factory UEFI/Secure
-Boot configuration. Needs you to enter BIOS (Vol+ + Power at boot) and report:
-(1) Secure Boot state (Enabled/Disabled), (2) current boot order and whether
-it needs reordering for a Limine install to boot by default, (3) any other
-UEFI setting Omarchy's own manual calls out. Take photos before changing
-anything, even if nothing turns out to need changing.
+**Result: CONFIRMED** (`FINDING-R1-10.5.md`, operator-verified on their own
+Deck). No BIOS change needed before install. Boot order already defaults to
+Limine (installer self-registers it). Secure Boot was never touched during
+the operator's original Omarchy install and it worked — direct evidence of
+the factory state — and the BIOS's `Security` tab exposes no Secure Boot
+toggle at all, consistent with it not being user-enforced on this hardware.
+No pre-install documentation step needed for either.
 
 ### 10.6 Collaboration with `28allday`
 

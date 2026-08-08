@@ -391,12 +391,16 @@ three parallel agents. Headline results (full hypotheses/results now also in
   no-client and show a Wi-Fi screen before Steam gets the display). Whether
   to bundle a pre-populated client remains a separate, unresolved
   legal/licensing call — see "Blocked on human" below.
-- **§10.5 Secure Boot/BIOS — PARTIAL/blocked.** Needs the operator to
-  physically check their own Deck's BIOS; cannot be resolved by tooling or a
-  VM (no emulator reproduces the Deck's real factory UEFI state).
-- **§10.6 upstream collaboration — PARTIAL, staged.** Outreach message to
-  `28allday` and five `deckarchy` bug reports drafted (`DRAFT-outreach-
-  28allday.md`, `DRAFT-upstream-bugs-deckarchy.md`); nothing sent or posted.
+- **§10.5 Secure Boot/BIOS — CONFIRMED (resolved session 3).** Operator
+  verified on their own Deck: boot order already defaults to Limine, Secure
+  Boot was never touched during their original install and it worked, and
+  the BIOS exposes no Secure Boot toggle at all. No pre-install BIOS step
+  needed.
+- **§10.6 upstream collaboration — PARTIAL, staged, on hold.** Outreach
+  message to `28allday` and five `deckarchy` bug reports drafted
+  (`DRAFT-outreach-28allday.md`, `DRAFT-upstream-bugs-deckarchy.md`);
+  operator has decided to hold entirely — nothing sent or posted, no
+  timeline to revisit.
 
 ## Blocked on human
 
@@ -437,11 +441,18 @@ three parallel agents. Headline results (full hypotheses/results now also in
   candidate designs (background Steam vs. systemd-user-service mapper) are
   prepared concretely in `FINDING-R1-10.3.md` with a head-to-head test plan;
   neither can be decided without the physical Deck.
-- **New (R1 §10.5): Secure Boot / BIOS state needs the operator to check
-  their own Deck.** Enter BIOS (Vol+ + Power), report Secure Boot
-  Enabled/Disabled state, boot order, and any Omarchy-manual-specific
-  requirement; photograph before changing anything. See
-  `FINDING-R1-10.5.md`.
+- **Resolved (session 3): Secure Boot / BIOS state.** Operator checked their
+  own Deck: boot order already defaults to Limine, and Secure Boot was never
+  touched during the original Omarchy install (direct evidence of factory
+  state) — the BIOS's `Security` tab exposes no Secure Boot toggle at all.
+  No pre-install BIOS step needed. See `FINDING-R1-10.5.md`. Photos taken
+  during verification were reviewed and deleted locally at operator's
+  request, not committed.
+- **On hold, indefinitely: R1 §10.6 drafts.** Operator has decided to hold
+  entirely on sending/filing the `28allday` outreach message and the five
+  `deckarchy` bug reports — not now, not with edits, just holding. Drafts
+  remain staged (`DRAFT-outreach-28allday.md`,
+  `DRAFT-upstream-bugs-deckarchy.md`) for if/when this changes.
 - **New (R1 §10.4): bundling a pre-populated Steam client in the ISO is a
   legal call, not an engineering one.** It's technically viable (tested,
   confirmed working offline once installed) but no document authorizing
