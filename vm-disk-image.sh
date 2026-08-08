@@ -79,6 +79,62 @@ disk_image::extract() {
   }
 }
 
+# disk_image::root_mount <root-raw-file>
+# Mounts the extracted root partition via `udisksctl loop-setup` + `mount`
+# — a real kernel mount, rootless (confirmed working on this dev machine:
+# no sudo/polkit prompt for a read-only loop-setup + mount of a regular
+# file, session 2). Prints "<loop-dev> <path-to-@-subvolume>" on success.
+#
+# This replaced an earlier `btrfs restore` (userspace recovery tool)
+# approach that looked correct in unit tests against small fixtures but
+# broke on a real install: `btrfs restore` errors on zstd-compressed
+# extents ("zstd frame incomplete") and — worse — silently stops walking
+# the rest of the tree after that error instead of failing loudly, so it
+# never reached /etc or /var/lib/pacman/local at all (PLAN.md §8.1's exact
+# failure mode: a tool that looks like it worked while doing nothing).
+# Confirmed against a real disk from a real install (session 2) before
+# relying on it, same as every other extraction function in this file.
+#
+# "@" is this project's own root-subvolume name (vm-cidata.sh's layout,
+# matching the configurator's own template) — not a btrfs universal, so
+# this only works against images this project's own cidata config built.
+disk_image::root_mount() {
+  local root_raw=$1
+  local loop_line loop_dev mount_line mount_point
+
+  loop_line=$(udisksctl loop-setup -r -f "$root_raw" 2>&1) || {
+    echo "disk_image::root_mount: loop-setup failed: $loop_line" >&2
+    return 1
+  }
+  loop_dev=$(grep -oP '(?<=as )/dev/loop[0-9]+' <<<"$loop_line")
+  [[ -n $loop_dev ]] || {
+    echo "disk_image::root_mount: could not parse loop device from: $loop_line" >&2
+    return 1
+  }
+
+  mount_line=$(udisksctl mount -b "$loop_dev" 2>&1) || {
+    udisksctl loop-delete -b "$loop_dev" >/dev/null 2>&1
+    echo "disk_image::root_mount: mount failed: $mount_line" >&2
+    return 1
+  }
+  mount_point=$(grep -oP '(?<=at ).*' <<<"$mount_line")
+  if [[ -z $mount_point || ! -d "$mount_point/@" ]]; then
+    udisksctl unmount -b "$loop_dev" >/dev/null 2>&1
+    udisksctl loop-delete -b "$loop_dev" >/dev/null 2>&1
+    echo "disk_image::root_mount: no @ subvolume found at '${mount_point:-<unparsed>}'" >&2
+    return 1
+  fi
+  echo "$loop_dev $mount_point/@"
+}
+
+# disk_image::root_unmount <loop-dev> — always call this once done with
+# whatever disk_image::root_mount handed back, success or failure.
+disk_image::root_unmount() {
+  local loop_dev=$1
+  udisksctl unmount -b "$loop_dev" >/dev/null 2>&1 || true
+  udisksctl loop-delete -b "$loop_dev" >/dev/null 2>&1 || true
+}
+
 # disk_image::esp_list <disk> [mtools-path] — list files under a path on
 # the ESP (default root) without mounting.
 disk_image::esp_list() {

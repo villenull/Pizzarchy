@@ -35,9 +35,14 @@ cidata::render_config() {
     return 1
   fi
 
+  local boot_obj_id root_obj_id
+  boot_obj_id=$(cat /proc/sys/kernel/random/uuid)
+  root_obj_id=$(cat /proc/sys/kernel/random/uuid)
+
   jq -n \
     --arg device "$device" \
     --arg hostname "$hostname" \
+    --arg boot_obj_id "$boot_obj_id" --arg root_obj_id "$root_obj_id" \
     --argjson boot_start "$boot_start" --argjson boot_size "$boot_size" \
     --argjson root_start "$root_start" --argjson root_size "$root_size" \
     '{
@@ -64,6 +69,7 @@ cidata::render_config() {
           "wipe": true,
           "partitions": [
             {
+              "obj_id": $boot_obj_id,
               "btrfs": [], "dev_path": null, "flags": ["boot", "esp"],
               "fs_type": "fat32", "mount_options": [], "mountpoint": "/boot",
               "size": { "sector_size": {"unit":"B","value":512}, "unit": "B", "value": $boot_size },
@@ -71,6 +77,7 @@ cidata::render_config() {
               "status": "create", "type": "primary"
             },
             {
+              "obj_id": $root_obj_id,
               "btrfs": [
                 {"mountpoint": "/", "name": "@"},
                 {"mountpoint": "/home", "name": "@home"},

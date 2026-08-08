@@ -142,6 +142,8 @@ creds_json="$WORK/user_credentials.json"
 qmp_sock="$WORK/qmp.sock"
 pidfile="$WORK/qemu.pid"
 serial_log="$WORK/serial.log"
+debug_log_img="$WORK/debug-log.raw"
+debug_log_txt="$WORK/install-debug.log"
 
 disk_bytes=$((DISK_SIZE_GB * 1024 * 1024 * 1024))
 
@@ -155,6 +157,16 @@ cidata::render_config /dev/vda "$disk_bytes" "$HOSTNAME_" "$config_json"
 cidata::render_credentials "$USERNAME" "$PASSWORD" "$creds_json"
 cidata::build_image "$cidata_img" "$config_json" "$creds_json"
 
+# Debug-log capture drive: the real install log only ever exists in the
+# guest's tmpfs (/var/log/omarchy-install.log), and tty1's actual text can
+# be hidden behind plymouth's splash for the guest's whole lifetime — a
+# screendump doesn't reliably show it. A fork's cidata branch of
+# .automated_script.sh can dd its log (and state.json) onto this device,
+# found in-guest at /dev/disk/by-id/virtio-vmdebuglog, right before its
+# unconditional poweroff. Harmless no-op against a script that doesn't
+# know about it — just an unused extra block device.
+qemu-img create -f raw "$debug_log_img" 8M >/dev/null
+
 log "booting ISO headless (timeout ${INSTALL_TIMEOUT}s)"
 qemu-system-x86_64 \
   "${ACCEL_ARGS[@]}" \
@@ -167,6 +179,8 @@ qemu-system-x86_64 \
   -device ide-cd,drive=cdrom0,bootindex=2 \
   -drive file="$cidata_img",format=raw,if=none,id=cidata0 \
   -device virtio-blk-pci,drive=cidata0 \
+  -drive file="$debug_log_img",format=raw,if=none,id=dbglog0 \
+  -device virtio-blk-pci,drive=dbglog0,serial=vmdebuglog \
   -display none -vga std \
   -qmp "unix:${qmp_sock},server,nowait" \
   -serial "file:${serial_log}" \
@@ -197,6 +211,15 @@ while kill -0 "$qemu_pid" 2>/dev/null; do
   fi
 done
 log "guest exited after ${elapsed}s"
+
+# Raw device, no filesystem — strip trailing NULs from the unused tail of
+# the image so the saved log doesn't carry megabytes of padding.
+tr -d '\0' <"$debug_log_img" >"$debug_log_txt" || true
+if [[ -s $debug_log_txt ]]; then
+  log "debug log captured: $debug_log_txt"
+else
+  log "debug log empty (fork's .automated_script.sh didn't write to it, or guest never got that far)"
+fi
 
 log "converting qcow2 -> raw for rootless offline inspection"
 qemu-img convert -O raw "$disk" "$disk_raw" || fail "qemu-img convert failed"
@@ -232,23 +255,23 @@ fi
 
 log "extracting root partition for package/unit assertions"
 root_raw="$WORK/root.raw"
-if disk_image::root_extract "$disk_raw" "$root_raw"; then
-  restored="$WORK/restored-root"
-  disk_image::root_restore_matching "$root_raw" '^/(var/lib/pacman/local(|/.*)|etc/systemd/system(|/.*))$' "$restored"
-
+if disk_image::root_extract "$disk_raw" "$root_raw" &&
+  read -r root_loop root_at < <(disk_image::root_mount "$root_raw"); then
   if [[ ${#EXPECT_PACKAGES[@]} -gt 0 && -n ${EXPECT_PACKAGES[0]} ]]; then
     log "asserting package set: ${EXPECT_PACKAGES[*]}"
-    check assert::packages_present "$restored/var/lib/pacman/local" "${EXPECT_PACKAGES[@]}"
+    check assert::packages_present "$root_at/var/lib/pacman/local" "${EXPECT_PACKAGES[@]}"
   fi
 
   if [[ ${#EXPECT_UNITS[@]} -gt 0 && -n ${EXPECT_UNITS[0]} ]]; then
     log "asserting enabled units: ${EXPECT_UNITS[*]}"
-    check assert::units_enabled "$restored/etc/systemd/system" "${EXPECT_UNITS[@]}"
+    check assert::units_enabled "$root_at/etc/systemd/system" "${EXPECT_UNITS[@]}"
   else
     log "skipping enabled-units check (VM_EXPECT_UNITS not set — T3 hasn't run yet)"
   fi
+
+  disk_image::root_unmount "$root_loop"
 else
-  log "could not extract root partition — see errors above"
+  log "could not extract/mount root partition — see errors above"
   status=1
 fi
 

@@ -51,6 +51,17 @@ network_type=$(jq -r '.network_config.type' "$config")
 [[ $network_type == iso ]] || fail "network_config.type stays 'iso' (offline install, no network dependency)" "$network_type"
 pass "device/hostname/offline-network fields are set correctly"
 
+# Real bug caught by an actual VM install run (session 2): archinstall's
+# DiskLayoutConfiguration.parse_arg does `partition['obj_id']` unconditionally
+# (archinstall/lib/models/device.py) — a missing key is a KeyError, not a
+# default. Guard against silently dropping it again.
+boot_obj_id=$(jq -r '.disk_config.device_modifications[0].partitions[0].obj_id' "$config")
+root_obj_id=$(jq -r '.disk_config.device_modifications[0].partitions[1].obj_id' "$config")
+[[ -n $boot_obj_id && $boot_obj_id != null ]] || fail "boot partition carries a non-empty obj_id" "$boot_obj_id"
+[[ -n $root_obj_id && $root_obj_id != null ]] || fail "root partition carries a non-empty obj_id" "$root_obj_id"
+[[ $boot_obj_id != "$root_obj_id" ]] || fail "boot and root partitions get distinct obj_id values" "$boot_obj_id"
+pass "each partition carries a distinct, non-empty obj_id (archinstall requires this key to exist)"
+
 if cidata::render_config /dev/vda 1000000 too-small "$work/tiny.json" 2>/dev/null; then
   fail "render_config refuses a disk too small to fit boot+root, rather than emitting a broken negative size"
 fi

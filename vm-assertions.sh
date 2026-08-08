@@ -136,22 +136,14 @@ assert::limine_config_entries() {
 # --- package set / enabled units (root partition) -----------------------
 
 # disk_image::root_extract <disk> <dest-raw-file>
-# Extraction half, step 1: carve the root partition out to its own file so
-# btrfs restore can read it (needs to see the partition's own byte 0).
+# Extraction half, step 1: carve the root partition out to its own file
+# (needs to see the partition's own byte 0 — see disk_image::root_mount in
+# vm-disk-image.sh for step 2).
 disk_image::root_extract() {
   local disk=$1 dest=$2
   local start size
   read -r start size < <(disk_image::root_partition "$disk") || return 1
   disk_image::extract "$disk" "$start" "$size" "$dest"
-}
-
-# disk_image::root_restore_matching <root-raw-file> <path-regex> <dest-dir>
-# Extraction half, step 2: btrfs restore (works on an unmounted image, no
-# root needed for a regular file) of paths matching the regex.
-disk_image::root_restore_matching() {
-  local root_raw=$1 regex=$2 dest=$3
-  mkdir -p "$dest"
-  btrfs restore --path-regex "$regex" -S "$root_raw" "$dest" >/dev/null 2>&1
 }
 
 # assert::packages_present <pacman-local-db-dir> <package-name...>

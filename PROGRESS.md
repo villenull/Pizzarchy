@@ -8,8 +8,23 @@
 Bootstrapped. `PLAN.md` and `SESSIONS.md` read in full (session 1). Git
 repo initialized, planning docs committed as baseline (`3c44891`). Local
 toolchain checked (see below). Block 1 (T0 §1, QEMU install harness):
-harness + libraries + unit tests written and passing; full end-to-end run
-against a real ISO not yet verified (environment gap, see below).
+harness + libraries + unit tests written and passing.
+
+**Session 2: T0 §1's "done when" criterion is now met.** `vm-install-test.sh`
+ran end-to-end against a real, unmodified-upstream `omarchy-iso` build and
+got a clean **PASS** — partition table, package set (5/5 expected
+packages), and enabled systemd units all verified against a real,
+successful, fully-offline install (942/943 packages, all 12 install
+phases `ok`). Getting there surfaced and fixed two real bugs in this
+project's own harness code (not upstream bugs) — see "Findings" below:
+`vm-cidata.sh` was missing a JSON key archinstall requires (`obj_id`,
+`KeyError` at install time), and the package/unit assertion path used
+`btrfs restore` in a way that silently stopped mid-tree-walk on
+zstd-compressed extents, so it could report "package not found" against
+partitions that actually installed fine — replaced with a real rootless
+kernel mount (`udisksctl loop-setup` + `mount`), which is also just a
+better approach generally. Task #4 ("verify harness can actually fail")
+is done: it caught two real bugs before this ever touches hardware.
 
 ### T0 §1 deliverables (session 1)
 
@@ -234,59 +249,100 @@ input wheel`). Passwordless `sudo` is still not set up, but turned out to
 only matter for one non-essential line in upstream's build script (see
 below) — not a real blocker.
 
-**New finding (session 2): building the real `omarchy-iso` ISO from this
-environment is currently bottlenecked by very low network throughput**,
-not by tooling/permissions. Four build attempts via unmodified upstream
-`bin/omarchy-iso-make` (cloned to session scratch space, not this repo):
+**Network bottleneck (session 2) — root-caused and fixed.** Building the
+real `omarchy-iso` ISO from this environment first looked bandwidth-
+starved: four build attempts via unmodified upstream `bin/omarchy-iso-make`
+(cloned to session scratch space, not this repo) failed — three on mirror
+timeouts ("Operation too slow. Less than 1 bytes/sec" from
+`stable-mirror.omarchy.org`, worsening across `ParallelDownloads=5` → `1`),
+the fourth crawling at ~2 KB/s even to an unrelated host (nodejs.org). The
+user's own speed test showed 600 Mbps, which didn't match. Root cause,
+confirmed by direct comparison: **Docker's default bridge network on this
+host silently throttles throughput** (`docker run --network host` measured
+62 MB/s against the same URL that crawled at 2 KB/s through the bridge —
+matches both the host's own 54 MB/s direct-curl result and the ISP speed
+test). MTU and IPv6 were checked and ruled out first. Fix: add
+`--network host` to the build's `docker run` invocation (scratch clone
+only — see below). This is worth remembering for *any* Docker-based
+tooling on this host, not just ISO builds.
 
-1. Attempt 1: failed on one file (`hyprland...zst.sig`) from
-   `stable-mirror.omarchy.org`, "Operation too slow. Less than 1 bytes/sec".
-2. Attempt 2: failed on several large packages from the same mirror
-   (llvm-libs, perl, qt6-declarative, qt6-base, python), same error,
-   *plus* two outright 404s from Arch's own `fastly.mirror.pkgbuild.com`/
-   `geo.mirror.pkgbuild.com` for `mesa`/`systemd` (stale-mirror sync lag —
-   a known, unrelated Arch mirror issue).
-3. Attempt 3: same failure, same package cluster — 3/3 identical pattern
-   pointed at contention from `ParallelDownloads = 5` in
-   `configs/pacman-online-stable.conf`, so that was dropped to `1` in the
-   scratch clone (not this repo) for attempt 4.
-4. Attempt 4: no download-abort errors, but *even the unrelated nodejs.org
-   tarball* crawled at ~1.6–3.2 KB/s sustained (measured directly) — at
-   that rate the ~3GB package set would take days. This points at the
-   session's actual network egress bandwidth right now, not mirror
-   throttling or download parallelism. Killed rather than let it run
-   indefinitely.
-
-Two harmless deviations made in the scratch clone only (never touched
-this repo): commented out `sudo rm -rf /var/cache/pacman/pkg/*` in
-`bin/omarchy-iso-make` (host-side cache tidy, not required for a correct
-build, and needs sudo this non-tty background session can't provide), and
-set `ParallelDownloads = 1` in `configs/pacman-online-stable.conf`.
+Three deviations made in the scratch clone only (never touched this
+repo's own files): `--network host` added to `DOCKER_ARGS` in
+`bin/omarchy-iso-make` (the actual fix); `sudo rm -rf
+/var/cache/pacman/pkg/*` commented out (host-side cache tidy, not required
+for a correct build, needs sudo this non-tty background session can't
+provide); `ParallelDownloads` in `configs/pacman-online-stable.conf` was
+dropped to `1` then restored to the stock `5` once `--network host`
+proved to be the real fix.
 
 Also applied — and this one **is** relevant to T5 later, not just this
-scratch test — the one-line completion-detection patch to
-`configs/airootfs/root/.automated_script.sh` that `vm-install-test.sh`'s
-own "KNOWN GAP" comment already anticipated, with one correction: reading
-the actual dashboard source (`omarchy-install-dashboard`) shows
-non-interactive installs never actually hang on a prompt (both the reboot
-confirm and the failure menu already short-circuit when
-`OMARCHY_UI_INTERACTIVE=no`) — the real gap is narrower: on success the
-dashboard calls an in-guest `reboot` (into the freshly-installed disk)
-rather than powering off, so QEMU's process never exits either way. Patch:
-export `OMARCHY_UI_AUTO_REBOOT=no OMARCHY_UI_FAILURE_ACTION=exit` in the
-cidata branch, capture the dashboard's exit status without tripping
-`set -e`, then explicitly `poweroff` when non-interactive regardless of
-outcome. The `vm-install-test.sh` comment block should be corrected to
-match this more precise finding next time it's touched.
+scratch test — two patches to `configs/airootfs/root/.automated_script.sh`:
 
-- Net effect: this session can write and unit-test the harness logic
-  (fixture-based, using rootless tools like `mtools` for FAT/ESP reads),
-  and tooling/permissions are no longer the blocker — but **T0 §1's "done
-  when" criterion (run against a real build, confirm failure detection)
-  is still not verified**, now purely because this session's network
-  couldn't sustain an ISO build. Retry when network conditions allow, or
-  build on a connection known to have real bandwidth. Added to "Blocked on
-  human" below.
+1. The completion-detection fix `vm-install-test.sh`'s "KNOWN GAP" comment
+   already anticipated, corrected on closer reading of the actual
+   dashboard source (`omarchy-install-dashboard`): non-interactive installs
+   never actually hang on a prompt (reboot confirm and failure menu both
+   already short-circuit on `OMARCHY_UI_INTERACTIVE=no`) — the real gap is
+   narrower: on success the dashboard calls an in-guest `reboot` (into the
+   freshly-installed disk) rather than powering off, so QEMU's process
+   never exits either way. Fix: export `OMARCHY_UI_AUTO_REBOOT=no
+   OMARCHY_UI_FAILURE_ACTION=exit` in the cidata branch, capture the
+   dashboard's exit status without tripping `set -e`, then explicitly
+   `poweroff` when non-interactive regardless of outcome.
+2. A debug-log capture: the real install log
+   (`/var/log/omarchy-install.log`) only ever exists in the guest's tmpfs,
+   and tty1's actual text can be hidden behind plymouth's splash for the
+   guest's *entire* lifetime (confirmed — a QMP screendump loop sampling
+   every ~15s for 90s+ showed a frozen "OMARCHY" splash the whole time;
+   pressing Esc, plymouth's own "show details" toggle, revealed unrelated
+   systemd boot-log text, not the real tty1 content). Fix, now a permanent
+   part of `vm-install-test.sh` itself (not scratch-only — see below): an
+   extra small virtio-blk drive (`serial=vmdebuglog`,
+   `/dev/disk/by-id/virtio-vmdebuglog` in-guest), which the ISO fork writes
+   the install log + orchestrator `state.json` onto right before its
+   poweroff. `vm-install-test.sh` dumps its content to
+   `$WORK/install-debug.log` after every run. This is what made the two
+   real bugs below findable at all.
+
+**Two real bugs in this project's own harness, found via the first actual
+end-to-end run — this is exactly what task #4 ("verify harness can
+actually fail") was for:**
+
+1. `vm-cidata.sh`'s `cidata::render_config` didn't include an `obj_id` key
+   per partition. archinstall's `DiskLayoutConfiguration.parse_arg`
+   (`archinstall/lib/models/device.py:185`) does `partition['obj_id']`
+   unconditionally — no default, straight `KeyError` — so every install
+   attempt failed after 0.1s, before ever touching the disk
+   ("Preparing live environment" phase). Fixed: generate a UUID
+   (`/proc/sys/kernel/random/uuid`) per partition. Added a regression test
+   in `test-vm-cidata.sh` (existing tests didn't check for this key at
+   all, so this could have silently regressed indefinitely without one).
+2. `vm-assertions.sh`'s `disk_image::root_restore_matching` used `btrfs
+   restore` (the userspace recovery tool) to inspect the installed root
+   partition without a real mount. It looked correct in unit tests against
+   small hand-built fixtures, but on a real install it errors on
+   zstd-compressed extents ("zstd frame incomplete") — and, worse, **stops
+   walking the rest of the tree after that error instead of failing
+   loudly**, so it never reached `/etc` or `/var/lib/pacman/local` at all.
+   This is PLAN.md §8.1's exact failure class (a tool that looks like it
+   worked while doing nothing) — reproduced in this project's own tooling,
+   not just upstream's. Fixed: replaced with a real rootless kernel mount
+   (`udisksctl loop-setup` + `mount` — confirmed working with no sudo/
+   polkit prompt on this dev machine, same technique already used
+   elsewhere this session for read-only ISO/squashfs inspection). New
+   `disk_image::root_mount`/`disk_image::root_unmount` in
+   `vm-disk-image.sh`; `vm-install-test.sh` updated to use them.
+
+**Net result: T0 §1's "done when" criterion is met.** `vm-install-test.sh`
+run against a real, unmodified-upstream `omarchy-iso` build, with both
+fixes applied, produced a clean PASS: partition table valid, all 5
+expected packages present, both spot-checked systemd units
+(`NetworkManager.service`, `limine-snapper-sync.service`) enabled — against
+a real install that put 942/943 packages on disk across all 12 phases,
+fully offline (`network_config.type: iso`, confirmed via
+`offline downloading...` in the captured log — no network device was even
+attached to the test VM, `-nic none`, matching CLAUDE.md's offline
+constraint).
 
 Carried over from the operator's manual install session (already validated
 on real hardware, treat as fact):
@@ -306,18 +362,16 @@ on real hardware, treat as fact):
   group membership** (`docker run hello-world` succeeds, `/dev/kvm`
   accessible, `groups` includes `kvm disk docker`). Not yet confirmed:
   `ventoy-bin` from the AUR, and shellcheck still uses the session-scratch
-  static-binary workaround (not blocking, just not switched over).
-- **New (session 2): T0 §1's real end-to-end run is now blocked on network
-  bandwidth, not tooling.** Building unmodified upstream `omarchy-iso`
-  (needed since this project's own ISO doesn't exist until T5) failed 4/4
-  times from this session's network — see "Local dev-machine limitations"
-  above for the detailed pattern (mirror timeouts at `ParallelDownloads=5`,
-  then ~2 KB/s sustained even to nodejs.org at `ParallelDownloads=1`).
-  Retry `cd <scratch clone> && ./bin/omarchy-iso-make` (or a fresh clone —
-  scratch space, not this repo) from a connection with real throughput,
-  then `./vm-install-test.sh <built-iso>`. The one-line completion-detection
-  patch this needs is documented above and should be re-applied (or moved
-  into this repo's own fork once T5 exists).
+  static-binary workaround (not blocking, just not switched over) — though
+  shellcheck itself appeared on `$PATH` partway through session 2, so it
+  may already be installed; re-check with `which shellcheck` next session.
+- **Resolved (session 2): T0 §1's real end-to-end run.** Was blocked on a
+  Docker bridge-network throughput issue (root-caused and fixed with
+  `--network host`, see "Local dev-machine limitations" above), then on
+  two real bugs in this project's own harness (`obj_id` missing from
+  `vm-cidata.sh`'s JSON, `btrfs restore` silently truncating its tree walk
+  in `vm-assertions.sh`), both now fixed and covered. `vm-install-test.sh`
+  now passes cleanly against a real ISO end to end.
 - **PLAN.md §4/§5 architecture needs revisiting**: the
   `OMARCHY_INSTALLER_REPO` hook it assumes doesn't exist upstream (see
   Findings above). Needs a decision before T5 on the replacement approach
@@ -337,16 +391,22 @@ See `PLAN.md` §10 — six documented questions with hypotheses, worked in R1.
 
 ## Next session should start with
 
-T0 §1–6 are all built (see deliverables above). Before starting block 3
-(R1 research, per `SESSIONS.md`'s block table):
+T0 §1–6 are all built and **T0 §1's real end-to-end run is now verified**
+(session 2 — see "Status summary" and "Findings" above). Before starting
+block 3 (R1 research, per `SESSIONS.md`'s block table):
 
-1. Check whether the operator's package/permission installs landed
-   (`which docker shellcheck mkarchiso; groups` — as of this write-up,
-   none had yet). If they have: run `./vm-install-test.sh` against a real
-   built ISO for the first time (needs an ISO — none exists until T5, so
-   this may mean building upstream's own unmodified `omarchy-iso` first
-   just to exercise the harness, separate from this project's own fork
-   work) and push/verify the CI workflow on an actual GitHub Actions run
-   once a remote exists.
-2. Otherwise, proceed to block 3 (R1 research questions) — T0 isn't fully
+1. Push/verify the CI workflow (`.github/workflows/ci.yml`) on an actual
+   GitHub Actions run once a remote exists — not yet done, no remote is
+   configured for this repo. Worth noting: the CI runner's Docker networking
+   should be checked for the same bridge-throughput issue found this
+   session if T5's ISO build ever runs there (see "Local dev-machine
+   limitations" above) — GitHub-hosted runners may or may not have the
+   same problem; hasn't been tested.
+2. If T5 (ISO build) work starts: the two `.automated_script.sh` patches
+   from session 2 (completion-detection poweroff, debug-log capture drive)
+   need to land in this project's own fork, not just the scratch clone
+   they were verified against. The debug-log drive's host side
+   (`vm-install-test.sh`) is already permanent; only the guest-side
+   `.automated_script.sh` write needs porting.
+3. Otherwise, proceed to block 3 (R1 research questions) — T0 isn't fully
    hardware/CI-verified but isn't blocking further work either.
