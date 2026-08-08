@@ -550,12 +550,20 @@ reconcile_uki() {
     fail "internal error: reconcile_uki called for '${pkgbase}', which has no /usr/lib/modules/*/pkgbase"
   uki=$(find_uki_for "$pkgbase") || uki=""
 
-  # Idempotency rule. Regenerating unconditionally would be *correct* but not
-  # idempotent: an initramfs is not byte-reproducible, so a rebuilt UKI has
-  # different bytes, and limine-entry-tool writes the UKI's blake2b hash into
-  # the config -- so the config would change on every run too. Skip only when
-  # the artifacts are provably current: the UKI exists, is newer than the
-  # kernel image it was built from, and is registered in the Limine config.
+  # Idempotency rule. Skip only when the artifacts are provably current: the
+  # UKI exists, is newer than the kernel image it was built from, and is
+  # registered in the Limine config.
+  #
+  # CORRECTION (measured in vm-kernel-hook-test.sh, 2026-08-08): an earlier
+  # version of this comment justified the skip by claiming an initramfs is
+  # not byte-reproducible, so a needless rebuild would change the UKI's bytes
+  # and therefore the blake2b hash limine-entry-tool records in the config.
+  # That is false on current mkinitcpio: rebuilding this UKI from unchanged
+  # inputs produced a byte-identical file, sha256 and all. The skip is still
+  # right -- rebuilding a 140 MB UKI and rewriting the boot config to say the
+  # same thing is minutes of work and an unnecessary write to the boot chain,
+  # inside a pacman hook that runs on every kernel change -- but it is a cost
+  # and blast-radius argument, not a reproducibility one.
   if [[ -z ${OMARCHY_DECK_FORCE_UKI:-} && -n $uki ]] &&
     $SUDO test "$uki" -nt "$moddir/vmlinuz" &&
     [[ $(limine_entry_count "$uki") -eq 1 ]]; then

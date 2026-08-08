@@ -25,9 +25,16 @@
 #   doing nothing). The in-guest probe snapshots the ESP, the Limine config,
 #   fstab, pacman.conf, the live mount options and the installed package set
 #   after run 1 and again after run 2, and the pass condition is that those
-#   two snapshots are byte-identical. UKI content is covered by sha256, so a
-#   needless initramfs rebuild (which is not byte-reproducible) shows up as
-#   a diff instead of passing silently.
+#   two snapshots are byte-identical. UKI content is covered by sha256.
+#
+#   CORRECTION (measured in vm-kernel-hook-test.sh, 2026-08-08): that sha256
+#   does NOT catch a needless UKI rebuild, which is what this note originally
+#   claimed. mkinitcpio's UKI output is byte-reproducible -- rebuilding from
+#   unchanged inputs produces an identical file. The sha256 still catches a
+#   rebuild whose *inputs* changed, which is the case that matters for
+#   correctness, but "run 2 rebuilt everything for nothing" would pass this
+#   test silently. Use the mtime-sentinel technique in vm-kernel-hook-test.sh
+#   if that ever needs asserting here.
 #
 # * Everything is injected without root on the host. The payload scripts are
 #   written onto the guest's ESP with mtools at a byte offset — the same
@@ -168,9 +175,9 @@ done
 # Snapshot every piece of state either the script or a kernel install can
 # touch. Sorted and content-hashed so it is order- and mtime-independent:
 # the only differences that should show up between run 1 and run 2 are real
-# ones. sha256 over the ESP tree is what catches a needless UKI rebuild —
-# an initramfs is not byte-reproducible, so a rebuild changes the hash (and
-# the hash limine-entry-tool records in its config).
+# ones. sha256 over the ESP tree catches any rebuild whose inputs changed —
+# but not a needless rebuild from unchanged inputs, because mkinitcpio's UKI
+# output turned out to be byte-reproducible (see the CORRECTION at the top).
 snapshot() {
   local tag=$1
   {

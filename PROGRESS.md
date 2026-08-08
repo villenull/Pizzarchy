@@ -37,6 +37,19 @@ needed and each of the first five failed on a *different* real bug — see
 "T1 — omarchy-deck-kernel.sh review" under Findings. Steps 3–6 (pacman hook,
 CI flags, §8.5 upstream repro, stage split) are untouched.
 
+**Session 5: T1 step 3 done** (the pacman hook). The headline is what the
+investigation found *before* anything was written: upstream's
+`limine-mkinitcpio-hook` already covers UKI generation on install/upgrade
+**and** entry+file cleanup on remove, so most of what step 3 was scoped to
+build already exists and works. The hook that shipped is therefore a
+*verifier*, not a generator, closing three narrower gaps upstream really
+does have — all three of them silent-failure gaps. Verified in a VM: 33
+assertions, all passing, including forced reinstalls, a fabricated missing
+UKI, a fabricated stale entry, and a package removal. Needed a new substrate
+image builder (`vm-neptune-image.sh`) because the session-2 installed disk
+no longer exists on this machine. See "T1 step 3 — the pacman hook" under
+Findings. Steps 4–6 still untouched.
+
 ### T0 §1 deliverables (session 1)
 
 Flat files (per `CLAUDE.md`'s no-subdirectories rule — the task file's
@@ -188,7 +201,7 @@ human" below instead.
 |---|---|---|
 | T0 Test infrastructure | **§1–6 all built; two verification gaps remain** | §1 harness unit-tested (31 assertions) but not run end-to-end against a real ISO; §2–6 done (Ventoy doc, override loader + 8 tests, deck-sync/snapshot/rollback untested against hardware, CI workflow untested against a real Actions run, shellcheck clean repo-wide). See T0 §1/§2–6 deliverables above for exact gaps. |
 | R1 Research questions | not started | Can run parallel; 10.4 is highest stakes |
-| T1 Kernel and boot | **steps 1–2 done; 3–6 not started** | Script rewritten and now actually executes: shellcheck clean, idempotency proven in a VM (`vm-kernel-idempotency-test.sh`, run twice, byte-identical end state), kernel version reduced to one documented constant (`NEPTUNE_SERIES_DEFAULT=611`) with glob-keyed entry regeneration. Still to do: pacman hook (§3), CI flags (§4), §8.5 upstream repro (§5), stage split (§6). |
+| T1 Kernel and boot | **steps 1–3 done; 4–6 not started** | Script rewritten and now actually executes: shellcheck clean, idempotency proven in a VM (`vm-kernel-idempotency-test.sh`, run twice, byte-identical end state), kernel version reduced to one documented constant (`NEPTUNE_SERIES_DEFAULT=611`) with glob-keyed entry regeneration. Pacman hook done and VM-verified (`vm-kernel-hook-test.sh`, 33 assertions): fires on install/upgrade/remove of `linux-neptune-*`, verifies rather than duplicates upstream's UKI machinery, repairs a missing UKI, prunes stale entries, and does not duplicate entries on repeat reinstalls. Still to do: CI flags (§4), §8.5 upstream repro (§5), stage split (§6). |
 | T2 Gamepad input spike | not started | Opus. Determines T4's entire scope |
 | T3 Gaming Mode | not started | Needs T0's deck-sync.sh to be efficient |
 | T4 Installer UI | not started | Blocked on T2's finding |
@@ -501,6 +514,124 @@ substantive — new `omarchy_linux-neptune-611.efi` (38.5 MB), new
 so the pass is not vacuous. The harness injects rootlessly (mtools onto the
 ESP + SMBIOS type-11 systemd credentials); it never needs sudo on the host,
 so it can run in CI.
+
+### T1 step 3 — the pacman hook (session 5)
+
+**The finding that mattered most: upstream already does most of this.**
+`limine-mkinitcpio-hook` 1.36.0-1 (read directly — it is installed on this
+dev machine and on the operator's Deck) ships three ALPM hooks, and between
+them they cover both directions:
+
+- **Install/Upgrade** — `/etc/pacman.d/hooks/90-mkinitcpio-install.hook`.
+  Note the path: the package drops it into `/etc`, where it *shadows*
+  mkinitcpio's own same-named hook in `/usr/share/libalpm/hooks` (pacman
+  de-duplicates hooks by filename, `/etc` wins). Triggers `Type=Path`,
+  `Operation=Install|Upgrade`, `Target=usr/lib/modules/*/pkgbase`, plus a
+  second trigger on `usr/lib/firmware/*` and friends that forces a rebuild of
+  *every* installed kernel. It runs `limine-mkinitcpio-install`, which builds
+  `$ESP/EFI/Linux/<prefix>_<pkgbase>.efi` and calls
+  `limine-entry-tool --add-uki`. A plain `pacman -S linux-neptune-611`
+  reinstall counts as an Upgrade (libalpm classifies a reinstall as an
+  upgrade because the package is already in the local db) — **confirmed in
+  the VM**, the hook fires on a reinstall.
+- **Remove** — `60-limine-mkinitcpio-remove-pre.hook` (PreTransaction,
+  records the pkgbase names into `/var/lib/limine/removed_kernels.list`) and
+  `90-limine-mkinitcpio-remove-post.hook` (PostTransaction, runs
+  `limine-mkinitcpio-remove post`). It deregisters the entry **and deletes
+  the UKI file** — `limine-entry-tool --remove-all` removes files unless
+  `--keep-files` is passed. So the suspected gap ("does anything clean up
+  after `pacman -Rns linux-neptune-611`?") **does not exist**. Confirmed in
+  the VM: the removal test shows `Removed unused Limine boot entry:
+  linux-neptune-611` coming from upstream's hook, before this project's hook
+  runs at all.
+
+**So the hook that shipped verifies rather than generates.** It closes three
+real gaps, all of the same shape — upstream can fail while reporting success:
+
+1. `limine-mkinitcpio-install`'s per-kernel error paths are all
+   `error_msg …; continue`, and the guard before them is a bare
+   `pacman -Qqo … || continue`. It can build nothing and still exit 0, while
+   the Limine entry keeps pointing at the previous UKI whose modules
+   directory the upgrade just deleted. **This was hit for real while building
+   the test harness** (a broken `pacman.conf` in the chroot made every
+   `pacman -Q` fail; the script skipped the only kernel and exited 0 having
+   built nothing) — it is not a theoretical concern.
+2. Its whole-run failure (`initialize_header || exit 1`, e.g. the ESP not
+   mounted) happens PostTransaction, so it cannot roll back: the kernel lands
+   with no UKI behind one terse pacman error line.
+3. `limine-mkinitcpio-remove`'s `post_remove` never checks whether
+   `limine-entry-tool` succeeded and then deletes `removed_kernels.list`
+   unconditionally, so a failed removal is forgotten permanently.
+
+**The firmware conflict cannot be hooked at all.** `--ask=4` exists because
+libalpm asks `Remove linux-firmware? [y/N]` during transaction *preparation*,
+before any hook — including PreTransaction hooks — runs. Nothing catches it
+and nothing can. In practice it only bites on the first swap (which
+`stage_kernel` owns); afterwards there is nothing left to conflict with. It
+recurs only if something drags Arch's `linux-firmware` back in as a
+dependency, and the fix for that is a `conflicts` entry on the Deck pacman
+package (T5), not a hook. Recorded here so T5 does not rediscover it.
+
+**Shape of the hook.** `/etc/pacman.d/hooks/95-omarchy-deck-kernel.hook`
+(`95-` so it sorts after every upstream hook, both the `90-` install one and
+the `90-` remove-post one), `Type=Package`,
+`Operation=Install|Upgrade|Remove`, `Target=linux-neptune-*` and
+`linux-firmware-neptune`, `When=PostTransaction`,
+`Exec=/usr/local/bin/omarchy-deck-kernel reconcile`. `stage_hook` installs
+both files with a content compare so a re-run writes nothing. The same
+basename under `/usr/share/libalpm/hooks` will supersede it cleanly when the
+Deck logic becomes its own package. The whole rationale is written into the
+hook file itself, not just here — the person asking "why does this exist" is
+reading the hook.
+
+**VM evidence.** `vm-kernel-hook-test.sh`, 33 assertions, all passing:
+install run leaves a working hook; a forced reinstall fires upstream's hook
+*and* this one, really regenerates the UKI, and leaves exactly one Limine
+entry; a second reinstall still leaves exactly one (the "must not duplicate"
+requirement, tested rather than argued); deleting the UKI behind Limine's
+back and running the hook's own command repairs it; a fabricated stale
+`linux-neptune-999` entry is pruned; `pacman -Rdd` leaves no UKI and no
+entry. Also asserted: on a healthy reinstall this project's hook does **not**
+rebuild — it only verifies — which is the evidence that it is not duplicating
+upstream's work. `vm-kernel-idempotency-test.sh` was re-run after adding
+`stage_hook` to `main()` and still passes (`hook: … already current` on run 2).
+
+**New harness: `vm-neptune-image.sh`.** Session 2's installed Quattro disk
+image is gone from this machine (`/var/tmp` was cleared), and rebuilding it
+means an ISO build plus a full unattended install. This builds a purpose-made
+substrate instead — limine + limine-mkinitcpio-hook from Omarchy's own repo,
+`ENABLE_UKI=yes` + `CUSTOM_UKI_NAME="omarchy"`, a vfat ESP mounted
+`fmask=0077,dmask=0077`, and a real `linux-neptune-611` from the Valve repos —
+in a privileged `archlinux/archlinux` container, in about six minutes,
+without root on the host. It is explicitly **not** a claim to be a Quattro
+install; it reproduces the four properties the boot chain depends on. Two
+things it cost to get right, both worth not rediscovering:
+
+- **Docker gives the container a tmpfs `/dev` with no udev**, so `losetup -P`
+  publishes partitions under `/sys/block` but nothing creates `/dev/loopNpM`.
+  The nodes have to be `mknod`'d from sysfs by hand.
+- **`genfstab -U` silently emitted `/dev/loop0p1` for the ESP**, because it
+  resolves UUIDs through `/dev/disk/by-uuid`, which udev never populated. The
+  guest then booted (root comes from the kernel cmdline, not fstab), waited
+  90 s for a device that cannot exist in a VM, failed `/boot`, and dropped to
+  an emergency shell — which from the outside looked exactly like a hung
+  test: disk churn, then silence, for two full runs. fstab is now written by
+  hand from `blkid`, and the builder refuses to ship an fstab containing a
+  `/dev/` path. Also: put `console=ttyS0` **last** in the kernel cmdline, or
+  systemd's boot output goes to a VGA framebuffer no harness is capturing. A
+  QEMU monitor `screendump` is what finally showed the emergency shell.
+
+**Correction to a session-4 claim: mkinitcpio's UKI output IS
+byte-reproducible.** `omarchy-deck-kernel.sh` and
+`vm-kernel-idempotency-test.sh` both asserted the opposite in comments, and
+the hook test's first run failed on an assertion built on it — a reinstall
+that demonstrably rebuilt the UKI (`mkinitcpio` ran, `UKI stored in …`,
+`Updated: /boot/limine.conf`) produced a byte-identical file, same sha256.
+Consequences: the idempotency test's sha256 snapshot does *not* catch a
+needless rebuild (it does catch one whose inputs changed), and the "skip when
+current" rule in `reconcile_uki` is justified by cost and boot-chain blast
+radius, not by reproducibility. Both comments corrected in place; proving a
+regeneration happened now uses an mtime sentinel.
 
 ## Blocked on human
 
