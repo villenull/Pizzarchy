@@ -534,6 +534,27 @@ so it can run in CI.
   hardware. Also unvalidated on hardware: replacing Arch's split
   `linux-firmware-*` with Valve's `linux-firmware-neptune` (correct in the
   VM, but Wi-Fi/BT/audio can only be checked on the Deck).
+- **Resolved (session 4): T1's scope-decision precondition, checked against
+  the operator's real Deck.** The rewritten `omarchy-deck-kernel.sh` only
+  supports systems where `limine-entry-tool` is present (provided by the
+  `limine-mkinitcpio-hook` package) — the agent flagged this as needing
+  revisiting if the operator's Deck (installed via archinstall + Omarchy
+  manually, not the Quattro ISO) predates that mechanism. Operator ran
+  read-only checks on the real Deck (`pacman -Qi limine-mkinitcpio-hook`,
+  `ls /etc/mkinitcpio.d/`, `ls /usr/lib/modules/*/pkgbase`): the package
+  **is** installed (v1.36.0-1, explicitly installed 2026-08-03 — likely via
+  a recent `omarchy update` pulling in Quattro's boot-chain machinery even
+  though the original install predates it), so the script's actual gate
+  (`command -v limine-entry-tool`) passes. Two `.preset` files
+  (`linux-neptune-611.preset`, `linux.preset`) are still present in
+  `/etc/mkinitcpio.d/` as leftover cruft from before the hook existed — the
+  script never reads that path, so they're harmless. `pkgbase` for
+  `6.11.11-valve29-1-neptune-611-...` confirms the operator's Deck is
+  already on the same `linux-neptune-611` series the script pinned to.
+  **Not yet done:** actually running the script on the physical Deck (a
+  write action, needs separate operator go-ahead) and confirming
+  `omarchy` vs `omarchy-dev` (the dev-channel check came back "not found" —
+  likely just the wrong package name for their channel, unconfirmed).
 - Any write to the physical Deck
 - Any public action (repos, upstream issues, outreach) — **now includes two
   concrete staged drafts awaiting approval**: `DRAFT-outreach-28allday.md`
