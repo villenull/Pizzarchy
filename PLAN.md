@@ -301,6 +301,14 @@ user does nothing (screens should never hard-block on input forever).
    steps (account sign-in, updates) want it. Include this as a clearly
    **skippable** screen ("Connect now" / "Skip — connect later") rather
    than a blocking one, since the core install must not depend on it.
+   **Promoted per R1 §10.4 (confirmed):** Steam cannot sign in without
+   network on first launch under any packaging strategy, so a user who
+   skips this screen must be told plainly that Steam will need Wi-Fi before
+   Gaming Mode is usable — otherwise first boot is an undismissable Steam
+   error dialog with no keyboard attached. See §10.4's "Decision needed"
+   item 3: T5 must detect "no network + no Steam client installed" before
+   handing the display to Steam and show a controller-navigable Wi-Fi
+   screen instead of letting Steam fail on its own.
 8. **Final confirm-and-install summary.** One screen recapping the choices
    from 1–7 before anything destructive actually runs, with a single
    "Install" confirm button — matches the review screen pattern already
@@ -719,6 +727,21 @@ packages is likely a matter of extending that list plus adding Valve's
 build will need either a local re-sign step or a matching SigLevel exception
 carried into the ISO's `pacman.conf`. Verify by reading `omarchy-iso/builder/`.
 
+**Result: CONFIRMED, signing caveat KILLED** (`FINDING-R1-10.1.md`). No
+re-sign step needed at all — `omarchy-iso` already ships an out-of-tree
+kernel (`linux-t2`) from an unsigned third-party repo (`[arch-mact2]`,
+`SigLevel = Never`) into the offline mirror and boots it, and the entire
+offline repo is `SigLevel = Never` by deliberate upstream design (signatures
+are checked against the live keyring instead). Adding Valve's repos is a
+structurally identical, already-exercised edit — copy the `[arch-mact2]`
+block shape into the three `pacman-online-*.conf` files. Two new risks not
+in the original hypothesis: the offline mirror is stored **uncompressed** in
+the squashfs, so every byte of `linux-firmware-neptune`/`steam`/gamescope
+adds ~1:1 to ISO size (budget this before locking the package set); and the
+build has a hard package-count self-check (600–2000) that will need its
+upper bound widened. See `FINDING-R1-10.1.md` for full file/line citations
+and the recommended T5 architecture.
+
 ### 10.2 Is there a lighter integration point than forking `basecamp/omarchy`?
 
 **Hypothesis: yes — use hooks, don't fork.** Two independent signals: (a)
@@ -734,6 +757,34 @@ sanctioned path and a fork would be swimming upstream. **Verify against
 Quattro specifically, not 3.x**, since this is exactly the kind of thing the
 rewrite changed.
 
+**Result: PARTIAL — right conclusion, wrong mechanism** (`FINDING-R1-10.2.md`).
+Signal (a), `OMARCHY_INSTALLER_REPO`/`OMARCHY_INSTALLER_REF`, was already
+killed (see the "Foundational assumption" finding above). For (b) and (c):
+the `hooks/<name>.d/` mechanism does exist and work in Quattro (six hook
+types, not one), but `post-update.d/` is the wrong hook — it's unprivileged,
+`$HOME`-scoped, never runs before first boot, and upstream's own hook runner
+silently swallows failures (`omarchy-hook:19,26`), which conflicts with this
+project's "never silently swallow a failure" rule. The `~/.local/share/omarchy`
+pacman-owned-symlink claim is half wrong: it's not pacman-owned and doesn't
+exist at all on fresh Quattro installs (it's purely a 3.x upgrade shim) — but
+the practical conclusion (don't integrate by git checkout) still holds, since
+`OMARCHY_PATH=/usr/share/omarchy` everywhere and there's no checkout to
+integrate with.
+
+**The real sanctioned extension point, not previously considered:** upstream
+already solves this exact problem shape twice, in-tree, via
+`install/hardware/` — `pacman.sh` (hardware-gated unsigned third-party repo,
+verbatim the shape needed for Valve's repos) and `intel/ptl-kernel.sh`
+(hardware-gated kernel swap + Limine boot-order drop-in — a working template
+for T1). Recommended T5 architecture: fork `omarchy-iso` for build-time
+changes (§10.1) + ship Deck logic as its own pacman package for install-time
+work (mirrors `omarchy-dev`'s own PKGBUILD) + one `pre-refresh-pacman.d/`
+hook for durability. That last hook is load-bearing: `omarchy-refresh-pacman`
+**silently overwrites `/etc/pacman.conf` wholesale** on every channel
+refresh, which would delete the Valve repo entries without it. Also found:
+an ALPM pre-transaction guard aborts bare `pacman -Syu` unless
+`OMARCHY_UPDATE_PACMAN=1` is set — affects T1 and T3.
+
 ### 10.3 Should the gamepad→input mapping layer ship permanently?
 
 **Hypothesis: ship it, but scoped to Desktop Mode only.** In Gaming Mode,
@@ -747,6 +798,20 @@ service active only in the desktop session. (a) is less code and more
 SteamOS-faithful; (b) is more predictable and doesn't require Steam running.
 Test both on hardware in the same T3 session — this is a cheap experiment
 with a large downstream design impact.
+
+**Result: PARTIAL — both designs prepared, decision needs hardware**
+(`FINDING-R1-10.3.md`). Design (a): add `steam -silent` to Hyprland autostart
+to inherit Steam Input's built-in desktop controller layout + OSK for free;
+open questions are whether this codepath initializes correctly outside
+gamescope/Plasma, OSK focus detection on native Wayland vs XWayland apps
+under Hyprland, and resource cost/singleton conflicts with Gaming Mode's own
+Steam instance. Design (b): the T2 mapper as a systemd `--user` service
+scoped by `WantedBy=hyprland-session.target` (draft unit written), needing a
+`/dev/uinput` permission fix (udev rule + `SupplementaryGroups=input`) and
+`wvkbd`/`squeekboard` via `wlr-input-method` for the OSK it doesn't get for
+free. Both are prepared concretely enough for a single hardware session to
+test head-to-head per the finding's test plan — not attempted here, per the
+physical-Deck-only testing tier.
 
 ### 10.4 Will `steam` actually work offline on first boot?
 
@@ -765,6 +830,34 @@ screen (Section 6.1a, item 7) becomes more prominent — still skippable for
 install, but clearly the path to a usable Gaming Mode. Decide this before
 marketing copy is written.
 
+**Result: CONFIRMED** (`FINDING-R1-10.4.md`) — tested for real in a
+network-isolated QEMU VM, not reasoned about. Cold, no client, no network:
+Steam fails fatally in under one second (`Steam needs to be online to
+update.`) and exits; no client is ever installed. The obvious mitigation —
+pre-populate the 2.5 GB client with network on, then relaunch offline — was
+also tested and does **not** rescue the offline claim: Steam does start and
+reach its login screen, but then sits in `LogonFailure No Connection`,
+retrying on backoff. **Login itself requires network under any packaging
+strategy** — this is over-determined, not a single fixable gap. Redistributing
+a pre-populated client was also checked and found not clearly authorized by
+Steam's Subscriber Agreement (no redistribution clause found; every Linux
+distro ships only the 20 MB launcher, never the client) — a legal call, not
+an engineering one, and the recommendation is not to attempt it.
+
+**Operator decision (accepted):** reframe rather than treat as a blocker.
+`CLAUDE.md`'s hard constraint is now worded as "fully offline install through
+first boot into Gaming Mode; Steam signs in on first launch like a
+factory-reset Deck." Marketing copy: *"Installs completely offline. Steam
+signs in on first launch, exactly like a factory-reset Deck."* T5 gains a
+required item: detect "no network + no Steam client installed" before
+handing the display to Steam on first boot, and show a controller-navigable
+Wi-Fi screen instead of letting Steam fail on its own with an undismissable
+modal and no keyboard available. Still open: whether to bundle the 20 MB
+`steam` launcher package itself in the offline mirror (recommended: yes, it's
+a legitimate redistribution and removes one download) — see PROGRESS.md
+"Blocked on human" for the pre-populated-client licensing question, which
+remains unresolved pending operator/legal judgment.
+
 ### 10.5 Secure Boot / BIOS state
 
 **Hypothesis: low risk but needs documenting.** Omarchy's own manual requires
@@ -774,6 +867,15 @@ installer, so if any BIOS step *is* needed (entering setup via Vol+ + Power,
 changing boot order), it must be documented with photos before first boot, not
 discovered mid-install. Confirm on your own device and write it down.
 
+**Result: PARTIAL / blocked on operator** (`FINDING-R1-10.5.md`). Cannot be
+resolved from inside this worktree or by any automated tooling — there's no
+VM/emulator equivalent that reproduces the Deck's actual factory UEFI/Secure
+Boot configuration. Needs you to enter BIOS (Vol+ + Power at boot) and report:
+(1) Secure Boot state (Enabled/Disabled), (2) current boot order and whether
+it needs reordering for a Limine install to boot by default, (3) any other
+UEFI setting Omarchy's own manual calls out. Take photos before changing
+anything, even if nothing turns out to need changing.
+
 ### 10.6 Collaboration with `28allday`
 
 **Hypothesis: high receptivity.** They maintain the Gaming Mode script *and*
@@ -782,6 +884,16 @@ stars with one fork — a serious collaborator is likely welcome, and there may
 be appetite for Deck support closer to upstream, meaning less needs to live in
 a permanent fork. Low-cost, high-upside: open the conversation early rather
 than after forking silently.
+
+**Result: PARTIAL, staged for operator review** (`FINDING-R1-10.6.md`).
+Drafted, not sent — an outreach message to `28allday`
+(`DRAFT-outreach-28allday.md`) referencing the pacman-package architecture
+finding above, and five upstream bug reports against `aorumbayev/deckarchy`
+covering the §8 hypotheses (`DRAFT-upstream-bugs-deckarchy.md`). One of the
+five (ESP `fmask`/`dmask` blocking `limine-snapper.sh`) is flagged as
+possibly belonging against `basecamp/omarchy` instead, pending a repro
+re-check before filing. Nothing has been posted or sent anywhere; sending
+is a separate, explicit operator-approved action outside this task's scope.
 
 ## 11. Long-term maintenance risks (design for these now, not after launch)
 

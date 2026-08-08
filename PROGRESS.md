@@ -355,6 +355,49 @@ on real hardware, treat as fact):
 - Omarchy's `limine-snapper.sh` fails when `/boot` is mounted 0077
 - `cs35l41-dsp1-*` firmware warnings appear on OLED; audio impact unverified
 
+### R1 — six research questions resolved (session 3)
+
+Full detail in `FINDING-R1-10.1.md` through `FINDING-R1-10.6.md`, worked by
+three parallel agents. Headline results (full hypotheses/results now also in
+`PLAN.md` §10 inline):
+
+- **§10.1 offline mirror — CONFIRMED, signing caveat KILLED.** No re-sign
+  step needed; `omarchy-iso` already carries an unsigned third-party repo the
+  same way Valve's would work. New risk: ISO size grows ~1:1 with the mirror
+  (stored uncompressed by design), and the build's package-count self-check
+  (600–2000) will need its upper bound widened.
+- **§10.2 hooks vs. fork — PARTIAL, right conclusion via a different
+  mechanism.** `post-update.d/` hooks are real in Quattro but unprivileged
+  and silently swallow failures — wrong tool. Found upstream's actual
+  sanctioned pattern instead: `install/hardware/pacman.sh` +
+  `intel/ptl-kernel.sh`, a working in-tree template for exactly this
+  hardware-gated kernel-swap-plus-repo problem, usable as-is for T1.
+  Recommended architecture: fork `omarchy-iso` (build-time) + a
+  Deck-specific pacman package (install-time) + one `pre-refresh-pacman.d/`
+  hook (durability, since `omarchy refresh pacman` silently wipes
+  `/etc/pacman.conf`).
+- **§10.3 gamepad mapping — PARTIAL.** Both designs prepared concretely;
+  genuinely needs a hardware session to decide, not attempted here.
+- **§10.4 Steam offline — CONFIRMED. ⚠️ Contradicted a CLAUDE.md hard
+  constraint; operator decision made.** Tested for real in a network-isolated
+  QEMU VM: cold launch with no network fails fatally in under a second; even
+  with the 2.5 GB client pre-populated (also tested), Steam reaches its login
+  screen but then requires network to actually log in — the offline
+  limitation is over-determined, not a single fixable gap. Operator chose to
+  accept the reframing: **`CLAUDE.md`'s offline constraint is now worded**
+  "fully offline install through first boot into Gaming Mode; Steam signs in
+  on first launch like a factory-reset Deck," `PLAN.md` §6.1a item 7 (Wi-Fi
+  screen) is promoted, and T5 gains a required item (detect no-network/
+  no-client and show a Wi-Fi screen before Steam gets the display). Whether
+  to bundle a pre-populated client remains a separate, unresolved
+  legal/licensing call — see "Blocked on human" below.
+- **§10.5 Secure Boot/BIOS — PARTIAL/blocked.** Needs the operator to
+  physically check their own Deck's BIOS; cannot be resolved by tooling or a
+  VM (no emulator reproduces the Deck's real factory UEFI state).
+- **§10.6 upstream collaboration — PARTIAL, staged.** Outreach message to
+  `28allday` and five `deckarchy` bug reports drafted (`DRAFT-outreach-
+  28allday.md`, `DRAFT-upstream-bugs-deckarchy.md`); nothing sent or posted.
+
 ## Blocked on human
 
 - Ventoy setup on the test USB (T0 step 2)
@@ -372,22 +415,49 @@ on real hardware, treat as fact):
   `vm-cidata.sh`'s JSON, `btrfs restore` silently truncating its tree walk
   in `vm-assertions.sh`), both now fixed and covered. `vm-install-test.sh`
   now passes cleanly against a real ISO end to end.
-- **PLAN.md §4/§5 architecture needs revisiting**: the
-  `OMARCHY_INSTALLER_REPO` hook it assumes doesn't exist upstream (see
-  Findings above). Needs a decision before T5 on the replacement approach
-  (pacman-repo-server-swap vs. `--local-source` package build).
+- **Resolved (R1, session 3): PLAN.md §4/§5 architecture.** R1 §10.1/§10.2
+  found the concrete replacement — fork `omarchy-iso` for build-time changes,
+  ship Deck logic as its own pacman package for install-time work (modeled on
+  upstream's own `install/hardware/pacman.sh` + `intel/ptl-kernel.sh`
+  precedents), plus one `pre-refresh-pacman.d/` hook for durability. See
+  `FINDING-R1-10.1.md` and `FINDING-R1-10.2.md`. No longer blocked; ready to
+  inform T5.
 - Any write to the physical Deck
-- Any public action (repos, upstream issues, outreach)
+- Any public action (repos, upstream issues, outreach) — **now includes two
+  concrete staged drafts awaiting approval**: `DRAFT-outreach-28allday.md`
+  and `DRAFT-upstream-bugs-deckarchy.md` (five bug reports), from R1 §10.6.
+  Nothing has been sent; sending each is a separate explicit action.
 - **Scope decision: v0 vs v1 first** (see `PLAN.md` §3.1). Recommended is
   v0 = T0+T1+T3 as a post-install script, ISO deferred to v1.
 - **Do not wipe the operator's existing Deck install.** It is a working
   Omarchy + Neptune + Limine system and is the single most valuable test
   asset in the project — it's the known-good baseline for T3's
   iterate-in-place loop. Snapshot it before any destructive test.
+- **New (R1 §10.3): gamepad-mapping design needs a hardware session.** Both
+  candidate designs (background Steam vs. systemd-user-service mapper) are
+  prepared concretely in `FINDING-R1-10.3.md` with a head-to-head test plan;
+  neither can be decided without the physical Deck.
+- **New (R1 §10.5): Secure Boot / BIOS state needs the operator to check
+  their own Deck.** Enter BIOS (Vol+ + Power), report Secure Boot
+  Enabled/Disabled state, boot order, and any Omarchy-manual-specific
+  requirement; photograph before changing anything. See
+  `FINDING-R1-10.5.md`.
+- **New (R1 §10.4): bundling a pre-populated Steam client in the ISO is a
+  legal call, not an engineering one.** It's technically viable (tested,
+  confirmed working offline once installed) but no document authorizing
+  redistribution of the client itself was found, and no Linux distro does
+  it — recommendation is not to attempt it and to solve the UX problem with
+  a pre-Steam network-check screen instead (now in `PLAN.md` §6.1a item 7 /
+  §10.4). Needs an explicit operator go/no-go before T5 if this is ever
+  reconsidered. See `FINDING-R1-10.4.md`.
 
 ## Open questions
 
-See `PLAN.md` §10 — six documented questions with hypotheses, worked in R1.
+`PLAN.md` §10's six questions are now all resolved by R1 (session 3) — see
+`FINDING-R1-10.1.md` through `FINDING-R1-10.6.md`, and the "Findings" section
+above for the headline results. Three (§10.3, §10.5, and the pre-populated-
+client question under §10.4) remain blocked on operator/hardware action, not
+further research — tracked in "Blocked on human" above.
 
 ## Next session should start with
 
