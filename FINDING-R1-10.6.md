@@ -1,0 +1,79 @@
+# FINDING R1 §10.6 — Upstream collaboration
+
+**Result: PARTIAL.** Drafted and staged only — nothing sent, posted, or
+published. No `gh` commands were run and no network calls were made to any
+forum/GitHub/Discord API, per the hard project rule requiring explicit
+operator approval before anything public happens.
+
+## Hypothesis (PLAN.md §10.6)
+
+High receptivity expected: `28allday` maintains the Gaming Mode script this
+project plans to fork (`Super-Shift-S-Omarchy-Deck-Mode`) and also
+contributes to mainline Omarchy; their repo has low existing traction
+(single-digit stars, one fork), so a serious collaborator reaching out is
+likely welcome, and there may be appetite for Deck support living closer to
+upstream — meaning less needs to live in a permanent fork. Framed as
+low-cost, high-upside: open the conversation early rather than after forking
+silently.
+
+## What was drafted
+
+1. **`DRAFT-outreach-28allday.md`** — a low-key outreach message to
+   `28allday`. Introduces the project, asks whether they're open to
+   comparing notes (not a formal collaboration ask), and references the
+   finding already recorded in `PROGRESS.md` ("Foundational assumption in
+   PLAN.md §4/§5/§10.2 is wrong") that Omarchy Quattro installs as a pacman
+   package pulled from a repo baked into the ISO's offline mirror, not a
+   git-cloned installer chain — meaning there may be a lighter integration
+   path (a companion package + hook points) than either project forking the
+   other. Also flags that this project plans to file upstream bug reports
+   against `deckarchy` regardless of how the conversation goes, and offers
+   to share findings either way. PROGRESS.md was read for context only, not
+   edited.
+
+2. **`DRAFT-upstream-bugs-deckarchy.md`** — five bug reports against
+   `aorumbayev/deckarchy`, one per hypothesis in PLAN.md §8:
+   - **Bug 1:** `linux-neptune.sh` silently no-ops and exits 0 when run via
+     `curl | bash` (likely inherited `linutil`/`common-script.sh`
+     structure never designed for a curl pipe).
+   - **Bug 2:** No Limine support in bootloader detection — likely an
+     unimplemented feature (Limine support in archinstall/Omarchy postdates
+     the script), not a broken check. Notes that any fix should probe the
+     same five candidate config paths Omarchy's own `limine-snapper.sh`
+     uses, not one hardcoded path.
+   - **Bug 3:** `linux-neptune-611.preset`'s commented-out `default_uki`
+     points at an `/efi/...` path that's wrong for archinstall's Limine+UKI
+     layout (ESP at `/boot`) — traced to being inherited unmodified from
+     stock Arch's own `linux.preset` template, not a deckarchy-authored
+     bug, so framed as informational with a request to document it for
+     Limine+UKI users.
+   - **Bug 4:** `checkAURHelper` auto-installs `yay-bin` as a side effect of
+     an environment check, which later conflicts with Omarchy's pinned
+     `yay` and aborts Omarchy's own installer. Asks for the auto-install
+     side effect to be opt-in or preference-aware, not for deckarchy to
+     match this project's specific mitigation (which is simply skipping
+     that step and letting Omarchy own it).
+   - **Bug 5:** ESP mounted `fmask=0077,dmask=0077` breaks user-space reads
+     needed by Omarchy's `limine-snapper.sh`. Flagged as likely **not**
+     deckarchy-specific — the draft recommends an isolation reproduction on
+     stock archinstall + Omarchy with no Deck packages before filing, and
+     notes it may actually belong against `basecamp/omarchy` instead.
+     Each report includes title, hypothesis/root-cause description,
+     concrete reproduction steps, and expected vs. actual behavior, per the
+     task's required format.
+
+## Not done / explicitly out of scope for this pass
+
+- Nothing was sent, posted, filed, or published anywhere.
+- `28allday`'s actual preferred contact channel/handle was not verified
+  (no network calls made) — the outreach draft leaves this as a fill-in for
+  whoever sends it.
+- Bug 5's correct target repo (deckarchy vs. basecamp/omarchy) depends on a
+  reproduction step that hasn't been re-run; flagged in the draft's review
+  notes.
+
+## Next step
+
+Both draft files are staged for operator review and approval. Once
+approved, the actual sending/filing is a separate, explicit action outside
+this task's scope.

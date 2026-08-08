@@ -21,9 +21,17 @@ only the sections task files cite.
 
 - **Limine only.** No GRUB, no systemd-boot paths. Deliberate, after real
   breakage with systemd-boot's UKI conventions (`PLAN.md` §6.3).
-- **Fully offline install** — the whole flow through first boot into Gaming
-  Mode, not just the base OS. If something seems to need network at install
-  time, flag it. See `PLAN.md` §10.4 for a real risk here.
+- **Fully offline install through first boot into Gaming Mode.** The
+  installer, first boot, and reaching the Gaming Mode session all require no
+  network — confirmed true end-to-end (`PROGRESS.md` Findings, T0 §1). Steam
+  itself then needs network to sign in on first launch, exactly like a
+  factory-reset Deck — confirmed unavoidable under any packaging strategy
+  (`R1` §10.4, `FINDING-R1-10.4.md`), not a gap to engineer around. Framing:
+  "installs completely offline; Steam signs in on first launch." The install
+  flow must make this obvious before it happens (a controller-navigable
+  Wi-Fi screen shown before Steam ever gets the display on first boot without
+  a client — required T5 item, see `PLAN.md` §6.1a item 7 and §10.4). If
+  something else seems to need network at install time, flag it.
 - **No keyboard or terminal for a standard install.** Every screen in
   `PLAN.md` §6.1a must be reachable by Deck buttons/trackpads alone.
 - **Never silently swallow a failure.** `set -euo pipefail` or equivalent;

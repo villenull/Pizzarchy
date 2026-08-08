@@ -1,0 +1,111 @@
+# CI: TASK-T0-test-infrastructure.md §5.
+#
+# .github/workflows/ is the one exception to CLAUDE.md's "no
+# subdirectories" rule — GitHub Actions requires this exact path, it
+# isn't a project file-organization choice.
+#
+# Two jobs, cheapest-first (PLAN.md §9's five-tier testing strategy):
+#   lint-and-unit-test  — every push/PR. shellcheck + bash -n + the
+#                         rootless test-vm-*.sh unit suites. Seconds.
+#   iso-install-test    — tags only. Builds the ISO and runs
+#                         vm-install-test.sh against it (T0 §1's tier-1
+#                         harness). NOTE: GitHub-hosted runners have no
+#                         /dev/kvm (confirmed absent from upstream
+#                         omarchy-iso's own CI for the same reason —
+#                         session 1 research), so this runs under TCG
+#                         software emulation, not KVM — vm-install-test.sh
+#                         detects this automatically and falls back, but
+#                         it will be much slower than a KVM-accelerated
+#                         local run. A self-hosted runner with KVM would
+#                         remove this constraint if the timeout below
+#                         proves too tight in practice.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck parted dosfstools mtools btrfs-progs jq openssl qemu-utils
+
+      - name: shellcheck
+        run: |
+          shopt -s nullglob
+          files=(*.sh)
+          [[ ${#files[@]} -gt 0 ]] || { echo "no *.sh files found"; exit 1; }
+          shellcheck "${files[@]}"
+
+      - name: bash -n syntax check
+        run: |
+          shopt -s nullglob
+          for f in *.sh; do
+            echo "checking $f"
+            bash -n "$f"
+          done
+
+      - name: Unit tests
+        run: |
+          shopt -s nullglob
+          tests=(test-*.sh)
+          [[ ${#tests[@]} -gt 0 ]] || { echo "no test-*.sh files found"; exit 1; }
+          status=0
+          for f in "${tests[@]}"; do
+            echo "::group::$f"
+            ./"$f" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+
+  # T5 (ISO build) hasn't landed yet — this job's ISO-build step is a
+  # placeholder until it does. Gated on a tag push so it doesn't block
+  # ordinary PRs on infrastructure that doesn't exist yet.
+  iso-install-test:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: lint-and-unit-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report KVM availability
+        run: |
+          if [[ -e /dev/kvm ]]; then
+            echo "/dev/kvm present"
+          else
+            echo "/dev/kvm absent — vm-install-test.sh will fall back to TCG (slow, expected on GitHub-hosted runners)"
+          fi
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils ovmf parted dosfstools mtools btrfs-progs jq openssl socat
+
+      - name: Build ISO
+        run: |
+          echo "TODO(T5): no ISO build entry point exists in this repo yet." >&2
+          echo "Once omarchy-deck-iso (or this repo's own build step) lands," >&2
+          echo "invoke it here to produce the .iso this job tests." >&2
+          exit 1
+
+      - name: Run install test
+        run: |
+          shopt -s nullglob
+          isos=(*.iso)
+          [[ ${#isos[@]} -eq 1 ]] || { echo "expected exactly one built .iso, found ${#isos[@]}"; exit 1; }
+          VM_INSTALL_TIMEOUT_SEC=3600 ./vm-install-test.sh "${isos[0]}"
+
+      - name: Upload ISO artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-deck-iso
+          path: "*.iso"
+          if-no-files-found: ignore
