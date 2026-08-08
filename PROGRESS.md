@@ -50,6 +50,20 @@ image builder (`vm-neptune-image.sh`) because the session-2 installed disk
 no longer exists on this machine. See "T1 step 3 — the pacman hook" under
 Findings. Steps 4–6 still untouched.
 
+**Session 6: T1 steps 4 + 6 done — T1 is now complete.**
+`omarchy-deck-kernel.sh` runs one stage at a time
+(`./omarchy-deck-kernel.sh stage-uki`), lists them for CI
+(`list-stages`), and cannot stop and wait for a human. The whole thing is
+one CLI change rather than two features: once a stage is individually
+invokable, "CI-testable" is mostly "that invocation never prompts and its
+exit code means something". Verified in QEMU by a new
+`vm-kernel-stage-test.sh` — **45 assertions, all passing**, including every
+stage run alone twice with the end state byte-identical, a no-argument full
+run on top of that changing nothing, and the one genuinely hang-prone code
+path (sudo asking for a password) proven to fail in 0s instead of blocking.
+Both existing suites re-run green as regressions. See "T1 steps 4 + 6"
+under Findings.
+
 ### T0 §1 deliverables (session 1)
 
 Flat files (per `CLAUDE.md`'s no-subdirectories rule — the task file's
@@ -201,7 +215,7 @@ human" below instead.
 |---|---|---|
 | T0 Test infrastructure | **§1–6 all built; two verification gaps remain** | §1 harness unit-tested (31 assertions) but not run end-to-end against a real ISO; §2–6 done (Ventoy doc, override loader + 8 tests, deck-sync/snapshot/rollback untested against hardware, CI workflow untested against a real Actions run, shellcheck clean repo-wide). See T0 §1/§2–6 deliverables above for exact gaps. |
 | R1 Research questions | not started | Can run parallel; 10.4 is highest stakes |
-| T1 Kernel and boot | **steps 1–3 done; 4–6 not started** | Script rewritten and now actually executes: shellcheck clean, idempotency proven in a VM (`vm-kernel-idempotency-test.sh`, run twice, byte-identical end state), kernel version reduced to one documented constant (`NEPTUNE_SERIES_DEFAULT=611`) with glob-keyed entry regeneration. Pacman hook done and VM-verified (`vm-kernel-hook-test.sh`, 33 assertions): fires on install/upgrade/remove of `linux-neptune-*`, verifies rather than duplicates upstream's UKI machinery, repairs a missing UKI, prunes stale entries, and does not duplicate entries on repeat reinstalls. Still to do: CI flags (§4), §8.5 upstream repro (§5), stage split (§6). |
+| T1 Kernel and boot | **all six steps done** | Script rewritten and now actually executes: shellcheck clean, idempotency proven in a VM (`vm-kernel-idempotency-test.sh`, run twice, byte-identical end state), kernel version reduced to one documented constant (`NEPTUNE_SERIES_DEFAULT=611`) with glob-keyed entry regeneration. Pacman hook done and VM-verified (`vm-kernel-hook-test.sh`, 33 assertions): fires on install/upgrade/remove of `linux-neptune-*`, verifies rather than duplicates upstream's UKI machinery, repairs a missing UKI, prunes stale entries, and does not duplicate entries on repeat reinstalls. §8.5 reproduced and documented (`FINDING-esp-permissions.md` + upstream issue draft). Steps 4+6 done and VM-verified (`vm-kernel-stage-test.sh`, 45 assertions): nine independently runnable stages, each idempotent alone, exit codes 0/1/2, and no invocation can block on a prompt. Remaining T1 gap is hardware-only — nothing has booted the Neptune kernel on the operator's Deck yet. |
 | T2 Gamepad input spike | not started | Opus. Determines T4's entire scope |
 | T3 Gaming Mode | not started | Needs T0's deck-sync.sh to be efficient |
 | T4 Installer UI | not started | Blocked on T2's finding |
@@ -632,6 +646,127 @@ needless rebuild (it does catch one whose inputs changed), and the "skip when
 current" rule in `reconcile_uki` is justified by cost and boot-chain blast
 radius, not by reproducibility. Both comments corrected in place; proving a
 regeneration happened now uses an mtime sentinel.
+
+### T1 steps 4 + 6 — CI-testable, one stage at a time (session 6)
+
+Done together because they are one CLI design, not two features: once a stage
+can be invoked on its own, "CI-testable" is mostly "that invocation never
+prompts and its exit code means something".
+
+**The interface, and why this one.** A positional subcommand selects a stage,
+which is the convention the rest of this repo already uses — `deck-sync.sh`,
+`deck-snapshot.sh` and `deck-rollback.sh` all take positional arguments and
+take *configuration* from environment variables, and the script already had
+`install` / `reconcile` positionally from step 3. So:
+
+```
+omarchy-deck-kernel.sh                  full run (unchanged)
+omarchy-deck-kernel.sh stage-kernel     one stage
+omarchy-deck-kernel.sh list-stages      the nine names, for harnesses
+omarchy-deck-kernel.sh reconcile        what the pacman hook runs (unchanged)
+```
+
+Both existing callers keep working untouched: `deck-sync.sh`'s loop and the
+hook's `Exec=` line both use the no-argument and `reconcile` forms. `deck-sync.sh`
+gained an optional `DECK_STAGE_ARGS` env var (not a third positional, so no
+existing invocation changes) so the iterate-in-place loop can reach one stage:
+`DECK_STAGE_ARGS=stage-uki ./deck-sync.sh omarchy-deck-kernel.sh`. Verified
+against a stubbed `ssh`/`rsync` on `PATH` — still no Deck reachable from this
+dev environment — and the remote command string with `DECK_STAGE_ARGS` unset
+is byte-identical to the one it built before, which is the property that
+mattered.
+
+**The stage names are not the task file's.** `TASK-T1` step 6 named five
+(`stage-repos`, `stage-kernel`, `stage-uki`, `stage-bootloader`,
+`stage-permissions`); the script has evolved to nine. The two that no longer
+map are deliberately **not** accepted as aliases, because both would be lies:
+`stage-bootloader` (this script does not write boot entries — `limine-entry-tool`
+does, from `stage-uki`) and `stage-permissions` (it is specifically the ESP's
+mount options, `stage-esp-permissions`). An unknown name is a usage error that
+lists the real ones.
+
+**`INSTALL_STAGES` is the single source of truth** — the full run iterates it,
+`list-stages` prints it, single-stage dispatch validates against it, and the
+function name is derived from the stage name rather than tabulated. A stage
+cannot be individually runnable but missing from the full run, or vice versa.
+
+**Prerequisites, and the honest way to handle them.** Two stages
+(`stage-preconditions`, `stage-esp-detect`) set the `SUDO` / `ESP_PATH` /
+`LIMINE_CONFIG` every other stage reads. They are pure probes — they install
+nothing, write nothing, unmount nothing — so a single-stage run executes them
+first. The alternative is a stage that guesses where the ESP is, which is
+`PLAN.md` §8.3 again. Prerequisites a probe *cannot* satisfy now fail loudly
+and name the stage to run:
+
+- `stage-kernel` / `stage-firmware-swap` check the Valve repos are configured
+  and have a usable db. Previously an unconfigured repo made `pacman -Sl`
+  print nothing and the script reported *"the Valve repos returned no
+  linux-neptune-\* packages at all — the mirror layout may have changed"*,
+  sending the reader to Valve's mirror to debug a missing line in their own
+  `pacman.conf`.
+- `stage-uki` checked this already but called it an "internal error", which it
+  no longer is — it is now a reachable user path.
+- `stage-firmware-swap` checks the repos **before** removing anything, because
+  its whole job is to leave the system with no firmware for the few seconds
+  until `stage-kernel` installs Valve's; discovering *then* that the
+  replacement's repo was never configured would be the worst possible moment.
+  Run alone it now says so out loud.
+
+**Exit codes: 0 success, 1 stage failure, 2 usage error.** The 2-means-usage
+split is what `deck-sync.sh` and `deck-rollback.sh` already do, and it is the
+one a CI caller needs — "you invoked me wrong" must be distinguishable from
+"the boot chain is broken" without parsing output.
+
+**Non-interactivity: one real hazard, found by auditing rather than assuming.**
+Every `pacman` call was already `--noconfirm` (plus the `--ask=4` conflict
+fix from steps 1–2), there is no `read` anywhere, and `limine-entry-tool` /
+`limine-mkinitcpio` were read directly — they prompt nowhere and their only
+lock is a `flock` with a 10s timeout. The one genuine hang was **this
+script's own sudo check**: `$SUDO -n true || $SUDO true`. The fallback reads
+its password from `/dev/tty`, so redirecting stdin does not disarm it, and a
+CI job holding a controlling terminal would sit at the prompt until it timed
+out with no clue why. It is now reached only in interactive mode; otherwise
+the missing credential is a fast, specific failure naming the two fixes.
+
+Interactivity is **auto-detected** (stdin not a terminal ⇒ non-interactive)
+rather than opt-in, deliberately: a harness that forgets a flag would silently
+get the prompting build, which is the exact class of defect this project
+exists to avoid. `--non-interactive` / `--interactive` /
+`OMARCHY_DECK_NONINTERACTIVE` override it. In non-interactive mode stdin is
+redirected from `/dev/null` for the whole run, so any child that tries to read
+a prompt sees EOF immediately instead of blocking on an inherited pipe.
+
+**VM evidence — `vm-kernel-stage-test.sh`, 45 assertions, all passing** (45s
+of guest time on the `vm-neptune-image.sh` substrate). Every stage invoked
+alone, in order, each under `setsid --wait timeout … </dev/null` — no
+controlling terminal, no stdin, a hard time limit, so a stage that blocks
+gets killed and reports 124 rather than hanging the suite. Then every stage
+alone *again*, with the two end states byte-identical (per-stage idempotency,
+which full-run idempotency does not imply: a stage only ever reached after its
+predecessors can be idempotent in that sequence and not on its own). Then the
+no-argument full run on top, exiting 0 and changing nothing — the regression
+check that stage-by-stage and the full run converge on the same state. The
+pass is not vacuous: the before/after diff shows `/boot` going
+`fmask=0077,dmask=0077` → `0133/0022`, `/etc/fstab` rewritten, and
+`steamdeck-dsp` plus its dependency tree installed.
+
+**Regression evidence.** Both existing suites re-run green against the same
+substrate after the CLI change: `vm-kernel-hook-test.sh` 33/33 (the hook still
+fires on install/upgrade/remove, still only verifies on a healthy reinstall,
+still repairs a missing UKI and prunes a stale entry) and
+`vm-kernel-idempotency-test.sh` PASS (`run1_exit=0 run2_exit=0
+state_diff_exit=0`). Nothing in step 3's hook logic or step 5's ESP
+permissions work was touched — the hook's `Exec=` line is unchanged and still
+calls `reconcile`, which is why `hook_script_matches=1` still holds.
+
+The non-interactive assertions are the ones worth having built: a user with
+password-required sudo is created in the guest, the test **first proves
+`sudo -n` genuinely fails for them** (otherwise the section would be vacuous),
+and then runs a stage as that user with no tty and no stdin under a 60s limit.
+It returns in **0s** with the non-interactive message — 124 would have meant it
+sat at the prompt. Two more stdin shapes pass too: stdin closed outright
+(`0<&-`), and stdin on a fifo whose writer never writes, which is the shape
+that makes a stray read hang forever rather than see EOF.
 
 ## Blocked on human
 

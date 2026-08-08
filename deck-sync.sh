@@ -13,6 +13,19 @@
 #   DECK_SSH_PORT    default: 22
 #   DECK_REMOTE_DIR  default: omarchy-deck-sync (relative to $HOME on
 #                    the Deck)
+#   DECK_STAGE_ARGS  default: none — arguments to pass to the stage script
+#                    remotely, split on whitespace (so no argument may
+#                    itself contain a space). Added for TASK-T1 step 6:
+#                    omarchy-deck-kernel.sh now runs one stage at a time
+#                    (`./omarchy-deck-kernel.sh list-stages` names them),
+#                    and this is how the loop reaches a single one:
+#
+#                      DECK_STAGE_ARGS=stage-uki \
+#                        ./deck-sync.sh omarchy-deck-kernel.sh
+#
+#                    Kept as an env var rather than a third positional
+#                    argument so the existing two-positional interface,
+#                    and every existing invocation, are untouched.
 #
 # NOT YET RUN AGAINST REAL HARDWARE — no Deck reachable from this dev
 # environment. Per TASK-T0-test-infrastructure.md §4 ("deck-sync.sh
@@ -33,6 +46,7 @@ DECK_HOST=${DECK_HOST:-steamdeck}
 DECK_USER=${DECK_USER:-deck}
 DECK_SSH_PORT=${DECK_SSH_PORT:-22}
 DECK_REMOTE_DIR=${DECK_REMOTE_DIR:-omarchy-deck-sync}
+DECK_STAGE_ARGS=${DECK_STAGE_ARGS:-}
 
 SSH_TARGET="${DECK_USER}@${DECK_HOST}"
 ssh_() { ssh -p "$DECK_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 "$SSH_TARGET" "$@"; }
@@ -54,9 +68,18 @@ rsync -az --delete \
 log "recording remote timestamp so journalctl only shows this run"
 since=$(ssh_ 'date "+%Y-%m-%d %H:%M:%S"') || { log "could not reach $SSH_TARGET over SSH"; exit 1; }
 
-log "running stage '$STAGE' remotely"
+# Quote each argument for the *remote* shell with printf %q — the same
+# technique deck-snapshot.sh already uses to pass a description through ssh.
+remote_args=""
+if [[ -n $DECK_STAGE_ARGS ]]; then
+  for arg in $DECK_STAGE_ARGS; do
+    remote_args+=" $(printf '%q' "$arg")"
+  done
+fi
+
+log "running stage '$STAGE'${remote_args:+ (args:${remote_args})} remotely"
 status=0
-ssh_ "chmod +x '${DECK_REMOTE_DIR}/${STAGE}' && '${DECK_REMOTE_DIR}/${STAGE}'" || status=$?
+ssh_ "chmod +x '${DECK_REMOTE_DIR}/${STAGE}' && '${DECK_REMOTE_DIR}/${STAGE}'${remote_args}" || status=$?
 
 if [[ $status -eq 0 ]]; then
   log "stage '$STAGE' exited 0"
