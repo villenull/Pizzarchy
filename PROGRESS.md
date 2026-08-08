@@ -227,23 +227,66 @@ this project exists to prevent (§8.1).
 
 ### Local dev-machine limitations affecting T0 §1
 
-- No Docker (`omarchy-iso-make`'s ISO build runs in a privileged Docker
-  container) — full ISO builds aren't runnable on this machine without it.
-- Operator's user account is not in the `kvm` group (`/dev/kvm` exists,
-  group `kvm`, but `groups` shows only `video input wheel`) — KVM
-  acceleration unavailable; QEMU would fall back to slow TCG emulation.
-- No passwordless `sudo` — blocks root-required steps in the disk-image
-  assertion layer (`qemu-nbd` connect, mounting the btrfs root partition).
-  `udisksctl loop-setup` works rootless, but the resulting `/dev/loopN`
-  node is `root:disk` and the user isn't in `disk` either, so even
-  loop-mapped raw block access is blocked.
+**Update (session 2): Docker, `kvm`, and `disk` group membership are now
+confirmed working** (`docker run hello-world` succeeds, `/dev/kvm` is
+accessible, `groups` shows `kvm disk docker` alongside the existing `video
+input wheel`). Passwordless `sudo` is still not set up, but turned out to
+only matter for one non-essential line in upstream's build script (see
+below) — not a real blocker.
+
+**New finding (session 2): building the real `omarchy-iso` ISO from this
+environment is currently bottlenecked by very low network throughput**,
+not by tooling/permissions. Four build attempts via unmodified upstream
+`bin/omarchy-iso-make` (cloned to session scratch space, not this repo):
+
+1. Attempt 1: failed on one file (`hyprland...zst.sig`) from
+   `stable-mirror.omarchy.org`, "Operation too slow. Less than 1 bytes/sec".
+2. Attempt 2: failed on several large packages from the same mirror
+   (llvm-libs, perl, qt6-declarative, qt6-base, python), same error,
+   *plus* two outright 404s from Arch's own `fastly.mirror.pkgbuild.com`/
+   `geo.mirror.pkgbuild.com` for `mesa`/`systemd` (stale-mirror sync lag —
+   a known, unrelated Arch mirror issue).
+3. Attempt 3: same failure, same package cluster — 3/3 identical pattern
+   pointed at contention from `ParallelDownloads = 5` in
+   `configs/pacman-online-stable.conf`, so that was dropped to `1` in the
+   scratch clone (not this repo) for attempt 4.
+4. Attempt 4: no download-abort errors, but *even the unrelated nodejs.org
+   tarball* crawled at ~1.6–3.2 KB/s sustained (measured directly) — at
+   that rate the ~3GB package set would take days. This points at the
+   session's actual network egress bandwidth right now, not mirror
+   throttling or download parallelism. Killed rather than let it run
+   indefinitely.
+
+Two harmless deviations made in the scratch clone only (never touched
+this repo): commented out `sudo rm -rf /var/cache/pacman/pkg/*` in
+`bin/omarchy-iso-make` (host-side cache tidy, not required for a correct
+build, and needs sudo this non-tty background session can't provide), and
+set `ParallelDownloads = 1` in `configs/pacman-online-stable.conf`.
+
+Also applied — and this one **is** relevant to T5 later, not just this
+scratch test — the one-line completion-detection patch to
+`configs/airootfs/root/.automated_script.sh` that `vm-install-test.sh`'s
+own "KNOWN GAP" comment already anticipated, with one correction: reading
+the actual dashboard source (`omarchy-install-dashboard`) shows
+non-interactive installs never actually hang on a prompt (both the reboot
+confirm and the failure menu already short-circuit when
+`OMARCHY_UI_INTERACTIVE=no`) — the real gap is narrower: on success the
+dashboard calls an in-guest `reboot` (into the freshly-installed disk)
+rather than powering off, so QEMU's process never exits either way. Patch:
+export `OMARCHY_UI_AUTO_REBOOT=no OMARCHY_UI_FAILURE_ACTION=exit` in the
+cidata branch, capture the dashboard's exit status without tripping
+`set -e`, then explicitly `poweroff` when non-interactive regardless of
+outcome. The `vm-install-test.sh` comment block should be corrected to
+match this more precise finding next time it's touched.
+
 - Net effect: this session can write and unit-test the harness logic
-  (fixture-based, using rootless tools like `mtools` for FAT/ESP reads)
-  but **cannot fully verify T0 §1's "done when" criterion** (run against a
-  real build, confirm failure detection) without one of: Docker + `kvm`
-  group membership + passwordless sudo (or at least group `disk`), or
-  running the harness in CI instead, or the operator granting these
-  locally. Added to "Blocked on human" below.
+  (fixture-based, using rootless tools like `mtools` for FAT/ESP reads),
+  and tooling/permissions are no longer the blocker — but **T0 §1's "done
+  when" criterion (run against a real build, confirm failure detection)
+  is still not verified**, now purely because this session's network
+  couldn't sustain an ISO build. Retry when network conditions allow, or
+  build on a connection known to have real bandwidth. Added to "Blocked on
+  human" below.
 
 Carried over from the operator's manual install session (already validated
 on real hardware, treat as fact):
@@ -259,17 +302,22 @@ on real hardware, treat as fact):
 ## Blocked on human
 
 - Ventoy setup on the test USB (T0 step 2)
-- **Operator agreed (session 1) to handle the local package/permission
-  installs Claude Code can't do itself** (needs root, or a password
-  prompt Claude Code can't answer): `sudo pacman -S archiso shellcheck
-  docker`, `ventoy-bin` from the AUR, and `sudo usermod -aG kvm,disk
-  $USER` (needs re-login to take effect) for QEMU KVM acceleration and
-  rootless-enough disk-image access. **Not yet confirmed done as of this
-  write-up** — re-check with `which docker shellcheck mkarchiso; groups`
-  next session before assuming it landed. Once it has, T0 §1's
-  `vm-install-test.sh` should get its first real end-to-end run (see gap
-  noted under T0 §1 deliverables above) and shellcheck can run without the
-  session-scratch static-binary workaround.
+- **Resolved (session 2): operator confirmed `docker`, `kvm`, `disk`
+  group membership** (`docker run hello-world` succeeds, `/dev/kvm`
+  accessible, `groups` includes `kvm disk docker`). Not yet confirmed:
+  `ventoy-bin` from the AUR, and shellcheck still uses the session-scratch
+  static-binary workaround (not blocking, just not switched over).
+- **New (session 2): T0 §1's real end-to-end run is now blocked on network
+  bandwidth, not tooling.** Building unmodified upstream `omarchy-iso`
+  (needed since this project's own ISO doesn't exist until T5) failed 4/4
+  times from this session's network — see "Local dev-machine limitations"
+  above for the detailed pattern (mirror timeouts at `ParallelDownloads=5`,
+  then ~2 KB/s sustained even to nodejs.org at `ParallelDownloads=1`).
+  Retry `cd <scratch clone> && ./bin/omarchy-iso-make` (or a fresh clone —
+  scratch space, not this repo) from a connection with real throughput,
+  then `./vm-install-test.sh <built-iso>`. The one-line completion-detection
+  patch this needs is documented above and should be re-applied (or moved
+  into this repo's own fork once T5 exists).
 - **PLAN.md §4/§5 architecture needs revisiting**: the
   `OMARCHY_INSTALLER_REPO` hook it assumes doesn't exist upstream (see
   Findings above). Needs a decision before T5 on the replacement approach

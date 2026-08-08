@@ -32,20 +32,28 @@
 # completion-signal gap"): completion detection here is "QEMU's process
 # exits" (a clean guest poweroff/shutdown). Today's *unmodified* upstream
 # omarchy-iso does not auto-poweroff after a non-interactive cidata
-# install — omarchy-install-dashboard leaves an interactive
-# confirm-and-reboot prompt unless OMARCHY_UI_AUTO_REBOOT/
-# OMARCHY_UI_FAILURE_ACTION are set, and nothing in the cidata path sets
-# them (only OMARCHY_UI_INTERACTIVE=no is automatic). Against a stock ISO
-# this script will hit VM_INSTALL_TIMEOUT_SEC and exit non-zero with a
-# screendump saved for inspection — that is a real, honest failure, not a
-# bug in this harness. T5's Deck ISO fork needs a one-line addition to
-# `configs/airootfs/root/.automated_script.sh`'s cidata branch:
-# `export OMARCHY_UI_AUTO_REBOOT=no OMARCHY_UI_FAILURE_ACTION=exit` and a
-# `systemctl poweroff` after the dashboard returns when non-interactive.
-# This script has not yet been run against a real ISO end-to-end — no
-# Docker/kvm-group/passwordless-sudo on this dev machine to build+boot one
-# (see PROGRESS.md). Verify on a machine that has those before trusting
-# the completion-detection path.
+# install. Reading omarchy-install-dashboard's actual source (session 2)
+# corrected an earlier, wrong version of this note: non-interactive
+# installs do NOT hang on a prompt — both the reboot confirm and the
+# failure menu already short-circuit when OMARCHY_UI_INTERACTIVE=no. The
+# real gap is narrower: on success the dashboard runs an in-guest `reboot`
+# (into the freshly-installed disk) rather than powering off, so QEMU's
+# process never exits either way — success or failure, this harness's
+# process-exit wait will hit VM_INSTALL_TIMEOUT_SEC. Against a stock ISO
+# that is a real, honest failure, not a bug in this harness. T5's Deck ISO
+# fork needs a one-line addition to
+# `configs/airootfs/root/.automated_script.sh`'s cidata branch: export
+# `OMARCHY_UI_AUTO_REBOOT=no OMARCHY_UI_FAILURE_ACTION=exit` before the
+# dashboard call, capture its exit status without tripping `set -e`, then
+# unconditionally `systemctl poweroff` afterward when non-interactive
+# (verified as a scratch patch against unmodified upstream in session 2 —
+# see PROGRESS.md for the exact diff).
+# This script has not yet been run against a real ISO end-to-end. Docker/
+# kvm-group/disk-group access is confirmed working now (session 2), but
+# every attempt to build an unmodified test ISO from this environment hit
+# a real network-bandwidth ceiling (session 2, see PROGRESS.md) before a
+# boot could even be attempted. Verify on a connection with real
+# throughput before trusting the completion-detection path.
 
 set -uo pipefail
 
