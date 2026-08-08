@@ -388,9 +388,9 @@ three parallel agents. Headline results (full hypotheses/results now also in
   "fully offline install through first boot into Gaming Mode; Steam signs in
   on first launch like a factory-reset Deck," `PLAN.md` §6.1a item 7 (Wi-Fi
   screen) is promoted, and T5 gains a required item (detect no-network/
-  no-client and show a Wi-Fi screen before Steam gets the display). Whether
-  to bundle a pre-populated client remains a separate, unresolved
-  legal/licensing call — see "Blocked on human" below.
+  no-client and show a Wi-Fi screen before Steam gets the display).
+  **Decided: no pre-populated client** — ship only the plain launcher, rely
+  on the Wi-Fi screen. See below.
 - **§10.5 Secure Boot/BIOS — CONFIRMED (resolved session 3).** Operator
   verified on their own Deck: boot order already defaults to Limine, Secure
   Boot was never touched during their original install and it worked, and
@@ -453,22 +453,23 @@ three parallel agents. Headline results (full hypotheses/results now also in
   `deckarchy` bug reports — not now, not with edits, just holding. Drafts
   remain staged (`DRAFT-outreach-28allday.md`,
   `DRAFT-upstream-bugs-deckarchy.md`) for if/when this changes.
-- **New (R1 §10.4): bundling a pre-populated Steam client in the ISO is a
-  legal call, not an engineering one.** It's technically viable (tested,
-  confirmed working offline once installed) but no document authorizing
-  redistribution of the client itself was found, and no Linux distro does
-  it — recommendation is not to attempt it and to solve the UX problem with
-  a pre-Steam network-check screen instead (now in `PLAN.md` §6.1a item 7 /
-  §10.4). Needs an explicit operator go/no-go before T5 if this is ever
-  reconsidered. See `FINDING-R1-10.4.md`.
+- **Resolved (session 3): pre-populated Steam client — decided against.**
+  Operator confirmed: don't bundle it. Ship only the plain 20 MB `steam`
+  launcher package in the offline mirror (legitimate, distro-standard
+  redistribution); rely entirely on T5's pre-Steam network-check/Wi-Fi
+  screen to handle the offline case. This makes that Wi-Fi screen a
+  **required, load-bearing T5 item**, not optional polish — with no
+  pre-populated client, it's the only thing between a Wi-Fi-less first boot
+  and a bare Steam crash dialog with no keyboard to dismiss it. See
+  `FINDING-R1-10.4.md` and `PLAN.md` §6.1a item 7 / §10.4.
 
 ## Open questions
 
 `PLAN.md` §10's six questions are now all resolved by R1 (session 3) — see
 `FINDING-R1-10.1.md` through `FINDING-R1-10.6.md`, and the "Findings" section
-above for the headline results. Three (§10.3, §10.5, and the pre-populated-
-client question under §10.4) remain blocked on operator/hardware action, not
-further research — tracked in "Blocked on human" above.
+above for the headline results. Only §10.3 (gamepad mapping design) remains
+blocked on a hardware session — tracked in "Blocked on human" above.
+Everything else under §10.4/§10.5 is now fully decided.
 
 ## Next session should start with
 

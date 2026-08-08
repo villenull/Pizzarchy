@@ -300,21 +300,25 @@ decision.** I did not find a document that authorises it.
    *"Installs completely offline. Steam signs in on first launch, exactly like
    a factory-reset Deck."* — do not claim more.
 
-## Decision needed from the operator
+## Decisions (operator, session 3)
 
-1. Is the `CLAUDE.md` "fully offline … through first boot into Gaming Mode"
-   constraint **reworded** to "fully offline install; Steam needs network on
-   first launch", or is it treated as a real blocker that changes scope?
-2. Do we attempt to ship a pre-populated Steam client in the ISO at all?
-   Phase 4 shows it **works technically** and meaningfully improves first
-   boot (login screen instead of fatal error), at a cost of 2.5 GB and a
-   redistribution I found no document authorising — and which no Linux distro
-   performs. My recommendation is **no**, and to solve the same UX problem
-   with item 5 below instead (our own pre-Steam network check), which costs
-   nothing and carries no licensing exposure. But the redistribution question
-   is a legal call, not mine.
-3. Given (1), confirm that T5 should build the "no network → controller-
-   navigable Wi-Fi screen before Steam gets the display" path.
+1. **Decided: reworded.** `CLAUDE.md`'s "fully offline" constraint is now
+   worded "fully offline install through first boot into Gaming Mode; Steam
+   signs in on first launch like a factory-reset Deck."
+2. **Decided: no pre-populated client.** Confirmed — don't bundle it. Ship
+   only the plain 20 MB `steam` launcher package in the offline mirror (a
+   legitimate, distro-standard redistribution), and rely on item 3 to handle
+   the offline case gracefully instead of paying the 2.5 GB size cost and
+   the licensing exposure for a UX gain the network-check screen gets for
+   free.
+3. **Decided: confirmed, and this is now the load-bearing requirement.**
+   T5 must build the "no network + no client → controller-navigable Wi-Fi
+   screen before Steam gets the display" path. Since there is no
+   pre-populated client (per decision 2), this is not an optional polish
+   item — it is the *only* thing standing between a user who skips Wi-Fi at
+   install and a bare Steam crash dialog with no keyboard to dismiss it, on
+   every single install that skips or lacks Wi-Fi. Treat as required for
+   T5, not deferrable.
 
 ## Reproduction
 

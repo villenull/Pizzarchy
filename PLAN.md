@@ -852,11 +852,14 @@ signs in on first launch, exactly like a factory-reset Deck."* T5 gains a
 required item: detect "no network + no Steam client installed" before
 handing the display to Steam on first boot, and show a controller-navigable
 Wi-Fi screen instead of letting Steam fail on its own with an undismissable
-modal and no keyboard available. Still open: whether to bundle the 20 MB
-`steam` launcher package itself in the offline mirror (recommended: yes, it's
-a legitimate redistribution and removes one download) — see PROGRESS.md
-"Blocked on human" for the pre-populated-client licensing question, which
-remains unresolved pending operator/legal judgment.
+modal and no keyboard available. **Decided (session 3): no pre-populated
+client.** Ship only the plain 20 MB `steam` launcher package in the offline
+mirror (legitimate, distro-standard redistribution) and rely entirely on the
+Wi-Fi screen above to handle the offline case — no 2.5 GB size cost, no
+licensing exposure. This makes the Wi-Fi-screen-before-Steam requirement
+load-bearing, not optional polish: with no pre-populated client, it is the
+only thing between a user who lacks Wi-Fi and a bare Steam crash dialog with
+no keyboard to dismiss it.
 
 ### 10.5 Secure Boot / BIOS state
 
