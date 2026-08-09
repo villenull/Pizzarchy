@@ -75,7 +75,9 @@ entries. The trigger is **the safety snapshot that `TASK-hardware-validation.md`
 step 2 mandates**: before it there were zero snapshot entries and the check
 passed. Fixed by anchoring the count to real `path:` lines under the ESP's
 `/EFI/Linux/`. See "T1 — first physical hardware run" under Findings.
-**Not yet rebooted** — the boot chain is verified but unbooted, by choice.
+**Rebooted and verified** — the Deck boots the Neptune kernel cleanly with the
+new Snapshots submenu present, and `reconcile` still writes nothing after a
+real boot.
 
 **Session 7 also resolved R1 §10.3**, the other item blocked on hardware all
 project: **ship design (b)**, the `uinput`/`evdev` mapper as a systemd
@@ -238,7 +240,7 @@ human" below instead.
 |---|---|---|
 | T0 Test infrastructure | **§1–6 all built; two verification gaps remain** | §1 harness unit-tested (31 assertions) but not run end-to-end against a real ISO; §2–6 done (Ventoy doc, override loader + 8 tests, deck-sync/snapshot/rollback untested against hardware, CI workflow untested against a real Actions run, shellcheck clean repo-wide). See T0 §1/§2–6 deliverables above for exact gaps. |
 | R1 Research questions | **all six resolved** | §10.1/§10.2/§10.4/§10.5 resolved session 3; §10.3 resolved session 7 on hardware (ship design (b) — see `FINDING-R1-10.3.md`); §10.6 answered but held indefinitely by operator choice. |
-| T1 Kernel and boot | **all six steps done** | Script rewritten and now actually executes: shellcheck clean, idempotency proven in a VM (`vm-kernel-idempotency-test.sh`, run twice, byte-identical end state), kernel version reduced to one documented constant (`NEPTUNE_SERIES_DEFAULT=611`) with glob-keyed entry regeneration. Pacman hook done and VM-verified (`vm-kernel-hook-test.sh`, 33 assertions): fires on install/upgrade/remove of `linux-neptune-*`, verifies rather than duplicates upstream's UKI machinery, repairs a missing UKI, prunes stale entries, and does not duplicate entries on repeat reinstalls. §8.5 reproduced and documented (`FINDING-esp-permissions.md` + upstream issue draft). Steps 4+6 done and VM-verified (`vm-kernel-stage-test.sh`, 45 assertions): nine independently runnable stages, each idempotent alone, exit codes 0/1/2, and no invocation can block on a prompt. **Session 7: run on the physical Deck for the first time** — all nine stages plus `reconcile` exit 0 on Valve Galileo (OLED), after the run exposed and fixed a real bug (`limine_entry_count` miscounting `limine-snapper-sync` snapshot entries, which both failed `stage-uki` and silently defeated idempotency inside the pacman hook). Remaining hardware gaps: the stock→Neptune *conversion* path (the Deck was already converted by hand, so `stage-firmware-swap` and `stage-esp-permissions` ran only as no-ops), and nothing has been rebooted to verify the boot chain end-to-end. |
+| T1 Kernel and boot | **all six steps done** | Script rewritten and now actually executes: shellcheck clean, idempotency proven in a VM (`vm-kernel-idempotency-test.sh`, run twice, byte-identical end state), kernel version reduced to one documented constant (`NEPTUNE_SERIES_DEFAULT=611`) with glob-keyed entry regeneration. Pacman hook done and VM-verified (`vm-kernel-hook-test.sh`, 33 assertions): fires on install/upgrade/remove of `linux-neptune-*`, verifies rather than duplicates upstream's UKI machinery, repairs a missing UKI, prunes stale entries, and does not duplicate entries on repeat reinstalls. §8.5 reproduced and documented (`FINDING-esp-permissions.md` + upstream issue draft). Steps 4+6 done and VM-verified (`vm-kernel-stage-test.sh`, 45 assertions): nine independently runnable stages, each idempotent alone, exit codes 0/1/2, and no invocation can block on a prompt. **Session 7: run on the physical Deck for the first time** — all nine stages plus `reconcile` exit 0 on Valve Galileo (OLED), after the run exposed and fixed a real bug (`limine_entry_count` miscounting `limine-snapper-sync` snapshot entries, which both failed `stage-uki` and silently defeated idempotency inside the pacman hook). Rebooted and verified: boots `neptune-611` cleanly, `reconcile` writes nothing post-boot, ESP byte-identical, and audio/Wi-Fi/BT/trackpads/gyro/GPU all spot-check clean. Remaining hardware gap: the stock→Neptune *conversion* path — the Deck was already converted by hand, so `stage-firmware-swap` and `stage-esp-permissions` ran only as no-ops. |
 | T2 Gamepad input spike | not started | Opus. Determines T4's entire scope |
 | T3 Gaming Mode | not started | Needs T0's deck-sync.sh to be efficient |
 | T4 Installer UI | not started | Blocked on T2's finding |
@@ -889,13 +891,40 @@ conversion itself** — in particular `stage-firmware-swap` actually removing
 Arch's split `linux-firmware-*` and `stage-esp-permissions` actually doing
 the `umount`/`mount` cycle on a live ESP. Those remain VM-only evidence.
 
-**Not rebooted.** Every boot artifact is byte-identical to the bytes this
-machine is currently running, and the script wrote nothing to the ESP, so
-the reboot validates less than the task file assumed. One pre-existing
-oddity noted for whoever does reboot: `/boot/limine.conf` has
-`default_entry: 2`, which with the current entry order may select stock Arch
-(`linux` 7.1.4) rather than Neptune — unchanged by this run, but select the
-Neptune entry explicitly at the menu rather than accepting the default.
+**Reboot verified (step 5).** The Deck rebooted and came back on
+`6.11.11-valve29-1-neptune-611-g2dcfaf4df7ac`. What this does and does not
+prove is worth stating precisely: every boot artifact was byte-identical to
+the bytes the machine was already running, so this is **not** evidence that
+the script *produced* a working boot chain. What it does prove is that the
+Limine menu still boots cleanly with `limine-snapper-sync`'s new Snapshots
+submenu present — the only thing about the boot menu that changed this
+session — and that the `limine_entry_count` fix holds across a real boot.
+
+Post-boot checks, all clean:
+
+- `reconcile` exits 0 and **writes nothing** — "UKI up to date … registered
+  once", prune finds nothing stale. The fix survives a reboot.
+- ESP **byte-identical** to the pre-reboot capture: all four UKIs and
+  `limine.conf` match on `md5sum`.
+- Boot time 39.5s (5.3s firmware + 7.2s loader + 9.8s kernel + 17.3s
+  userspace) against a 27.6s pre-reboot baseline. Slower, but the loader
+  segment is unchanged (7.2s vs 7.4s) — the growth is in kernel/userspace,
+  consistent with first-boot-after-change cache rebuilds rather than
+  anything in the boot chain. Not investigated further.
+- Hardware spot-check (the physical-only tier in `CLAUDE.md`): audio devices
+  all present (Speaker, Headphones, HDMI, Internal Microphone), `wlan0`
+  connected, `bluetooth.service` active, both `Valve Software Steam
+  Controller` nodes plus `Steam Deck` and `Steam Deck Motion Sensors`
+  enumerated, two `iio` devices for the IMU, `amdgpu` loaded, Wayland
+  session up.
+- **Correction to a carried-over note:** `cs35l41-dsp1-*` firmware warnings
+  did **not** appear — zero occurrences in the boot journal. `PROGRESS.md`
+  had these recorded as "known/expected on OLED" from the operator's manual
+  install session; on `linux-firmware-neptune` jupiter.20260712.1-2 with
+  `steamdeck-dsp` 0.99-2 they are absent. Treat their reappearance as worth
+  a second look rather than as expected background noise.
+
+`/boot/limine.conf` still has `default_entry: 2`, unchanged by this run.
 
 **Incidental.** `shellcheck` is now installed via pacman on the Deck,
 retiring the session-1 scratch-binary workaround noted above. Also: this
@@ -1093,7 +1122,5 @@ block 3 (R1 research, per `SESSIONS.md`'s block table):
    the substrate (or in the idempotency/hook/stage suites) and re-run all
    three — otherwise the next "idempotency proven" claim carries the same
    blind spot. This is the highest-value follow-up from session 7.
-5. **The reboot verification is still outstanding** (`TASK-hardware-validation.md`
-   step 5). Boot chain is verified but unbooted. Select the Neptune entry
-   explicitly at the Limine menu — `default_entry: 2` may point at stock
-   Arch. Rollback target if needed: `sudo snapper -c root rollback 1`.
+5. ~~The reboot verification~~ — **done**, see above. The Deck boots Neptune
+   cleanly and `reconcile` writes nothing post-boot.
