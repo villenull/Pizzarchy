@@ -30,9 +30,10 @@ automation** — not to rediscover it.
 | `CLAUDE.md` | Auto-loaded every session. Hard constraints. |
 | `SESSIONS.md` | **Before your first block.** Usage-limit budgeting and the 20-block schedule. |
 | `PROGRESS.md` | Every session start. Current state. |
+| `WHERE-WE-ARE.md` | When you want the whole picture fast, or are working outside the repo. Self-contained; no other file needed to follow it. |
 | `PLAN.md` | **Once, in session 1.** Large. After that, read only the specific sections task files cite. |
 | `TASK-*.md` | One per work block. |
-| `omarchy-deck-kernel.sh` | Draft implementation, starting point for T1. Never executed. |
+| `omarchy-deck-kernel.sh` | T1's deliverable — done. Nine idempotent stages, VM-tested and hardware-validated. |
 
 Files you'll create follow the same flat pattern: `FINDING-*.md` for
 research outputs, `deck-sync.sh` and similar for scripts. **Keep everything
