@@ -101,17 +101,25 @@ schedule — follow that, not just the task order.**
 edit-test loop for everything after it. Skipping it to "get to the real
 work faster" is the easiest way to lose a week.
 
-### v0 vs v1 — check with the operator before starting T4
+### ✅ v0 vs v1 — decided (session 7): **v0 first**
 
-`PLAN.md` §3.1 recommends shipping a **v0** first: T0 + T1 + T3 only, as a
-post-install script for Decks that already have Omarchy installed normally.
-That delivers the whole "feels like a Steam Deck, Desktop Mode is Omarchy"
-experience without the ISO, the offline mirror, or the controller-navigable
-installer — weeks earlier, and without depending on findings that aren't in
-yet.
+The operator chose `PLAN.md` §3.1's recommendation. **v0 = T0 + T1 + T3**, as
+a post-install script for Decks that already have Omarchy installed normally.
+**T4 and T5 are deferred to v1 — do not start them.**
 
-If the operator hasn't explicitly chosen v1-first, **ask before starting
-T4**. It's a scope decision, not an implementation detail.
+T0 and T1 are done, so **T3 is the entire remaining v0 scope.**
+
+Two consequences worth knowing before you pick up a task file:
+
+- **Skip T2.** Its only purpose is sizing T4, which is deferred. This does
+  *not* defer the desktop-mode input mapper (R1 §10.3 design (b)) — that is
+  v0 scope and belongs to T3.
+- **The "fully offline" constraint does not bind v0.** It governs installing
+  from the ISO; v0 runs on an installed, networked system. The rule against
+  auto-installing an AUR helper still applies.
+
+Full reasoning and the open "which Omarchy version does v0 target" question
+are in `PROGRESS.md` under "Scope decision: v0 first".
 
 ---
 

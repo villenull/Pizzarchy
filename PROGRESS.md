@@ -1163,6 +1163,94 @@ outreach to 28allday**, which now has a concrete ask — a license on DeckShift
 — on top of the collaboration question. That outreach has been held
 indefinitely by operator choice; this finding is a reason to revisit.
 
+### Scope decision: v0 first (session 7)
+
+The operator chose `PLAN.md` §3.1's recommendation. **v0 = T0 + T1 + T3 as a
+post-install script**, run on a Deck that already has Omarchy installed the
+normal way. T4 (controller-only installer UI) and T5 (ISO + offline payload)
+become **v1**. This had been open since session 1 and gated T4.
+
+**Status against v0's own scope: two-thirds done.**
+
+| v0 component | State |
+|---|---|
+| T0 test infrastructure | ✅ done |
+| T1 kernel / firmware / boot chain | ✅ done and hardware-validated (minus the default-entry stage) |
+| T3 Gaming Mode + session switching | ⬜ **not started — this is now the whole remaining project** |
+
+**What v0 delivers:** a Deck that boots to Gaming Mode, has working Deck
+hardware, and switches to an Omarchy desktop and back by controller alone.
+That is goals 4–7 of the original plan — the part users actually feel.
+
+**What v0 explicitly does not include:** the ISO, the offline package mirror,
+the eight guided installer screens, the pre-Steam Wi-Fi screen. Those are v1.
+
+### What v0 changes beyond ordering
+
+Three consequences that are easy to miss, and each removes real risk:
+
+**1. The "fully offline" hard constraint does not apply to v0.** That
+constraint governs *installation from the ISO*. A post-install script runs on
+an already-installed, networked system. Concretely, this **defuses the AUR
+blocker** found earlier the same session: DeckShift sources
+`gamescope-session-git` / `gamescope-session-steam-git` from the AUR, which
+cannot exist in an offline mirror — but is perfectly fine for v0. Building
+and shipping `gamescope-session*` in a mirror reverts to being a **T5/v1
+problem**, not a blocker on the next thing we build. (`CLAUDE.md`'s separate
+rule still stands: do not *auto-install an AUR helper*. v0 should require a
+helper to be present, or build with `makepkg` directly, rather than
+installing one.)
+
+**2. T2 leaves the critical path.** T2's entire purpose is sizing T4 — can a
+gamepad drive `archinstall` and `gum` prompts at the kernel input layer? With
+T4 deferred, **that question is deferred with it.** T2 was formally the next
+block in the 20-block schedule; under v0 it should be skipped for now.
+
+  ⚠️ Do not confuse this with the *desktop-mode* input mapper. R1 §10.3's
+  design (b) — the `uinput`/`evdev` mapper as a systemd user service, plus
+  `squeekboard` — **is squarely in v0 scope**, because Desktop Mode has to be
+  usable by controller. It belongs to T3, not T2. The session-7 hardware work
+  already proved its preconditions (unprivileged `/dev/uinput`, the correct
+  `wayland-session@hyprland.desktop.target` scoping, protocol support).
+
+**3. Several v1-only risks stop mattering for now:** ISO size against the
+uncompressed mirror, the package-count self-check bound, the pre-Steam Wi-Fi
+screen, and Steam's offline behaviour. All remain recorded and all become
+live again at v1.
+
+### ⚠️ The decision v0 now forces: which Omarchy does v0 target?
+
+v0 runs on "a Deck that already has Omarchy". **Which Omarchy is now the
+sharpest open question**, because it directly shapes T3:
+
+- The operator's Deck runs **Omarchy 3.8.4** (git install, waybar-era shell).
+- The project targets **Quattro / 4.x**, whose shell is a from-scratch
+  Quickshell rewrite.
+
+T3's two most visible deliverables — the Desktop Mode icon inside Omarchy and
+the Gaming Mode → Desktop trigger — are **shell integration points**, and they
+land in different places on 3.x versus 4.x. T1 was immune to this (it gates on
+the Limine UKI mechanism, not Omarchy's packaging); T3 is not.
+
+Three options, none obviously right:
+
+1. **Target 4.x, upgrade the test Deck to Quattro.** Matches the project's
+   stated target and Quattro's stable release is the eventual goal anyway.
+   Costs a risky upgrade on the single most valuable test asset.
+2. **Target 3.x first, port to 4.x later.** Ships against hardware that
+   exists today with no upgrade risk, and 3.x is what most Omarchy-on-Deck
+   users are actually running right now. Costs a port later, in exactly the
+   shell layer most likely to churn.
+3. **Build T3's session switching first (shell-agnostic), decide later.**
+   SDDM session switching, the gamescope session, the input mapper and the
+   hardware-parity work are all independent of which shell is running. Only
+   the icon and the QAM hook are version-sensitive. This defers the decision
+   without blocking work.
+
+**Option 3 is the recommendation** — it is the only one that does not require
+choosing before there is evidence, and it front-loads the parts of T3 that
+are large, valuable, and shell-independent.
+
 ## Blocked on human
 
 - Ventoy setup on the test USB (T0 step 2)
@@ -1229,8 +1317,12 @@ indefinitely by operator choice; this finding is a reason to revisit.
   concrete staged drafts awaiting approval**: `DRAFT-outreach-28allday.md`
   and `DRAFT-upstream-bugs-deckarchy.md` (five bug reports), from R1 §10.6.
   Nothing has been sent; sending each is a separate explicit action.
-- **Scope decision: v0 vs v1 first** (see `PLAN.md` §3.1). Recommended is
-  v0 = T0+T1+T3 as a post-install script, ISO deferred to v1.
+- **Resolved (session 7): scope decision made — v0 first.** The operator chose
+  `PLAN.md` §3.1's recommendation: **v0 = T0 + T1 + T3, shipped as a
+  post-install script** for Decks that already have Omarchy installed
+  normally. The ISO, the offline mirror, and the controller-navigable
+  installer (T4, T5) are **deferred to v1**. See "Scope decision: v0 first"
+  under Findings for what this changes — it is more than a reordering.
 - **Do not wipe the operator's existing Deck install.** It is a working
   Omarchy + Neptune + Limine system and is the single most valuable test
   asset in the project — it's the known-good baseline for T3's
