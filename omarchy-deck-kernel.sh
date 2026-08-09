@@ -668,12 +668,32 @@ find_uki_for() {
   esac
 }
 
-# limine_entry_count <uki-path> -- how many times the Limine config references
-# this UKI. limine-entry-tool writes the filename into the entry's `path:`
-# line (with a #<blake2b> suffix), so matching the basename is enough.
+# limine_entry_count <uki-path> -- how many *bootable entries for the live
+# kernel* the Limine config references. limine-entry-tool writes the filename
+# into the entry's `path:` line (with a #<blake2b> suffix).
+#
+# Matching the bare basename is NOT enough, and assuming it was cost a failed
+# run on real hardware. limine-snapper-sync adds a Snapshots submenu whose
+# entries boot a snapshot's copy of the same UKI, under a path that embeds the
+# very same basename:
+#
+#   path: boot():/EFI/Linux/omarchy_linux-neptune-611.efi#<hash>
+#   path: boot():/<machine-id>/limine_history/omarchy_linux-neptune-611.efi_sha256_<h>#<hash>
+#
+# A substring count sees 2 and calls a correct boot chain broken. Worse, it
+# also defeats reconcile_uki's up-to-date test (which requires exactly 1), so
+# the UKI gets rebuilt on every run -- inside a pacman hook, that is a
+# pointless boot-chain write on every kernel change, and the idempotency this
+# script promises is silently lost.
+#
+# So: count only `path:` lines pointing into the ESP's own /EFI/Linux, with the
+# basename terminated by the #<hash> suffix, whitespace, or end of line. The
+# limine_history/ snapshot paths fail that anchor and are correctly ignored.
 limine_entry_count() {
-  local uki=$1
-  $SUDO grep -cF -- "${uki##*/}" "$LIMINE_CONFIG" || true
+  local uki=$1 esc
+  esc=${uki##*/}
+  esc=${esc//./\\.}
+  $SUDO grep -cE -- "^[[:space:]]*path:.*/EFI/Linux/${esc}([#[:space:]]|$)" "$LIMINE_CONFIG" || true
 }
 
 # reconcile_uki <pkgbase> -- verify, and repair only if verification fails,
