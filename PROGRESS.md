@@ -77,6 +77,16 @@ passed. Fixed by anchoring the count to real `path:` lines under the ESP's
 `/EFI/Linux/`. See "T1 — first physical hardware run" under Findings.
 **Not yet rebooted** — the boot chain is verified but unbooted, by choice.
 
+**Session 7 also resolved R1 §10.3**, the other item blocked on hardware all
+project: **ship design (b)**, the `uinput`/`evdev` mapper as a systemd
+`--user` service. Design (a) (background Steam) is ruled out on a circular
+dependency — it sources the OSK from a signed-in Steam client, and §6.1a's
+pre-Steam Wi-Fi screen would need that OSK to type the password Steam is
+waiting on. Design (b)'s preconditions all verified on hardware, and two
+concrete errors in the prepared design were found by running it (a systemd
+target that does not exist, and `uaccess` not covering `/dev/uinput`). See
+"R1 §10.3 — gamepad mapping decided on hardware" under Findings.
+
 ### T0 §1 deliverables (session 1)
 
 Flat files (per `CLAUDE.md`'s no-subdirectories rule — the task file's
@@ -227,7 +237,7 @@ human" below instead.
 | Task | Status | Notes |
 |---|---|---|
 | T0 Test infrastructure | **§1–6 all built; two verification gaps remain** | §1 harness unit-tested (31 assertions) but not run end-to-end against a real ISO; §2–6 done (Ventoy doc, override loader + 8 tests, deck-sync/snapshot/rollback untested against hardware, CI workflow untested against a real Actions run, shellcheck clean repo-wide). See T0 §1/§2–6 deliverables above for exact gaps. |
-| R1 Research questions | not started | Can run parallel; 10.4 is highest stakes |
+| R1 Research questions | **all six resolved** | §10.1/§10.2/§10.4/§10.5 resolved session 3; §10.3 resolved session 7 on hardware (ship design (b) — see `FINDING-R1-10.3.md`); §10.6 answered but held indefinitely by operator choice. |
 | T1 Kernel and boot | **all six steps done** | Script rewritten and now actually executes: shellcheck clean, idempotency proven in a VM (`vm-kernel-idempotency-test.sh`, run twice, byte-identical end state), kernel version reduced to one documented constant (`NEPTUNE_SERIES_DEFAULT=611`) with glob-keyed entry regeneration. Pacman hook done and VM-verified (`vm-kernel-hook-test.sh`, 33 assertions): fires on install/upgrade/remove of `linux-neptune-*`, verifies rather than duplicates upstream's UKI machinery, repairs a missing UKI, prunes stale entries, and does not duplicate entries on repeat reinstalls. §8.5 reproduced and documented (`FINDING-esp-permissions.md` + upstream issue draft). Steps 4+6 done and VM-verified (`vm-kernel-stage-test.sh`, 45 assertions): nine independently runnable stages, each idempotent alone, exit codes 0/1/2, and no invocation can block on a prompt. **Session 7: run on the physical Deck for the first time** — all nine stages plus `reconcile` exit 0 on Valve Galileo (OLED), after the run exposed and fixed a real bug (`limine_entry_count` miscounting `limine-snapper-sync` snapshot entries, which both failed `stage-uki` and silently defeated idempotency inside the pacman hook). Remaining hardware gaps: the stock→Neptune *conversion* path (the Deck was already converted by hand, so `stage-firmware-swap` and `stage-esp-permissions` ran only as no-ops), and nothing has been rebooted to verify the boot chain end-to-end. |
 | T2 Gamepad input spike | not started | Opus. Determines T4's entire scope |
 | T3 Gaming Mode | not started | Needs T0's deck-sync.sh to be efficient |
@@ -894,6 +904,51 @@ harness has no TTY and `sudo` reads passwords from `/dev/tty` — the same
 constraint session 6 hardened the script against. Worth knowing for any
 future on-Deck agent session.
 
+### R1 §10.3 — gamepad mapping decided on hardware (session 7)
+
+`FINDING-R1-10.3.md` rewritten from scaffolding into a resolved finding:
+**ship design (b)**, the `uinput`/`evdev` mapper as a systemd `--user`
+service. Detail lives there; the parts worth surfacing here:
+
+**Design (a) is ruled out by a circular dependency, not by a measurement.**
+It sources controller-as-mouse *and* the OSK from a signed-in Steam client;
+§10.4 confirmed Steam needs network to sign in; §6.1a item 7 needs a
+controller-navigable Wi-Fi screen *before* Steam gets the display. You would
+need the OSK to type the Wi-Fi password that the OSK depends on. The
+first-boot path therefore needs a non-Steam mapper regardless, so (a) could
+only ever be a second input layer on top of (b).
+
+**Two concrete errors in the prepared design, both found by running it:**
+
+1. **The draft unit's `WantedBy=hyprland-session.target` does not exist**
+   (`LoadState=not-found`). Under `uwsm` 0.26.6 the real target is
+   `wayland-session@hyprland.desktop.target`. A unit wanted by a nonexistent
+   target **enables without error and never starts** — it would have shipped,
+   reported success, and silently done nothing. Corrected and verified live.
+2. **`TAG+="uaccess"` does not grant access to `/dev/uinput`.** It carries the
+   `uaccess` tag but not the `seat` tag (`CURRENT_TAGS=:uaccess:`, versus
+   `:uaccess:seat:` on a real input device), and systemd's uaccess builtin
+   only ACLs seat-assigned devices. **T4/T5 action item: add the desktop user
+   to the `input` group at install time** — and note `SupplementaryGroups=` is
+   not permitted in a `--user` unit, so it cannot be done per-service.
+
+**Verified working:** unprivileged `/dev/uinput` device creation end-to-end
+(open → capability bits → `UI_DEV_CREATE` → visible in
+`/proc/bus/input/devices`) via a udev rule, so design (b) needs **no
+privileged helper** — the risk the finding called potentially disqualifying.
+Controller evdev *read* access already works with no change, via the seat ACL
+these nodes do get. Hyprland 0.56 implements both `zwp_input_method_manager_v2`
+and `zwp_virtual_keyboard_manager_v1` + `zwlr_layer_shell_v1`, so the OSK is
+protocol-feasible. **Use `squeekboard`** (Arch `extra`) — the doc's first
+suggestion, `wvkbd`, is AUR-only and `CLAUDE.md` forbids auto-installing an
+AUR helper.
+
+**Untestable on this Deck, permanently:** anything involving Gaming Mode. The
+operator's Deck has no `steam` and no `gamescope` — only Hyprland sessions —
+so "does it conflict with Gaming Mode's Steam instance" and "does it stay out
+of the gamescope session" cannot be answered here by any amount of setup.
+That needs a machine with both sessions; realistically a T3/T5-era test.
+
 ## Blocked on human
 
 - Ventoy setup on the test USB (T0 step 2)
@@ -966,10 +1021,16 @@ future on-Deck agent session.
   Omarchy + Neptune + Limine system and is the single most valuable test
   asset in the project — it's the known-good baseline for T3's
   iterate-in-place loop. Snapshot it before any destructive test.
-- **New (R1 §10.3): gamepad-mapping design needs a hardware session.** Both
-  candidate designs (background Steam vs. systemd-user-service mapper) are
-  prepared concretely in `FINDING-R1-10.3.md` with a head-to-head test plan;
-  neither can be decided without the physical Deck.
+- **Resolved (session 7): R1 §10.3 gamepad-mapping design — decided in favour
+  of design (b).** The hardware session happened; `FINDING-R1-10.3.md` is now
+  a resolved finding, not scaffolding. Design (a) (background Steam) is ruled
+  out on a circular dependency between confirmed project facts: it sources the
+  OSK from a signed-in Steam client, §10.4 confirmed Steam needs network to
+  sign in, and `PLAN.md` §6.1a item 7 needs a controller-navigable Wi-Fi
+  screen *before* Steam — so you would need the OSK to type the Wi-Fi password
+  that the OSK depends on. Design (b)'s preconditions all verified on
+  hardware. **New T4/T5 action item:** the installer must add the desktop user
+  to the `input` group — `uaccess` does not cover `/dev/uinput`.
 - **Resolved (session 3): Secure Boot / BIOS state.** Operator checked their
   own Deck: boot order already defaults to Limine, and Secure Boot was never
   touched during the original Omarchy install (direct evidence of factory
@@ -996,9 +1057,10 @@ future on-Deck agent session.
 
 `PLAN.md` §10's six questions are now all resolved by R1 (session 3) — see
 `FINDING-R1-10.1.md` through `FINDING-R1-10.6.md`, and the "Findings" section
-above for the headline results. Only §10.3 (gamepad mapping design) remains
-blocked on a hardware session — tracked in "Blocked on human" above.
-Everything else under §10.4/§10.5 is now fully decided.
+above for the headline results. **§10.3 (gamepad mapping) is now resolved too
+(session 7, on hardware): ship design (b).** Everything under §10.4/§10.5 was
+already fully decided. Only §10.6 remains open, and only because the operator
+has chosen to hold it indefinitely.
 
 ## Next session should start with
 
