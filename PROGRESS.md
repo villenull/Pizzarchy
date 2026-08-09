@@ -924,7 +924,67 @@ Post-boot checks, all clean:
   `steamdeck-dsp` 0.99-2 they are absent. Treat their reappearance as worth
   a second look rather than as expected background noise.
 
-`/boot/limine.conf` still has `default_entry: 2`, unchanged by this run.
+### ⚠️ New gap found at reboot: nothing sets the default boot entry
+
+The Deck booted Neptune only because the operator **selected it by hand** at
+the Limine menu. `/boot/limine.conf` has `default_entry: 2`, and counting
+bootable entries in the pre-session config (`limine.conf.old`) resolves that
+to the **stock Arch kernel**:
+
+```
+1.  //linux-neptune-611
+2.  //linux              ← default_entry: 2
+3.  /EFI fallback
+```
+
+It was already 2 before this session, so this is pre-existing, not caused by
+T1 — but it is squarely T1's problem.
+
+**Nothing in the toolchain owns this value.** `omarchy-deck-kernel.sh` never
+mentions `default_entry` (grep: no matches), and neither do
+`limine-entry-tool`, `limine-update`, or `limine-snapper-sync`. It is a static
+number written once at install time and never reconciled against which
+kernels actually exist.
+
+**Why this matters more than it looks.** The script installs, verifies and
+prunes the Neptune boot entry with real care — and then leaves the machine
+defaulting to a different kernel. On a fresh install following this project's
+flow, an end user boots stock Arch on Deck hardware, gets degraded or missing
+Valve hardware support, and has no way to know why. `CLAUDE.md`'s
+controller-only constraint makes it worse: the fallback ("just pick the right
+entry") assumes a user who knows to interrupt a boot menu.
+
+**And the mechanism is fragile.** `default_entry` is a *positional index*,
+while `limine-snapper-sync` inserts and removes a Snapshots submenu as
+snapshots come and go. Today the submenu sorts last (`BOOT_ORDER="*,
+*fallback, Snapshots"` in `/etc/default/limine`) so indices 1–2 are stable,
+but pinning boot selection to an integer another daemon can renumber is the
+wrong mechanism regardless of current ordering.
+
+**The durable form exists — confirmed, not assumed.** Limine 12.5.1's
+`CONFIG.md` (`/usr/share/doc/limine/CONFIG.md`, line 92) documents:
+
+> `default_entry` — Entry which will be automatically selected at startup.
+> Can be a 1-based entry index (e.g. `1`), or an entry path (e.g.
+> `OSes/Arch Linux`). Entry paths use `/` as a directory separator […]
+
+So the default can be keyed on the **entry name**, which
+`limine-snapper-sync` cannot renumber out from under it. For this machine's
+config (`/+Omarchy` → `//linux-neptune-611`) that is:
+
+```
+default_entry: Omarchy/linux-neptune-611
+```
+
+**Proposed fix, not yet implemented:** a `stage-default-entry` — or an
+extension of `stage-uki` — that asserts the default resolves to the pinned
+Neptune kernel and repairs it when it does not, writing the *entry path*
+rather than an index and keying on the `linux-neptune-*` glob like every
+other reconcile path. It belongs in `reconcile` too, so the pacman hook
+re-asserts it whenever kernels change. Note the entry-path form needs
+verifying on hardware before it ships: the docs say it works, but this
+project's history (`PLAN.md` §8) is mostly cases where documented behavior
+and real behavior diverged.
 
 **Incidental.** `shellcheck` is now installed via pacman on the Deck,
 retiring the session-1 scratch-binary workaround noted above. Also: this
