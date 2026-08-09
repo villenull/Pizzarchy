@@ -77,17 +77,131 @@
 # chain is the same class of defect as PLAN.md §8.1 -- it looks like it
 # worked right up until the device does not boot.
 #
-# Still TODO in later T1 steps (not this change):
-#   - The pacman hook (PLAN.md §11 / task step 3).
-#   - Non-interactive flags + independently runnable stages (steps 4, 6).
-#   - The §8.5 upstream reproduction and issue (step 5).
+# ---------------------------------------------------------------------------
+# T1 STEP 3 (2026-08-08) -- the pacman hook, and what upstream already does
+# ---------------------------------------------------------------------------
+# See the long comment block in hook_text() below, which is written verbatim
+# into /etc/pacman.d/hooks/95-omarchy-deck-kernel.hook so the reasoning lives
+# next to the artifact on the installed system. Summary: upstream's
+# limine-mkinitcpio-hook already covers UKI *generation* on install/upgrade
+# and *deregistration* on remove, so this script's hook does not rebuild
+# anything by default -- it verifies what upstream produced and repairs it
+# only when the verification fails.
+#
+# ---------------------------------------------------------------------------
+# T1 STEPS 4 + 6 (2026-08-08) -- CI-testable, and one stage at a time
+# ---------------------------------------------------------------------------
+# Steps 4 (non-interactive/CI) and 6 (split into independently runnable
+# stages) are one CLI design, not two: once a stage can be invoked on its
+# own, "CI-testable" is mostly "that invocation never prompts and its exit
+# code means something". What landed:
+#
+#   * A positional subcommand selects one stage, matching the convention the
+#     rest of this repo already uses (deck-sync.sh / deck-rollback.sh /
+#     deck-snapshot.sh take positional arguments and take *configuration*
+#     from OMARCHY_DECK_*/DECK_* environment variables). No argument still
+#     means the full run, so deck-sync.sh's iterate-in-place loop and the
+#     pacman hook's `Exec=` line are both unaffected.
+#
+#       omarchy-deck-kernel.sh                     full install run
+#       omarchy-deck-kernel.sh stage-kernel        one stage
+#       omarchy-deck-kernel.sh list-stages         the stage names, for CI
+#       omarchy-deck-kernel.sh reconcile           what the pacman hook runs
+#
+#   * INSTALL_STAGES below is the single source of truth: the full run
+#     iterates it, list-stages prints it, and single-stage dispatch validates
+#     against it. A stage cannot be individually runnable but missing from
+#     the full run, or vice versa.
+#
+#   * Two stages -- stage_preconditions and stage_esp_detect -- are pure
+#     probes that mutate nothing, and they set the SUDO / ESP_PATH /
+#     LIMINE_CONFIG values every other stage reads. A single-stage run
+#     executes them first as prerequisites. That is not "running someone
+#     else's stage": the alternative is a stage that guesses where the ESP is,
+#     which is PLAN.md §8.3 all over again.
+#
+#   * Prerequisites that a probe cannot satisfy -- the Valve repos for
+#     stage-kernel, an installed kernel for stage-uki -- are detected and
+#     reported as missing prerequisites naming the stage to run, rather than
+#     surfacing as the confusing downstream failure they used to
+#     ("the Valve repos returned no linux-neptune-* packages at all", which
+#     reads like a mirror-layout change).
+#
+#   * Interactivity is a mode, not a hope. See the NONINTERACTIVE block
+#     below: a run whose stdin is not a terminal cannot prompt, and the one
+#     code path that really could block forever (sudo asking for a password)
+#     now fails fast with the fix in the message. Exit codes: 0 success,
+#     1 stage failure, 2 usage error -- the same 2-means-usage convention
+#     deck-sync.sh and deck-rollback.sh already use.
+#
+# Verified in QEMU by vm-kernel-stage-test.sh (every stage alone, twice each,
+# stage-by-stage end state identical to a full run's, prompts made impossible
+# rather than merely unlikely). Steps 3 and 5 were not touched.
 
 set -euo pipefail
 
 readonly PROG=omarchy-deck-kernel
 
 log()  { printf '[%s] %s\n' "$PROG" "$*"; }
-fail() { printf '[%s] ERROR: %s\n' "$PROG" "$*" >&2; exit 1; }
+
+# Failures also go to syslog. When this runs from the pacman hook the console
+# output is one line among a hundred and scrolls away immediately, and a
+# PostTransaction hook cannot roll anything back -- so the only thing that
+# makes the failure findable afterwards is the journal.
+fail() {
+  printf '[%s] ERROR: %s\n' "$PROG" "$*" >&2
+  if command -v logger >/dev/null 2>&1; then
+    logger -p err -t "$PROG" -- "$*" 2>/dev/null || true
+  fi
+  exit 1
+}
+
+# Exit codes, so a CI caller can tell "this stage failed" from "you invoked me
+# wrong" without parsing output:
+#   0  success
+#   1  a stage failed (every fail() call)
+#   2  usage error -- unknown stage/command/option, or a bad env var value
+# 2-means-usage is the convention deck-sync.sh and deck-rollback.sh already
+# use for the same distinction.
+usage_error() {
+  printf '[%s] ERROR: %s\n' "$PROG" "$*" >&2
+  exit 2
+}
+
+# ---------------------------------------------------------------------------
+# Interactivity (TASK-T1 step 4).
+#
+# The default is auto-detected rather than opt-in, deliberately: a CI harness
+# that forgets to pass a flag would silently get the prompting build, and
+# "silently gets the wrong behaviour in automation" is the class of defect
+# this whole project exists to avoid. stdin not being a terminal means nobody
+# is there to answer a question, so that is what the detection keys on.
+#
+# In non-interactive mode:
+#   * stdin is redirected from /dev/null for the entire run (below, in main),
+#     so any child that tries to read a prompt sees EOF immediately instead of
+#     blocking on an inherited pipe or socket forever.
+#   * sudo is only ever attempted with -n; a password requirement becomes a
+#     fast, specific failure instead of a hang (see stage_preconditions).
+# Every pacman invocation is already --noconfirm, and the conflict question
+# --ask=4 answers is pre-answered by number rather than by suppressing all
+# questions -- see stage_kernel.
+#
+# Override either way with OMARCHY_DECK_NONINTERACTIVE=1/0 or
+# --non-interactive/--interactive.
+# ---------------------------------------------------------------------------
+case ${OMARCHY_DECK_NONINTERACTIVE:-auto} in
+  auto)         if [[ -t 0 ]]; then NONINTERACTIVE=0; else NONINTERACTIVE=1; fi ;;
+  1 | yes | true)  NONINTERACTIVE=1 ;;
+  0 | no | false)  NONINTERACTIVE=0 ;;
+  *) usage_error "OMARCHY_DECK_NONINTERACTIVE must be 1/0/yes/no/true/false, got: '${OMARCHY_DECK_NONINTERACTIVE}'" ;;
+esac
+
+# systemctl's pager would block a non-interactive run forever waiting for a
+# keypress nobody will press. None of the systemctl subcommands used here page
+# today (stop/start/is-active/daemon-reload), so this is belt-and-braces
+# against a future edit adding one -- not a fix for a known bug.
+export SYSTEMD_PAGER=
 
 # ---------------------------------------------------------------------------
 # The kernel version constant. This is the ONLY place a Neptune version
@@ -125,7 +239,7 @@ readonly NEPTUNE_SERIES_DEFAULT=611
 
 NEPTUNE_SERIES=${OMARCHY_DECK_NEPTUNE_SERIES:-$NEPTUNE_SERIES_DEFAULT}
 [[ $NEPTUNE_SERIES =~ ^[0-9]+$ ]] ||
-  fail "OMARCHY_DECK_NEPTUNE_SERIES must be digits only (e.g. 611, 618, 72), got: '$NEPTUNE_SERIES'"
+  usage_error "OMARCHY_DECK_NEPTUNE_SERIES must be digits only (e.g. 611, 618, 72), got: '$NEPTUNE_SERIES'"
 readonly NEPTUNE_SERIES
 readonly KERNEL_PKG="linux-neptune-${NEPTUNE_SERIES}"
 
@@ -151,6 +265,19 @@ readonly -a LIMINE_CONFIG_CANDIDATES=(
   /limine.conf
 )
 
+# The pacman hook installed by stage_hook, and the copy of this script it
+# calls. /etc/pacman.d/hooks is the admin hook directory; /usr/share/libalpm/
+# hooks is for package-shipped hooks. This is installed by a script today, so
+# /etc is the correct location -- and when the Deck logic becomes its own
+# pacman package (FINDING-R1-10.1), the package can ship the SAME basename
+# under /usr/share/libalpm/hooks: pacman de-duplicates hooks by filename with
+# /etc winning, so the two never both fire, and removing the /etc copy hands
+# over cleanly to the packaged one.
+readonly HOOK_DIR=/etc/pacman.d/hooks
+readonly HOOK_NAME=95-omarchy-deck-kernel.hook
+readonly HOOK_PATH="${HOOK_DIR}/${HOOK_NAME}"
+readonly HOOK_SCRIPT_PATH=/usr/local/bin/omarchy-deck-kernel
+
 # Set by stage_preconditions/stage_esp_detect, consumed by later stages.
 SUDO=""
 ESP_PATH=""
@@ -173,10 +300,25 @@ stage_preconditions() {
     command -v sudo >/dev/null 2>&1 ||
       fail "not running as root and sudo not found"
     SUDO="sudo"
-    # Prove escalation actually works now rather than failing halfway
-    # through a boot-chain edit.
-    $SUDO -n true 2>/dev/null || $SUDO true ||
+    # Prove escalation actually works now rather than failing halfway through
+    # a boot-chain edit.
+    #
+    # The bare `sudo true` fallback is the ONE place in this script that could
+    # block forever with nothing to answer it: sudo reads its password from
+    # /dev/tty, so redirecting stdin does not disarm it, and a CI job that
+    # inherits a controlling terminal would sit at the prompt until the job
+    # timed out with no clue why. So it is reached only when a human is
+    # actually there to type (interactive mode); otherwise the missing
+    # credential is reported immediately, with the two ways to fix it.
+    if $SUDO -n true 2>/dev/null; then
+      :
+    elif [[ $NONINTERACTIVE -eq 1 ]]; then
+      fail "sudo needs a password and this is a non-interactive run (stdin is not a terminal, or --non-interactive/OMARCHY_DECK_NONINTERACTIVE was set). Refusing to sit at a prompt nobody can answer. Fix by running as root, or by granting this user passwordless sudo, or re-run from a terminal."
+    elif $SUDO true; then
+      :
+    else
       fail "sudo escalation failed -- re-run as root or fix sudo before touching the boot chain"
+    fi
   fi
 
   # Deck hardware gate. product_name is "Jupiter" (LCD) or "Galileo" (OLED);
@@ -238,6 +380,27 @@ EOF
       fail "repo '${repo}' has no usable package database after pacman -Sy"
   done
   log "repos ready (${added} added this run, $(( ${#VALVE_REPOS[@]} - added )) already present)"
+}
+
+# require_valve_repos <stage-name> -- hard prerequisite check for the stages
+# that need Valve's packages to exist (TASK-T1 step 6).
+#
+# In a full run stage_repos has already satisfied this and the check is a
+# formality. Invoked on its own, a stage may hit a system where it has not,
+# and the failure that produced further down was actively misleading: an
+# unconfigured repo makes `pacman -Sl` print nothing, which stage_kernel
+# reported as "the Valve repos returned no linux-neptune-* packages at all --
+# the mirror layout may have changed". That sends the reader to Valve's
+# mirror to debug a missing line in their own pacman.conf. Name the missing
+# prerequisite and the stage that provides it instead.
+require_valve_repos() {
+  local caller=$1 repo
+  for repo in "${VALVE_REPOS[@]}"; do
+    grep -qE "^\[${repo}\]" /etc/pacman.conf ||
+      fail "${caller} needs the Valve repos, but [${repo}] is not in /etc/pacman.conf. Run '${PROG}.sh stage-repos' first, or the full run with no arguments."
+    pacman -Sl "$repo" >/dev/null 2>&1 ||
+      fail "${caller} needs the Valve repos, but '${repo}' has no usable package database. Run '${PROG}.sh stage-repos' first to sync it."
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -388,6 +551,12 @@ stage_firmware_swap() {
     return 0
   fi
 
+  # Checked before anything is removed, not after: this stage's whole job is
+  # to leave the system with no firmware for the few seconds until
+  # stage_kernel installs Valve's. Discovering *then* that the repo holding
+  # the replacement was never configured would be the worst possible moment.
+  require_valve_repos "stage-firmware-swap"
+
   log "firmware: removing Arch's split linux-firmware packages so Valve's can be installed: ${colliding[*]}"
   # -dd because linux-firmware is a hard dependency of every installed kernel;
   # the replacement is installed immediately below, in the same script run.
@@ -398,9 +567,17 @@ stage_firmware_swap() {
   remaining=$(colliding_arch_firmware | tr '\n' ' ')
   [[ -z ${remaining// /} ]] ||
     fail "pacman -Rdd exited 0 but these are still installed: ${remaining}. THE SYSTEM MAY NOW HAVE PARTIAL FIRMWARE -- run 'pacman -S linux-firmware' before rebooting."
+
+  # Said out loud because this stage is individually runnable (TASK-T1 step 6)
+  # and, alone, it is the one stage that leaves the system in a worse state
+  # than it found it. In a full run stage_kernel is the very next thing to
+  # execute and closes the window; run on its own, nothing does.
+  log "firmware: this system now has NO firmware installed. 'stage-kernel' installs Valve's replacement (linux-firmware-neptune) -- do not reboot before it has run."
 }
 
 stage_kernel() {
+  require_valve_repos "stage-kernel"
+
   local -a available
   mapfile -t available < <(neptune_series_available)
   [[ ${#available[@]} -gt 0 ]] ||
@@ -499,48 +676,76 @@ limine_entry_count() {
   $SUDO grep -cF -- "${uki##*/}" "$LIMINE_CONFIG" || true
 }
 
-stage_uki() {
+# reconcile_uki <pkgbase> -- verify, and repair only if verification fails,
+# the UKI and Limine entry for ONE installed Neptune kernel.
+#
+# Parameterised by pkgbase (rather than closing over KERNEL_PKG) because the
+# pacman hook has to reconcile whatever is installed, which after a pin move
+# or a partial upgrade is not necessarily the pinned series.
+reconcile_uki() {
+  local pkgbase=$1
   local uki moddir
-  moddir=$(kernel_module_dir "$KERNEL_PKG") ||
-    fail "internal error: stage_uki ran without an installed ${KERNEL_PKG}"
-  uki=$(find_uki_for "$KERNEL_PKG") || uki=""
+  moddir=$(kernel_module_dir "$pkgbase") ||
+    fail "internal error: reconcile_uki called for '${pkgbase}', which has no /usr/lib/modules/*/pkgbase"
+  uki=$(find_uki_for "$pkgbase") || uki=""
 
-  # Idempotency rule. Regenerating unconditionally would be *correct* but not
-  # idempotent: an initramfs is not byte-reproducible, so a rebuilt UKI has
-  # different bytes, and limine-entry-tool writes the UKI's blake2b hash into
-  # the config -- so the config would change on every run too. Skip only when
-  # the artifacts are provably current: the UKI exists, is newer than the
-  # kernel image it was built from, and is registered in the Limine config.
+  # Idempotency rule. Skip only when the artifacts are provably current: the
+  # UKI exists, is newer than the kernel image it was built from, and is
+  # registered in the Limine config.
+  #
+  # CORRECTION (measured in vm-kernel-hook-test.sh, 2026-08-08): an earlier
+  # version of this comment justified the skip by claiming an initramfs is
+  # not byte-reproducible, so a needless rebuild would change the UKI's bytes
+  # and therefore the blake2b hash limine-entry-tool records in the config.
+  # That is false on current mkinitcpio: rebuilding this UKI from unchanged
+  # inputs produced a byte-identical file, sha256 and all. The skip is still
+  # right -- rebuilding a 140 MB UKI and rewriting the boot config to say the
+  # same thing is minutes of work and an unnecessary write to the boot chain,
+  # inside a pacman hook that runs on every kernel change -- but it is a cost
+  # and blast-radius argument, not a reproducibility one.
   if [[ -z ${OMARCHY_DECK_FORCE_UKI:-} && -n $uki ]] &&
     $SUDO test "$uki" -nt "$moddir/vmlinuz" &&
     [[ $(limine_entry_count "$uki") -eq 1 ]]; then
     log "UKI up to date: ${uki} (newer than ${moddir}/vmlinuz, registered once in ${LIMINE_CONFIG##*/})"
   else
-    log "building UKI for ${KERNEL_PKG} via limine-mkinitcpio"
+    log "building UKI for ${pkgbase} via limine-mkinitcpio"
     $SUDO limine-mkinitcpio ||
       fail "limine-mkinitcpio failed -- see output above. The boot entry was not updated."
 
-    uki=$(find_uki_for "$KERNEL_PKG") ||
-      fail "limine-mkinitcpio exited 0 but no *_${KERNEL_PKG}.efi appeared in ${ESP_PATH}/EFI/Linux. Do not reboot; this is exactly the PLAN.md §8.1 failure mode."
+    uki=$(find_uki_for "$pkgbase") ||
+      fail "limine-mkinitcpio exited 0 but no *_${pkgbase}.efi appeared in ${ESP_PATH}/EFI/Linux. Do not reboot; this is exactly the PLAN.md §8.1 failure mode."
 
     # limine-mkinitcpio registers the entry itself. If it did not, register
     # explicitly -- and verify afterwards rather than assuming the call worked.
     if [[ $(limine_entry_count "$uki") -eq 0 ]]; then
-      log "registering Limine entry for ${KERNEL_PKG}"
-      $SUDO limine-entry-tool --add-uki "$KERNEL_PKG" "$uki" \
+      log "registering Limine entry for ${pkgbase}"
+      $SUDO limine-entry-tool --add-uki "$pkgbase" "$uki" \
         --comment "Neptune kernel (${moddir##*/})" ||
-        fail "limine-entry-tool --add-uki failed for ${KERNEL_PKG}"
+        fail "limine-entry-tool --add-uki failed for ${pkgbase}"
     fi
   fi
 
   # Post-conditions, checked every run including the skip path.
-  $SUDO test -f "$uki" || fail "UKI missing at ${uki} after stage_uki"
+  $SUDO test -f "$uki" || fail "UKI missing at ${uki} after reconcile_uki ${pkgbase}"
   local refs
   refs=$(limine_entry_count "$uki")
   [[ $refs -eq 1 ]] ||
     fail "expected exactly 1 Limine entry referencing ${uki##*/}, found ${refs}. The kernel is installed but its boot entry is wrong -- inspect ${LIMINE_CONFIG} before rebooting."
 
   log "boot entry verified: ${uki} referenced once in ${LIMINE_CONFIG##*/}"
+}
+
+stage_uki() {
+  # Was "internal error": before TASK-T1 step 6 the only caller was main(),
+  # which had just run stage_kernel, so reaching this meant a bug in this
+  # script. It is now a reachable user path -- `stage-uki` invoked before
+  # `stage-kernel` -- so it says which prerequisite is missing and what to
+  # run, and lists what IS installed so a pin mismatch is obvious.
+  local installed
+  installed=$(installed_neptune_pkgbases | tr '\n' ' ')
+  kernel_module_dir "$KERNEL_PKG" >/dev/null ||
+    fail "stage-uki needs ${KERNEL_PKG} installed, but no /usr/lib/modules/*/pkgbase names it (installed Neptune kernels: ${installed:-none}). Run '${PROG}.sh stage-kernel' first, or the full run with no arguments."
+  reconcile_uki "$KERNEL_PKG"
 }
 
 # ---------------------------------------------------------------------------
@@ -602,7 +807,221 @@ stage_prune() {
 }
 
 # ---------------------------------------------------------------------------
-# Stage 6: ESP permissions (PLAN.md §8.5)
+# Stage 6: the pacman hook (PLAN.md §11, TASK-T1 step 3)
+# ---------------------------------------------------------------------------
+
+# stage_reconcile -- what the pacman hook runs. Glob-keyed over every
+# installed Neptune kernel, then prune.
+#
+# Deliberately does NOT include stage_repos (a `pacman -Sy` inside a pacman
+# transaction would deadlock on the database lock) or stage_esp_permissions
+# (unmounting the ESP mid-transaction, while pacman may still have files open
+# on it, is not something a hook gets to do). Everything it does call is
+# read-only against the pacman database -- `pacman -Q*` queries take no lock,
+# which is also why upstream's own PostTransaction hook can call `pacman -Qqo`.
+stage_reconcile() {
+  local -a installed=()
+  mapfile -t installed < <(installed_neptune_pkgbases)
+
+  if [[ ${#installed[@]} -eq 0 ]]; then
+    log "reconcile: no linux-neptune-* kernel is installed -- pruning only"
+  else
+    log "reconcile: verifying ${#installed[@]} installed Neptune kernel(s): ${installed[*]}"
+    local pkgbase
+    for pkgbase in "${installed[@]}"; do
+      reconcile_uki "$pkgbase"
+    done
+  fi
+
+  stage_prune
+}
+
+# hook_text -- the ALPM hook, written to stdout.
+#
+# The comment block is part of the artifact on purpose: it is the answer to
+# "why does this exist when limine-mkinitcpio-hook already does all of this",
+# and the person who asks that is reading the hook file, not this script.
+hook_text() {
+  cat <<HOOK
+# ${HOOK_NAME} -- installed by ${PROG}.sh (TASK-T1 step 3, PLAN.md §11).
+# Not shipped by any package yet. Remove this file and ${HOOK_SCRIPT_PATH}
+# together; leaving the hook without the script makes every pacman
+# transaction fail with "unable to run hook".
+#
+# ===========================================================================
+# WHAT UPSTREAM ALREADY DOES -- verified against limine-mkinitcpio-hook
+# 1.36.0-1, by reading the hooks and scripts it actually installs.
+# ===========================================================================
+#
+# This hook does NOT build UKIs and does NOT register Limine entries as its
+# normal path, because limine-mkinitcpio-hook already does both, correctly,
+# for every kernel package including linux-neptune-*:
+#
+#   INSTALL / UPGRADE -- /etc/pacman.d/hooks/90-mkinitcpio-install.hook
+#     (shipped by limine-mkinitcpio-hook into /etc, where it shadows
+#     mkinitcpio's own same-named hook in /usr/share/libalpm/hooks).
+#     Triggers: Type=Path, Operation=Install|Upgrade,
+#     Target=usr/lib/modules/*/pkgbase  -- plus a second trigger on
+#     usr/lib/firmware/* and friends that forces a rebuild of *every*
+#     kernel. PostTransaction, NeedsTargets. Runs
+#     /usr/share/libalpm/scripts/limine-mkinitcpio-install, which reads each
+#     pkgbase file, builds \$ESP/EFI/Linux/<prefix>_<pkgbase>.efi (prefix =
+#     CUSTOM_UKI_NAME from /etc/default/limine, else the machine-id) and
+#     calls limine-entry-tool --add-uki. A plain \`pacman -S linux-neptune-*\`
+#     reinstall counts as Upgrade (libalpm classifies a reinstall as an
+#     upgrade because the package is already in the local db), so a reinstall
+#     is fully covered.
+#
+#   REMOVE -- 60-limine-mkinitcpio-remove-pre.hook (PreTransaction, records
+#     the pkgbase names into /var/lib/limine/removed_kernels.list) plus
+#     90-limine-mkinitcpio-remove-post.hook (PostTransaction, runs
+#     limine-mkinitcpio-remove post, which drops the Limine entries and
+#     deletes the UKI files -- limine-entry-tool --remove-all deletes files
+#     unless --keep-files is passed). So \`pacman -Rns linux-neptune-611\`
+#     after a bump to -612 IS cleaned up; that is not the gap.
+#
+# ===========================================================================
+# THE GAPS THIS HOOK ACTUALLY CLOSES
+# ===========================================================================
+#
+# 1. limine-mkinitcpio-install can fail and still exit 0. Every one of its
+#    per-kernel error paths is \`error_msg ...; continue\`: a failed
+#    mkinitcpio, an empty pkgbase, a missing cmdline. The loop moves on, the
+#    script exits 0, and pacman prints nothing unusual -- while the Limine
+#    entry still points at the PREVIOUS UKI, whose modules directory the
+#    upgrade just deleted. That is PLAN.md §8.1's failure mode exactly:
+#    progress printed, nothing done, success reported. The machine looks fine
+#    until it is rebooted.
+#
+# 2. Its whole-run failure path is also quiet. \`initialize_header || exit 1\`
+#    fires when the ESP is not mounted (which on this project's systems is
+#    one failed umount/mount cycle away, see PLAN.md §8.5). A PostTransaction
+#    hook exiting non-zero cannot roll the transaction back, so the kernel is
+#    installed with no UKI behind a single terse pacman error line.
+#
+# 3. limine-mkinitcpio-remove's post_remove never checks whether the removal
+#    worked -- limine-entry-tool --remove-all is called unchecked and then
+#    /var/lib/limine/removed_kernels.list is deleted unconditionally, so a
+#    failed removal is forgotten permanently. The result is a Limine entry
+#    pointing at a UKI that is gone. Nothing upstream ever revisits it.
+#    stage_prune (glob-keyed on linux-neptune-*, not on any pinned version)
+#    reconciles that on the next transaction.
+#
+# So: this hook VERIFIES, and only repairs when verification fails. For every
+# installed linux-neptune-* it asserts the UKI exists, is newer than the
+# vmlinuz it was built from, and is referenced exactly once in the Limine
+# config; it rebuilds via limine-mkinitcpio only when one of those is false,
+# and it prunes UKIs/entries belonging to Neptune kernels that are no longer
+# installed. That makes it idempotent by construction -- the healthy path
+# writes nothing, so repeat runs cannot duplicate entries.
+#
+# ===========================================================================
+# WHAT THIS HOOK DELIBERATELY DOES NOT DO
+# ===========================================================================
+#
+# The linux-firmware-neptune conflict (the --ask=4 fix in ${PROG}.sh's
+# stage_kernel) is NOT handled here, and no ALPM hook can handle it: libalpm
+# asks "Remove linux-firmware? [y/N]" during transaction *preparation*, before
+# any hook -- including PreTransaction hooks -- has run. There is nothing to
+# hook. In practice it only bites on the first swap, which stage_kernel owns;
+# once Arch's split linux-firmware-* packages are gone there is nothing left
+# to conflict with and a routine \`pacman -Syu\` upgrades
+# linux-firmware-neptune in place. It recurs only if something drags Arch's
+# linux-firmware back in as a dependency, and the fix for that belongs in
+# packaging (a \`conflicts\` entry on the Deck package, T5), not in a hook.
+#
+# ===========================================================================
+
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = linux-neptune-*
+Target = linux-firmware-neptune
+
+[Action]
+Description = Verifying Neptune UKIs and Limine entries (omarchy-deck)
+When = PostTransaction
+Exec = ${HOOK_SCRIPT_PATH} reconcile
+HOOK
+}
+
+# script_source_path -- an absolute path to the file this script is running
+# from, so stage_hook can install a copy for the hook to call.
+#
+# Returns non-zero when there is no such file, which is the \`curl | bash\`
+# case: bash has already consumed the pipe, so the source cannot be recovered
+# from /proc/self/fd either. stage_hook turns that into a loud, actionable
+# failure rather than quietly skipping hook installation -- a run that
+# reports success without leaving the hook behind would be the §8.1 defect
+# in this script instead of in upstream's.
+script_source_path() {
+  local src=${OMARCHY_DECK_SCRIPT_PATH:-${BASH_SOURCE[0]:-}}
+  [[ -n $src && -f $src && -r $src ]] || return 1
+  local dir base
+  dir=$(cd -- "$(dirname -- "$src")" && pwd) || return 1
+  base=$(basename -- "$src")
+  printf '%s/%s\n' "$dir" "$base"
+}
+
+stage_hook() {
+  local src
+  src=$(script_source_path) ||
+    fail "cannot install the pacman hook: this script is not running from a readable file (\$0='${0}'). Piping it straight into bash works for everything else, but the hook has to call a copy of it on disk. Download it to a file and re-run, or set OMARCHY_DECK_SCRIPT_PATH to its path."
+
+  $SUDO install -d -m 0755 "$HOOK_DIR" ||
+    fail "could not create ${HOOK_DIR}"
+
+  # The callable copy. Compared byte-for-byte rather than copied every run:
+  # an unconditional copy would change the mtime on every invocation, which
+  # is exactly the kind of "idempotent except for the bits nobody snapshots"
+  # claim this project does not accept.
+  if $SUDO cmp -s "$src" "$HOOK_SCRIPT_PATH" 2>/dev/null; then
+    log "hook: ${HOOK_SCRIPT_PATH} already current"
+  else
+    log "hook: installing ${HOOK_SCRIPT_PATH}"
+    $SUDO install -D -m 0755 "$src" "$HOOK_SCRIPT_PATH" ||
+      fail "could not install ${HOOK_SCRIPT_PATH}"
+  fi
+
+  local tmp_hook
+  tmp_hook=$(mktemp) || fail "mktemp failed"
+  hook_text >"$tmp_hook" || { rm -f "$tmp_hook"; fail "could not render the pacman hook"; }
+
+  if $SUDO cmp -s "$tmp_hook" "$HOOK_PATH" 2>/dev/null; then
+    log "hook: ${HOOK_PATH} already current"
+  else
+    log "hook: installing ${HOOK_PATH}"
+    $SUDO install -D -m 0644 "$tmp_hook" "$HOOK_PATH" ||
+      { rm -f "$tmp_hook"; fail "could not install ${HOOK_PATH}"; }
+  fi
+  rm -f "$tmp_hook"
+
+  # Verify what is on disk, not what install(1) reported (PLAN.md §8.1).
+  $SUDO test -x "$HOOK_SCRIPT_PATH" ||
+    fail "${HOOK_SCRIPT_PATH} is missing or not executable after installing it"
+  $SUDO cmp -s "$src" "$HOOK_SCRIPT_PATH" ||
+    fail "${HOOK_SCRIPT_PATH} differs from ${src} after installing it -- is / read-only or full?"
+
+  # An Exec= line pointing at something that does not exist turns every
+  # future pacman transaction into a failure, so parse it back out of the
+  # installed file and check the target rather than assuming the heredoc
+  # rendered correctly.
+  local exec_target
+  exec_target=$($SUDO sed -nE 's/^Exec[[:space:]]*=[[:space:]]*([^[:space:]]+).*/\1/p' "$HOOK_PATH" | head -n 1)
+  [[ -n $exec_target ]] ||
+    fail "wrote ${HOOK_PATH} but it has no Exec= line on re-read"
+  [[ $exec_target == "$HOOK_SCRIPT_PATH" ]] ||
+    fail "${HOOK_PATH}'s Exec= points at '${exec_target}', expected '${HOOK_SCRIPT_PATH}'"
+  $SUDO test -x "$exec_target" ||
+    fail "${HOOK_PATH} would run '${exec_target}', which is not executable -- every pacman transaction would fail. Refusing to leave that in place."
+
+  log "pacman hook ready: ${HOOK_PATH} -> ${HOOK_SCRIPT_PATH} reconcile"
+}
+
+# ---------------------------------------------------------------------------
+# Stage 7: ESP permissions (PLAN.md §8.5)
 #
 # SECURITY TRADEOFF -- deliberately visible, not buried:
 #   archinstall hardens the ESP to fmask=0077,dmask=0077 on UKI setups, on
@@ -791,19 +1210,197 @@ stage_esp_permissions() {
 }
 
 # ---------------------------------------------------------------------------
+# CLI (TASK-T1 steps 4 and 6)
+# ---------------------------------------------------------------------------
 
-main() {
-  stage_preconditions
-  stage_repos
-  stage_esp_detect
-  stage_firmware_swap
-  stage_kernel
-  stage_uki
-  stage_prune
-  stage_esp_permissions
+# INSTALL_STAGES -- the full run, in execution order, and the single source of
+# truth for what a stage is. The full run iterates this array, `list-stages`
+# prints it, and single-stage dispatch validates against it, so "runnable on
+# its own" and "part of the full run" cannot drift apart.
+#
+# Two orderings here are deliberate and were argued out in earlier steps; do
+# not sort this list:
+#   * stage-hook comes BEFORE stage-esp-permissions. The hook is what keeps
+#     the boot chain correct across future updates, and it must not be hostage
+#     to a umount/mount cycle that can legitimately fail on a busy ESP.
+#   * stage-hook comes AFTER the kernel stages: it is only worth installing
+#     once this run has proven the machinery it verifies actually works here.
+#
+# The stage names are the ones TASK-T1 step 6 asked for, updated to the stages
+# that actually exist. Two of that task file's five names have no counterpart
+# and are NOT accepted as aliases, because both would be lies: `stage-bootloader`
+# (the Limine entry is not written by this script -- limine-entry-tool writes
+# it, from stage-uki) and `stage-permissions` (spelled stage-esp-permissions,
+# since it is specifically the ESP's mount options). An unknown name is a
+# usage error listing the real ones, not a guess at what was meant.
+readonly -a INSTALL_STAGES=(
+  stage-preconditions
+  stage-repos
+  stage-esp-detect
+  stage-firmware-swap
+  stage-kernel
+  stage-uki
+  stage-prune
+  stage-hook
+  stage-esp-permissions
+)
+
+# Stages that read ESP_PATH / LIMINE_CONFIG, and therefore need stage_esp_detect
+# to have run first. See ESP prerequisite note in run_one_stage.
+readonly -a ESP_DEPENDENT_STAGES=(
+  stage-uki
+  stage-prune
+  stage-esp-permissions
+)
+
+# stage_function <stage-name> -- derived, not tabulated, so there is no second
+# list to fall out of sync with INSTALL_STAGES.
+stage_function() {
+  local n=${1#stage-}
+  printf 'stage_%s\n' "${n//-/_}"
+}
+
+in_list() {
+  local want=$1 x
+  shift
+  for x in "$@"; do [[ $x == "$want" ]] && return 0; done
+  return 1
+}
+
+# run_one_stage <stage-name> -- TASK-T1 step 6's "each callable individually".
+#
+# ESP prerequisite note: stage_preconditions and stage_esp_detect run first
+# when the requested stage needs what they set. They are pure probes -- they
+# install nothing, write nothing and unmount nothing -- so this does not
+# violate "a stage does only its own job". The alternative is a stage that
+# assumes where the ESP is, which is PLAN.md §8.3 exactly. Prerequisites a
+# probe cannot satisfy (repos synced, kernel installed) are the stages' own
+# require_valve_repos / kernel_module_dir checks, which name the stage to run.
+run_one_stage() {
+  local name=$1 fn
+  in_list "$name" "${INSTALL_STAGES[@]}" ||
+    usage_error "unknown stage '${name}'. Stages, in full-run order: ${INSTALL_STAGES[*]}"
+
+  fn=$(stage_function "$name")
+  declare -F "$fn" >/dev/null ||
+    fail "internal error: stage '${name}' maps to ${fn}(), which does not exist"
+
+  [[ $name == stage-preconditions ]] || stage_preconditions
+  if [[ $name != stage-esp-detect ]] && in_list "$name" "${ESP_DEPENDENT_STAGES[@]}"; then
+    stage_esp_detect
+  fi
+
+  log "${name}: running on its own"
+  "$fn"
+  log "${name}: ok"
+}
+
+run_install() {
+  local name
+  for name in "${INSTALL_STAGES[@]}"; do
+    "$(stage_function "$name")"
+  done
 
   log "done. Reboot and select the '${KERNEL_PKG}' entry from the Limine menu."
   log "after boot, confirm with: uname -r  (expect it to contain 'neptune-${NEPTUNE_SERIES}')"
+}
+
+usage() {
+  cat <<USAGE
+usage: ${PROG}.sh [options] [command|stage]
+
+commands:
+  install      (default, and what running with no arguments does) the full
+               run: every stage below, in order.
+  reconcile    verify -- and repair only if verification fails -- the UKI and
+               Limine entry of every installed linux-neptune-* kernel, then
+               prune artifacts of ones that are no longer installed. This is
+               what ${HOOK_PATH} runs; it touches no repos, installs nothing,
+               and never unmounts the ESP.
+  list-stages  print the stage names, one per line, in full-run order. For
+               harnesses that want to iterate every stage without hardcoding
+               the list.
+  help         this text.
+
+stages (run exactly one, by name; each is idempotent and exits non-zero on
+failure, so a caller can assert on the exit code alone):
+$(printf '  %s\n' "${INSTALL_STAGES[@]}")
+
+  Running one stage first runs stage-preconditions, and stage-esp-detect when
+  the stage needs the ESP. Both only probe -- nothing is installed, written or
+  unmounted by them. A stage whose real prerequisite is missing (repos not
+  synced for stage-kernel, no kernel installed for stage-uki) fails loudly and
+  says which stage to run first; it never proceeds on a guess.
+
+options:
+  --non-interactive  never prompt; fail fast instead. Implied when stdin is
+                     not a terminal, which covers CI, ssh without a tty, and
+                     systemd units.
+  --interactive      allow prompting (currently: sudo asking for a password)
+                     even when stdin is not a terminal.
+  -h, --help         this text.
+
+exit codes:
+  0  success
+  1  a stage failed
+  2  usage error (unknown stage/command/option, or a bad env var value)
+
+environment:
+  OMARCHY_DECK_NEPTUNE_SERIES  override the pinned series (digits only)
+  OMARCHY_DECK_FORCE_UKI       rebuild the UKI even when it verifies clean
+  OMARCHY_DECK_SCRIPT_PATH     path to install as ${HOOK_SCRIPT_PATH}
+  OMARCHY_DECK_NONINTERACTIVE  1/0 -- force the mode instead of detecting it
+USAGE
+}
+
+main() {
+  local -a positional=()
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --non-interactive) NONINTERACTIVE=1 ;;
+      --interactive)     NONINTERACTIVE=0 ;;
+      -h | --help)       usage; return 0 ;;
+      --)                shift; positional+=("$@"); break ;;
+      -*)                usage >&2; usage_error "unknown option '$1'" ;;
+      *)                 positional+=("$1") ;;
+    esac
+    shift
+  done
+
+  [[ ${#positional[@]} -le 1 ]] ||
+    usage_error "expected at most one command or stage, got ${#positional[@]}: ${positional[*]}"
+
+  local cmd=${positional[0]:-install}
+
+  # The guarantee, applied once for every path below: with stdin on /dev/null
+  # a child that tries to read a prompt gets EOF now rather than blocking on
+  # an inherited pipe until the CI job's timeout. Done after argument parsing
+  # so --interactive can still opt out, and after `usage` so --help is
+  # unaffected either way.
+  if [[ $NONINTERACTIVE -eq 1 ]]; then
+    exec </dev/null
+  fi
+
+  case $cmd in
+    install)
+      run_install
+      ;;
+    reconcile)
+      stage_preconditions
+      stage_esp_detect
+      stage_reconcile
+      log "reconcile: done"
+      ;;
+    list-stages)
+      printf '%s\n' "${INSTALL_STAGES[@]}"
+      ;;
+    help)
+      usage
+      ;;
+    *)
+      run_one_stage "$cmd"
+      ;;
+  esac
 }
 
 main "$@"
