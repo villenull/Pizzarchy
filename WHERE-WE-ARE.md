@@ -211,13 +211,50 @@ T3) cannot be meaningfully developed or tested on this machine as configured.
 T1 was unaffected because it gates on *mechanism* (the Limine UKI tooling),
 not on Omarchy's packaging. **T3 will not be so lucky.**
 
-### 5.5 ⚠️ The test Deck has no Gaming Mode at all
+### 5.5 The test Deck's Gaming Mode — partially resolved
 
-Neither `steam` nor `gamescope` is installed; the only session is Hyprland.
-So "does Desktop Mode conflict with Gaming Mode's Steam instance" and "does
-the session switch work in both directions" are **currently untestable on the
-only hardware available**. T3 is the task that most needs this, and it needs
-it set up first.
+`steam` and `gamescope` are **now installed** (session 7). Valve's own
+gamescope build, not Arch's. The remaining piece is the *session wrapper*,
+which is not obtainable from any configured repo — see §5.9.
+
+**A trap worth knowing:** a bare `pacman -S steam` **installs NVIDIA drivers
+on a Steam Deck**. `steam` depends on the virtual `lib32-vulkan-driver`, and
+with no 32-bit AMD provider installed, pacman picks the NVIDIA stack on its
+own. Naming `lib32-vulkan-radeon` explicitly drops it to zero. Nothing errors
+— it just silently installs the wrong driver. **The ISO package list must pin
+`lib32-vulkan-radeon`**, or every offline install ships unused NVIDIA drivers
+in an uncompressed mirror.
+
+### 5.9 ⚠️ The session wrapper: a licensing and offline problem
+
+The plan says T3 starts by **forking `28allday/Super-Shift-S-Omarchy-Deck-Mode`**.
+Checked in session 7, and that instruction has two problems:
+
+1. **The repo was renamed twice and is superseded.** It is now
+   `28allday/deckshift` (v0.1.15, has Omarchy 4 fixes, actively pushed). The
+   name in the plan is four months stale.
+2. **It is unlicensed** — as was its predecessor. Under default copyright
+   there is no permission to fork, modify or redistribute. The plan's "fork
+   it" instruction is **not legally executable as written.** It can be read as
+   a reference design; it cannot be vendored.
+
+Separately, DeckShift obtains `gamescope-session-git` /
+`gamescope-session-steam-git` **from the AUR** via `yay`/`paru`. That breaks
+two project rules simultaneously: no auto-installing an AUR helper, and **AUR
+packages cannot be part of a fully offline install** (they need network and a
+build step). **T5 must build and carry pre-built `gamescope-session*`
+packages in its own mirror** — a requirement not previously identified.
+
+**Useful and reusable:** the same author's `28allday/omarchy-deck-iso` **is
+MIT-licensed** and is structurally already T5's architecture — a thin Omarchy
+fork, an offline mirror, and post-install steps.
+
+**And the reassuring part:** none of this prior art targets Steam Deck
+*hardware*. It is all "Deck-*style* gaming mode on a generic PC" — no Neptune
+kernel, no Valve firmware, no Jupiter/Galileo detection, and DeckShift
+explicitly handles NVIDIA. The plan (§2) demanded a prior-art check in "week
+one" precisely to avoid duplicating someone else's work; that check is now
+done, and **this project's core differentiator is not duplicated.**
 
 ### 5.6 T0's two remaining gaps
 
