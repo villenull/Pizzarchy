@@ -1079,6 +1079,90 @@ so "does it conflict with Gaming Mode's Steam instance" and "does it stay out
 of the gamescope session" cannot be answered here by any amount of setup.
 That needs a machine with both sessions; realistically a T3/T5-era test.
 
+### T3 prep — Steam/gamescope installed, and the prior-art check done (session 7)
+
+**Steam and gamescope are now installed on the Deck** (snapshot 2 taken
+first), unblocking T3's session work. Installed: `multilib/steam` 1.0.0.87-1,
+`jupiter-staging/gamescope` 3.16.25-3 (Valve's own build — packager is
+`ci-package-builder-1@steamos.cloud`, not Arch's 3.16.24-1), plus
+`lib32-vulkan-radeon`. 91 packages total.
+
+**⚠️ A bare `pacman -S steam` installs NVIDIA drivers on a Steam Deck.**
+`steam` depends on the *virtual* `lib32-vulkan-driver`. `vulkan-radeon` is
+installed for 64-bit but nothing 32-bit provided it, so pacman selected a
+provider on its own and picked the NVIDIA stack — `nvidia-utils`,
+`egl-wayland`, `egl-gbm`, `egl-x11`. Naming `lib32-vulkan-radeon` explicitly
+drops nvidia/EGL packages from the transaction to **zero**.
+
+**T5 must pin `lib32-vulkan-radeon` in the package list.** Otherwise an
+unattended offline install silently puts NVIDIA drivers on AMD-only hardware
+— directly against `PLAN.md`'s AMD-only non-goal — and bakes several hundred
+MB of unused driver into an ISO whose offline mirror is stored
+**uncompressed** (§10.1). Caught by reading a dry run, not by the install
+failing; nothing would have errored.
+
+**Also confirmed: no `gamescope-session*` package exists in `jupiter-staging`
+or `holo-staging`.** The Gaming Mode session wrapper is not obtainable from
+Valve's repos. That is consistent with `PLAN.md` §6.4 (this project builds
+the session layer itself), but see the AUR problem below.
+
+### ⚠️ Prior-art check — `PLAN.md` §2 asked for this in "week one"; done now
+
+`PLAN.md` §2 warned: know the prior art before investing weeks, and if
+someone has moved closer to this, reconsider the approach. The operator
+raised "the deck mode Omarchy project by no-signal.uk". Result:
+
+**no-signal.uk is `28allday`** — the same author `PLAN.md` §2/§5/§6.4 already
+names as T3's starting point. They have shipped more since the plan was
+written:
+
+| Repo | What it is | License | Activity |
+|---|---|---|---|
+| `28allday/deckshift` | **Current** session-switcher. v0.1.15, has Omarchy 4 fixes | **NONE** | pushed 2026-07-27, 6★ |
+| `28allday/omarchy-deck-iso` | Omarchy ISO + offline mirror + deck-mode flip | **MIT** | pushed 2026-06-27, 3★ |
+| `28allday/Super-Shift-S-Omarchy-Deck-Mode` | The repo `PLAN.md` names — **superseded** | **NONE** | pushed 2026-03-28, 8★ |
+| `28allday/omasteam` | Omarchy-*flavoured* desktop running **on SteamOS** in userland | MIT | pushed 2026-08-03 |
+
+**Correction to `PLAN.md` §5/§6.4:** the repo the plan says to fork was
+renamed twice (`Super-Shift-S` → `Omarchy Deck` → **DeckShift**) and is four
+months stale. T3's reference is **DeckShift**, not the name in the plan.
+
+**None of them target Steam Deck hardware.** All are "Steam Deck-*style*
+gaming mode on a generic PC" — no Neptune kernel, no Valve firmware, no
+Jupiter/Galileo detection, and DeckShift explicitly handles NVIDIA. So this
+project's actual differentiator — real Deck hardware support — is **not
+duplicated by the closest prior art**, which is the reassuring answer to the
+question §2 raised. `omasteam` runs *on top of* SteamOS, the opposite
+direction from this project.
+
+**🚫 Blocker: DeckShift and Super-Shift-S are both unlicensed.** Under default
+copyright that means no permission to fork, modify, or redistribute.
+**`PLAN.md` §5's instruction to "fork `28allday/Super-Shift-S...`" is not
+legally executable as written.** `omarchy-deck-iso` and `omasteam` *are* MIT.
+Until a license exists, DeckShift can be **read as a reference design** but
+not forked or vendored.
+
+**🚫 Second blocker: DeckShift gets `gamescope-session-git` /
+`gamescope-session-steam-git` from the AUR via `yay`/`paru`** (ChimeraOS's
+session framework). That collides with two project constraints at once:
+`CLAUDE.md` forbids auto-installing an AUR helper (it caused a real upstream
+installer failure), and **AUR packages cannot be part of a fully offline
+install** — they need network plus a build step. T5's offline mirror would
+have to carry pre-built `gamescope-session*` packages, built by this
+project's own CI. **This is a new, previously unidentified T5 requirement.**
+
+**Worth reusing:** `omarchy-deck-iso` is MIT and is structurally already
+T5's architecture — a thin Omarchy fork plus an offline mirror plus
+post-install steps. It is a legitimate base to build on even though it has no
+Deck hardware support.
+
+**Recommended position** (operator decision, not taken): read DeckShift as the
+reference for session switching rather than forking it; consider
+`omarchy-deck-iso` (MIT) as T5's base; and **send the already-drafted R1 §10.6
+outreach to 28allday**, which now has a concrete ask — a license on DeckShift
+— on top of the collaboration question. That outreach has been held
+indefinitely by operator choice; this finding is a reason to revisit.
+
 ## Blocked on human
 
 - Ventoy setup on the test USB (T0 step 2)
