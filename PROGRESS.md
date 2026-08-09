@@ -976,15 +976,56 @@ config (`/+Omarchy` → `//linux-neptune-611`) that is:
 default_entry: Omarchy/linux-neptune-611
 ```
 
-**Proposed fix, not yet implemented:** a `stage-default-entry` — or an
-extension of `stage-uki` — that asserts the default resolves to the pinned
-Neptune kernel and repairs it when it does not, writing the *entry path*
-rather than an index and keying on the `linux-neptune-*` glob like every
-other reconcile path. It belongs in `reconcile` too, so the pacman hook
-re-asserts it whenever kernels change. Note the entry-path form needs
-verifying on hardware before it ships: the docs say it works, but this
-project's history (`PLAN.md` §8) is mostly cases where documented behavior
-and real behavior diverged.
+**Applied to the operator's Deck and confirmed working (session 7).**
+`/boot/limine.conf` now reads `default_entry: Omarchy/linux-neptune-611`
+(backup at `~/limine.conf.before-default-entry-fix`; one-line diff, verified
+on re-read, `limine-list` still parses, `reconcile` still exits 0). The
+operator rebooted and **let the menu time out with no key pressed** — it
+booted the Neptune kernel unattended.
+
+The entry name was taken from `limine-list`, which is authoritative rather
+than inferred from config syntax:
+
+```
+Omarchy
+├─ linux-neptune-611
+├─ linux
+└─ Snapshots
+EFI fallback
+```
+
+**Useful discovery: Limine implements the Boot Loader Interface**, so the
+selected entry is readable from userspace after boot, as a *path*:
+
+```
+$ bootctl status          # Product: Limine 12.5.1
+                          # ✓ Default entry control, ✓ One-shot entry control
+LoaderEntrySelected  ->  Omarchy/linux-neptune-611
+```
+
+`LoaderEntrySelected` (EFI var, UTF-16LE, 4-byte attribute prefix) is a
+ready-made assertion target for any future test of boot-entry selection —
+no screen-scraping the menu.
+
+**⚠️ Not yet proven: that the entry-*path* form is what did the work.**
+Entry 1 is also `linux-neptune-611`, so the observed result is equally
+consistent with Limine parsing the path correctly *or* with it failing to
+parse and silently falling back to index 1. A fix that works by accident is
+worse than none, so this must be settled before `stage-default-entry` ships.
+
+**Settle it in QEMU, not on hardware.** This is bootloader config parsing,
+not hardware behavior, so per `CLAUDE.md`'s testing tiers it belongs on the
+`vm-neptune-image.sh` substrate: set `default_entry` to a **non-first** entry
+(e.g. `Omarchy/linux`), boot, and assert `LoaderEntrySelected` matches. If it
+does, the path form is genuinely honoured. Repeatable in CI, and no physical
+reboot needed.
+
+**Still to implement:** a `stage-default-entry` — or an extension of
+`stage-uki` — that asserts the default resolves to the pinned Neptune kernel
+and repairs it when it does not, writing the *entry path* rather than an
+index and keying on the `linux-neptune-*` glob like every other reconcile
+path. It belongs in `reconcile` too, so the pacman hook re-asserts it
+whenever kernels change.
 
 **Incidental.** `shellcheck` is now installed via pacman on the Deck,
 retiring the session-1 scratch-binary workaround noted above. Also: this
