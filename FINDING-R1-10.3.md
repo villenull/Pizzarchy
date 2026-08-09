@@ -1,72 +1,119 @@
 # FINDING R1 §10.3 — Should the gamepad→input mapping layer ship permanently?
 
-**Result: PARTIAL.** Both candidate designs prepared concretely from
-documentation/research. **Not decided** — this requires physical Deck
-hardware and must not be attempted here (per operator instruction and
-CLAUDE.md's testing-tier rule: session switching and gamescope behavior are
-physical-Deck-only test items).
+**Result: RESOLVED — ship design (b), the custom mapper as a systemd user
+service.** Decided 2026-08-09 on the operator's physical Steam Deck OLED
+(`Valve` / `Galileo`, Omarchy 3.8.4, Hyprland 0.56.0 under `uwsm` 0.26.6),
+in the same session as the first hardware run of `omarchy-deck-kernel.sh`.
 
-## Hypothesis (PLAN.md §10.3)
+This file previously held two prepared-but-undecided designs. It is now the
+decision plus the hardware evidence behind it. The design descriptions are
+kept because the corrections to them are the useful part.
 
-Ship the mapping layer, scoped to Desktop Mode only, but the specific design
-is open between two options:
+## The decision
 
-- **(a)** Run Steam in the background during the Omarchy desktop session and
-  inherit its desktop controller layout + on-screen keyboard (OSK) for free.
-- **(b)** Ship the custom mapper (the T2 `uinput`/`evdev` daemon) as a
-  systemd user service, active only in the desktop session.
+**Design (b)** — the T2 `uinput`/`evdev` mapper as a systemd `--user`
+service scoped to the desktop session. Every precondition the earlier draft
+flagged as unverified has now been tested on hardware and works.
 
-## Design (a): background Steam, prepared for testing
+**Design (a)** — backgrounding Steam and inheriting Steam Input's desktop
+layout — is **ruled out**, and not on a close call.
 
-**Mechanism.** In stock SteamOS Desktop Mode, the Steam client itself is
-running (not just Gaming Mode's gamescope session), and Steam Input applies
-a built-in **"Desktop" controller configuration template** whenever no game
-has input focus. This is what gives stock Desktop Mode trackpad-as-mouse and
-an automatic on-screen keyboard on text-field focus — it isn't a separate
-subsystem, it's Steam Input's default desktop layout, active as long as the
-Steam client process is alive and a controller is attached.
+## Why design (a) is out
 
-**How to reproduce this in an Omarchy/Hyprland session:**
-- Add `steam -silent` (suppresses the main Steam window, keeps the client
-  and Steam Input running in the background/tray) to Hyprland's autostart
-  (Omarchy's `~/.config/hypr/autostart.conf` convention, or a `.desktop`
-  autostart file).
-- Steam Input's desktop layout is controlled by the per-user
-  `~/.steam/steam/config/config.vdf` + the controller's "Desktop Controller
-  Layout" — no extra config should be needed since Deck's controller has
-  Steam Input enabled by default for the Deck controller type.
-- The OSK is Steam's own `steamwebhelper`-based keyboard; it triggers on
-  detected text-field focus.
+**It cannot serve the first-boot path, which is the path that matters most.**
+This is a circular dependency between three already-confirmed project facts,
+not a new test result:
 
-**Known unknowns that require hardware:**
-1. Whether `-silent` still initializes the desktop Steam Input layout when
-   launched from a non-gamescope compositor (Hyprland) rather than SteamOS's
-   own Plasma desktop session — this codepath may assume gamescope/Plasma
-   session context.
-2. Whether the OSK correctly detects focus in native Wayland apps vs
-   XWayland apps under Hyprland (Steam's OSK has known Wayland-focus quirks
-   outside SteamOS's own compositor).
-3. Battery/RAM cost of a backgrounded full Steam client during every desktop
-   session, and whether it interferes with Gaming Mode's own Steam instance
-   on session switch (single Steam client, two sessions — needs verifying
-   there's no lock-file/singleton conflict).
-4. Whether it conflicts with the T2 install-time mapper if that process is
-   still running when Desktop Mode starts.
+- Design (a) sources both controller-as-mouse and the on-screen keyboard
+  from a running, **signed-in** Steam client.
+- `FINDING-R1-10.4.md` confirmed Steam requires network to sign in on first
+  launch — over-determined, not a fixable gap.
+- `PLAN.md` §6.1a item 7 requires a **controller-navigable Wi-Fi screen shown
+  before Steam ever gets the display** on a first boot with no client.
 
-**Trade-off as designed:** less code, more SteamOS-faithful, but depends on
-undocumented Steam Input internals behaving the same outside gamescope, and
-carries the overhead/complexity of running the full Steam client during
-every desktop session.
+Under design (a) that Wi-Fi screen would have no working controller input and
+no on-screen keyboard: you would need the OSK to type the Wi-Fi password, but
+the OSK only exists once the network is up and Steam is signed in. So the
+first-boot path needs a non-Steam mapper **regardless of what the steady-state
+desktop uses**. Design (a) could at best cover the steady-state session,
+meaning shipping two input layers where one suffices. That is strictly worse.
 
-## Design (b): custom mapper as a systemd user service, prepared for testing
+**Secondary:** design (a) was also untestable on this hardware. The operator's
+Deck has no Gaming Mode at all — neither `steam` nor `gamescope` is installed,
+and the only sessions are `hyprland.desktop` and `hyprland-uwsm.desktop`. The
+test plan's "confirm no conflict switching back to Gaming Mode's own Steam
+instance" cannot be answered on this machine by any amount of setup. It would
+need a SteamOS-derived install, which this Deck is not. Recorded so a future
+session does not retry it here expecting a different outcome.
 
-**Mechanism.** Adapt the T2 spike's mapper (`uinput`-created virtual
-keyboard/mouse device, fed by `python-evdev` reading the Deck controller) as
-a long-running systemd `--user` service, started only by the Hyprland/Desktop
-session's own systemd target — never by Gaming Mode's gamescope session —
-so scoping is enforced by *which target starts it*, not a runtime check.
+## Design (b) — hardware evidence
 
-**Draft unit** (`~/.config/systemd/user/deck-input-mapper.service`):
+| Test plan item | Result |
+|---|---|
+| `/dev/uinput` access without root | ✅ **works** with one udev rule — verified functionally, not just by permissions |
+| evdev *read* access without root | ✅ already works, via seat ACL — needs no change |
+| Service starts only in the desktop session | ✅ works, but **the draft unit's target does not exist** — corrected below |
+| OSK via `wlr-input-method` | ✅ protocol support confirmed; package available without AUR |
+
+### 1. `/dev/uinput` — the doc's "first thing to validate"
+
+Baseline confirmed the prediction: `crw------- root root`, module not even
+loaded, and an unprivileged open fails with `EACCES`. After the udev rule
+below, an unprivileged functional test passes end to end — opens the node,
+sets `EV_KEY`/`KEY_A` capability bits, issues `UI_DEV_CREATE`, and the device
+appears in `/proc/bus/input/devices` before being destroyed.
+
+**So design (b) does not need a privileged helper.** That was the stated risk
+that would have "undercut design (b)'s advantage"; it does not materialise.
+
+**Ships as `/etc/udev/rules.d/99-deck-uinput.rules`:**
+
+```
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
+```
+
+plus `/etc/modules-load.d/deck-uinput.conf` containing `uinput`, since the
+module is not autoloaded.
+
+**⚠️ `uaccess` alone is NOT sufficient — the installer must add the desktop
+user to the `input` group.** This was tested rather than assumed, and the
+result is counter-intuitive: `/dev/uinput` *does* carry the `uaccess` tag
+(`CURRENT_TAGS=:uaccess:`) but gets **no** user ACL, because systemd's
+`uaccess` builtin only grants ACLs to devices assigned to a seat. `uinput` is
+a virtual device (`/devices/virtual/misc/uinput`) with no `seat` tag —
+compare a real input device, which shows `CURRENT_TAGS=:uaccess:seat:` and
+does receive a `user:<name>:rw-` ACL. `loginctl seat-status seat0` lists no
+uinput entry. The `TAG+="uaccess"` above is kept as harmless
+future-proofing; the `GROUP="input"` clause is what actually grants access
+today. **T4/T5 action item: add the user to `input` at install time.**
+
+By contrast the controller's own evdev nodes *do* get a seat ACL
+(`user:<name>:rw-` on the `Valve Software Steam Controller` and `Steam Deck`
+nodes), so the mapper's **read** side needs no group membership or rule at
+all. Only the write side does.
+
+### 2. The draft unit was wrong, and would have failed silently
+
+The prepared unit used `WantedBy=hyprland-session.target`. **That target does
+not exist** — `systemctl --user show -p LoadState hyprland-session.target`
+returns `LoadState=not-found`. Under `uwsm` 0.26.6 the session targets are
+compositor-instance templates:
+
+```
+wayland-session@hyprland.desktop.target            ← the one to use
+wayland-session-pre@hyprland.desktop.target
+wayland-session-envelope@hyprland.desktop.target
+wayland-session-xdg-autostart@hyprland.desktop.target
+```
+
+A unit with `WantedBy=` a nonexistent target **enables without error and then
+never starts** — exactly the silent-failure class `CLAUDE.md` forbids. Had
+this shipped as drafted, the mapper would have been installed, reported
+success, and simply never run.
+
+**Corrected unit** (`~/.config/systemd/user/deck-input-mapper.service`),
+verified live — `systemctl --user enable` places the symlink in
+`wayland-session@hyprland.desktop.target.wants/` and the service activates:
 
 ```ini
 [Unit]
@@ -80,55 +127,45 @@ ExecStart=%h/.local/bin/deck-input-mapper
 Restart=on-failure
 
 [Install]
-WantedBy=hyprland-session.target
+WantedBy=wayland-session@hyprland.desktop.target
 ```
 
-- `WantedBy=hyprland-session.target` (not the generic
-  `graphical-session.target`) is the actual scoping mechanism: Omarchy
-  launches Hyprland via `uwsm`, which exposes a Hyprland-specific systemd
-  target distinct from whatever starts the gamescope Gaming Mode session.
-  **Needs hardware confirmation** that `hyprland-session.target` (or
-  whatever uwsm names it on this Quattro build) exists and is *not* also
-  reached from the gamescope session.
-- `/dev/uinput` access: default permissions are root-only. Needs either a
-  udev rule granting the `input` group write access plus
-  `SupplementaryGroups=input` on the unit, or an equivalent polkit rule.
-  This permission wiring is untested and should be the first thing a
-  hardware session validates — if it doesn't work non-root, design (b)'s
-  "doesn't require Steam running" advantage is undercut by needing a
-  privileged helper instead.
-- **OSK is not free here** — design (b) doesn't inherit Steam's built-in
-  keyboard. Reuse `wvkbd` or `squeekboard`, both of which support the
-  `wlr-input-method` Wayland protocol that wlroots compositors (Hyprland
-  included) implement, so focus-triggered popup should be possible without
-  bespoke integration — but this is unverified and is the biggest open
-  question for design (b).
+Note there is **no `SupplementaryGroups=`** — that directive is not permitted
+in a `--user` unit, which is the other reason the `input` group has to be
+granted at install time rather than per-service.
 
-**Trade-off as designed:** more predictable, doesn't require the Steam
-client running, but is more code to own (mapper + OSK + udev rule +
-wlr-input-method wiring), and duplicates behavior Steam already provides
-for free in design (a).
+The scoping argument also holds up structurally: the target is parameterised
+by the compositor's `.desktop` name, so a gamescope Gaming Mode session
+cannot reach `wayland-session@hyprland.desktop.target`. It would instantiate a
+different unit instance, or not use `uwsm` at all. **Reasoned, not verified** —
+there is no gamescope session on this machine to test against.
 
-## What a hardware test session needs to do to decide
+### 3. OSK — feasible, and the AUR constraint picks the package
 
-1. Boot into Omarchy Desktop Mode on the Deck.
-2. **Test (a):** add `steam -silent` to Hyprland autostart, reboot into
-   Desktop Mode, and check: controller-as-trackpad works, OSK appears on
-   text-field focus in both a native Wayland app and an XWayland app,
-   measure idle RAM/battery delta with Steam backgrounded, and confirm no
-   conflict switching back to Gaming Mode's own Steam instance.
-3. **Test (b):** install the T2 mapper as the systemd user service above,
-   confirm it starts only in the Hyprland session and never under
-   gamescope, confirm `/dev/uinput` access works without running as root,
-   wire up `wvkbd`/`squeekboard` via `wlr-input-method` and test
-   focus-triggered popup.
-4. Compare on: reliability, input latency, resource/battery cost, code
-   surface to maintain long-term, and whether either breaks Gaming Mode
-   session switching.
-5. Record the decision by superseding this file with a resolved finding —
-   this file should be treated as scaffolding for that session, not a final
-   answer.
+Hyprland 0.56.0 implements **both** relevant protocol families, confirmed
+from the binary's own symbols: `zwp_input_method_manager_v2` (what
+`squeekboard` uses) and `zwp_virtual_keyboard_manager_v1` + `zwlr_layer_shell_v1`
+(what `wvkbd` uses). So the doc's "biggest open question for design (b)" is
+answered at the protocol level: focus-triggered popup is supported.
 
-Both designs above are prepared so this comparison can start immediately on
-hardware rather than needing setup work first. No physical Deck access was
-used or attempted to produce this finding.
+**Use `squeekboard`, not `wvkbd`.** `squeekboard` is in Arch `extra`
+(1.43.1-5); `wvkbd` is AUR-only, and `CLAUDE.md` forbids auto-installing an
+AUR helper. The doc's first suggestion was the one this project cannot ship.
+
+## What is still unverified
+
+Stated plainly rather than implied by omission:
+
+- **The mapper itself does not exist.** T2 is not started — the repo has only
+  `TASK-T2-gamepad-input-spike.md`. What is verified here is that every
+  *precondition* design (b) depends on works on real hardware. Input latency
+  and reliability, which the test plan lists as comparison criteria, cannot
+  be measured until there is a mapper to measure.
+- **OSK focus-triggered popup is protocol-confirmed, not demonstrated.**
+  `squeekboard` was not installed. Confirming an actual popup on text-field
+  focus in a native Wayland app and an XWayland app remains to be done.
+- **Gaming Mode coexistence is untestable on this Deck** (no gamescope). It
+  needs a machine with both sessions installed — realistically a T3/T5-era
+  test, not a repeat of this one.
+- Battery/RAM cost was not measured for either design; with (a) ruled out on
+  structural grounds the comparison it was meant to inform is moot.

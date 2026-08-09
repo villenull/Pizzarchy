@@ -64,6 +64,31 @@ path (sudo asking for a password) proven to fail in 0s instead of blocking.
 Both existing suites re-run green as regressions. See "T1 steps 4 + 6"
 under Findings.
 
+**Session 7: T1 ran on the physical Deck for the first time — and the first
+hardware run found a bug six VM suites could not.** All nine stages plus
+`reconcile` now exit 0 on the operator's OLED Deck (Valve Galileo), but
+`stage-uki` failed on the first attempt: `limine_entry_count()` counted the
+UKI basename as a *substring* of the whole Limine config, so
+`limine-snapper-sync`'s snapshot-rollback entries — whose paths embed the
+same basename under `limine_history/` — were miscounted as duplicate boot
+entries. The trigger is **the safety snapshot that `TASK-hardware-validation.md`
+step 2 mandates**: before it there were zero snapshot entries and the check
+passed. Fixed by anchoring the count to real `path:` lines under the ESP's
+`/EFI/Linux/`. See "T1 — first physical hardware run" under Findings.
+**Rebooted and verified** — the Deck boots the Neptune kernel cleanly with the
+new Snapshots submenu present, and `reconcile` still writes nothing after a
+real boot.
+
+**Session 7 also resolved R1 §10.3**, the other item blocked on hardware all
+project: **ship design (b)**, the `uinput`/`evdev` mapper as a systemd
+`--user` service. Design (a) (background Steam) is ruled out on a circular
+dependency — it sources the OSK from a signed-in Steam client, and §6.1a's
+pre-Steam Wi-Fi screen would need that OSK to type the password Steam is
+waiting on. Design (b)'s preconditions all verified on hardware, and two
+concrete errors in the prepared design were found by running it (a systemd
+target that does not exist, and `uaccess` not covering `/dev/uinput`). See
+"R1 §10.3 — gamepad mapping decided on hardware" under Findings.
+
 ### T0 §1 deliverables (session 1)
 
 Flat files (per `CLAUDE.md`'s no-subdirectories rule — the task file's
@@ -214,8 +239,8 @@ human" below instead.
 | Task | Status | Notes |
 |---|---|---|
 | T0 Test infrastructure | **§1–6 all built; two verification gaps remain** | §1 harness unit-tested (31 assertions) but not run end-to-end against a real ISO; §2–6 done (Ventoy doc, override loader + 8 tests, deck-sync/snapshot/rollback untested against hardware, CI workflow untested against a real Actions run, shellcheck clean repo-wide). See T0 §1/§2–6 deliverables above for exact gaps. |
-| R1 Research questions | not started | Can run parallel; 10.4 is highest stakes |
-| T1 Kernel and boot | **all six steps done** | Script rewritten and now actually executes: shellcheck clean, idempotency proven in a VM (`vm-kernel-idempotency-test.sh`, run twice, byte-identical end state), kernel version reduced to one documented constant (`NEPTUNE_SERIES_DEFAULT=611`) with glob-keyed entry regeneration. Pacman hook done and VM-verified (`vm-kernel-hook-test.sh`, 33 assertions): fires on install/upgrade/remove of `linux-neptune-*`, verifies rather than duplicates upstream's UKI machinery, repairs a missing UKI, prunes stale entries, and does not duplicate entries on repeat reinstalls. §8.5 reproduced and documented (`FINDING-esp-permissions.md` + upstream issue draft). Steps 4+6 done and VM-verified (`vm-kernel-stage-test.sh`, 45 assertions): nine independently runnable stages, each idempotent alone, exit codes 0/1/2, and no invocation can block on a prompt. Remaining T1 gap is hardware-only — nothing has booted the Neptune kernel on the operator's Deck yet. |
+| R1 Research questions | **all six resolved** | §10.1/§10.2/§10.4/§10.5 resolved session 3; §10.3 resolved session 7 on hardware (ship design (b) — see `FINDING-R1-10.3.md`); §10.6 answered but held indefinitely by operator choice. |
+| T1 Kernel and boot | **all six steps done** | Script rewritten and now actually executes: shellcheck clean, idempotency proven in a VM (`vm-kernel-idempotency-test.sh`, run twice, byte-identical end state), kernel version reduced to one documented constant (`NEPTUNE_SERIES_DEFAULT=611`) with glob-keyed entry regeneration. Pacman hook done and VM-verified (`vm-kernel-hook-test.sh`, 33 assertions): fires on install/upgrade/remove of `linux-neptune-*`, verifies rather than duplicates upstream's UKI machinery, repairs a missing UKI, prunes stale entries, and does not duplicate entries on repeat reinstalls. §8.5 reproduced and documented (`FINDING-esp-permissions.md` + upstream issue draft). Steps 4+6 done and VM-verified (`vm-kernel-stage-test.sh`, 45 assertions): nine independently runnable stages, each idempotent alone, exit codes 0/1/2, and no invocation can block on a prompt. **Session 7: run on the physical Deck for the first time** — all nine stages plus `reconcile` exit 0 on Valve Galileo (OLED), after the run exposed and fixed a real bug (`limine_entry_count` miscounting `limine-snapper-sync` snapshot entries, which both failed `stage-uki` and silently defeated idempotency inside the pacman hook). Rebooted and verified: boots `neptune-611` cleanly, `reconcile` writes nothing post-boot, ESP byte-identical, and audio/Wi-Fi/BT/trackpads/gyro/GPU all spot-check clean. Remaining hardware gap: the stock→Neptune *conversion* path — the Deck was already converted by hand, so `stage-firmware-swap` and `stage-esp-permissions` ran only as no-ops. |
 | T2 Gamepad input spike | not started | Opus. Determines T4's entire scope |
 | T3 Gaming Mode | not started | Needs T0's deck-sync.sh to be efficient |
 | T4 Installer UI | not started | Blocked on T2's finding |
@@ -768,6 +793,292 @@ sat at the prompt. Two more stdin shapes pass too: stdin closed outright
 (`0<&-`), and stdin on a fifo whose writer never writes, which is the shape
 that makes a stray read hang forever rather than see EOF.
 
+### T1 — first physical hardware run (session 7)
+
+The first time any of this project's code touched the real Deck. Nine stages
+plus `reconcile`, run one at a time, against a snapper snapshot taken first
+(`root`, snapshot **1**). Hardware: `Valve` / `Galileo` — OLED, the only
+verified model.
+
+**The environment is not what the task file assumed, and that is itself a
+finding.** The operator's Deck runs **Omarchy 3.8.4 installed from git**
+(`~/.local/share/omarchy`, `omarchy-version-branch` → `master`), **not**
+Quattro: no `/usr/share/omarchy`, no `/etc/omarchy.conf`, and neither
+`omarchy` nor `omarchy-dev` is an installed package. That resolves the
+session-4 open item ("confirming `omarchy` vs `omarchy-dev` — likely just
+the wrong package name"): it was neither. There is no Omarchy package at
+all on a 3.x git install.
+
+**It ran anyway, and the reason matters for T5.** `omarchy-deck-kernel.sh`
+gates on *mechanism*, never on version — `stage_preconditions` checks tools,
+sudo, Deck DMI and `command -v limine-entry-tool`, and no executable line in
+the script references `/usr/share/omarchy`, `/etc/omarchy.conf` or the
+`omarchy` package. The UKI prefix is *discovered* from `/etc/default/limine`
+rather than assumed. On this machine that file already carries the
+Quattro-shaped values the script was written for (`ENABLE_UKI=yes`,
+`CUSTOM_UKI_NAME="omarchy"`, `ESP_PATH="/boot"`). **So the boot-chain work
+requires Quattro's *mechanism* (`limine-mkinitcpio-hook`), not Quattro's
+*packaging*.** A 3.x install that has had `omarchy update` pull in the
+boot-chain machinery is a supported substrate.
+
+**The bug this found — `limine_entry_count()` substring miscount.**
+`reconcile_uki` asserts each UKI is referenced exactly once in the Limine
+config. The counter behind it was `grep -cF` on the bare basename.
+`limine-snapper-sync` writes a Snapshots submenu whose entries boot a
+snapshot's copy of the same UKI, at a path that *contains* that basename:
+
+```
+path: boot():/EFI/Linux/omarchy_linux-neptune-611.efi#<hash>                              ← the real entry
+path: boot():/<machine-id>/limine_history/omarchy_linux-neptune-611.efi_sha256_<h>#<hash>  ← a snapshot entry
+```
+
+Count 2, not 1 → `stage-uki` exits 1 with "expected exactly 1 Limine entry
+… found 2". The boot chain was *correct*; the check was wrong.
+
+**The second-order bug is the worse one.** `reconcile_uki`'s up-to-date test
+also requires the count to be exactly 1. With any snapshot present that is
+never true, so the UKI is **rebuilt on every run** — and this code is what
+the pacman hook executes, meaning a pointless boot-chain write on every
+kernel transaction. The idempotency proven in session 4 (`run1_exit=0
+run2_exit=0 state_diff_exit=0`) was real in the VM and silently false on any
+real machine with a snapshot. Observed directly: the failing run rebuilt
+*both* UKIs; after the fix the same stage logs "UKI up to date … registered
+once" and writes nothing.
+
+**Why six VM suites missed it.** `vm-neptune-image.sh` builds a substrate
+with limine + `limine-mkinitcpio-hook`, but nothing in
+`vm-kernel-idempotency-test.sh`, `vm-kernel-hook-test.sh` or
+`vm-kernel-stage-test.sh` ever creates a snapper snapshot, so
+`limine-snapper-sync` never generated a Snapshots submenu and the second
+reference never existed. The gap is in the *substrate*, not the assertions —
+worth closing before trusting the next idempotency claim.
+
+**The fix.** `limine_entry_count()` now counts only `path:` lines pointing
+into the ESP's own `/EFI/Linux/`, with the basename terminated by the
+`#<hash>` suffix, whitespace, or end of line; `limine_history/` paths fail
+that anchor. Verified against the real config: old counter 2, new counter 1,
+for both `omarchy_linux-neptune-611.efi` and `omarchy_linux.efi`.
+`shellcheck` clean.
+
+**Results — all nine stages, plus the hook's own entry point:**
+
+| Stage | Exit | Effect on this machine |
+|---|---|---|
+| `stage-preconditions` | 0 | no-op; detected `Valve Galileo` |
+| `stage-repos` | 0 | **added** `jupiter-staging` + `holo-staging` (they were absent) |
+| `stage-esp-detect` | 0 | no-op; `/boot` on `/dev/nvme0n1p1` |
+| `stage-firmware-swap` | 0 | no-op — "no Arch linux-firmware packages left to displace" |
+| `stage-kernel` | 0 | no-op; all four packages already current |
+| `stage-uki` | **1 → 0** | failed on the bug above; after the fix, skips cleanly |
+| `stage-prune` | 0 | no-op; 1 Neptune UKI, 1 installed Neptune kernel |
+| `stage-hook` | 0 | **installed** the hook + `/usr/local/bin/omarchy-deck-kernel` |
+| `stage-esp-permissions` | 0 | no-op; already `fmask=0133,dmask=0022`, fstab untouched |
+
+`/usr/local/bin/omarchy-deck-kernel reconcile` (what the pacman hook runs)
+also exits 0 and **writes nothing** — `md5sum` of all four UKIs and
+`limine.conf` identical before and after. The "idempotent by construction,
+the healthy path writes nothing" claim now holds on hardware, not only in
+QEMU.
+
+**⚠️ Scope limit — this was a reconcile run, not a conversion run.** The
+Deck was already in most of T1's end state before the script ran: per
+`/var/log/pacman.log`, `linux-neptune-611`, `-headers`,
+`linux-firmware-neptune` and `steamdeck-dsp` were installed **by hand on
+2026-08-03**, Arch's `linux-firmware` removed the same day, and `/boot` was
+already mounted `0133/0022`. So seven of nine stages were exercised only on
+their no-op path. **Still unvalidated on hardware: the stock→Neptune
+conversion itself** — in particular `stage-firmware-swap` actually removing
+Arch's split `linux-firmware-*` and `stage-esp-permissions` actually doing
+the `umount`/`mount` cycle on a live ESP. Those remain VM-only evidence.
+
+**Reboot verified (step 5).** The Deck rebooted and came back on
+`6.11.11-valve29-1-neptune-611-g2dcfaf4df7ac`. What this does and does not
+prove is worth stating precisely: every boot artifact was byte-identical to
+the bytes the machine was already running, so this is **not** evidence that
+the script *produced* a working boot chain. What it does prove is that the
+Limine menu still boots cleanly with `limine-snapper-sync`'s new Snapshots
+submenu present — the only thing about the boot menu that changed this
+session — and that the `limine_entry_count` fix holds across a real boot.
+
+Post-boot checks, all clean:
+
+- `reconcile` exits 0 and **writes nothing** — "UKI up to date … registered
+  once", prune finds nothing stale. The fix survives a reboot.
+- ESP **byte-identical** to the pre-reboot capture: all four UKIs and
+  `limine.conf` match on `md5sum`.
+- Boot time 39.5s (5.3s firmware + 7.2s loader + 9.8s kernel + 17.3s
+  userspace) against a 27.6s pre-reboot baseline. Slower, but the loader
+  segment is unchanged (7.2s vs 7.4s) — the growth is in kernel/userspace,
+  consistent with first-boot-after-change cache rebuilds rather than
+  anything in the boot chain. Not investigated further.
+- Hardware spot-check (the physical-only tier in `CLAUDE.md`): audio devices
+  all present (Speaker, Headphones, HDMI, Internal Microphone), `wlan0`
+  connected, `bluetooth.service` active, both `Valve Software Steam
+  Controller` nodes plus `Steam Deck` and `Steam Deck Motion Sensors`
+  enumerated, two `iio` devices for the IMU, `amdgpu` loaded, Wayland
+  session up.
+- **Correction to a carried-over note:** `cs35l41-dsp1-*` firmware warnings
+  did **not** appear — zero occurrences in the boot journal. `PROGRESS.md`
+  had these recorded as "known/expected on OLED" from the operator's manual
+  install session; on `linux-firmware-neptune` jupiter.20260712.1-2 with
+  `steamdeck-dsp` 0.99-2 they are absent. Treat their reappearance as worth
+  a second look rather than as expected background noise.
+
+### ⚠️ New gap found at reboot: nothing sets the default boot entry
+
+The Deck booted Neptune only because the operator **selected it by hand** at
+the Limine menu. `/boot/limine.conf` has `default_entry: 2`, and counting
+bootable entries in the pre-session config (`limine.conf.old`) resolves that
+to the **stock Arch kernel**:
+
+```
+1.  //linux-neptune-611
+2.  //linux              ← default_entry: 2
+3.  /EFI fallback
+```
+
+It was already 2 before this session, so this is pre-existing, not caused by
+T1 — but it is squarely T1's problem.
+
+**Nothing in the toolchain owns this value.** `omarchy-deck-kernel.sh` never
+mentions `default_entry` (grep: no matches), and neither do
+`limine-entry-tool`, `limine-update`, or `limine-snapper-sync`. It is a static
+number written once at install time and never reconciled against which
+kernels actually exist.
+
+**Why this matters more than it looks.** The script installs, verifies and
+prunes the Neptune boot entry with real care — and then leaves the machine
+defaulting to a different kernel. On a fresh install following this project's
+flow, an end user boots stock Arch on Deck hardware, gets degraded or missing
+Valve hardware support, and has no way to know why. `CLAUDE.md`'s
+controller-only constraint makes it worse: the fallback ("just pick the right
+entry") assumes a user who knows to interrupt a boot menu.
+
+**And the mechanism is fragile.** `default_entry` is a *positional index*,
+while `limine-snapper-sync` inserts and removes a Snapshots submenu as
+snapshots come and go. Today the submenu sorts last (`BOOT_ORDER="*,
+*fallback, Snapshots"` in `/etc/default/limine`) so indices 1–2 are stable,
+but pinning boot selection to an integer another daemon can renumber is the
+wrong mechanism regardless of current ordering.
+
+**The durable form exists — confirmed, not assumed.** Limine 12.5.1's
+`CONFIG.md` (`/usr/share/doc/limine/CONFIG.md`, line 92) documents:
+
+> `default_entry` — Entry which will be automatically selected at startup.
+> Can be a 1-based entry index (e.g. `1`), or an entry path (e.g.
+> `OSes/Arch Linux`). Entry paths use `/` as a directory separator […]
+
+So the default can be keyed on the **entry name**, which
+`limine-snapper-sync` cannot renumber out from under it. For this machine's
+config (`/+Omarchy` → `//linux-neptune-611`) that is:
+
+```
+default_entry: Omarchy/linux-neptune-611
+```
+
+**Applied to the operator's Deck and confirmed working (session 7).**
+`/boot/limine.conf` now reads `default_entry: Omarchy/linux-neptune-611`
+(backup at `~/limine.conf.before-default-entry-fix`; one-line diff, verified
+on re-read, `limine-list` still parses, `reconcile` still exits 0). The
+operator rebooted and **let the menu time out with no key pressed** — it
+booted the Neptune kernel unattended.
+
+The entry name was taken from `limine-list`, which is authoritative rather
+than inferred from config syntax:
+
+```
+Omarchy
+├─ linux-neptune-611
+├─ linux
+└─ Snapshots
+EFI fallback
+```
+
+**Useful discovery: Limine implements the Boot Loader Interface**, so the
+selected entry is readable from userspace after boot, as a *path*:
+
+```
+$ bootctl status          # Product: Limine 12.5.1
+                          # ✓ Default entry control, ✓ One-shot entry control
+LoaderEntrySelected  ->  Omarchy/linux-neptune-611
+```
+
+`LoaderEntrySelected` (EFI var, UTF-16LE, 4-byte attribute prefix) is a
+ready-made assertion target for any future test of boot-entry selection —
+no screen-scraping the menu.
+
+**⚠️ Not yet proven: that the entry-*path* form is what did the work.**
+Entry 1 is also `linux-neptune-611`, so the observed result is equally
+consistent with Limine parsing the path correctly *or* with it failing to
+parse and silently falling back to index 1. A fix that works by accident is
+worse than none, so this must be settled before `stage-default-entry` ships.
+
+**Settle it in QEMU, not on hardware.** This is bootloader config parsing,
+not hardware behavior, so per `CLAUDE.md`'s testing tiers it belongs on the
+`vm-neptune-image.sh` substrate: set `default_entry` to a **non-first** entry
+(e.g. `Omarchy/linux`), boot, and assert `LoaderEntrySelected` matches. If it
+does, the path form is genuinely honoured. Repeatable in CI, and no physical
+reboot needed.
+
+**Still to implement:** a `stage-default-entry` — or an extension of
+`stage-uki` — that asserts the default resolves to the pinned Neptune kernel
+and repairs it when it does not, writing the *entry path* rather than an
+index and keying on the `linux-neptune-*` glob like every other reconcile
+path. It belongs in `reconcile` too, so the pacman hook re-asserts it
+whenever kernels change.
+
+**Incidental.** `shellcheck` is now installed via pacman on the Deck,
+retiring the session-1 scratch-binary workaround noted above. Also: this
+session drove `sudo` through a `pinentry` `SUDO_ASKPASS` helper, because the
+harness has no TTY and `sudo` reads passwords from `/dev/tty` — the same
+constraint session 6 hardened the script against. Worth knowing for any
+future on-Deck agent session.
+
+### R1 §10.3 — gamepad mapping decided on hardware (session 7)
+
+`FINDING-R1-10.3.md` rewritten from scaffolding into a resolved finding:
+**ship design (b)**, the `uinput`/`evdev` mapper as a systemd `--user`
+service. Detail lives there; the parts worth surfacing here:
+
+**Design (a) is ruled out by a circular dependency, not by a measurement.**
+It sources controller-as-mouse *and* the OSK from a signed-in Steam client;
+§10.4 confirmed Steam needs network to sign in; §6.1a item 7 needs a
+controller-navigable Wi-Fi screen *before* Steam gets the display. You would
+need the OSK to type the Wi-Fi password that the OSK depends on. The
+first-boot path therefore needs a non-Steam mapper regardless, so (a) could
+only ever be a second input layer on top of (b).
+
+**Two concrete errors in the prepared design, both found by running it:**
+
+1. **The draft unit's `WantedBy=hyprland-session.target` does not exist**
+   (`LoadState=not-found`). Under `uwsm` 0.26.6 the real target is
+   `wayland-session@hyprland.desktop.target`. A unit wanted by a nonexistent
+   target **enables without error and never starts** — it would have shipped,
+   reported success, and silently done nothing. Corrected and verified live.
+2. **`TAG+="uaccess"` does not grant access to `/dev/uinput`.** It carries the
+   `uaccess` tag but not the `seat` tag (`CURRENT_TAGS=:uaccess:`, versus
+   `:uaccess:seat:` on a real input device), and systemd's uaccess builtin
+   only ACLs seat-assigned devices. **T4/T5 action item: add the desktop user
+   to the `input` group at install time** — and note `SupplementaryGroups=` is
+   not permitted in a `--user` unit, so it cannot be done per-service.
+
+**Verified working:** unprivileged `/dev/uinput` device creation end-to-end
+(open → capability bits → `UI_DEV_CREATE` → visible in
+`/proc/bus/input/devices`) via a udev rule, so design (b) needs **no
+privileged helper** — the risk the finding called potentially disqualifying.
+Controller evdev *read* access already works with no change, via the seat ACL
+these nodes do get. Hyprland 0.56 implements both `zwp_input_method_manager_v2`
+and `zwp_virtual_keyboard_manager_v1` + `zwlr_layer_shell_v1`, so the OSK is
+protocol-feasible. **Use `squeekboard`** (Arch `extra`) — the doc's first
+suggestion, `wvkbd`, is AUR-only and `CLAUDE.md` forbids auto-installing an
+AUR helper.
+
+**Untestable on this Deck, permanently:** anything involving Gaming Mode. The
+operator's Deck has no `steam` and no `gamescope` — only Hyprland sessions —
+so "does it conflict with Gaming Mode's Steam instance" and "does it stay out
+of the gamescope session" cannot be answered here by any amount of setup.
+That needs a machine with both sessions; realistically a T3/T5-era test.
+
 ## Blocked on human
 
 - Ventoy setup on the test USB (T0 step 2)
@@ -797,9 +1108,14 @@ that makes a stray read hang forever rather than see EOF.
   validated live on the operator's OLED Deck; `618` (6.18.39.valve1) is the
   newest non-RC series. Bumping is a one-line change to
   `NEPTUNE_SERIES_DEFAULT`, but it should not ship without a boot test on
-  hardware. Also unvalidated on hardware: replacing Arch's split
-  `linux-firmware-*` with Valve's `linux-firmware-neptune` (correct in the
-  VM, but Wi-Fi/BT/audio can only be checked on the Deck).
+  hardware. **Still open after session 7:** replacing Arch's split
+  `linux-firmware-*` with Valve's `linux-firmware-neptune` remains
+  unvalidated *by the script* on hardware — the operator had already done
+  that swap by hand on 2026-08-03, so `stage-firmware-swap` was only ever
+  exercised on its no-op path. Wi-Fi/BT/audio do work on the resulting
+  system, which is real evidence for the end state but not for the
+  transition. Same for `stage-esp-permissions`' `umount`/`mount` cycle: the
+  ESP was already `0133/0022`, so the stage early-returned.
 - **Resolved (session 4): T1's scope-decision precondition, checked against
   the operator's real Deck.** The rewritten `omarchy-deck-kernel.sh` only
   supports systems where `limine-entry-tool` is present (provided by the
@@ -817,10 +1133,13 @@ that makes a stray read hang forever rather than see EOF.
   script never reads that path, so they're harmless. `pkgbase` for
   `6.11.11-valve29-1-neptune-611-...` confirms the operator's Deck is
   already on the same `linux-neptune-611` series the script pinned to.
-  **Not yet done:** actually running the script on the physical Deck (a
-  write action, needs separate operator go-ahead) and confirming
-  `omarchy` vs `omarchy-dev` (the dev-channel check came back "not found" —
-  likely just the wrong package name for their channel, unconfirmed).
+  **Resolved (session 7):** the script has now been run on the physical
+  Deck — all nine stages exit 0 (after fixing a bug the run exposed), see
+  "T1 — first physical hardware run" under Findings. The `omarchy` vs
+  `omarchy-dev` question is also answered, and the answer was neither: the
+  Deck runs **Omarchy 3.8.4 installed from git**, so no Omarchy pacman
+  package exists at all. The script does not care — it gates on
+  `limine-entry-tool`, not on Omarchy's packaging.
 - Any write to the physical Deck
 - Any public action (repos, upstream issues, outreach) — **now includes two
   concrete staged drafts awaiting approval**: `DRAFT-outreach-28allday.md`
@@ -832,10 +1151,16 @@ that makes a stray read hang forever rather than see EOF.
   Omarchy + Neptune + Limine system and is the single most valuable test
   asset in the project — it's the known-good baseline for T3's
   iterate-in-place loop. Snapshot it before any destructive test.
-- **New (R1 §10.3): gamepad-mapping design needs a hardware session.** Both
-  candidate designs (background Steam vs. systemd-user-service mapper) are
-  prepared concretely in `FINDING-R1-10.3.md` with a head-to-head test plan;
-  neither can be decided without the physical Deck.
+- **Resolved (session 7): R1 §10.3 gamepad-mapping design — decided in favour
+  of design (b).** The hardware session happened; `FINDING-R1-10.3.md` is now
+  a resolved finding, not scaffolding. Design (a) (background Steam) is ruled
+  out on a circular dependency between confirmed project facts: it sources the
+  OSK from a signed-in Steam client, §10.4 confirmed Steam needs network to
+  sign in, and `PLAN.md` §6.1a item 7 needs a controller-navigable Wi-Fi
+  screen *before* Steam — so you would need the OSK to type the Wi-Fi password
+  that the OSK depends on. Design (b)'s preconditions all verified on
+  hardware. **New T4/T5 action item:** the installer must add the desktop user
+  to the `input` group — `uaccess` does not cover `/dev/uinput`.
 - **Resolved (session 3): Secure Boot / BIOS state.** Operator checked their
   own Deck: boot order already defaults to Limine, and Secure Boot was never
   touched during the original Omarchy install (direct evidence of factory
@@ -862,9 +1187,10 @@ that makes a stray read hang forever rather than see EOF.
 
 `PLAN.md` §10's six questions are now all resolved by R1 (session 3) — see
 `FINDING-R1-10.1.md` through `FINDING-R1-10.6.md`, and the "Findings" section
-above for the headline results. Only §10.3 (gamepad mapping design) remains
-blocked on a hardware session — tracked in "Blocked on human" above.
-Everything else under §10.4/§10.5 is now fully decided.
+above for the headline results. **§10.3 (gamepad mapping) is now resolved too
+(session 7, on hardware): ship design (b).** Everything under §10.4/§10.5 was
+already fully decided. Only §10.6 remains open, and only because the operator
+has chosen to hold it indefinitely.
 
 ## Next session should start with
 
@@ -887,3 +1213,15 @@ block 3 (R1 research, per `SESSIONS.md`'s block table):
    `.automated_script.sh` write needs porting.
 3. Otherwise, proceed to block 3 (R1 research questions) — T0 isn't fully
    hardware/CI-verified but isn't blocking further work either.
+
+**Added after session 7 (hardware run):**
+
+4. **Close the VM substrate gap that hid the `limine_entry_count` bug.**
+   `vm-neptune-image.sh` produces a system with no snapper snapshot, so
+   `limine-snapper-sync` never writes the Snapshots submenu, so no test
+   could ever see a second reference to a UKI basename. Create a snapshot in
+   the substrate (or in the idempotency/hook/stage suites) and re-run all
+   three — otherwise the next "idempotency proven" claim carries the same
+   blind spot. This is the highest-value follow-up from session 7.
+5. ~~The reboot verification~~ — **done**, see above. The Deck boots Neptune
+   cleanly and `reconcile` writes nothing post-boot.
