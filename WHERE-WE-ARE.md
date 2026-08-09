@@ -296,17 +296,50 @@ Mapped to the plan's own workstreams.
 | §10 Six open research questions | **All resolved.** |
 | §11 Long-term maintenance risks | Kernel-churn risk **addressed** (glob-keyed pacman hook). Omarchy update cadence, recovery path, trademark — **not addressed.** |
 
-### The scope decision nobody has made
+### ✅ Scope decision: v0 first (decided session 7)
 
-The plan strongly recommends shipping a **v0 first**: T0 + T1 + T3 as a
-*post-install script* for Decks that already have Omarchy, skipping the ISO,
-the offline mirror, and the controller-navigable installer entirely. That
-delivers the whole "feels like a Steam Deck, Desktop Mode is Omarchy"
-experience weeks earlier, and the ISO (T4 + T5) becomes v1 that wraps it.
+**v0 = T0 + T1 + T3, shipped as a post-install script** for Decks that
+already have Omarchy installed normally. T4 (installer UI) and T5 (ISO +
+offline mirror) are deferred to **v1**.
 
-**The operator has never confirmed v0-vs-v1.** The project's own instructions
-say to ask before starting T4. Given T1 is done, **T3 is the natural next
-build and v0 is within reach** — this decision is now live, not theoretical.
+**That makes v0 two-thirds complete.** T0 and T1 are done; **T3 is now the
+entire remaining project.**
+
+v0 delivers goals 4–7 of the original plan — boots to Gaming Mode, Deck
+hardware works, two-way switch to an Omarchy desktop by controller. It does
+not include the ISO, the offline mirror, the eight installer screens, or the
+pre-Steam Wi-Fi screen.
+
+**Three consequences that are easy to miss:**
+
+1. **The "fully offline" constraint doesn't apply to v0.** It governs
+   installation from the ISO; a post-install script runs on an
+   already-installed, networked machine. This **defuses the AUR blocker** in
+   §5.9 — sourcing `gamescope-session*` from the AUR is fine for v0, and
+   building them into a mirror reverts to a v1 problem. (The separate rule
+   against *auto-installing an AUR helper* still stands.)
+2. **T2 leaves the critical path.** Its only purpose is sizing T4. With T4
+   deferred, skip it for now. ⚠️ Do **not** confuse this with the
+   *desktop-mode* input mapper — that is in v0, belongs to T3, and its
+   preconditions are already hardware-proven.
+3. **Several v1-only risks stop mattering for now** — ISO size, the
+   package-count check, the Wi-Fi screen, Steam's offline behaviour. All
+   still recorded; all live again at v1.
+
+### ⚠️ The decision v0 now forces: which Omarchy does v0 target?
+
+The operator's Deck runs **3.8.4**; the project targets **Quattro 4.x**, whose
+shell is a from-scratch rewrite. T3's two most visible deliverables — the
+Desktop Mode icon and the Gaming Mode → Desktop trigger — are shell
+integration points that land differently on each. T1 was immune to this; T3
+is not.
+
+Options: upgrade the Deck to Quattro (risky, on the only test asset); target
+3.x now and port later (ships today, costs a port in the churniest layer); or
+**build T3's shell-agnostic parts first** — SDDM session switching, the
+gamescope session, the input mapper, hardware parity — and decide once
+there's evidence. **The third is the recommendation**, since only the icon
+and QAM hook are actually version-sensitive.
 
 ---
 
@@ -333,27 +366,31 @@ build and v0 is within reach** — this decision is now live, not theoretical.
 
 ## 8. Suggested next steps
 
-In rough priority order:
+**v0 is decided, so the path is now unusually clear: finish T1's loose ends,
+then build T3.** In rough order:
 
-1. **Make the v0-vs-v1 scope call.** It determines whether the next months go
-   into T3 (v0, ships sooner) or T4/T5 (the ISO). Everything downstream
-   depends on it.
+1. **Start T3's shell-agnostic core.** This is now the whole project. In
+   dependency order: the gamescope Gaming Mode session, SDDM session
+   switching both ways, the desktop-mode input mapper (R1 §10.3 design (b),
+   preconditions already hardware-proven), then the hardware-parity pass.
+   Read `28allday/deckshift` as a reference design — **do not fork it, it is
+   unlicensed** (§5.9).
 2. **Close the VM substrate blind spot** (§5.1). Small, and it restores trust
-   in every idempotency claim the project makes.
-3. **Implement the default-boot-entry stage** (§5.2), verifying the entry-path
-   syntax in QEMU first.
-4. **Set up Gaming Mode on the test Deck** (§5.5) — install Steam and
-   gamescope. T3 cannot start without it, and it's a prerequisite nobody has
-   scheduled.
-5. **Decide how to handle the Quattro-vs-3.8.4 mismatch** (§5.4). Options:
-   upgrade the Deck to Quattro beta, accept that T3's shell integration is
-   developed blind, or wait for Quattro stable. This is a real fork in the
-   road and it isn't in any task file.
-6. **Run T2, the gamepad spike** — formally the next block, and it sizes T4.
-   Note that session 7 already answered a good chunk of it incidentally
-   (`/dev/uinput` works unprivileged, the correct systemd scoping target,
-   which on-screen keyboard to use), so T2 may be smaller than its task file
-   assumes. **Read the gamepad finding before starting it.**
+   in every idempotency claim the project makes. Worth doing before T3 adds
+   more to test.
+3. **Implement the default-boot-entry stage** (§5.2), verifying Limine's
+   entry-path syntax in QEMU first. Last real T1 gap.
+4. **Defer the "which Omarchy" decision deliberately** (§6) rather than
+   accidentally — build the shell-agnostic parts first, choose when there is
+   evidence.
+5. **Skip T2 for now.** Its only purpose is sizing T4, which is deferred.
+   ⚠️ Not the same as the desktop-mode mapper, which stays in scope under T3.
+6. **Optional, operator-only:** the R1 §10.6 outreach to 28allday, which now
+   has a concrete ask (a license on DeckShift). Public action, held by choice.
+
+Not on the v0 path but still unaddressed whenever v1 comes back: Ventoy setup,
+ISO size budgeting, the pre-Steam Wi-Fi screen, trademark/redistribution
+review, and the recovery-path documentation.
 
 ---
 
