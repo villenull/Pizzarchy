@@ -20,8 +20,9 @@ Read START-HERE.md and begin.
 | `SESSIONS.md` | Usage-limit budgeting and a 20-block schedule for Max 5x. |
 | `PLAN.md` | Full plan: architecture, diagnosed bugs, test strategy, timeline. |
 | `PROGRESS.md` | Living state. Updated continuously by each session. |
+| `WHERE-WE-ARE.md` | **Self-contained state summary.** Readable without the repo — for catching up, or for a chat session with no file access. |
 | `TASK-*.md` | Eight work specs: objective, steps, done-criteria, escalation. |
-| `omarchy-deck-kernel.sh` | Draft kernel/boot automation encoding five real bug fixes. **Never executed — review before trusting.** |
+| `omarchy-deck-kernel.sh` | Kernel/boot automation. Nine idempotent stages, shellcheck-clean, VM-tested and **validated on physical hardware** (session 7). |
 
 ## Where this came from
 
