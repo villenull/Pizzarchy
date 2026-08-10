@@ -145,3 +145,20 @@ itself. It must never reach the ISO.
 `src/deck-session.sh stage-audit-privileges` implements the predicate and can
 be reused: it fails on blanket AND passwordless, while treating the ordinary
 password-protected `deck ALL=(ALL) ALL` as normal.
+
+## Constraint added by session 16 (PROGRESS.md 5.11)
+
+**Bake BOTH rotation fixes into the image.** Neither survives a fresh install:
+
+| Surface | Setting | Why it needs baking |
+|---|---|---|
+| Omarchy desktop | `transform 3`, `scale 1.25` in `monitors.lua` | per-USER config; a new user comes up sideways |
+| Limine boot menu | `interface_rotation: 270` in `limine.conf` | `omarchy refresh limine` **moves the file aside and copies the template over it**, destroying a hand edit |
+
+`interface_rotation` needs Limine >= v10 (the Deck has 12.5.2) and rotates the
+menu only, not the booted OS. ⚠️ `270` matches the desktop's transform but has
+NOT been seen on a screen -- 5.11's history is a recorded transform value that
+turned out upside down, so verify before shipping it.
+
+The TTY is a third surface (`fbcon=rotate:1` on the kernel cmdline) and is still
+awaiting operator approval as a boot-chain change.

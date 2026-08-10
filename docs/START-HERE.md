@@ -7,17 +7,35 @@ work without waiting for further instruction.**
 >
 > ### ✅ PHASE 1 COMPLETE. Phase 2 is underway — the core promise now works.
 >
-> **T0, R1, T1, T2 done. T3 is close.** P1.5 rebuilt the Deck; **session 15
-> closed the phase-2 opener**, and session 16 shipped P2.0b + P2.0c: Steam's own **Power → Switch to Desktop** works
-> end to end, on hardware, through the affordance a user actually touches.
+> **T0, R1, T1, T2 done. T3 is close.** Steam's own **Power → Switch to
+> Desktop** works end to end on hardware — the affordance a user actually
+> touches — and session 16 **soak-proved it, 20/20 cycles clean**. Session 16
+> shipped P2.0b, P2.0c, P2.0e, P2.1 and the programmatic half of P2.2.
 >
 > **The Deck:** package-based **Omarchy 4.0 + Neptune 6.11.11-valve29**,
 > Hyprland 0.56.2, unencrypted, booting unattended, **Steam signed in and past
 > OOBE**, greeter and desktop rotated correctly, zero DeckShift. Reach it with
-> **`ssh steamdeck`** (key-based, passwordless sudo). Snapshots #1–#3 from P1.5,
-> **#4** pre-session-15, **#5** `P2.0 complete`, **#6**/**#7** from session 16.
-> It was left **on the desktop** —
+> **`ssh steamdeck`** (key-based, passwordless sudo). **7 snapshots** — #1–#3
+> P1.5, #4 pre-15, #5 `P2.0 complete`, #6/#7 session 16. Left **on the desktop**;
 > `stage-default-session` (boot straight to Gaming Mode) is deliberately not run.
+>
+> Installed by session 16 and not in any earlier notes: three helpers in
+> `/usr/bin/steamos-polkit-helpers/`, the input mapper as a `--user` service
+> (`deck-input-mapper.service`, active), plus `python-evdev` and `squeekboard`
+> from Arch `[extra]`.
+>
+> ⚠️ **TWO TEMPORARY CHANGES ARE STILL IN EFFECT on the Deck.** Neither is part
+> of the product; both were operator-requested for testing:
+>
+> 1. **The display never sleeps** — idle/screensaver/lock disabled, sleep
+>    targets masked. This is an **OLED** panel, so burn-in is the reason not to
+>    leave it. Revert: `sudo /usr/local/sbin/deck-always-on-revert.sh`.
+> 2. **A gsettings input source** was set (`org.gnome.desktop.input-sources`)
+>    to silence squeekboard's "No system layout". Revert:
+>    `gsettings reset org.gnome.desktop.input-sources sources`.
+>
+> Also: the backlight sysfs node is deliberately left **0644**, not the 666
+> found. If it is 666 again, Steam fell back — which means a helper broke.
 >
 > **Git:** everything through **session 16** is merged into **`main`** and
 > **pushed** to `origin`. Check state with
@@ -40,7 +58,7 @@ work without waiting for further instruction.**
 > 2. `docs/PROGRESS.md` **§5.9–§5.18** — the open issues. §5.10/§5.13/§5.14/
 >    §5.16/§5.18 are now closed; **§5.17 is the live one**
 > 3. `docs/ROADMAP.md` phase 2 — the work queue from here
-> 4. `docs/PROGRESS.md` §7 — 36 facts that each cost real time; do not
+> 4. `docs/PROGRESS.md` §7 — 38 facts that each cost real time; do not
 >    re-derive them
 >
 > Hardware evidence: `docs/findings/P15-live-iso-recon.md` (R-0…R-19, raw logs
@@ -56,11 +74,11 @@ work without waiting for further instruction.**
 > (That glob is the 5 shell suites; `test/unit/test-deck-input-mapper.py` is a
 > sixth and is **not** in it — run it separately.)
 >
-> `test/unit/test-deck-session.sh` is now **53 assertions** covering all four
+> `test/unit/test-deck-session.sh` is now **62 assertions** covering all five
 > generated files — the `steamos-update` stub's exit-code protocol, the
 > install-marker contract, both polkit helpers' argument validation, the sddm
 > restart helper's shape, and Steam's shim. It has teeth: **mutation-tested,
-> 15/15 then 34/34 faults caught**, including the apply-path drift that rebooted
+> 15/15 then 39/39 faults caught**, including the apply-path drift that rebooted
 > the Deck. See `docs/findings/P2-session-summary.md` §6a and
 > `docs/findings/P16-session-summary.md` §4 for what it does and does not cover.
 >
@@ -129,12 +147,19 @@ work without waiting for further instruction.**
 >
 > ### Good work available *without* the Deck
 >
-> T4's installer screens and OSK (re-scoped by §5.9 —
-> lizard mode already makes the installer navigable, so the real gap is **text
-> entry**) · T5's ISO fork (`docs/tasks/T5-iso-and-payload.md`), which now has
-> four constraints: offline-only pacman, the encryption default, repo precedence,
-> and **baking in the desktop rotation** — it currently lives in one user's
-> `~/.config/hypr/monitors.lua`, so a fresh install still comes up sideways.
+**These two are the bulk of what is left in phase 2**, and neither needs the
+> Deck:
+>
+> - **T4's installer screens (P2.5/P2.6)**, re-scoped by §5.9 — lizard mode
+>   already makes the installer navigable, so the real gap is **text entry**.
+>   Draw our own button glyphs; do not use Valve's artwork
+>   (`docs/findings/P16-redistribution-and-trademark.md`).
+> - **T5's ISO fork (P2.7/P2.8)**, `docs/tasks/T5-iso-and-payload.md`, which now
+>   carries **five** recorded constraints: offline-only pacman · the encryption
+>   default (§5.12) · repo precedence (§5.13) · **baking in BOTH rotations**
+>   (desktop `monitors.lua` *and* Limine `interface_rotation`) · **excluding
+>   `99-deck-testing`** (§5.17). Also decide **bundle vs fetch** — `steamdeck-dsp`
+>   is `Proprietary`, so bundling redistributes it and fetching does not.
 
 Layout is in `CLAUDE.md`. Paths below are repo-root-relative.
 
@@ -239,15 +264,24 @@ VM.
 | T5 | `docs/tasks/T5-iso-and-payload.md` | Sonnet/Opus | ⬜ P2.7–P2.8, now with §5.12/§5.13 constraints |
 | T6 | `docs/tasks/T6-integration-release.md` | **Opus** | ⬜ phase 3 |
 
-**Phase 1 is closed and P2.0 is done.** Sensible entry points:
+**Phase 1 is closed. P2.0, P2.0b, P2.0c and P2.0e are done**, and P2.1/P2.2/P2.4
+are done as far as a script can verify them. Sensible entry points:
 
-- **With the Deck** (operator present): **P2.0d** — §5.17, removing
-  `99-deck-testing` and re-verifying what it has been masking. Then **P2.1/P2.2**
-  (input mapper, hardware parity). *(P2.0b, P2.0c and P2.0e are done —
-  session 16.)*
-- **Without the Deck:** **P2.5** (T4's installer screens — text entry is the
-  real gap) or **P2.7** (T5's `omarchy-iso` fork, which now also owns §5.17's
-  "never bake `99-deck-testing` into the image" guard).
+- **Without the Deck — this is where the remaining bulk is.** **P2.5/P2.6**
+  (T4's installer screens; text entry is the real gap) or **P2.7/P2.8** (T5's
+  `omarchy-iso` fork, which now carries five recorded constraints — see above).
+  Either is days of work and needs no hardware.
+- **With the Deck, needing a HUMAN present:** everything left on P2.1/P2.2/P2.4
+  is a thing a script cannot check — does the OSK appear on text focus, are the
+  buttons mapped correctly, does sound actually come out, do haptics and gyro
+  respond, and every rotation surface. Batch these into one hands-on pass.
+- **A decision, not a task: §5.17.** It is *answered* — a narrower sudo grant is
+  impossible, because the install stages write to `/etc/sudoers.d/` itself.
+  What remains is choosing whether to drop `99-deck-testing` (and lose the
+  unattended SSH loop) or keep it and rely on T5 excluding it from the image.
+  `./src/deck-session.sh stage-audit-privileges` is the gate either way.
+- **Held for operator approval, both boot-chain:** Limine's
+  `interface_rotation: 270` and the TTY's `fbcon=rotate:1`.
 
 ⚠️ **P2.3 (TDP, fan curves, battery) still requires per-item operator approval
 every single time.** That rule has not moved.
