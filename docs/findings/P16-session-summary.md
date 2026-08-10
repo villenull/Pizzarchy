@@ -44,6 +44,7 @@ Later in the same session, working unattended:
 | **§5.5 answered** | `steamdeck-dsp` is **`Proprietary`** with no licence text, so a *bundling* ISO is blocked; *fetching* redistributes nothing. Logo out, glyphs to be redrawn. `docs/findings/P16-redistribution-and-trademark.md` |
 | **§5.18(a) root-caused and fixed** | `steam-launcher.service` `TimeoutStopSec=60`; retries went **600 → 283 → 20** |
 | **P2.1 mapper shipped** | `stage-input-mapper` + `--user` unit; verified binding `event7 (Steam Deck)` on hardware. Two unit defects found by *running* it (ordering cycle, `StartLimit*` in the wrong section) |
+| **P2.1 OSK probed** | `squeekboard` **runs on Hyprland 0.56.2**; needed an input source set via gsettings. Whether it appears on text focus is **unverified — needs eyes** |
 
 `jupiter-hw-support` was **skipped** by operator decision — its six `jupiter-*`
 helpers have no user-visible effect yet, and `jupiter-fan-control` belongs to

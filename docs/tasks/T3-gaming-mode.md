@@ -127,6 +127,33 @@ Both would have shipped from a review; neither is visible without running it.
 
 Use `squeekboard` (Arch `extra`) for the OSK, not `wvkbd` (AUR-only).
 
+### squeekboard on Hyprland 0.56.2 — probed on hardware, session 16
+
+✅ **It runs.** Installed from `[extra]` (1.43.1-5) and started against the live
+session, it stays up — so Hyprland advertises the input-method protocols it
+needs. Two warnings appear:
+
+- `No system layout present` — **actionable, and fixed by configuring an input
+  source**: `gsettings set org.gnome.desktop.input-sources sources "[('xkb','us')]"`.
+  It was empty (`@a(ss) []`) on this Deck. The warning disappears once set.
+- `Could not register to session manager: … org.gnome.SessionManager` —
+  **harmless**, a GNOME integration attempt with no owner on Hyprland.
+
+⚠️ **Not verified, and it is the part that matters:** whether the keyboard
+actually *appears when a text field takes focus*. That needs someone looking at
+the screen and touching an entry box. Everything above only establishes that the
+process runs and is configured.
+
+**Reaching the session over SSH:** `WAYLAND_DISPLAY` is **empty in Hyprland's
+own `environ`** — it sets that for children rather than inheriting it, and
+`HYPRLAND_INSTANCE_SIGNATURE` is absent too. Pull the environment from a *child*
+(`quickshell`, `waybar`) instead:
+
+```bash
+CHILD=$(pgrep -u deck -x quickshell | head -1)
+eval "$(tr '\0' '\n' < /proc/$CHILD/environ | grep -E '^(WAYLAND_DISPLAY|XDG_RUNTIME_DIR|HYPRLAND_INSTANCE_SIGNATURE|DBUS_SESSION_BUS_ADDRESS)=' | sed 's/^/export /')"
+```
+
 Shares an implementation with T2's mapper — build once, scope twice.
 
 ### 5. Deck hardware tuning — Opus, and hardware-safety-sensitive
