@@ -765,14 +765,8 @@ stage_steam_hook() {
   log "installing Steam's Switch-to-Desktop hook: ${STEAM_SHIM}"
   local wrapper
   wrapper=$(mktemp) || fail "mktemp failed"
-  cat >"$wrapper" <<EOF
-#!/usr/bin/env bash
-# steamos-session-select -- compatibility shim so Steam's "Switch to Desktop"
-# works. Steam calls this unprivileged; the real work needs root.
-${INSTALL_MARKER}
-set -euo pipefail
-exec sudo -n ${SELECT_BIN} "\$@"
-EOF
+  render_steam_shim >"$wrapper" ||
+    fail "could not render the steamos-session-select shim"
   $SUDO install -m 0755 -o root -g root "$wrapper" "$STEAM_SHIM" ||
     fail "could not install ${STEAM_SHIM}"
   rm -f "$wrapper"
@@ -800,6 +794,30 @@ EOF
   log "verified: Steam can resolve it on PATH=${STEAM_RUNTIME_PATH} -> ${resolved}"
 
   log "stage-steam-hook: ok"
+}
+
+# The Steam-facing shim's body, written to stdout.
+#
+# Split out of stage_steam_hook so test/unit/test-deck-session.sh can reach it.
+# It was the last generated file in this script still written as an inline
+# heredoc, and the suite's own header flagged it as the remaining blind spot:
+# its INSTALL_MARKER line was unverified, and the marker is what stops a re-run
+# refusing to proceed (or clobbering somebody else's file). Session 16's
+# mutation run confirmed the gap was real -- deleting that marker was the one
+# fault the suite could not see.
+#
+# `exec sudo -n`, not plain sudo: this shim is the whole call path from Steam
+# to ${SELECT_BIN}, and -n guarantees it can never block on a password prompt
+# Steam has no way to render.
+render_steam_shim() {
+  cat <<EOF
+#!/usr/bin/env bash
+# steamos-session-select -- compatibility shim so Steam's "Switch to Desktop"
+# works. Steam calls this unprivileged; the real work needs root.
+${INSTALL_MARKER}
+set -euo pipefail
+exec sudo -n ${SELECT_BIN} "\$@"
+EOF
 }
 
 # ---------------------------------------------------------------------------

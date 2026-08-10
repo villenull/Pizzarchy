@@ -71,10 +71,10 @@
 # own post-install re-run of the stub). Those need root and a real Deck path,
 # and remain covered only by the stage's own check at install time.
 #
-# Also not covered: the steamos-session-select shim written by
-# stage_steam_hook is still an inline heredoc, so its INSTALL_MARKER line is
-# unverified here. Worth folding in if that stage is ever refactored the same
-# way -- it carries the same clobber risk as the stub.
+# Closed in session 16: stage_steam_hook's shim used to be an inline heredoc
+# and was this suite's last blind spot -- mutation testing confirmed deleting
+# its INSTALL_MARKER was the one fault nothing here could see. It is now
+# render_steam_shim and is covered in section 6.
 
 set -euo pipefail
 
@@ -674,5 +674,52 @@ grep -q "return 1" "$rs_helper" ||
 [[ $(grep -c "return 1" "$rs_helper") -ge 2 ]] ||
   fail_test "each settle condition rejects independently" "only one 'return 1' found; an or-style check would let an empty seat list alone satisfy the gate, which is the 5.18 defect"
 pass "the seat-list and process conditions each reject independently, so neither alone can satisfy the gate"
+
+# ===========================================================================
+# 6. render_steam_shim -- the file Steam actually invokes
+# ===========================================================================
+#
+# Small, but it is the entire call path from Steam's Power menu to
+# deck-session-select, and two of its four lines are load-bearing in ways that
+# are invisible from a shell.
+
+shim="$work/steamos-session-select"
+render_steam_shim >"$shim"
+chmod +x "$shim"
+
+bash -n "$shim" 2>"$work/stderr" ||
+  fail_test "render_steam_shim emits syntactically valid bash" "$(cat "$work/stderr")"
+pass "render_steam_shim emits syntactically valid bash (checked nowhere else -- it is generated)"
+
+# The blind spot this section exists to close.
+grep -qF -- "$INSTALL_MARKER_TEXT" "$shim" ||
+  fail_test "the shim carries the install marker" "without it a re-run of stage-steam-hook refuses to proceed, reporting that something else owns /usr/bin/steamos-session-select"
+grep -qF -- "$INSTALL_MARKER" "$shim" ||
+  fail_test "the shim's marker is '#'-commented, as a shell file needs" "expected: $INSTALL_MARKER"
+( assert_ours_or_absent "$shim" "DeckShift or SteamOS customizations" ) ||
+  fail_test "assert_ours_or_absent accepts the shim render_steam_shim actually produces"
+pass "the shim carries the marker and is re-accepted by assert_ours_or_absent -- the gap mutation testing found in session 16"
+
+# -n is what keeps a missing sudo grant from HANGING Steam rather than failing
+# it. Steam cannot render a password prompt, so a blocking sudo is a hung
+# Power menu with no feedback at all.
+grep -qE '^exec sudo -n ' "$shim" ||
+  fail_test "the shim elevates with 'exec sudo -n'" "without -n, a missing or broken sudoers grant makes this BLOCK on a password prompt Steam cannot display; got: $(grep sudo "$shim")"
+pass "the shim uses 'exec sudo -n' -- it can fail, but it can never hang waiting for a password Steam cannot show"
+
+# It must invoke the absolute path, not a bare name. Steam's runtime PATH is
+# only /usr/bin:/bin, and SELECT_BIN lives in /usr/local/bin -- so a bare name
+# here would resolve for a human testing by hand and fail for Steam. That is
+# the exact defect PROGRESS.md 5.10 spent a session finding.
+grep -qF -- "$SELECT_BIN" "$shim" ||
+  fail_test "the shim calls SELECT_BIN by absolute path" "Steam's runtime PATH is ${STEAM_RUNTIME_PATH}, which does not contain $(dirname "$SELECT_BIN") -- a bare name would work by hand and silently fail for Steam"
+pass "the shim calls ${SELECT_BIN} by absolute path -- ${STEAM_RUNTIME_PATH} would never resolve a bare name there"
+
+# Arguments must reach deck-session-select intact: Steam passes the target
+# session as $1 ('plasma', per PROGRESS.md 5.10), so dropping "$@" would make
+# every switch a no-argument call.
+grep -qE 'exec sudo -n .* "\$@"' "$shim" ||
+  fail_test "the shim forwards its arguments" "Steam passes the target session as an argument; without \"\$@\" deck-session-select is called with none and dies on 'no session specified'"
+pass "the shim forwards \"\$@\" -- Steam passes the target session ('plasma') as an argument"
 
 echo "all deck-session.sh tests passed"
