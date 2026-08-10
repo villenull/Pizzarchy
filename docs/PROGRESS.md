@@ -943,11 +943,16 @@ duration, and why the settle gate did not help: `steam-launcher.service` is a
 **unit in the user manager**, not a process or a logind session, so neither of
 the gate's conditions can see it.
 
-**Fix for P2.0e:** add a user-manager condition — wait for
-`steam-launcher.service` to leave `deactivating` (narrow), or for no unit in
-that manager to be `deactivating` (general), via
-`systemctl --machine=<user>@.host --user`. ⚠️ Do **not** shorten Valve's
-`TimeoutStopSec`; Steam is being given that time to shut down cleanly.
+**✅ Fixed 2026-08-10 (session 16).** `render_restart_helper`'s settle gate got a
+third condition: **no unit in the desktop user's systemd manager may be
+`deactivating`**, asked generally rather than by name, via
+`systemctl --machine=<user>@.host --user`. `VT_SETTLE_MAX` went 15 s → **60 s**
+to match `steam-launcher.service`'s own `TimeoutStopSec` — giving up before
+systemd does would hand the problem straight back to the autologin retry loop.
+
+⚠️ Deliberately **not** shortening Valve's `TimeoutStopSec`: Steam is being given
+that time to shut down cleanly, and cutting it trades a slow switch for possible
+state corruption.
 
 **What this costs today:** a switch always recovers unattended, which is the
 product-critical property, and 18 of 20 are clean. The other 2 visibly flicker
