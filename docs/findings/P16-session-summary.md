@@ -1,0 +1,120 @@
+# Session 16 summary — 2026-08-10 (P2.0b + P2.0c, and §5.13 audited)
+
+> Companion to `docs/findings/P2-session-summary.md`. Evidence lives in
+> `docs/findings/P2-steam-integration-and-rotation.md` (**R-27** is new) and
+> `docs/findings/P16-repo-overlap-audit.md`; this is the orientation page.
+>
+> **The headline is uncomfortable and worth leading with: three recorded
+> "facts" from session 15 were wrong, and two defects were introduced *by this
+> session's own fixes* and caught only by mutation testing and soak runs.**
+> Nothing here was found by reading code and concluding it looked right.
+
+## 1. What was corrected — read this before trusting §5.15/§5.16
+
+| Recorded | Actual |
+|---|---|
+| §5.15: "the missing `steamos-priv-write` means Gaming Mode's brightness slider does nothing" | **The slider works on the test Deck.** Steam *falls back*: helper → `sudo -n tee` → `sudo -n chmod a+w`. Right about the product, wrong about the present — and the wrong half is the dangerous one |
+| §5.15: the 666 mode on the backlight sysfs node | **Steam sets it**, every Gaming Mode start, via that third fallback. Not a hand-edit |
+| R-26: "`RestartSec=3` is the more important half" of §5.16's fix | **`RestartSec` never gated the fatal start.** It came from an explicit `systemctl restart` transaction; `RestartSec` only spaces `Restart=always` auto-restarts. The measured gap was **3 ms**, not 100 ms |
+| R-26: §5.16 is a session-switch defect | It fired **at boot**. Any sddm restart whose teardown overruns 5 s can do it |
+
+The unifying lesson, and the one to carry forward: **the test Deck is more
+capable than the product**, because `/etc/sudoers.d/99-deck-testing` grants the
+desktop user blanket NOPASSWD (§5.17). Anything privilege-dependent verified
+here is suspect until re-checked without it.
+
+## 2. Shipped
+
+| Item | Verified by |
+|---|---|
+| **`steamos-set-timezone`** (`stage-timezone-helper`) | set the Deck to `Europe/Berlin`, confirmed, restored |
+| **`steamos-priv-write`** (`stage-priv-write-helper`) | brightness → 45000, confirmed, restored |
+| Both grants are **operative**, not just installed | re-run with `99-deck-testing` removed; Steam's own tier-2/tier-3 fallbacks refused, ours still worked |
+| **§5.16's real fix** — `TimeoutStopSec=30`, stop→settle→start, `systemd-run` transient unit | 20/20 soak; zero `start-limit-hit`, zero stop timeouts, zero unit failures |
+| **`Relogin=true`** (§5.18(b)) | greeter never blocked a switch again |
+| **§5.13 answered with data** | 101 overlaps measured; reordering rejected; fix is one qualified package |
+| Unit suite 17 → **53 assertions**, all four generated files covered | mutation-tested **34/34**, zero holes |
+
+`jupiter-hw-support` was **skipped** by operator decision — its six `jupiter-*`
+helpers have no user-visible effect yet, and `jupiter-fan-control` belongs to
+P2.3, which needs per-item approval anyway.
+
+## 3. Opened
+
+- **§5.17 — `99-deck-testing` grants blanket passwordless root**, is owned by no
+  package, and **sorts last**, so it overrides every narrow grant this project
+  installs. Must never ship. It is also what made §5.15 look healthy. Removing
+  it permanently needs a narrower replacement first, because
+  `tools/deck-sync.sh` runs whole install stages through `sudo -n`.
+- **§5.18(a) — the session-start retry thrash.** `Relogin=true` absorbs it, so
+  the device always recovers unattended, but a switch can visibly flicker.
+  Improved substantially by the comm-name fix below; **not solved**.
+
+## 4. Two defects this session introduced, and how they were caught
+
+Both would have shipped on a "the code looks right" review.
+
+1. **A settle gate that matched nothing.** The §5.18(a) fix listed `gamescope`
+   as a process name. The kernel truncates `comm` to 15 chars and `pgrep -x`
+   matches `comm`, so inside a live gamescope session
+   `pgrep -u deck -x gamescope` returns **0** — the compositor is
+   `gamescope-wl`, its launcher `start-gamescope`. That half of the gate
+   reported "settled" instantly and looked like it worked. Found by
+   instrumenting the real settle window on hardware.
+2. **Assertions that passed on comments.** Twice — first checking the helper
+   did not call `fuser`, then checking the gate named `uwsm` — a whole-file
+   `grep` matched the code's own explanatory prose while the code had stopped
+   doing the thing. Both found by mutation testing, not review. The assertions
+   now match the specific line.
+
+**Methodology that earned its keep, and should be repeated:**
+
+- **Mutation testing.** 34 introduced faults, 34 caught, and every hole it
+  exposed was one review had already missed.
+- **Assert *which* guard fired, not just the exit code.** Two guards sharing an
+  exit code hide each other's deletion; three assertions had to be narrowed.
+- **Soak, don't sample.** §5.18 needed 4 cycles to appear. P1.5's R-18 and
+  session 15's R-23 both took this switch successfully and saw nothing.
+- **A soak that passes too fast is broken.** The first one "passed" 9 cycles in
+  45 s because it waited for *a* session rather than a *new* one — it never
+  observed a real switch.
+
+## 5. Honest limits
+
+- **§5.18(a) is improved, not fixed.** Autologin attempts across 20 switches
+  went **600 → 283**, and the distribution is bimodal: **16 of 20 cycles at the
+  ideal 1 attempt**, two at 3–5, and two that thrash (104 and 155) for 30–40 s.
+  A distinct failure mode, not a timing gradient. Root cause — what makes
+  `uwsm start … Hyprland` exit in ~1 ms — is **not** identified.
+- **Two settle signals were measured and ruled out**, so the next attempt need
+  not retry them: `graphical-session.target` **flaps** across a switch
+  (active → inactive → active in ~1.6 s), and "no session for the user" can
+  never be true while anyone is on SSH. The usable discriminator is
+  `Type=wayland`, which excludes the `manager` session and `tty` sessions.
+- **The narrow sudoers grants are proven; `99-deck-session-select`'s is not.**
+  It was installed before that verification technique existed and still carries
+  `verify_nopasswd`'s honest warning.
+- **The gamescope session was never verified as *usable*** — only that logind
+  created an active user session. Steam finishing startup is a different claim,
+  and the operator could not see the screen during these runs.
+- **Nothing here was seen on a screen.** Every result is from logs, `loginctl`,
+  `systemctl` and `pacman`. Rotation, the greeter, and Gaming Mode's actual
+  appearance remain visually unverified this session.
+
+## 6. State on exit
+
+| | |
+|---|---|
+| Deck | Omarchy desktop, Hyprland up, `ssh steamdeck` working |
+| Snapshots | #1–#3 P1.5 · #4 pre-15 · #5 P2.0 · **#6** pre-polkit-helpers · **#7** pre-sddm-decouple |
+| Branch | **`p16-polkit-helpers`**, unpushed and unmerged — `main` is the operator's call |
+| Backlight node | deliberately left **0644**, not the 666 found. If it is 666 again, Steam fell back, which means a helper broke |
+| ⚠️ Temporary | **display always-on is ENABLED** for testing — idle/screensaver/lock off, sleep targets masked. Revert: `sudo /usr/local/sbin/deck-always-on-revert.sh`. This is an **OLED** panel; burn-in is the reason not to leave it |
+
+## 7. Where to go next
+
+- **P2.0d (§5.17)** — the blanket sudo grant. Everything privilege-shaped is
+  untrustworthy until it goes.
+- **P2.0e (§5.18(a))** — find why the incoming session dies. The gate made it
+  rarer; it did not explain it.
+- **P2.1 / P2.2** — input mapper as a `--user` service, hardware parity matrix.

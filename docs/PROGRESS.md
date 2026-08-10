@@ -880,16 +880,41 @@ chose `Relogin=true` — the same posture already taken in
 `stage-sddm-resilience`, a loop that can still recover beating a dead end that
 cannot, with Ctrl+Alt+F2 as the dev escape.
 
-**Status after the fix: (b) works, (a) does NOT.** 20/20 soak cycles passed and
-the greeter never blocked a switch — but sddm logged **600 `Session … selected`
-events for 20 switches**. Most cycles are one attempt; five took 14–38 s and
-absorbed nearly all of the rest, retrying roughly three times a second. So the
-session-start failure still happens routinely and `Relogin=true` is simply
-absorbing it.
+**Status: (b) works. (a) is improved and not solved.** Two 20/20 soaks, and the
+greeter never blocked a switch in either. The retry count is the metric that
+matters, since `Relogin=true` hides the failure from every other signal:
 
-⚠️ **Why (a)'s gate misses it.** `render_restart_helper` waits on
-`loginctl show-seat seat0 -p Sessions` plus `pgrep` for
-Hyprland/gamescope/uwsm. Neither sees the two things that actually linger:
+| | total autologin attempts / 20 switches |
+|---|---|
+| before the comm-name fix | **600** |
+| after | **283** |
+
+The distribution after the fix is the real finding — it is **bimodal**, not a
+spread:
+
+| attempts in a cycle | cycles |
+|---|---|
+| 1 (ideal) | **16** |
+| 3 | 1 |
+| 5 | 1 |
+| 104 | 1 |
+| 155 | 1 |
+
+So a switch either lands first time (18/20) or falls into a distinct state that
+retries ~3×/s for 30–40 s before clearing. That is a failure *mode*, not a
+timing gradient, and it is the thing left to explain.
+
+⚠️ **The gate had a defect of its own, now fixed.** It listed `gamescope` as a
+process name. The kernel truncates `comm` to 15 chars and `pgrep -x` matches
+`comm`, so inside a live gamescope session `pgrep -u deck -x gamescope` returns
+**0** — the compositor is `gamescope-wl`, its launcher `start-gamescope`. That
+half of the gate matched nothing and reported "settled" instantly. Correcting it
+is what took 600 attempts down to 283. Names verified on both sessions:
+`Hyprland`, `start-hyprland`, `uwsm` (desktop); `gamescope-wl`,
+`start-gamescope` (gaming).
+
+⚠️ **What the gate still misses.** It waits on
+`loginctl show-seat seat0 -p Sessions` plus that `pgrep`. Neither sees:
 
 - **Seatless leftover sessions.** During the thrash, `loginctl list-sessions`
   carried several `deck` sessions with seat `-`, which `show-seat seat0` does
@@ -897,13 +922,19 @@ Hyprland/gamescope/uwsm. Neither sees the two things that actually linger:
 - **uwsm's state inside the user manager.** `user@1000.service` stays
   `active/running` across switches, and `uwsm start` is what exits immediately.
 
-**Next attempt should gate on the user manager**, not the seat — e.g.
-`graphical-session.target` going inactive in the `--user` instance, or the
-absence of any session for that user regardless of seat. Not attempted yet.
+**Measured, so the next attempt does not repeat it:** `graphical-session.target`
+in the user manager **flaps** across a switch (active → inactive → active within
+~1.6 s), so it is not usable as a settle signal on its own. And "no session for
+the user" can never be true while anyone is on SSH — the discriminator that does
+work is **`Type=wayland`**, which excludes both the `manager`-class session and
+`tty` (SSH) sessions.
+
+**Still unexplained: why `uwsm start … Hyprland` exits in ~1 ms.** Until that is
+known, every fix here is mitigation.
 
 **What this costs today:** a switch always recovers unattended, which is the
-product-critical property, but it can visibly flicker for up to ~38 s first.
-Acceptable for now; not shippable as a finished experience.
+product-critical property, and 18 of 20 are clean. The other 2 visibly flicker
+for 30–40 s. Acceptable for now; not shippable as a finished experience.
 
 ⚠️ **This is why "it worked once" was never enough.** P1.5's R-18 and session
 15's R-23 both took this switch successfully; the defect needed 4 cycles to
@@ -1204,5 +1235,5 @@ One line each. Detail lives in git history and in the `FINDING-*.md` files.
 | 7 | First physical hardware run; two real bugs found; R1 §10.3 resolved; Steam/gamescope installed; prior-art check done |
 | 8 | First Gaming Mode boot, via a DeckShift hybrid splice (since reversed — §2.3) |
 | 15 | **Phase 2 opener, 2026-08-10.** §5.10 closed — Steam's own Switch-to-Desktop works, with **two** causes not one (OOBE, plus the runtime narrowing PATH to `/usr/bin:/bin`, which made the `/usr/local/bin` shim unreachable all along). §5.14 closed with a stub, after learning its exit codes are a protocol: apply exiting 0 made Steam **reboot the Deck**. §5.11's greeter + desktop fixed — transform is **3**, not the recorded 1, and Omarchy's `auto` scale left a 640×400 desktop. A `#` marker in a Lua file taught us Hyprland **silently discards** an unparseable config. Opened §5.15 (the whole polkit-helper surface, incl. brightness) and §5.16 (the switch latched sddm into permanent failure). |
-| 16 | **P2.0b + P2.0c, 2026-08-10.** `steamos-set-timezone` + `steamos-priv-write` shipped as two new `deck-session.sh` stages, both signatures **read from Steam's log** rather than inferred, both hardware-verified with a real change and restore. Operator skipped `jupiter-hw-support`. Corrected §5.15: the brightness slider **works** on this Deck — Steam falls back to `sudo -n tee` and then `sudo -n chmod a+w`, which is also what makes those sysfs nodes 666. Opened §5.17 (`99-deck-testing`'s blanket NOPASSWD masks privilege defects and must not ship). Then **P2.0c**: §5.16's real cause was the **stop timing out** (`TimeoutStopSec=5`, teardown 5.008s → SIGKILL → start 3ms later), not the retry spacing — R-26's `RestartSec` rationale was wrong, and it fired at **boot**, not only on switches. Fixed with `TimeoutStopSec=30` + stop→settle→start in a `systemd-run` transient unit; **20/20 soak clean**. The soak also found **§5.18**: a dead session lands on a password greeter, because SDDM ships `Relogin=false`. Unit suite +32 assertions (48 total), mutation-tested 28/28. |
+| 16 | **P2.0b + P2.0c, 2026-08-10.** `steamos-set-timezone` + `steamos-priv-write` shipped as two new `deck-session.sh` stages, both signatures **read from Steam's log** rather than inferred, both hardware-verified with a real change and restore. Operator skipped `jupiter-hw-support`. Corrected §5.15: the brightness slider **works** on this Deck — Steam falls back to `sudo -n tee` and then `sudo -n chmod a+w`, which is also what makes those sysfs nodes 666. Opened §5.17 (`99-deck-testing`'s blanket NOPASSWD masks privilege defects and must not ship). Then **P2.0c**: §5.16's real cause was the **stop timing out** (`TimeoutStopSec=5`, teardown 5.008s → SIGKILL → start 3ms later), not the retry spacing — R-26's `RestartSec` rationale was wrong, and it fired at **boot**, not only on switches. Fixed with `TimeoutStopSec=30` + stop→settle→start in a `systemd-run` transient unit; **20/20 soak clean**. The soak also found **§5.18**: a dead session lands on a password greeter, because SDDM ships `Relogin=false`. Then **P2.0e/§5.13**: the repo overlap was **audited** (101 collisions, Valve older in 50 -> reordering rejected; the fix is `pacman -S jupiter-staging/gamescope`), and the suite's last blind spot closed. Two defects were introduced by this session's own fixes and caught by mutation testing and soaking, not review -- a settle gate matching the comm name `gamescope`, which no process has. Unit suite 17 -> **53 assertions**, mutation-tested **34/34**. |
 | 9 | **One long session, 2026-08-09/10 — the scope reset and all of phase 1's non-hardware work.** Five scope decisions (§2): the ISO is the deliverable again, network-at-install is fine, target 4.0, DeckShift dropped, Deck rebuilds allowed. Docs consolidated (`PROGRESS` 1403→~600 lines, `WHERE-WE-ARE` folded in, `PLAN` frozen with a known-wrong-sections banner); `docs/ROADMAP.md` written (three phases); dead drafts removed. **P1.1:** `stage-default-entry` with the path form *proven by boot*, substrate rebuilt with real snapper snapshots (which immediately caught the hook test's own substring miscount), three deliberate-failure tests. **P1.2–P1.3:** T2 spike resolved — a gamepad drives `gum` and `archinstall` at the kernel input layer, so T4 is days not weeks. **P1.4 (half):** 4.0 beta ISO built; static inspection decided T4's OSK question and found the OLED Deck's `nfa765` Wi-Fi firmware present (§5.1). Repo reorganized out of the flat layout (a root `*.sh` glob had silently gone from checking every script to none). |
