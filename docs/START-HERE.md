@@ -39,15 +39,15 @@ work without waiting for further instruction.**
 > 1. `docs/PROGRESS.md` §1 (state) and §2 (the five scope decisions) — these
 >    reversed several earlier ones, and a session that misses them will build
 >    the wrong thing
-> 2. `docs/PROGRESS.md` **§5.9–§5.18** — the open issues. §5.10/§5.13/§5.14/§5.16
->    are now closed; **§5.17 and §5.18 are the live ones**
+> 2. `docs/PROGRESS.md` **§5.9–§5.18** — the open issues. §5.10/§5.13/§5.14/
+>    §5.16/§5.18 are now closed; **§5.17 is the live one**
 > 3. `docs/ROADMAP.md` phase 2 — the work queue from here
 > 4. `docs/PROGRESS.md` §7 — 36 facts that each cost real time; do not
 >    re-derive them
 >
 > Hardware evidence: `docs/findings/P15-live-iso-recon.md` (R-0…R-19, raw logs
 > in `P15-recon-raw/`) and
-> `docs/findings/P2-steam-integration-and-rotation.md` (R-20…**R-27**).
+> `docs/findings/P2-steam-integration-and-rotation.md` (R-20…**R-28**).
 >
 > ### There are now unit tests. Run them before and after touching `src/`.
 >
@@ -112,11 +112,12 @@ work without waiting for further instruction.**
 > (`stage-timezone-helper`, `stage-priv-write-helper`), and
 > `jupiter-hw-support` is skipped by operator decision.
 >
-> Also open: **§5.18(a)** — a switch can visibly thrash before it lands, because
-> the incoming session sometimes dies within a millisecond and `Relogin=true`
-> retries until one sticks. It always recovers unattended; the cause is not
-> identified. *(§5.16 itself is **closed** — the real cause was sddm's stop
-> timing out, and 20/20 soak cycles are clean.)*
+> *(**§5.16 and §5.18 are both closed.** §5.16's cause was sddm's stop timing
+> out; §5.18's was `steam-launcher.service` taking up to ~53 s to stop, so the
+> incoming session started into a teardown. Autologin attempts across 20
+> switches went **600 → 283 → 20**, the ideal. Residual: a switch away from
+> Gaming Mode can take **~1 minute**, dominated by Valve's `TimeoutStopSec=60` —
+> correct and flicker-free, but not fast.)*
 >
 > ### One defect still deliberately unfixed — decide before coding
 >
@@ -235,7 +236,7 @@ VM.
 | R1 | `docs/tasks/R1-research-questions.md` | Opus/Sonnet | ✅ done |
 | T1 | `docs/tasks/T1-kernel-and-boot.md` | **Opus** | ✅ done — **hardware-validated 2026-08-10** |
 | T2 | `docs/tasks/T2-gamepad-input-spike.md` | **Opus** | ✅ done |
-| T3 | `docs/tasks/T3-gaming-mode.md` | Sonnet/Opus | 🟡 **the core promise works through Steam's own UI** (§5.10 ✅, §5.14 ✅, §5.11 greeter+desktop ✅, §5.15 brightness+timezone ✅). Left: §5.16, §5.17, P2.1–P2.4 |
+| T3 | `docs/tasks/T3-gaming-mode.md` | Sonnet/Opus | 🟡 **the core promise works, and the switch is now soak-proven** (§5.10 ✅, §5.14 ✅, §5.11 ✅, §5.15 ✅, §5.16 ✅, §5.18 ✅). Left: §5.17, P2.1–P2.4 |
 | T4 | `docs/tasks/T4-installer-ui.md` | Sonnet | ⬜ **unblocked, re-scoped by §5.9** → P2.5–P2.6 |
 | T5 | `docs/tasks/T5-iso-and-payload.md` | Sonnet/Opus | ⬜ P2.7–P2.8, now with §5.12/§5.13 constraints |
 | T6 | `docs/tasks/T6-integration-release.md` | **Opus** | ⬜ phase 3 |
@@ -243,8 +244,9 @@ VM.
 **Phase 1 is closed and P2.0 is done.** Sensible entry points:
 
 - **With the Deck** (operator present): **P2.0d** — §5.17, removing
-  `99-deck-testing` and re-verifying what it has been masking. Then **P2.0c**
-  (§5.16's root cause) and **P2.1/P2.2**. *(P2.0b is done — session 16.)*
+  `99-deck-testing` and re-verifying what it has been masking. Then **P2.1/P2.2**
+  (input mapper, hardware parity). *(P2.0b, P2.0c and P2.0e are done —
+  session 16.)*
 - **Without the Deck:** **P2.5** (T4's installer screens — text entry is the
   real gap) or **P2.7** (T5's `omarchy-iso` fork, which now also owns §5.17's
   "never bake `99-deck-testing` into the image" guard).
