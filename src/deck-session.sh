@@ -229,12 +229,17 @@ readonly SDDM_STOP_TIMEOUT=30
 # Bound on the post-stop settle loop, in 0.1s units. Never unbounded: a stuck
 # seat must not mean sddm is never started again.
 #
-# 15s, not the 5s this started at. uwsm and Hyprland run under the USER manager
-# (user@1000.service), not sddm's cgroup, so `systemctl stop sddm` returning
-# says nothing about them -- they exit on their own schedule afterwards. The
-# loop breaks as soon as the check passes, so a generous bound costs nothing on
-# the normal path and only matters when something is genuinely slow.
-readonly VT_SETTLE_MAX=150
+# 60s, matching steam-launcher.service's own TimeoutStopSec. R-28: that unit is
+# PartOf=graphical-session.target and Steam takes tens of seconds to exit --
+# measured at ~29s, and systemd will wait 60. Giving up before systemd does
+# would just hand the problem back to the autologin retry loop, which is the
+# thrash this bound exists to prevent.
+#
+# It sounds long and is not, on the normal path: the loop breaks the moment the
+# check passes, and 18 of 20 measured switches clear it immediately. The cost is
+# paid only when Steam is genuinely still shutting down, and the alternative
+# there is 30s of visible flicker rather than 30s of waiting.
+readonly VT_SETTLE_MAX=600
 
 # Our greeter config is a self-contained MIRROR of upstream's settings plus the
 # monitor transform -- not an include, because Hyprland's Lua parser offers no
@@ -715,16 +720,44 @@ session_user=${session_user}
 #   desktop  -> Hyprland, start-hyprland, uwsm  (also quickshell, omarchy-hyprlan)
 #   gaming   -> gamescope-wl, start-gamescope
 # Re-measure with \`ps -u <user> -o comm= | sort -u\` before editing this list.
+# THIRD condition, and the one that addresses PROGRESS.md 5.18(a)'s root cause.
+#
+# R-28: steam-launcher.service is PartOf=graphical-session.target with
+# TimeoutStopSec=60, and Steam takes tens of seconds to exit -- measured at ~29s
+# with NO "Stopped Steam Launcher" line in between, while every other unit stops
+# in ~50ms. It is a UNIT IN THE USER MANAGER, so neither of the two conditions
+# above can see it: it owns no logind session and its processes are not named
+# after a compositor. Starting sddm into that window is what makes the incoming
+# session's `uwsm start ... Hyprland` exit in ~1ms.
+#
+# Asked generally (any deactivating unit) rather than by name, because
+# steam-launcher is simply the slowest example rather than a special case.
+user_manager_busy() {
+  local out
+  # A user manager that is not running is legitimately "nothing to wait for",
+  # and errors here must not hang the switch -- but they must not be invisible
+  # either, so the outcome is reported in the settle note below.
+  out=\$(systemctl --machine="\${session_user}@.host" --user \\
+          list-units --state=deactivating --no-legend 2>/dev/null) || {
+    USER_MANAGER_QUERY_OK=0
+    return 1
+  }
+  USER_MANAGER_QUERY_OK=1
+  [[ -n \$out ]]
+}
+
 outgoing_gone() {
   [[ -z \$(loginctl show-seat seat0 -p Sessions --value 2>/dev/null) ]] || return 1
   # -x: exact comm match, so this cannot match a window title or a wrapper
   # script whose command line merely mentions one of them. -f would.
   pgrep -u "\$session_user" -x 'Hyprland|start-hyprland|gamescope-wl|start-gamescope|uwsm' >/dev/null 2>&1 && return 1
+  user_manager_busy && return 1
   return 0
 }
 
 settled=0
 i=0
+USER_MANAGER_QUERY_OK=-1   # -1 = never attempted, 0 = failed, 1 = succeeded
 while [[ \$i -lt ${VT_SETTLE_MAX} ]]; do
   if outgoing_gone; then
     settled=1
@@ -734,13 +767,19 @@ while [[ \$i -lt ${VT_SETTLE_MAX} ]]; do
   sleep 0.1
 done
 
+# The user-manager query is the condition that addresses 5.18(a)'s cause, so a
+# silently failing one would quietly restore the old behaviour. Say which.
+case \${USER_MANAGER_QUERY_OK} in
+  0) note "could not query \${session_user}'s systemd user manager, so the steam-launcher teardown check (PROGRESS.md 5.18a / R-28) did NOT run. The switch will still work, but the autologin thrash can return." ;;
+esac
+
 if [[ \$settled -eq 1 ]]; then
-  note "seat0 free after \$((i / 10)).\$((i % 10))s; starting sddm"
+  note "outgoing session gone after \$((i / 10)).\$((i % 10))s; starting sddm"
 else
   # Loud, and then proceed anyway. A stuck seat is still better answered by
   # starting sddm than by leaving the device with nothing -- this whole file
   # exists because the device was left with nothing.
-  note "seat0 still had sessions after ${VT_SETTLE_MAX} tenths of a second; starting sddm anyway. If the switch misbehaves, this is the first thing to look at."
+  note "outgoing session was STILL present after ${VT_SETTLE_MAX} tenths of a second; starting sddm anyway. steam-launcher.service is the usual reason (R-28) -- check 'journalctl _PID=\$(pgrep -u \${session_user} -x systemd)' for a 'Stopping Steam Launcher...' with no matching 'Stopped'."
 fi
 
 if ! systemctl start sddm; then

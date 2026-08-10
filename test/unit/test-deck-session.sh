@@ -675,6 +675,53 @@ grep -q "return 1" "$rs_helper" ||
   fail_test "each settle condition rejects independently" "only one 'return 1' found; an or-style check would let an empty seat list alone satisfy the gate, which is the 5.18 defect"
 pass "the seat-list and process conditions each reject independently, so neither alone can satisfy the gate"
 
+# --- the third condition: 5.18(a)'s actual root cause (R-28) --------------
+#
+# steam-launcher.service is PartOf=graphical-session.target with
+# TimeoutStopSec=60, and Steam takes ~29s to exit. It owns no logind session and
+# its processes are not named after a compositor, so BOTH conditions above are
+# blind to it -- which is why the first two versions of this gate did not stop
+# the thrash.
+
+# WIRED IN, not merely defined. Grepping the whole file for the function name
+# passes while the gate never calls it -- caught by mutation, and it is the same
+# presence-vs-wiring trap as the earlier comment-matching assertions.
+outgoing_body=$(awk '/^outgoing_gone\(\) \{/,/^\}/' "$rs_helper")
+[[ -n $outgoing_body ]] ||
+  fail_test "outgoing_gone() is present in the rendered helper"
+grep -q "user_manager_busy" <<<"$outgoing_body" ||
+  fail_test "outgoing_gone() actually CALLS user_manager_busy" "steam-launcher.service is a UNIT, invisible to a process check and to logind's seat list. Defining the function without calling it leaves the 5.18(a) thrash exactly as it was. Body: ${outgoing_body}"
+grep -q -- "--state=deactivating" "$rs_helper" ||
+  fail_test "the user-manager condition asks for deactivating units" "a unit mid-teardown is exactly the window that kills the incoming session"
+grep -qE -- '--machine="\$\{session_user\}@\.host"' "$rs_helper" ||
+  fail_test "the user-manager query targets the desktop user's manager" "the helper runs as root in a transient unit, so it must reach the user bus explicitly"
+pass "the gate waits for the user manager to have no deactivating units -- R-28's steam-launcher teardown, invisible to the other two conditions"
+
+# All three must reject independently.
+[[ $(grep -c "return 1" "$rs_helper") -ge 3 ]] ||
+  fail_test "each of the three settle conditions rejects independently" "found fewer than three 'return 1' paths"
+pass "all three settle conditions reject independently"
+
+# A failed query must be reported, not silently treated as 'nothing to wait
+# for'. That would restore the pre-R-28 behaviour with no trace.
+# Specifically the FAILURE branch. The flag name appears in several places, so
+# a whole-file grep passes even when the failing path stops recording it.
+umb_body=$(awk '/^user_manager_busy\(\) \{/,/^\}/' "$rs_helper")
+grep -q "USER_MANAGER_QUERY_OK=0" <<<"$umb_body" ||
+  fail_test "a FAILED user-manager query records itself as failed" "without it the query silently degrades to 'nothing deactivating' and the thrash returns with no trace. Body: ${umb_body}"
+grep -q "USER_MANAGER_QUERY_OK=1" <<<"$umb_body" ||
+  fail_test "a successful user-manager query records itself as succeeded" "otherwise the note cannot distinguish 'ran and found nothing' from 'never ran'"
+grep -q "did NOT run" "$rs_helper" ||
+  fail_test "a failed user-manager query is reported to the journal" "CLAUDE.md: never silently swallow a failure"
+pass "a failed user-manager query is journalled rather than silently passing the gate"
+
+# The bound must cover steam-launcher's own TimeoutStopSec, or the gate gives
+# up while systemd is still waiting and hands the thrash straight back.
+bound=$(grep -oE 'i -lt [0-9]+' "$rs_helper" | grep -oE '[0-9]+')
+[[ -n $bound && $bound -ge 600 ]] ||
+  fail_test "the settle bound covers steam-launcher's TimeoutStopSec=60s" "got ${bound} tenths of a second; giving up before systemd does returns the problem to the autologin retry loop"
+pass "the settle bound (${bound} tenths = $((bound / 10))s) covers steam-launcher.service's own TimeoutStopSec=60"
+
 # ===========================================================================
 # 6. render_steam_shim -- the file Steam actually invokes
 # ===========================================================================
