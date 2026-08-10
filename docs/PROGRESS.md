@@ -23,7 +23,7 @@ may use Wi-Fi (§2.2).
 | **R1** Six research questions | ✅ done | All six resolved. Several overturned the plan — §3 |
 | **T1** Kernel / firmware / boot | ✅ done | Ten stages, **hardware-validated end to end 2026-08-10** (§5.2). Neptune pin bump still untested |
 | **T2** Gamepad input spike | ✅ done | Navigation confirmed; T4 is days not weeks. Text entry open — §3.9 |
-| **T3** Gaming Mode + switching | 🟡 **both directions proven on hardware** (P1.5 phase F) — autologin bug found and fixed. Remaining: Steam's own menu item (§5.10), rotation (§5.11), parity batches |
+| **T3** Gaming Mode + switching | 🟡 **the core promise now works through Steam's own UI** (§5.10 closed, session 15). Rotation fixed on greeter + desktop (§5.11). Remaining: §5.15 (missing polkit helpers — brightness, timezone), §5.16 root cause, parity batches P2.2/P2.3, Quickshell pinning P2.4 |
 | **T4** Controller-only installer | ⬜ not started | **Re-scoped by §5.9** — lizard mode already makes the installer navigable; the real gap is text entry |
 | **T5** ISO + package payload | ⬜ not started | Unblocked by R1 and simplified by §2.2. **New constraints from P1.5:** offline-only pacman (§7), encryption default (§5.12), repo precedence (§5.13) |
 | **T6** Integration + release | ⬜ not started | Gated on Omarchy 4.0 stable |
@@ -52,10 +52,22 @@ user `deck`, key-based). Passwordless sudo via
 shipping** (it also masks `deck-session.sh`'s own sudoers verification).
 Snapshots: #1 pre-Neptune, #2 post-conversion, #3 complete.
 
-**Next action: phase 2.** The natural first block is **P2.1/P2.4** — resolve
-§5.10 (Steam's Switch-to-Desktop menu item, the untested half of the
-product's core promise) and §5.11 (rotation), both of which need the Deck and
-a Steam login.
+**Session 15 (2026-08-10) closed the phase-2 opener.** §5.10, §5.14 and the
+greeter/desktop half of §5.11 are all resolved and proven on hardware: **Steam's
+own Power → Switch to Desktop now works end to end**, and Steam is signed in.
+`src/deck-session.sh` went from four install stages to six, each verifying its
+own effect by running something. Snapshot **#4** precedes that session's writes.
+Findings: `docs/findings/P2-steam-integration-and-rotation.md` (R-20…R-26).
+
+It opened **§5.15** (Steam's whole privileged-helper surface is missing — this is
+now the widest gap, and it owns Gaming Mode's brightness slider) and **§5.16**
+(the switch could permanently kill sddm; mitigated, root cause open).
+
+**Next action:** either **§5.15** (decide the polkit-helper scope — `timedatectl`
+for timezone is cheap; `steamos-priv-write` needs a security design) or the
+Deck-free work: **§5.13**'s repo-precedence audit, **P2.5** (T4 installer
+screens) or **P2.7** (T5 ISO fork). T5 also inherits a new obligation from
+§5.11: the desktop rotation currently lives in one user's dotfile.
 
 ### 1.1 Artifacts that live OUTSIDE this repo
 
@@ -569,47 +581,60 @@ cannot express, or suppress it (via `hid-steam`'s hidraw behavior —
 unverified) and lose the free mouse/keyboard. Recommendation in the finding:
 use it.
 
-### 5.10 ⚠️ Steam's "Switch to Desktop" menu item is UNPROVEN — the core promise's untested half
+### 5.10 ✅ Steam's "Switch to Desktop" menu item — **RESOLVED 2026-08-10, proven on hardware**
 
-P1.5 phase F proved both switch directions, but the Gaming→Desktop one was
-exercised by invoking our shim directly. **Steam's Power menu never offered
-"Switch to Desktop"** (only Sleep/Shutdown/Restart/Cancel), so the path a
-*user* would actually take is untested.
+**Closed by session 15.** With a signed-in Steam, Power → **Switch to Desktop**
+is present, Steam invokes our shim, and the switch completes into Omarchy.
+Details: `docs/findings/P2-steam-integration-and-rotation.md` §R-23.
 
-Likely — but **not confirmed** — because Steam never left first-run setup: it
-is not signed in and is blocked behind §5.14's updater error, and its Power
-menu is reduced during OOBE.
+There were **two** independent causes, not the one §5.10 assumed:
 
-Established: Steam invokes the binary via `PATH`, not an absolute path
-(`PATH="${SYSTEM_PATH-${PATH}}" steamos-session-select %s`, from `steamui.so`),
-so `/usr/local/bin` should work **unless** the Steam runtime narrows
-`SYSTEM_PATH` — in which case the shim must move to `/usr/bin`.
+1. **Steam was stuck in OOBE** behind §5.14's updater error, which reduces the
+   Power menu. The hypothesis was right, and fixing §5.14 released it.
+2. **The shim was unreachable anyway.** The Steam runtime narrows `PATH` to
+   exactly `/usr/bin:/bin` (`SYSTEM_PATH` unset, so the `${PATH}` fallback
+   applies). `/usr/local/bin` — where the shim lived since P1.5 — is not on it.
+   This answers R-18a's open question: the shim **had** to move to `/usr/bin`,
+   and "Switch to Desktop" could never have worked before, menu item or not.
 
-**This is the product's central promise** (`docs/PLAN.md` §1: a Desktop Mode
-button "with a way back"). Treat it as open until a signed-in Steam shows the
-item and it works. Details: `docs/findings/P15-live-iso-recon.md` §R-18a.
+Also confirmed: **Steam passes `plasma`, not `desktop`** (SteamOS's desktop is
+KDE). `deck-session-select` already handles `desktop|plasma|omarchy`, so this
+worked by design — do not "simplify" that case away.
 
-### 5.11 Rotation must be fixed in userspace — no kernel we ship corrects it
+⚠️ Exercising this path also exposed §5.16, which could leave the Deck with no
+session at all. Read that before treating the switch as robust.
 
-**Confirmed by the operator on the finished system: the Limine menu, the SDDM
-greeter AND the Omarchy (Hyprland) desktop are all rendered 90° off.** The
-only surface that is correct is **Gaming Mode**, because gamescope rotates
-natively.
+### 5.11 🟡 Rotation — desktop and greeter FIXED; Limine menu and TTY still open
 
-`fbcon/rotate` is **0** on stock Arch *and* on Neptune; only the live ISO's
-`linux-t2` build set 1 — so no kernel this project ships corrects the panel,
-and the fix must come from userspace, per surface:
+`fbcon/rotate` is **0** on stock Arch *and* on Neptune, so no kernel this
+project ships corrects the panel and the fix is per-surface, in userspace.
 
 | Surface | Status | Fix |
 |---|---|---|
-| Limine menu | rotated | **no known fix yet** — and it is the first thing a user sees |
-| Console / TTY | rotated | `fbcon=rotate:1` on the cmdline |
-| SDDM greeter | rotated | SDDM's Wayland compositor config |
-| Omarchy / Hyprland | rotated | `monitor = eDP-1,…,transform,1` (or Omarchy's monitor config) |
+| Limine menu | ❌ rotated | **no known fix yet** — and it is the first thing a user sees. **T5** |
+| Console / TTY | ❌ rotated | `fbcon=rotate:1` on the cmdline — boot-chain change, **held for operator approval** |
+| SDDM greeter | ✅ **fixed, seen** | `stage-greeter-rotation` in `src/deck-session.sh` |
+| Omarchy / Hyprland | ✅ **fixed, seen** | `~/.config/hypr/monitors.lua` |
 | Gaming Mode | ✅ correct | none needed — gamescope handles it |
 
-Operator is content to live with it short-term but expects it fixed in
-phase 2. **T3/P2.4 + T5.** See §R-1, §R-12, §R-13a.
+**Three corrections to what was recorded here** (details:
+`docs/findings/P2-steam-integration-and-rotation.md` §R-24):
+
+- **The transform is 3 (270°), NOT 1.** `transform,1` renders the desktop
+  **upside down**. The old value was inference, never checked against a screen.
+- **The syntax was 3.x.** Omarchy 4.0 configures Hyprland in **Lua**
+  (`~/.config/hypr/monitors.lua`, `hl.monitor({…})`); the recorded
+  `monitor = eDP-1,…` line would not have parsed. Hyprland 0.56's Lua parser
+  also **rejects `hyprctl keyword`** — use `hyprctl eval 'hl.monitor({…})'`.
+- **NEW, a second display defect:** Omarchy's `scale = "auto"` resolves to **2**
+  on this panel, leaving a **640×400 logical desktop**. Now **1.25** (1024×640,
+  divides 1280×800 evenly). `GDK_SCALE` went 2 → 1 to match, or GTK apps render
+  ~2.5× and clip.
+
+⚠️ **The desktop half is per-user config** (`~/.config/hypr/monitors.lua`), so it
+is currently fixed only for `deck` on the test Deck. **T5 must bake it into the
+image** — `/etc/skel/.config/hypr/` or an Omarchy default — or a fresh install
+comes up rotated again.
 
 ### 5.12 The 4.0 installer defaults to FULL-DISK ENCRYPTION
 
@@ -635,16 +660,87 @@ blanket precedence to repos pinning older common packages. **Enumerate the
 overlap first** (`mesa`, `vulkan-radeon`, `lib32-vulkan-radeon` are the
 suspects). §R-15.
 
-### 5.14 Gaming Mode's update check fails: `steamos-update` exists in no repo
+### 5.14 ✅ Gaming Mode's update check — **RESOLVED 2026-08-10 with a stub**
 
-Steam's first run shows *"unable to download the required updates"* — the
-network is fine (DNS resolves, `store.steampowered.com` → 200, ufw allows
-output). The real log line is an *Updater apply* error, and the SteamOS
-tooling it wants is unobtainable: `steamos-customizations-jupiter` would
-supply it but ships `/etc/grub.d/`, which the Limine-only constraint forbids.
+**Closed by session 15.** Operator chose the stub option. Steam's log now reads
+`steamos-update check … returned: 7` → **`up to date`**, and the false network
+error is gone. Details: `docs/findings/P2-steam-integration-and-rotation.md`
+§R-21.
 
-A first-impression defect. Options in §R-17; a stub `steamos-update` looks
-best but is a decision, not a detail.
+**Two corrections to what was recorded here:**
+
+- Steam does **not** resolve this through `PATH`. It calls the absolute path
+  `/usr/bin/steamos-polkit-helpers/steamos-update`, so a stub in
+  `/usr/local/bin` would have installed cleanly and changed nothing.
+- **`steamos-customizations-jupiter` would not have supplied it.** That package
+  *is* available in `jupiter-staging`, but ships **zero** polkit helpers — it is
+  GRUB machinery. The reasoning here named the wrong package.
+
+⚠️ **Exit codes are a protocol, and 0 is dangerous.** `check` must exit **7**
+("up to date"); **the apply path must NOT exit 0** — Steam reads 0 as "an update
+was applied" and **reboots the device**, once per OOBE pass. That happened once
+on the Deck before it was caught. The stage now asserts apply is non-zero.
+
+This closed only *one* helper. The wider surface is **§5.15**.
+
+### 5.15 ⚠️ NEW, and it is the widest gap left: Steam's privileged-helper surface is missing
+
+§5.14 was one symptom of something larger. Steam drives system functions through
+helpers at **`/usr/bin/steamos-polkit-helpers/`**, invoked by **absolute path**.
+That directory does not exist here, so every call returns 127. Fourteen are
+compiled into the client; **eight were actually invoked** in one OOBE session.
+
+The two with real user impact:
+
+- **`steamos-priv-write`** — how Gaming Mode writes
+  `/sys/class/backlight/amdgpu_bl0/brightness`. Its absence means **the Gaming
+  Mode brightness slider does nothing**, and it explains why R-14a's "backlight
+  comes up at 1%" cannot be corrected from the UI. Same root cause.
+- **`steamos-set-timezone`** — called 28 times; OOBE's timezone picker silently
+  fails. Probably a three-line helper (`timedatectl set-timezone`) and the
+  cheapest real win here.
+
+Also missing: `steamos-devkit-mode`, `jupiter-get-als-gain` (ALS),
+`jupiter-dock-updater`, `jupiter-biosupdate`, `jupiter-fan-control`.
+
+**What is available:** `jupiter-hw-support` (`jupiter-staging`) ships six of them
+with Valve's own code — but it is 49 MiB download / 94 MiB installed and depends
+on **plymouth** on a Limine-only system. The `steamos-*` ones are in no repo.
+
+**Decision needed, not taken.** `steamos-priv-write` in particular is a root
+helper that writes caller-supplied sysfs paths; Valve's whitelists them and ours
+would have to. That is a security design, not a stub — and `jupiter-fan-control`
+lands in P2.3, which requires per-item operator approval every time.
+
+Full inventory and options: `docs/findings/P2-steam-integration-and-rotation.md`
+§R-20.
+
+### 5.16 🐞 The session switch can leave the Deck with NO session — mitigated, root cause open
+
+Found by taking the Gaming→Desktop path for real (§5.10). The switch left the
+Deck with no graphical session, recoverable only via
+`systemctl reset-failed sddm` **over SSH** — exactly what a controller-only user
+does not have. In the product that is a black screen with no way back.
+
+sddm ships `StartLimitIntervalSec=30`, `StartLimitBurst=2`, `RestartSec=100ms`.
+Switching restarts SDDM while gamescope still holds VT1; the first attempt raced
+that teardown (`HELPER_TTY_ERROR`), systemd retried 100 ms later — too soon for
+the VT to be free — and two failures inside 30 s latched the unit to `failed`
+**permanently**. A self-healing condition became unrecoverable because of a rate
+limit.
+
+**Mitigated** by `stage-sddm-resilience`: `StartLimitIntervalSec=0` and
+`RestartSec=3`, asserted against the values *systemd resolved*.
+
+**Still open — the root cause.** The restart is issued from inside the session
+being torn down. Decoupling it (a transient `systemd-run` unit, so the caller is
+not killed mid-restart) would *avoid* the race rather than only survive it.
+
+⚠️ **The verification has an honest limit:** the round trip afterwards passed
+*without the race recurring*, so what is proven is that the latch is gone — not
+that the recovery path was exercised. The race is intermittent; P1.5's R-18 hit
+this same switch and never saw it. Treat the switch as "works, not yet proven
+robust" until it has survived many cycles. §R-26.
 
 ### 5.2 T1's stock→Neptune conversion is ✅ VALIDATED (was: unvalidated)
 
@@ -819,6 +915,43 @@ backup rescue (the rebuild wipes both).
 - A `pgrep -f <pattern>` inside a shell whose own command line contains
   `<pattern>` matches itself and loops forever. Bit this session; use a
   pidfile or match more narrowly.
+- **Steam's runtime PATH is exactly `/usr/bin:/bin`**, with `SYSTEM_PATH`
+  unset. `/usr/local/bin` is unreachable from anything Steam invokes. Verify a
+  shim with `env -i PATH=/usr/bin:/bin sh -c 'command -v …'`, never with
+  `test -e` — the latter passes while Steam is blind to it.
+- **Steam calls its privileged helpers by ABSOLUTE path**,
+  `/usr/bin/steamos-polkit-helpers/<name>`. Two different resolution rules
+  coexist: `steamos-session-select` via PATH, the helpers absolutely. Both end
+  up needing `/usr/bin`.
+- **`steamos-update` exit codes are a protocol.** `check` → **7** means "up to
+  date"; **0 means an update is available**. On the apply path **0 makes Steam
+  REBOOT** the device to "finish" the update, and during OOBE Steam calls apply
+  without checking first — so 0 is a reboot loop. Use 7.
+- **Steam passes `plasma`** to `steamos-session-select`, not `desktop`.
+- **Omarchy 4.0 configures Hyprland in Lua**, not `.conf`
+  (`~/.config/hypr/*.lua`, `hl.monitor({…})`, `hl.config({…})`). Hyprland 0.56
+  **rejects `hyprctl keyword`** for Lua configs — "use eval"; the live path is
+  `hyprctl eval 'hl.monitor({…})'`.
+- **Hyprland silently discards a Lua config that fails to parse** — falls back
+  to defaults, logs nothing past `[cfg] Config is lua, loading lua mgr`, exits
+  0. Always `luac -p` a generated Hyprland config; the symptom otherwise looks
+  like "the setting has no effect here".
+- **The Deck panel's transform is 3 (270°). 1 is upside down.** And Omarchy's
+  `scale = "auto"` picks **2** on it, leaving a 640×400 logical desktop; 1.25
+  is the even divisor of 1280×800.
+- **sddm's shipped unit is `StartLimitBurst=2` / `StartLimitIntervalSec=30` /
+  `RestartSec=100ms`.** Two fast failures latch it to `failed` permanently,
+  needing `systemctl reset-failed` — unreachable without a keyboard. Any code
+  that restarts sddm has to account for this.
+- On a **package-based** Omarchy install there is no `~/.local/share/omarchy/`.
+  Defaults are in `/usr/share/omarchy/config/hypr/` and
+  `/etc/skel/.config/hypr/`, and 4.0 ships Lua-aware agent guidance at
+  `/usr/share/omarchy/default/agents/skills/omarchy/hyprland.md`. The
+  locally-installed `omarchy` skill documents the 3.x git layout and is wrong
+  for this system.
+- `steamos-customizations-jupiter` **is** available in `jupiter-staging` and
+  ships **zero** polkit helpers (it is GRUB machinery). `jupiter-hw-support`
+  ships six of them, at 94 MiB installed and a **plymouth** dependency.
 
 ---
 
@@ -836,4 +969,5 @@ One line each. Detail lives in git history and in the `FINDING-*.md` files.
 | 6 | T1 steps 4+6 — nine independently runnable stages, provably non-interactive |
 | 7 | First physical hardware run; two real bugs found; R1 §10.3 resolved; Steam/gamescope installed; prior-art check done |
 | 8 | First Gaming Mode boot, via a DeckShift hybrid splice (since reversed — §2.3) |
+| 15 | **Phase 2 opener, 2026-08-10.** §5.10 closed — Steam's own Switch-to-Desktop works, with **two** causes not one (OOBE, plus the runtime narrowing PATH to `/usr/bin:/bin`, which made the `/usr/local/bin` shim unreachable all along). §5.14 closed with a stub, after learning its exit codes are a protocol: apply exiting 0 made Steam **reboot the Deck**. §5.11's greeter + desktop fixed — transform is **3**, not the recorded 1, and Omarchy's `auto` scale left a 640×400 desktop. A `#` marker in a Lua file taught us Hyprland **silently discards** an unparseable config. Opened §5.15 (the whole polkit-helper surface, incl. brightness) and §5.16 (the switch latched sddm into permanent failure). |
 | 9 | **One long session, 2026-08-09/10 — the scope reset and all of phase 1's non-hardware work.** Five scope decisions (§2): the ISO is the deliverable again, network-at-install is fine, target 4.0, DeckShift dropped, Deck rebuilds allowed. Docs consolidated (`PROGRESS` 1403→~600 lines, `WHERE-WE-ARE` folded in, `PLAN` frozen with a known-wrong-sections banner); `docs/ROADMAP.md` written (three phases); dead drafts removed. **P1.1:** `stage-default-entry` with the path form *proven by boot*, substrate rebuilt with real snapper snapshots (which immediately caught the hook test's own substring miscount), three deliberate-failure tests. **P1.2–P1.3:** T2 spike resolved — a gamepad drives `gum` and `archinstall` at the kernel input layer, so T4 is days not weeks. **P1.4 (half):** 4.0 beta ISO built; static inspection decided T4's OSK question and found the OLED Deck's `nfa765` Wi-Fi firmware present (§5.1). Repo reorganized out of the flat layout (a root `*.sh` glob had silently gone from checking every script to none). |

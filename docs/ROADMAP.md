@@ -106,13 +106,16 @@ short, targeted Deck iterations over `tools/deck-sync.sh`.
 
 | # | Item | Where | Task ref |
 |---|---|---|---|
+| P2.0 ✅ | **Done 2026-08-10 (session 15).** §5.10 Steam's own Switch-to-Desktop proven end to end; §5.14 updater stub; §5.11 greeter + desktop rotation. Opened §5.15, §5.16 | Deck | `docs/findings/P2-steam-integration-and-rotation.md` |
+| P2.0b | **§5.15** — decide and ship the missing `steamos-polkit-helpers`. Owns Gaming Mode's **brightness slider** (`steamos-priv-write`) and OOBE's timezone. `jupiter-hw-support` supplies six but costs 94 MiB + plymouth | Deck + Dev | `docs/PROGRESS.md` §5.15 |
+| P2.0c | **§5.16** root cause — decouple the sddm restart from the session being torn down (transient `systemd-run` unit), then cycle the switch enough times to trust it | Deck | `docs/PROGRESS.md` §5.16 |
 | P2.1 | Desktop-mode input mapper as a `--user` service + `squeekboard`, on the Deck; verify against 4.0's `uwsm` targets | Deck (short) | `docs/tasks/T3-gaming-mode.md` §4 |
 | P2.2 | Hardware parity batch 1: Wi-Fi, BT, audio, trackpads/gyro, buttons in both sessions → `docs/findings/hardware-parity.md` | Deck | `docs/tasks/T3-gaming-mode.md` §5 |
 | P2.3 | Hardware parity batch 2: TDP, fan, battery — **operator approval per item, every time** | Deck | `docs/tasks/T3-gaming-mode.md` §5 |
 | P2.4 | Shell integration on Quickshell (now testable): pin the return icon, QAM/Power-menu trigger placement | Deck (short) | `docs/tasks/T3-gaming-mode.md` §6 |
 | P2.5 | T4: the 8 installer screens, per T2's finding; rotation handling per P1.5's recon | QEMU | `docs/tasks/T4-installer-ui.md` |
 | P2.6 | T4: full install flow in QEMU with virtual gamepad only, no keyboard | QEMU | `docs/tasks/T4-installer-ui.md` |
-| P2.7 | T5: fork `omarchy-iso`; Deck pacman package + `pre-refresh-pacman.d/` hook; Valve repos into the build; live-image firmware per §5.1's answer; `lib32-vulkan-radeon` pinned | Dev | `docs/tasks/T5-iso-and-payload.md` |
+| P2.7 | T5: fork `omarchy-iso`; Deck pacman package + `pre-refresh-pacman.d/` hook; Valve repos into the build; live-image firmware per §5.1's answer; `lib32-vulkan-radeon` pinned. **Also now: bake the desktop rotation into the image** (§5.11 — it currently lives in one user's `~/.config/hypr/monitors.lua`) | Dev | `docs/tasks/T5-iso-and-payload.md` |
 | P2.8 | T5: script-override loader wired; CI builds the ISO on tag; size recorded | Dev + CI | `docs/tasks/T5-iso-and-payload.md` |
 
 ### Exit criteria
@@ -158,7 +161,9 @@ exactly what we did.
 | Risk | Phase | Mitigation |
 |---|---|---|
 | ~~Live ISO can't drive the OLED radio~~ | 1 | **RETIRED** — works on hardware (R-0). No firmware needs baking into the live image |
-| ~~Live ISO renders rotated / unusable~~ | 1 | **RETIRED as stated**, but narrowed and still live: the **Limine menu** and **SDDM greeter** render rotated and no kernel we ship corrects it (§5.11). Gaming Mode is fine |
+| ~~Live ISO renders rotated / unusable~~ | 1 | **NARROWED TWICE.** Greeter and desktop are fixed and seen (§5.11, transform **3**). What remains is the **Limine menu** — no known fix, and the first thing a user sees — plus the TTY (`fbcon=rotate:1`, boot-chain, awaiting approval) |
+| Steam's system integration is absent, not just its updater | 2 | §5.15 — 14 polkit helpers Steam calls by absolute path; brightness and timezone are the user-visible ones. Scope undecided |
+| A session switch bricks the display manager | 2 | §5.16 — mitigated by lifting sddm's restart rate limit; root cause (restart issued from the dying session) still open, and the race is intermittent so absence of failure proves little |
 | ~~Stock Omarchy ISO won't boot/install on Deck~~ | 1 | **RETIRED** — boots and installs; the surprise was its **encryption default** (§5.12) |
 | Our fork inherits upstream's encryption default | 2 | Ship it off by default; TPM2 auto-unlock as follow-on (§5.12) |
 | Valve's packages shadowed by Arch's | 2 | `stage-repos` ordering bug, unfixed pending an overlap audit (§5.13) |
