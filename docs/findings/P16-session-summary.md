@@ -43,6 +43,7 @@ Later in the same session, working unattended:
 | **P2.2 programmatic half** | Wi-Fi, BT, audio, display, kernel **at parity**; input differs only because Steam replaces the native nodes with a virtual Xbox pad. `docs/findings/hardware-parity.md` |
 | **§5.5 answered** | `steamdeck-dsp` is **`Proprietary`** with no licence text, so a *bundling* ISO is blocked; *fetching* redistributes nothing. Logo out, glyphs to be redrawn. `docs/findings/P16-redistribution-and-trademark.md` |
 | **§5.18(a) root-caused and fixed** | `steam-launcher.service` `TimeoutStopSec=60`; retries went **600 → 283 → 20** |
+| **P2.1 mapper shipped** | `stage-input-mapper` + `--user` unit; verified binding `event7 (Steam Deck)` on hardware. Two unit defects found by *running* it (ordering cycle, `StartLimit*` in the wrong section) |
 
 `jupiter-hw-support` was **skipped** by operator decision — its six `jupiter-*`
 helpers have no user-visible effect yet, and `jupiter-fan-control` belongs to
@@ -120,7 +121,24 @@ Both would have shipped on a "the code looks right" review.
 | Backlight node | deliberately left **0644**, not the 666 found. If it is 666 again, Steam fell back, which means a helper broke |
 | ⚠️ Temporary | **display always-on is ENABLED** for testing — idle/screensaver/lock off, sleep targets masked. Revert: `sudo /usr/local/sbin/deck-always-on-revert.sh`. This is an **OLED** panel; burn-in is the reason not to leave it |
 
-## 7. Where to go next
+## 7. A pattern worth naming: three checks that were wrong about themselves
+
+Beyond the two defects in §4, this session produced three *checks* that
+reported confidently and incorrectly. All three were caught by running them
+against reality, none by review:
+
+| Check | Failure |
+|---|---|
+| settle gate's `pgrep -x gamescope` | matched **nothing** — the comm is `gamescope-wl`. Reported "settled" instantly |
+| target probe using `list-unit-files` | warned a target was missing while it was **active**; it is a runtime template instance with no file on disk |
+| `stage-audit-privileges` v1 | failed on `03_deck`, the ordinary password-protected admin grant — the false positive that gets a release check ignored |
+
+The shared shape: **a check that cannot distinguish "I looked and found
+nothing" from "I looked in the wrong place."** Worth asking of any new
+assertion, and worth a mutation test, which is what caught the equivalent
+problem in the unit suite three times.
+
+## 8. Where to go next
 
 - **P2.0d (§5.17)** — the blanket sudo grant. Everything privilege-shaped is
   untrustworthy until it goes.
