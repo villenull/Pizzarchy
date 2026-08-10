@@ -723,10 +723,11 @@ restamped every Gaming Mode start. That is Steam's doing, not a hand-edit.
 Supplying tier 1 is therefore a **security** change as much as a feature: it
 stops Steam reaching for blanket sudo and stops the `chmod`.
 
-**Still open here:** the narrow sudoers grants the two helpers install are
-visudo-validated but **not proven operative** — `99-deck-testing` sorts last in
-`/etc/sudoers.d/` and sudo takes the last match, so it authorizes the helpers
-today. Proving ours requires removing that file (§5.17).
+**The narrow grants are proven operative** — measured 2026-08-10 with
+`99-deck-testing` temporarily removed (§5.17), so nothing else could have
+authorized them. Both helpers still changed brightness and timezone, and
+`steamos-priv-write` still refused `/etc/shadow` with real privilege on the
+line.
 
 Not whitelisted on purpose: **`/dev/drm_dp_aux0`**, which Steam asks to write
 with an *empty* value. What that does is not understood, so the helper refuses
@@ -787,14 +788,34 @@ consequences, and the second is the expensive one:
    suspect until re-checked without this file.
 
 It also sorts **last** in `/etc/sudoers.d/` (`99-deck-testing` > `99-deck-…`),
-and sudo takes the last match, so it currently overrides every narrow grant
-this project installs — including the two from §5.15 and
-`99-deck-session-select`. None of them is proven operative while it exists.
+and sudo takes the last match, so it overrides every narrow grant this project
+installs — including the two from §5.15 and `99-deck-session-select`.
 
-**Not removed yet** — removing it breaks the unattended SSH loop this project
-iterates with. `deck` does have a password set (`passwd -S deck` → `P`) and
-`03_deck` grants `deck ALL=(ALL) ALL`, so removal is recoverable rather than a
-lockout. Decide before P2.7 bakes anything into the image.
+**Measured with it removed, 2026-08-10** (temporarily, with a `systemd-run`
+deadman restore; operator-approved). This is the product configuration, and it
+settles two things at once:
+
+| Probe | Result | What it means |
+|---|---|---|
+| `sudo -n true` | ✅ refused | the blanket grant was genuinely gone, so the rest is meaningful |
+| Steam tier 2, `echo V \| sudo -n tee PATH` | ✅ refused | **§5.15's product prediction is correct** — Steam's fallback dies, so without our helper the brightness slider really would do nothing |
+| Steam tier 3, `sudo -n chmod a+w PATH` | ✅ refused | the world-writable sysfs nodes are a test-rig artifact, not a shipped one |
+| direct write as `deck` (node reset to 0644) | ✅ refused | no ambient permission was masking the result |
+| `steamos-priv-write` → brightness | **works** | authorized by `99-deck-priv-write`, nothing else |
+| `steamos-set-timezone` → timezone | **works** | authorized by the narrow grant, nothing else |
+| `steamos-priv-write /etc/shadow` | ✅ refused | the whitelist holds with real privilege on the line |
+
+⚠️ The backlight node was reset to **0644** for that test and **left there** —
+it is the correct mode, and with tier 1 answering, Steam no longer re-`chmod`s
+it. If it is ever found at 666 again, Steam fell back, which means a helper
+broke.
+
+**Still not removed permanently** — doing so breaks the unattended SSH loop
+this project iterates with (`tools/deck-sync.sh` runs stages via `sudo -n`), so
+it needs a narrower replacement grant first. `deck` has a password set
+(`passwd -S deck` → `P`) and `03_deck` grants `deck ALL=(ALL) ALL`, so removal
+is recoverable rather than a lockout. Decide before P2.7 bakes anything into
+the image.
 
 ### 5.16 🐞 The session switch can leave the Deck with NO session — mitigated, root cause open
 
