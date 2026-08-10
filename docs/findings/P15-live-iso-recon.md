@@ -315,3 +315,34 @@ package mirror and installs from it, entirely offline, by design.
 - Anything the live environment needs at runtime (e.g. `python-evdev` for a
   mapper/OSK) must be **in the payload**. It cannot be fetched at install
   time under the current pacman config.
+
+## R-10. What the offline mirror actually contains — T5 payload scoping
+
+`/var/cache/omarchy/mirror/offline` on the live ISO: **2483 packages, 4.6 GB**
+(i.e. most of the 6.4 GB ISO). Probed for the packages this project needs:
+
+| Package | In mirror? | Consequence |
+|---|---|---|
+| `limine` | ✅ | Consistent with the Limine-only hard constraint — upstream already uses it |
+| `sof-firmware` | ✅ | Present in the *mirror* though absent from the live image (R-7), so the **installed** system can have audio |
+| `python` | ✅ | Base interpreter available |
+| `python-evdev` | ❌ | **Our mapper/OSK dependency is not in the ISO** |
+| `linux-neptune` | ❌ | Expected — Valve's kernel is not upstream Omarchy's concern |
+| `linux-firmware-neptune` | ❌ | Same |
+| `steam` | ❌ | Same |
+| `gamescope` | ❌ | Same |
+| `squeekboard` | ❌ | Moot anyway — the TTY-OSK decision (`T2-gamepad-spike.md` §4) already dropped it |
+
+**T5 (P2.7) scope, now concrete.** Every Deck-specific package is absent, and
+R-9 established pacman cannot reach the network from the live environment. So
+the fork must either bake Valve's packages into this offline mirror, or have
+the *installed* system pull them post-install over the network — which is
+what `src/omarchy-deck-kernel.sh stage-repos` already does, and is the cheaper
+path given §2.2 permits network during install.
+
+**The one that bites soonest is `python-evdev`:** anything of ours that runs
+*in the live environment* (a text-entry OSK for the Wi-Fi passphrase) needs
+it present in the payload, because it cannot be fetched at install time.
+Alternatively, write that component against raw `struct`-parsed evdev with no
+third-party dependency — which is exactly what this session's `evmon.py`
+proved is practical (R-8).
