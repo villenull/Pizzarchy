@@ -398,3 +398,73 @@ failed the stage loudly and survived untouched.
 Full script re-run end to end on the configured Deck: all six stages
 idempotent, no errors.
 </content>
+
+---
+
+## R-28. ✅ §5.18(a)'s root cause: `steam-launcher.service` stops for ~30 s and the new session starts into it
+
+Session 16. §5.18(a) was "the incoming session dies in ~1 ms and `Relogin=true`
+retries until one sticks", with the cause unidentified. It is identified.
+
+Both thrashing cycles in the 20-cycle soak have the same signature in the
+**user** manager's journal (`systemd[35310]`, uid 1000) — and it is the one unit
+that never reports stopping:
+
+```
+15:27:14.858  Stopped target Gamescope Session.
+15:27:14.859  Stopping Accessibility services bus...
+15:27:14.861  Stopping Steam Launcher...             <- no "Stopped" line, ever
+15:27:14.916  Stopped mangoapp.
+15:27:14.920  Stopped Accessibility services bus.
+      ...     29 SECONDS OF SILENCE ...
+15:27:43.775  Starting Virtual filesystem service...
+```
+
+Cycle 14 is identical with a 28 s gap. Every other unit stops in ~50 ms.
+
+`steam-launcher.service` is Valve's, shipped by the gamescope package:
+
+```
+PartOf=graphical-session.target
+TimeoutStopSec=60
+KillSignal=SIGCONT
+KillMode=mixed
+ExecStop=/bin/bash -c 'kill -TERM $(pgrep -P $MAINPID || echo $MAINPID)'
+```
+
+### The chain
+
+1. Switching away from Gaming Mode stops `gamescope-session.target`, which
+   stops `steam-launcher.service` because it is `PartOf` the graphical session.
+2. **Steam is slow to exit** — tens of seconds, and the unit permits 60.
+3. sddm has meanwhile already stopped and restarted (our restart helper's gate
+   passed, correctly: no compositor processes remain).
+4. The new session's `uwsm start … Hyprland` starts into a **user manager still
+   tearing the previous graphical session down**, and exits in ~1 ms.
+5. `Relogin=true` retries ~3×/s until the teardown finishes, then it sticks.
+
+### Why this explains everything observed
+
+- **The bimodal distribution.** 16/20 cycles at one attempt, two at 104/155.
+  Whether Steam exits promptly decides which. In cycle 6, Steam was still
+  *initialising* when the switch arrived (`BVerifyInstalledFiles` at 15:27:15)
+  — a Steam mid-startup takes the long path out.
+- **The 30–40 s duration**, which matches the ~29 s stop gap plus overhead.
+- **Why the settle gate did not help.** It waits on compositor *processes* and
+  on logind's seat list. `steam-launcher.service` is neither — it is a **unit in
+  the user manager**, invisible to both.
+- **Why `graphical-session.target` flapped** when probed earlier: it is
+  `PartOf`-linked to units still stopping, so it is not a settle signal on its
+  own.
+
+### What to do about it (P2.0e, not implemented here)
+
+The gate needs a **user-manager** condition, not another process name. The
+narrow form is to wait for `steam-launcher.service` to leave `deactivating`;
+the general form is to wait until no unit in that manager is `deactivating`.
+Reach it from the root transient unit with
+`systemctl --machine=<user>@.host --user`.
+
+⚠️ Do **not** simply shorten `TimeoutStopSec` on Valve's unit. Steam is being
+given that time to shut down cleanly, and cutting it risks corrupting its state
+— a different and worse bug than a slow switch.

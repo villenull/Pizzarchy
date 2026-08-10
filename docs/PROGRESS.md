@@ -929,8 +929,25 @@ the user" can never be true while anyone is on SSH — the discriminator that do
 work is **`Type=wayland`**, which excludes both the `manager`-class session and
 `tty` (SSH) sessions.
 
-**Still unexplained: why `uwsm start … Hyprland` exits in ~1 ms.** Until that is
-known, every fix here is mitigation.
+**✅ Root cause identified — R-28.** `steam-launcher.service` (Valve's, shipped
+with gamescope) is `PartOf=graphical-session.target` with **`TimeoutStopSec=60`**,
+and Steam takes tens of seconds to exit. Both thrashing cycles show the same
+user-manager signature: `Stopping Steam Launcher...` with **no matching
+`Stopped` line and ~29 s of silence**, while every other unit stops in ~50 ms.
+sddm has already restarted by then, so the new session's `uwsm start … Hyprland`
+starts into a user manager still tearing the old session down and exits in ~1 ms;
+`Relogin=true` then retries until the teardown completes.
+
+That explains the bimodality (whether Steam exits promptly), the 30–40 s
+duration, and why the settle gate did not help: `steam-launcher.service` is a
+**unit in the user manager**, not a process or a logind session, so neither of
+the gate's conditions can see it.
+
+**Fix for P2.0e:** add a user-manager condition — wait for
+`steam-launcher.service` to leave `deactivating` (narrow), or for no unit in
+that manager to be `deactivating` (general), via
+`systemctl --machine=<user>@.host --user`. ⚠️ Do **not** shorten Valve's
+`TimeoutStopSec`; Steam is being given that time to shut down cleanly.
 
 **What this costs today:** a switch always recovers unattended, which is the
 product-critical property, and 18 of 20 are clean. The other 2 visibly flicker
