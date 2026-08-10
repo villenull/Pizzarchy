@@ -416,3 +416,32 @@ straightforward.
 Teardown needed before re-running: `swapoff -a` (the installer creates a
 hibernation swapfile at `/mnt/swap/swapfile` that holds the mount), then
 `umount -R /mnt`, then `cryptsetup close root`.
+
+## R-12. Rotation, part 3 — the INSTALLED system's greeter IS rotated
+
+R-1a concluded "post-kernel is correct, only the bootloader is rotated."
+**That was too broad.** On the installed system:
+
+| Environment | Kernel | `fbcon/rotate` | Result |
+|---|---|---|---|
+| Live ISO | `7.1.6-arch1-Watanare-T2-1-t2` (`linux-t2`) | **1** | correct |
+| Installed | `7.1.6-arch1-1` (stock Arch) | **0** | **SDDM greeter rotated 90° CCW** |
+
+Same hardware, same upstream kernel version, different builds — and no
+`panel_orientation` sysfs property exposed on `card1-eDP-1` in the installed
+system. The kernel cmdline carries no rotation flag in either case.
+
+So the rotation correction seen in the live ISO came from **the `linux-t2`
+kernel's patches**, not from a universal upstream quirk. Stock Arch does not
+apply it, and **SDDM** (the display manager Omarchy 4.0 installs — confirmed
+`display-manager.service → sddm.service`) renders sideways as a result.
+
+**Deliberately not chased yet.** Phase E replaces this kernel with Valve's
+`linux-neptune`, which carries Deck hardware support and plausibly the panel
+quirk too. Diagnosing against a kernel we are about to remove would be wasted
+work. **Re-check `fbcon/rotate` and the greeter immediately after the Neptune
+conversion**, and only then decide whether T3/T5 must ship a fix.
+
+If it does still need fixing, the lever is SDDM's compositor (Omarchy 4.0 uses
+SDDM, so `sddm.conf`'s Wayland compositor settings), *not* `fbcon=rotate:`
+— fbcon governs the text console, which is not what the greeter draws on.
