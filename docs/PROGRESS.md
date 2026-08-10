@@ -591,13 +591,25 @@ item and it works. Details: `docs/findings/P15-live-iso-recon.md` §R-18a.
 
 ### 5.11 Rotation must be fixed in userspace — no kernel we ship corrects it
 
-The bootloader (Limine/Ventoy) and the SDDM greeter both render 90° off.
-`fbcon/rotate` is **0** on stock Arch *and* on Neptune; only the live ISO's
-`linux-t2` build set 1. Gaming Mode is fine (gamescope rotates natively).
+**Confirmed by the operator on the finished system: the Limine menu, the SDDM
+greeter AND the Omarchy (Hyprland) desktop are all rendered 90° off.** The
+only surface that is correct is **Gaming Mode**, because gamescope rotates
+natively.
 
-So: console needs `fbcon=rotate:1`; SDDM and Hyprland need a compositor
-transform; **the Limine menu itself has no fix yet** and is the first thing a
-user sees. T3/P2.4 + T5. See §R-1, §R-12, §R-13a.
+`fbcon/rotate` is **0** on stock Arch *and* on Neptune; only the live ISO's
+`linux-t2` build set 1 — so no kernel this project ships corrects the panel,
+and the fix must come from userspace, per surface:
+
+| Surface | Status | Fix |
+|---|---|---|
+| Limine menu | rotated | **no known fix yet** — and it is the first thing a user sees |
+| Console / TTY | rotated | `fbcon=rotate:1` on the cmdline |
+| SDDM greeter | rotated | SDDM's Wayland compositor config |
+| Omarchy / Hyprland | rotated | `monitor = eDP-1,…,transform,1` (or Omarchy's monitor config) |
+| Gaming Mode | ✅ correct | none needed — gamescope handles it |
+
+Operator is content to live with it short-term but expects it fixed in
+phase 2. **T3/P2.4 + T5.** See §R-1, §R-12, §R-13a.
 
 ### 5.12 The 4.0 installer defaults to FULL-DISK ENCRYPTION
 

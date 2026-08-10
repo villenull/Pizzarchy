@@ -767,3 +767,25 @@ testable; if it does, the shim must move to `/usr/bin`.
 product's core promise ("a Desktop Mode button... and a way back"), and the
 half that a *user* would actually touch remains untested. Next session:
 sign into Steam, resolve or stub R-17, then re-check the Power menu.
+
+## R-19. Rotation, final state — three of four surfaces are wrong
+
+Confirmed by the operator on the completed system (Omarchy 4.0 + Neptune +
+session layer). Supersedes the narrower readings in R-1a and R-12:
+
+| Surface | Orientation |
+|---|---|
+| Limine boot menu | ❌ rotated — **no fix identified** |
+| SDDM greeter | ❌ rotated |
+| Omarchy / Hyprland desktop | ❌ rotated |
+| Gaming Mode (gamescope) | ✅ correct |
+
+The pattern is now unambiguous: **everything that does not rotate itself
+renders sideways.** gamescope is correct only because it applies its own
+transform (`-O *,eDP-1` at 1280×800). Nothing in the kernel or in Omarchy's
+defaults compensates for the Deck's portrait-native panel.
+
+This is a bigger surface area than R-1a implied, and it lands squarely on
+T3/P2.4 (greeter + desktop) and T5 (the Limine menu, which ships in our ISO
+and greets the user first). Not fixed in P1.5 — the operator accepted it
+short-term — but it should not reach a release.
