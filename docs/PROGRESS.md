@@ -69,6 +69,13 @@ Deck-free work: **§5.13**'s repo-precedence audit, **P2.5** (T4 installer
 screens) or **P2.7** (T5 ISO fork). T5 also inherits a new obligation from
 §5.11: the desktop rotation currently lives in one user's dotfile.
 
+**Git state (end of session 15):** all phase-1 and P2.0 work is merged into
+**`main`**, with `p15-deck-recon` at the same commit. **Nothing is
+pushed** — `main` is ahead of `origin/main` by all of it
+(`github.com/villenull/Pizzarchy`), and pushing is an operator decision.
+`src/deck-session.sh` now has unit coverage (`test/unit/test-deck-session.sh`);
+CI's five bash suites and `shellcheck -x` over 21 scripts pass locally.
+
 ### 1.1 Artifacts that live OUTSIDE this repo
 
 Too large for git, but real and current. A session that assumes these are

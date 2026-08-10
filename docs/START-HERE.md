@@ -12,24 +12,50 @@ work without waiting for further instruction.**
 > end to end, on hardware, through the affordance a user actually touches.
 >
 > **The Deck:** package-based **Omarchy 4.0 + Neptune 6.11.11-valve29**,
-> unencrypted, booting unattended, **Steam signed in**, greeter and desktop
-> rotated correctly, zero DeckShift. Reach it with **`ssh steamdeck`**
-> (key-based, passwordless sudo). Snapshots #1–#3 from P1.5, **#4** before
-> session 15's writes.
+> Hyprland 0.56.2, unencrypted, booting unattended, **Steam signed in and past
+> OOBE**, greeter and desktop rotated correctly, zero DeckShift. Reach it with
+> **`ssh steamdeck`** (key-based, passwordless sudo). Snapshots #1–#3 from P1.5,
+> **#4** pre-session-15, **#5** `P2.0 complete`. It was left **on the desktop** —
+> `stage-default-session` (boot straight to Gaming Mode) is deliberately not run.
 >
-> Before doing anything else, read in this order:
+> **Git:** everything — all of phase 1 plus P2.0 — is merged into **`main`**, and
+> `p15-deck-recon` points at the same commit. **Nothing is pushed:** `main` is
+> ahead of `origin/main` by the whole of that work, and `origin` is a GitHub
+> remote, so pushing is the operator's call. Check with
+> `git rev-list --left-right --count origin/main...main` rather than trusting a
+> number written here.
+> A second worktree at `.claude/worktrees/hopeful-kare-af7d0a` is merged and
+> removable.
+>
+> **Start with the two session summaries** —
+> `docs/findings/P15-session-summary.md` and
+> `docs/findings/P2-session-summary.md`. They are the orientation pages; the
+> R-numbered findings files hold the evidence.
+>
+> Then read, in this order:
 > 1. `docs/PROGRESS.md` §1 (state) and §2 (the five scope decisions) — these
 >    reversed several earlier ones, and a session that misses them will build
 >    the wrong thing
 > 2. `docs/PROGRESS.md` **§5.9–§5.16** — the open issues. §5.10/§5.14 are now
 >    closed; **§5.15 and §5.16 are new and both matter**
 > 3. `docs/ROADMAP.md` phase 2 — the work queue from here
-> 4. `docs/PROGRESS.md` §7 — ~40 facts that each cost real time; do not
+> 4. `docs/PROGRESS.md` §7 — 36 facts that each cost real time; do not
 >    re-derive them
 >
 > Hardware evidence: `docs/findings/P15-live-iso-recon.md` (R-0…R-19, raw logs
 > in `P15-recon-raw/`) and
 > `docs/findings/P2-steam-integration-and-rotation.md` (R-20…R-26).
+>
+> ### There are now unit tests. Run them before and after touching `src/`.
+>
+> ```bash
+> for f in test/unit/test-*.sh; do ./"$f"; done   # 5 suites, seconds, no VM
+> ```
+>
+> `test/unit/test-deck-session.sh` pins the `steamos-update` stub's exit-code
+> protocol and the install-marker contract. ⚠️ **`src/deck-session.sh` is
+> source-safe, and the test sources it** — so anything you add at TOP LEVEL below
+> the constants runs at source time inside the test. Keep new work in functions.
 >
 > ### ⚠️ Session 15 corrected four recorded "facts". Trust the findings, not memory.
 >
@@ -100,14 +126,15 @@ it.
 |---|---|
 | `CLAUDE.md` | Auto-loaded every session. Hard constraints. |
 | `docs/ROADMAP.md` | **The plan — three phases.** Where the current block fits and what gates what. |
-| `docs/PROGRESS.md` | **Every session start. This is the authoritative state.** Scope, findings, open issues, and ~20 facts not to re-derive. |
+| `docs/PROGRESS.md` | **Every session start. This is the authoritative state.** Scope, findings, open issues, and 36 facts not to re-derive. |
 | `docs/SESSIONS.md` | Usage-limit budgeting and the block schedule. |
 | `docs/PLAN.md` | **Frozen and partly superseded.** Read the banner at the top first. Good for §6.1a (installer screens), §8 (bug hypotheses), §9 (test tiers), §11 (maintenance risks). |
 | `docs/tasks/` | One file per work block. |
 | `docs/findings/` | Research outputs. Evidence behind the decisions in `docs/PROGRESS.md`. |
 | `docs/drafts/` | Staged upstream report. **Nothing sent. Do not send.** |
 | `src/omarchy-deck-kernel.sh` | T1's deliverable. Ten idempotent stages, VM-tested and hardware-validated. |
-| `src/deck-session.sh` | T3's session-switch layer. |
+| `src/deck-session.sh` | T3's session-switch layer — **six** install stages, each self-verifying. Also owns the `steamos-update` stub, the greeter rotation and the SDDM restart drop-in. |
+| `test/unit/test-deck-session.sh` | Pins that script's two protocol contracts. No Deck, no VM, no root. |
 | `src/deck-input-mapper.py` | T2/T3's gamepad→keyboard mapper. |
 
 New files go in the matching directory — `docs/findings/` for research
