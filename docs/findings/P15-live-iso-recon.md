@@ -563,3 +563,65 @@ prompt would appear before boot completes, as plain text.
 straight to Gaming Mode like stock SteamOS, which does not stop at a login
 screen. **Autologin is therefore a T3 requirement**, not an optional nicety,
 and it is not yet configured. Nothing in the plan had called it out explicitly.
+
+## R-15. 🐞 BUG in `stage-repos`: Valve's repos are shadowed by Arch's
+
+**Found in Phase F, and it would have shipped.**
+
+`src/omarchy-deck-kernel.sh stage-repos` appends Valve's repositories to the
+**end** of `/etc/pacman.conf`:
+
+```
+line 19  [core]
+line 22  [extra]            <- Arch
+line 25  [multilib]
+line 28  [omarchy]
+line 47  [jupiter-staging]  <- Valve, appended by stage-repos
+line 51  [holo-staging]
+```
+
+pacman resolves by **repo order, first match wins**. So for any package name
+present in both, **Arch's build silently wins.** Demonstrated live:
+
+| | Repository | Version | Packager |
+|---|---|---|---|
+| what we got | `extra` | `3.16.25-1` | Sven-Hendrik Haase (Arch) |
+| what we needed | `jupiter-staging` | `3.16.25-3` | GitLab CI Package Builder (Valve) |
+
+`pacman -S gamescope` installed **Arch's** gamescope. Arch's build is the
+bare compositor: 47 files, **no** `gamescope-wayland.desktop`, no
+`start-gamescope-session`, no `/usr/lib/steamos/`. Valve's build ships the
+entire SteamOS session — the thing `src/deck-session.sh` exists to switch to.
+
+`stage-preconditions` caught it and failed loudly with an actionable message
+(good — exactly the `CLAUDE.md` contract), but nothing in the *kernel* script
+would have. The conversion reports complete success while leaving a system
+that cannot enter Gaming Mode.
+
+**Workaround used:** `pacman -S jupiter-staging/gamescope` (explicit repo
+prefix) — version went to `3.16.25-3` and every session file appeared.
+
+### The fix needs a decision, so it is NOT applied here
+
+Two candidate fixes, with a real tradeoff:
+
+1. **Insert Valve's repos above `[extra]`.** Matches SteamOS's own ordering
+   and fixes the whole class at once. **Risk:** Valve's repos pin older
+   versions of many common packages; giving them blanket precedence on an
+   Arch + Omarchy base could cause wide, surprising downgrades. Needs testing
+   before adoption.
+2. **Keep the order; require an explicit `jupiter-staging/` prefix** for every
+   Deck-specific package. Surgical and safe, but only works for packages we
+   know to name — a list that must be maintained, and whose gaps fail exactly
+   as this one did.
+
+**A third question this raises and does not answer:** which *other* packages
+overlap? `mesa`, `vulkan-radeon`, `lib32-vulkan-radeon` (already flagged for
+pinning in `ROADMAP.md` P2.7) are the obvious suspects for a GPU whose driver
+Valve patches. **Enumerate the overlap before choosing a fix** — the answer
+determines whether option 1 is even survivable.
+
+Deliberately left unfixed in this session: `stage-repos` is boot-chain code,
+the choice has consequences beyond gamescope, and picking one under time
+pressure at the end of a long hardware session is how bad defaults get
+baked in.
