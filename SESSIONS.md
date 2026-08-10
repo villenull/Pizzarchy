@@ -85,8 +85,8 @@ is fine when they're both Sonnet; avoid it when either is Opus.
 | Block | What | Model | Notes |
 |---|---|---|---|
 | P1.1 | ✅ done 2026-08-10 — substrate gap + `stage-default-entry` + failure tests, four suites green | **Opus** | |
-| P1.2 | Gamepad mapper prototype; drive archinstall/gum | **Opus** | Design-heavy |
-| P1.3 | OSK + `FINDING-T2-gamepad-spike.md` | Sonnet | Decides T4's scope |
+| P1.2 | ✅ done 2026-08-10 — mapper drives archinstall/gum in QEMU | **Opus** | |
+| P1.3 | ✅ done — `FINDING-T2-gamepad-spike.md`; T4 is days not weeks. OSK choice deferred to the real ISO | Sonnet | |
 | P1.4 | Ventoy USB + stock Omarchy 4.0 beta ISO | — | **Operator.** |
 | P1.5 | Deck recon + rebuild: live-ISO Wi-Fi/rotation, wipe → 4.0, kernel script conversion run, session switching | Sonnet | **Hardware. Ask first. USB keyboard needed.** |
 | P2.1 | Input mapper in the desktop session | Sonnet | Shares P1.2's implementation |

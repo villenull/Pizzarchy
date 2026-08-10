@@ -2,8 +2,17 @@
 
 **Model: Opus, plan mode.** This is a design spike, not implementation.
 
-> **This is the next block.** T4 is on the critical path to the ISO and this
-> sizes it.
+> **✅ RESOLVED 2026-08-10 — see `FINDING-T2-gamepad-spike.md`.**
+> Navigation works: a `uinput`/`evdev` mapper drives `gum` and `archinstall`
+> with no UI-side cooperation, proven in QEMU through the real kernel-VT
+> delivery path. **T4 is the days-shaped task, not the weeks-shaped one.**
+>
+> One gap remains and it is narrow: **text entry** (Wi-Fi password, account
+> credentials). Options and a recommendation are in the finding §4; settle it
+> against the real 4.0 ISO before writing any OSK code.
+>
+> Artifacts: `deck-input-mapper.py`, `test-deck-input-mapper.py` (26
+> assertions, in CI), `vm-gamepad-spike-test.sh` (QEMU).
 >
 > **Scope grew:** the install may now use Wi-Fi (`PROGRESS.md` §2.2), so the
 > user must **type a Wi-Fi password with a controller, in the live ISO,
