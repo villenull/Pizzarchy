@@ -330,10 +330,11 @@ Mode (R1 §10.3 design (b)) — one artifact, two consumers.
 
 **The open gap is text entry**, and only two screens need it: the Wi-Fi
 password (§2.2 put it on the critical path) and account credentials.
-Preference order: `squeekboard` if the live ISO runs a compositor (already
-chosen for Desktop Mode, no AUR) → a mapper-drawn OSK that needs no
-compositor → PIN-pad, which can supplement but cannot serve a Wi-Fi
-password. **Settle this against the real 4.0 ISO before writing OSK code.**
+**Now decided (2026-08-10):** the built 4.0 ISO's live environment has **no
+Wayland compositor at all**, so `squeekboard` is out there — T4 ships a
+**mapper-drawn OSK** that renders on a bare TTY and types through the
+virtual keyboard the mapper already owns. `squeekboard` remains correct for
+Desktop Mode under Hyprland; the two contexts get different answers.
 
 ⚠️ **The real Deck controller's event codes are not yet known** — the spike
 used a virtual pad modelling the Linux gamepad ABI. P1.5's recon captures
@@ -441,39 +442,46 @@ starts on this hardware* — not evidence about this project's own switch layer.
 
 Ranked by what they would cost to discover late.
 
-### 5.1 ⚠️ Wi-Fi in the live ISO is unverified — highest priority
+### 5.1 Wi-Fi in the live ISO — strong evidence, hardware confirmation pending
 
-Introduced by §2.2. The install now depends on the Deck reaching Wi-Fi *from
-the ISO*, and the ISO boots **Arch's stock kernel and stock `linux-firmware`**,
-not Neptune and not `linux-firmware-neptune`.
+Introduced by §2.2: the install now depends on the Deck reaching Wi-Fi *from
+the ISO*, whose live environment runs its own kernel and firmware, not
+Neptune's.
 
-All existing evidence that Deck Wi-Fi works comes from an installed system
-already running Valve's kernel and firmware. That evidence says nothing about
-the live environment. The OLED Deck also uses a **different radio from the
-LCD model** (`PLAN.md` §9.6), so even generic "Steam Deck Wi-Fi works on Linux"
-reports are not transferable without checking the model.
+**Substantially de-risked 2026-08-10 by inspecting the built 4.0 ISO**
+(`~/ISOs/omarchy-2026.08.10-x86_64-quattro.iso`). Its `airootfs.sfs`
+carries, in the live environment:
 
-**Cheap to settle, and it should be settled before T4 designs a Wi-Fi screen
-around an assumption:**
+```
+usr/lib/firmware/ath11k/WCN6855/hw2.0/nfa765/{amss.bin,m3.bin}   <- QCNFA765
+usr/lib/firmware/ath11k/WCN6855/hw2.1/nfa765/{amss.bin,m3.bin}
+usr/lib/firmware/ath11k/WCN6855/hw2.{0,1}/board-2.bin            <- per-board cal
+usr/lib/firmware/ath11k/WCN6855/hw2.{0,1}/regdb.bin
+kernel/drivers/net/wireless/ath/ath11k/*                         <- the driver
+usr/bin/iwctl + iwd.service                                      <- association
+```
 
-1. Boot the *stock, unmodified* Omarchy 4.0 ISO on the Deck from the Ventoy
-   USB and see whether a wireless interface enumerates and can associate.
-   This is `ROADMAP.md` P1.5's first act, before the wipe.
-2. If it does not, the ISO fork must carry `linux-firmware-neptune` (or the
-   specific firmware blob) **in the live environment's own filesystem**, not
-   just in the package payload — a different and less obvious change than
-   adding a package to the mirror.
+The **`nfa765`** directory is the notable part: that is QCNFA765, the OLED
+Deck's Wi-Fi module, with firmware variants named for it specifically. The
+driver, the per-board calibration blob (`board-2.bin` — the usual failure
+point when a device is *almost* supported), the regulatory database and the
+association tooling are all present.
 
-While in the live environment, also record two more things T4/T5 need
-(one boot answers all three):
+Live kernel is `7.1.6-arch1-Watanare-T2-1-t2` — the `linux-t2` kernel
+`omarchy-iso` already ships from `[arch-mact2]` (§3.3), not stock Arch.
+
+**Still not proof.** Firmware being present does not prove the driver binds
+to this device's PCI ID, nor that association succeeds. **P1.5 confirms it
+on hardware** — but the expected answer is now "yes", and the recon knows
+exactly what to check (`dmesg | grep ath11k`, does `wlan0` appear, does
+`iwctl station wlan0 scan` return networks).
+
+While in the live environment, still record for T4/T5:
 
 - **Display rotation.** The Deck panel is portrait-native; the live ISO may
-  render rotated 90°. T4's screens must know.
-- **Input enumeration** — what the controller looks like to the live kernel.
-
-If Wi-Fi fails and cannot be fixed in the live image, the offline mirror
-becomes load-bearing again and §2.2 has to be partially reconsidered. That is
-why it ranks first.
+  render rotated 90°.
+- **Input enumeration** — what the controller looks like to the live kernel
+  (`/proc/bus/input/devices`), which the T2 mapper's tables need (§3.9).
 
 ### 5.2 T1's stock→Neptune conversion is unvalidated on hardware
 
@@ -628,4 +636,5 @@ One line each. Detail lives in git history and in the `FINDING-*.md` files.
 | 8 | First Gaming Mode boot, via a DeckShift hybrid splice (since reversed — §2.3) |
 | 9 | Scope reset: ISO is the deliverable, target Omarchy 4.0, DeckShift dropped. Docs consolidated; `ROADMAP.md` written (three phases); Deck rebuild + factory-reset strategy adopted; dead drafts removed |
 | 10 | P1.1 done: `stage-default-entry` (path form proven by boot), substrate rebuilt with real snapper snapshots (immediately caught the hook test's own substring miscount), three deliberate-failure tests; all four suites green |
-| 11 | P1.2–P1.3 done: T2 spike resolved — gamepad drives `gum` + `archinstall` at the kernel input layer; T4 is days not weeks; text entry is the one open gap |
+| 11 | P1.2–P1.3 done: T2 spike resolved — gamepad drives `gum` + `archinstall` at the kernel input layer; T4 is days not weeks |
+| 12 | Built the 4.0 beta ISO; static inspection decided T4's OSK question (no compositor in the live env) and found the OLED Deck's `nfa765` Wi-Fi firmware present — §5.1 |

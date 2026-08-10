@@ -167,15 +167,27 @@ bzcat steamdeck-recovery-*.img.bz2 | sudo dd of=/dev/sdY bs=4M status=progress c
    ```
    *Expect:* the wired interface has a DHCP address within seconds.
 3. **Agent takes over via `ssh root@<ip>`.** Recon checklist, all read-only:
-   - **Wi-Fi (§5.1 — the headline question):** does a wireless interface
-     exist at all? `ip -br link`, `rfkill list`, `lspci -k`,
-     `dmesg | grep -iE 'wlan|wifi|ath|rtw|mt79|firmware.*(fail|error|timeout)'`.
-     If an interface exists: scan + associate + DHCP + ping — with whichever
-     of `iwctl` / `nmcli` the live env ships.
+   - **Wi-Fi (§5.1):** now *expected to work* — the ISO was inspected and
+     ships `ath11k` firmware including a **`nfa765`** variant (QCNFA765, the
+     OLED Deck's module), `board-2.bin`, the driver, and `iwd`. Confirm the
+     binding: `dmesg | grep -i ath11k` (look for firmware load + a device
+     name), `ip -br link` (does `wlan0` appear), `rfkill list`, then
+     `iwctl station wlan0 scan` / `get-networks` and associate.
+     **If it fails, capture the full `dmesg | grep -iE "ath11k|firmware"`** —
+     the blobs are present, so a failure means a binding/PCI-ID problem, a
+     materially different finding from "firmware missing".
    - **Rotation:** `cat /sys/class/graphics/fbcon/rotate`, camera frame of
      the physical screen, orientation of the installer UI if one started.
    - **Input:** `cat /proc/bus/input/devices` — what the controller looks
-     like to a stock kernel; `ls /dev/input/`.
+     like to the live kernel; `ls /dev/input/`. **This feeds the T2 mapper
+     directly** (`FINDING-T2-gamepad-spike.md`): the spike used a virtual pad
+     modelling the Linux gamepad ABI, so the Deck's real button codes and
+     extra nodes (trackpads, IMU, back paddles) are what the mapping tables
+     may need adjusting for. Save the whole file.
+   - **Try the mapper for real, right there:** copy `deck-input-mapper.py`
+     and `python-evdev` in, run it, and drive the live installer with the
+     controller. That is the first end-to-end controller-drives-installer
+     test on real hardware, and the ISO already ships `python3`.
    - **Environment:** `uname -r`, ISO version stamp, disk layout as the
      installer sees it (`lsblk`).
    - Save everything to the dev machine (`ssh … > recon/…`).

@@ -124,25 +124,37 @@ by it alone:
   `PROGRESS.md` §2.2 made the install use the network
 - **Account username + password** (item 5)
 
-Three options, in preference order:
+> **✅ DECIDED 2026-08-10, by inspecting the built 4.0 ISO.** The live
+> environment contains **no Wayland compositor of any kind** — no
+> `hyprland`, `gamescope`, `weston`, `sway`, `cage` or `labwc` binary in
+> `/usr/bin`, and no `squeekboard`/`wvkbd`. (Searches do hit `hyprland`, but
+> only as `/etc/skel/.config/hypr/` skeleton files and archinstall's
+> *profile definitions* — descriptions of what it can install, not something
+> that runs.) It is a pure console/TTY environment carrying `archinstall`,
+> `gum`, `python3`, `iwctl`.
+>
+> **So option 1 is out for the installer**, unless T5 adds an entire
+> compositor stack to the ISO — a far larger change than the alternative.
+> **Option 2 is the answer: a mapper-drawn OSK that renders on a bare TTY
+> and types through the same `uinput` keyboard the mapper already owns.**
+>
+> `squeekboard` remains correct for **Desktop Mode** (T3), which does run
+> under Hyprland. The two contexts get different answers, and that is fine —
+> the mapper is shared, the OSK is not.
 
-1. **`squeekboard` in the live ISO.** Already chosen for Desktop Mode
-   (R1 §10.3: Arch `extra`, no AUR; Hyprland implements the protocols). It
-   needs a **Wayland compositor**, so the live environment would run one —
-   which the ISO plausibly wants anyway for the graphical installer.
-   ⚠️ **Unverified in a live-ISO context.** This is the open question.
-2. **A mapper-drawn OSK** — an on-screen grid the mapper itself renders and
-   types from, no compositor needed. Works on a bare VT. More code, fully
-   under this project's control, and immune to the compositor question.
-3. **PIN-pad only** for the account screen (SteamOS-style). Cheap, but
-   **cannot serve a Wi-Fi password** — so it is a supplement, never the
-   answer.
+Three options, as evaluated:
 
-**Recommendation: settle option 1 against the real 4.0 ISO before writing any
-OSK code.** If the live environment already runs a compositor, `squeekboard`
-is nearly free and shares its choice with Desktop Mode. If it does not,
-option 2 is the fallback and is a bounded piece of work — the mapper already
-owns the input path it would need.
+1. ~~**`squeekboard` in the live ISO.**~~ **Ruled out** — needs a Wayland
+   compositor; the live environment has none (above).
+2. ✅ **A mapper-drawn OSK** — an on-screen grid the mapper itself renders
+   and types from, no compositor needed. Works on a bare VT, fully under
+   this project's control, immune to the compositor question. **This is the
+   choice.** Bounded work: the mapper already owns the input path and the
+   virtual keyboard; what is missing is a grid renderer and a character-key
+   emission path (the nav profile deliberately has none).
+3. **PIN-pad only** for the account screen (SteamOS-style). Still a useful
+   supplement — but it **cannot serve a Wi-Fi password**, so it is never the
+   answer on its own.
 
 ---
 
