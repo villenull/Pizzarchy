@@ -32,9 +32,22 @@ may use Wi-Fi (§2.2).
 the test bed (1), build the product (2), prove it from a factory reset and
 release (3).
 
-**Next action:** Phase 1 — P1.1 ✅ and P1.2–P1.3 (T2 spike) ✅ both done
-2026-08-10. **Remaining in phase 1: P1.4–P1.5, the Deck recon/rebuild
-session** — needs the operator. Runbook: `docs/tasks/P15-deck-rebuild-runbook.md`.
+**Next action: P1.5, the Deck recon/rebuild session.** Everything in phase 1
+that can be done without hardware is finished (P1.1 ✅, P1.2–P1.3 ✅, and
+P1.4's software half ✅ — the ISO is built, see §1.1). What remains needs the
+operator and the physical Deck. Runbook, phase by phase with expect/abort
+lines: `docs/tasks/P15-deck-rebuild-runbook.md`.
+
+### 1.1 Artifacts that live OUTSIDE this repo
+
+Too large for git, but real and current. A session that assumes these are
+missing will waste an hour rebuilding them.
+
+| Artifact | Where | Notes |
+|---|---|---|
+| **Omarchy 4.0 beta ISO** | `~/ISOs/omarchy-2026.08.10-x86_64-quattro.iso` | 6.0 GB, built 2026-08-10, `.sha256` alongside. **This is P1.4's ISO** — copy to the Ventoy stick. Rebuild only if a newer 4.0 is wanted (§3.10 has the flags) |
+| **QEMU substrate image** | `test/images/neptune-substrate.raw` | 14 GB apparent / ~2.9 GB sparse, gitignored. Every `test/vm/` suite uses it; rebuilt automatically by `test/images/vm-neptune-image.sh` if absent (~6 min) |
+| **`omarchy-iso` scratch clone** | session scratch — **will be lost** | Had two local deviations worth reapplying if rebuilding: `--network host` on the Docker run (§7's bridge throttle) and a scratch pacman cache instead of the host's (§3.10 item 3) |
 
 ---
 
@@ -642,8 +655,4 @@ One line each. Detail lives in git history and in the `FINDING-*.md` files.
 | 6 | T1 steps 4+6 — nine independently runnable stages, provably non-interactive |
 | 7 | First physical hardware run; two real bugs found; R1 §10.3 resolved; Steam/gamescope installed; prior-art check done |
 | 8 | First Gaming Mode boot, via a DeckShift hybrid splice (since reversed — §2.3) |
-| 9 | Scope reset: ISO is the deliverable, target Omarchy 4.0, DeckShift dropped. Docs consolidated; `docs/ROADMAP.md` written (three phases); Deck rebuild + factory-reset strategy adopted; dead drafts removed |
-| 10 | P1.1 done: `stage-default-entry` (path form proven by boot), substrate rebuilt with real snapper snapshots (immediately caught the hook test's own substring miscount), three deliberate-failure tests; all four suites green |
-| 11 | P1.2–P1.3 done: T2 spike resolved — gamepad drives `gum` + `archinstall` at the kernel input layer; T4 is days not weeks |
-| 12 | Built the 4.0 beta ISO; static inspection decided T4's OSK question (no compositor in the live env) and found the OLED Deck's `nfa765` Wi-Fi firmware present — §5.1 |
-| 13 | Repo reorganized out of the deliberately-flat layout into `src/` `tools/` `test/{lib,unit,vm,images}` `docs/{tasks,findings,drafts}`; 337 cross-references rewritten; CI rewired |
+| 9 | **One long session, 2026-08-09/10 — the scope reset and all of phase 1's non-hardware work.** Five scope decisions (§2): the ISO is the deliverable again, network-at-install is fine, target 4.0, DeckShift dropped, Deck rebuilds allowed. Docs consolidated (`PROGRESS` 1403→~600 lines, `WHERE-WE-ARE` folded in, `PLAN` frozen with a known-wrong-sections banner); `docs/ROADMAP.md` written (three phases); dead drafts removed. **P1.1:** `stage-default-entry` with the path form *proven by boot*, substrate rebuilt with real snapper snapshots (which immediately caught the hook test's own substring miscount), three deliberate-failure tests. **P1.2–P1.3:** T2 spike resolved — a gamepad drives `gum` and `archinstall` at the kernel input layer, so T4 is days not weeks. **P1.4 (half):** 4.0 beta ISO built; static inspection decided T4's OSK question and found the OLED Deck's `nfa765` Wi-Fi firmware present (§5.1). Repo reorganized out of the flat layout (a root `*.sh` glob had silently gone from checking every script to none). |

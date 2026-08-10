@@ -3,6 +3,34 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
+> ## Where things stand (updated 2026-08-10, end of session 13)
+>
+> **T0, R1, T1, T2 are done. T3 is in progress. The whole of phase 1 that can
+> be done without hardware is finished.**
+>
+> **The next action is P1.5 — the Deck recon/rebuild session — and it needs
+> the operator.** Read `docs/tasks/P15-deck-rebuild-runbook.md`; it is written
+> phase-by-phase with expect/abort lines and a live-comms plan (SSH-driven,
+> wired via the router, camera for firmware screens).
+>
+> Before doing anything else, read in this order:
+> 1. `docs/PROGRESS.md` §1 (state) and §2 (the five scope decisions) — these
+>    reversed several earlier ones, and a session that misses them will build
+>    the wrong thing
+> 2. `docs/ROADMAP.md` — the three phases
+> 3. `docs/PROGRESS.md` §7 — ~25 facts that each cost real time; do not
+>    re-derive them
+>
+> **If the operator is not available for hardware work**, useful things that
+> need no Deck: T4's mapper-drawn OSK (`docs/findings/T2-gamepad-spike.md` §4
+> — the design is decided, the code is not written), and T5's ISO fork
+> groundwork (`docs/tasks/T5-iso-and-payload.md`, gotchas in
+> `docs/PROGRESS.md` §3.10).
+>
+> **Do not** start T4's installer screens or T5's payload assembly before
+> P1.5's recon lands — rotation and the real controller's event codes shape
+> both.
+
 Layout is in `CLAUDE.md`. Paths below are repo-root-relative.
 
 ---

@@ -60,7 +60,7 @@ acceptable). There is no unrecoverable state on this path.
 | P1.1 ✅ | Close the VM substrate blind spot (snapper snapshot), implement `stage-default-entry` + verify Limine's entry-path form via `LoaderEntrySelected`, run the deliberate-failure test | QEMU | T1 §7–8, `docs/PROGRESS.md` §5.2, §5.3, §5.5 |
 | P1.2 ✅ | T2 spike: `uinput` mapper prototype; drive `archinstall` and `gum` with virtual gamepad only | QEMU | `docs/tasks/T2-gamepad-input-spike.md` |
 | P1.3 ✅ | T2 spike: `squeekboard` OSK — does focus-triggered text entry work, and can it run in a live-ISO-like environment? Write `docs/findings/T2-gamepad-spike.md`; size T4 | QEMU | `docs/tasks/T2-gamepad-input-spike.md` §4–5 |
-| P1.4 | **Operator:** Ventoy on the test USB; obtain or build the stock Omarchy 4.0 beta ISO; recovery USB; comms setup | Hardware prep | **`docs/tasks/P15-deck-rebuild-runbook.md`** §1–2 |
+| P1.4 🟡 | **ISO ✅ built** (`~/ISOs/omarchy-2026.08.10-x86_64-quattro.iso`). Remaining, operator: Ventoy on the test USB; obtain or build the stock Omarchy 4.0 beta ISO; recovery USB; comms setup | Hardware prep | **`docs/tasks/P15-deck-rebuild-runbook.md`** §1–2 |
 | P1.5 | **Deck session (ask first):** recon → wipe → 4.0 → Neptune conversion → session switching, driven over SSH with camera backup | Deck | **`docs/tasks/P15-deck-rebuild-runbook.md`** §3 |
 
 P1.1–P1.3 need no hardware and can proceed immediately; P1.4–P1.5 need the
@@ -78,13 +78,18 @@ kernel script including `stage-default-entry`.
 
 ### Exit criteria
 
-- [ ] Wi-Fi in the live ISO: answered with evidence (and if "no": the fix
-      identified — firmware into the live image's filesystem)
+- [x] **T4's OSK question decided** — the live ISO has no Wayland compositor,
+      so a mapper-drawn TTY OSK it is (`docs/findings/T2-gamepad-spike.md` §4)
+- [ ] Wi-Fi in the live ISO: **expected yes** — the ISO ships `ath11k`
+      `nfa765` firmware + `board-2.bin` + `iwd` (`docs/PROGRESS.md` §5.1).
+      Confirm the driver binds on hardware; capture `dmesg | grep ath11k`
+      either way
 - [ ] Display rotation and input behavior in the live ISO: recorded
-- [ ] T4's scope known — `docs/findings/T2-gamepad-spike.md` written
-- [ ] `stage-default-entry` shipped, path-form proven in QEMU, and validated
-      on the fresh install
-- [ ] Deliberate-failure test run and recorded
+- [x] T4's scope known — `docs/findings/T2-gamepad-spike.md` written: **days,
+      not weeks**
+- [x] `stage-default-entry` shipped, path-form **proven by boot** in QEMU
+- [ ] ...and validated on the fresh install (P1.5)
+- [x] Deliberate-failure tests run and recorded (three of them)
 - [ ] Deck runs Omarchy 4.0 + Neptune, boots it unattended, switches to
       Gaming Mode and back — with zero DeckShift and zero hand-edits
 
