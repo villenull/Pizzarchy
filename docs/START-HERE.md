@@ -3,48 +3,49 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
-> ## Where things stand (updated 2026-08-10, end of session 15)
+> ## Where things stand (updated 2026-08-10, end of session 16)
 >
 > ### ✅ PHASE 1 COMPLETE. Phase 2 is underway — the core promise now works.
 >
 > **T0, R1, T1, T2 done. T3 is close.** P1.5 rebuilt the Deck; **session 15
-> closed the phase-2 opener**: Steam's own **Power → Switch to Desktop** works
+> closed the phase-2 opener**, and session 16 shipped P2.0b + P2.0c: Steam's own **Power → Switch to Desktop** works
 > end to end, on hardware, through the affordance a user actually touches.
 >
 > **The Deck:** package-based **Omarchy 4.0 + Neptune 6.11.11-valve29**,
 > Hyprland 0.56.2, unencrypted, booting unattended, **Steam signed in and past
 > OOBE**, greeter and desktop rotated correctly, zero DeckShift. Reach it with
 > **`ssh steamdeck`** (key-based, passwordless sudo). Snapshots #1–#3 from P1.5,
-> **#4** pre-session-15, **#5** `P2.0 complete`. It was left **on the desktop** —
+> **#4** pre-session-15, **#5** `P2.0 complete`, **#6**/**#7** from session 16.
+> It was left **on the desktop** —
 > `stage-default-session` (boot straight to Gaming Mode) is deliberately not run.
 >
-> **Git:** everything — all of phase 1 plus P2.0 — is merged into **`main`**, and
-> `p15-deck-recon` points at the same commit. **Nothing is pushed:** `main` is
-> ahead of `origin/main` by the whole of that work, and `origin` is a GitHub
-> remote, so pushing is the operator's call. Check with
+> **Git:** everything through **session 16** is merged into **`main`** and
+> **pushed** to `origin`. Check state with
 > `git rev-list --left-right --count origin/main...main` rather than trusting a
-> number written here.
-> A second worktree at `.claude/worktrees/hopeful-kare-af7d0a` is merged and
-> removable.
+> number written here — this block has been stale twice before.
 >
-> **Start with the two session summaries** —
-> `docs/findings/P15-session-summary.md` and
-> `docs/findings/P2-session-summary.md`. They are the orientation pages; the
+> **Start with the session summaries, newest first** —
+> `docs/findings/P16-session-summary.md`, then
+> `docs/findings/P2-session-summary.md` and
+> `docs/findings/P15-session-summary.md`. They are the orientation pages; the
 > R-numbered findings files hold the evidence.
+>
+> ⚠️ **P16's opening section lists four recorded "facts" it had to correct, two
+> of them from session 15.** Read it before trusting §5.15 or §5.16.
 >
 > Then read, in this order:
 > 1. `docs/PROGRESS.md` §1 (state) and §2 (the five scope decisions) — these
 >    reversed several earlier ones, and a session that misses them will build
 >    the wrong thing
-> 2. `docs/PROGRESS.md` **§5.9–§5.16** — the open issues. §5.10/§5.14 are now
->    closed; **§5.15 and §5.16 are new and both matter**
+> 2. `docs/PROGRESS.md` **§5.9–§5.18** — the open issues. §5.10/§5.13/§5.14/
+>    §5.16/§5.18 are now closed; **§5.17 is the live one**
 > 3. `docs/ROADMAP.md` phase 2 — the work queue from here
 > 4. `docs/PROGRESS.md` §7 — 36 facts that each cost real time; do not
 >    re-derive them
 >
 > Hardware evidence: `docs/findings/P15-live-iso-recon.md` (R-0…R-19, raw logs
 > in `P15-recon-raw/`) and
-> `docs/findings/P2-steam-integration-and-rotation.md` (R-20…R-26).
+> `docs/findings/P2-steam-integration-and-rotation.md` (R-20…**R-28**).
 >
 > ### There are now unit tests. Run them before and after touching `src/`.
 >
@@ -52,48 +53,83 @@ work without waiting for further instruction.**
 > for f in test/unit/test-*.sh; do ./"$f"; done   # 5 suites, seconds, no VM
 > ```
 >
-> `test/unit/test-deck-session.sh` pins the `steamos-update` stub's exit-code
-> protocol and the install-marker contract. It has teeth — **mutation-tested,
-> 15/15 introduced faults caught**, including the apply-path drift that rebooted
-> the Deck; see `docs/findings/P2-session-summary.md` §6a for what it does and
-> does not cover. ⚠️ **`src/deck-session.sh` is source-safe, and the test sources
+> (That glob is the 5 shell suites; `test/unit/test-deck-input-mapper.py` is a
+> sixth and is **not** in it — run it separately.)
+>
+> `test/unit/test-deck-session.sh` is now **53 assertions** covering all four
+> generated files — the `steamos-update` stub's exit-code protocol, the
+> install-marker contract, both polkit helpers' argument validation, the sddm
+> restart helper's shape, and Steam's shim. It has teeth: **mutation-tested,
+> 15/15 then 34/34 faults caught**, including the apply-path drift that rebooted
+> the Deck. See `docs/findings/P2-session-summary.md` §6a and
+> `docs/findings/P16-session-summary.md` §4 for what it does and does not cover.
+>
+> ⚠️ Session 16's lesson for writing these: three assertions there pin **which
+> guard fired**, via the error message, not just the exit code. Two guards that
+> share an exit code make an exit-code-only assertion pass with either one
+> deleted — all three cases were caught by mutation testing, not by review.
+>
+> ⚠️ **`src/deck-session.sh` is source-safe, and the test sources
 > it** — so anything you add at TOP LEVEL below the constants runs at source time
 > inside the test. Keep new work in functions.
 >
-> ### ⚠️ Session 15 corrected four recorded "facts". Trust the findings, not memory.
+> ### ⚠️ Sessions 15 AND 16 each corrected four recorded "facts". Trust the findings, not memory.
 >
-> Each of these was written down confidently and was wrong:
-> `transform,1` (it is **3**; 1 is upside down) · the rotation syntax (4.0 uses
-> **Lua**, not `.conf`) · "Steam finds `steamos-update` via PATH" (**absolute
-> path**) · "`steamos-customizations-jupiter` would supply it" (**ships zero
-> polkit helpers**). Verify against hardware before building on a recorded value.
+> Session 15: `transform,1` (it is **3**; 1 is upside down) · the rotation syntax
+> (4.0 uses **Lua**, not `.conf`) · "Steam finds `steamos-update` via PATH"
+> (**absolute path**) · "`steamos-customizations-jupiter` would supply it"
+> (**ships zero polkit helpers**).
+>
+> Session 16: "the brightness slider does nothing" (**it works** — Steam falls
+> back to blanket sudo) · the 666 backlight mode (**Steam sets it**, not a
+> human) · "`RestartSec` is the important half" of §5.16 (**it never gated the
+> fatal start**) · "§5.16 is a switch defect" (**it fired at boot**).
+>
+> Two more were defects session 16 introduced *in its own fixes* and caught only
+> by mutation testing and soaking — see P16 §4. Verify against hardware before
+> building on a recorded value, and **never conclude a check works because it
+> passes.**
 >
 > ### The most important open item
 >
-> **§5.15 — Steam's entire privileged-helper surface is missing.**
-> `/usr/bin/steamos-polkit-helpers/` does not exist, and Steam calls 14 helpers
-> there by absolute path. **This owns Gaming Mode's brightness slider**
-> (`steamos-priv-write`) and OOBE's timezone. `jupiter-hw-support` supplies six
-> of them but costs 94 MiB and a plymouth dependency; the `steamos-*` ones are in
-> no repo. **Scope decision needed before coding.**
+> **§5.17 — the test Deck is more privileged than the product will be.**
+> `/etc/sudoers.d/99-deck-testing` grants `deck ALL=(ALL) NOPASSWD: ALL`, is
+> owned by no package, and **sorts last**, so it overrides every narrow sudoers
+> grant this project installs. It must never ship, and until it goes, anything
+> privilege-dependent verified on this Deck is suspect.
 >
-> Also open: **§5.16** — a session switch latched sddm into permanent failure,
-> leaving no graphical session and needing SSH to recover. Mitigated; the root
-> cause (restart issued from inside the dying session) is not fixed, and the race
-> is intermittent, so "it worked once" proves little.
+> Session 16 found this the hard way: §5.15 recorded that the missing
+> `steamos-priv-write` meant "the brightness slider does nothing", but the
+> slider **works here** — Steam falls back to `sudo -n tee`, then
+> `sudo -n chmod a+w`, both of which need exactly that blanket grant. Right
+> conclusion about the product, wrong belief about the present. **Assume any
+> "it works on the Deck" claim about privilege is wrong until re-checked
+> without `99-deck-testing`.**
 >
-> ### Two defects still deliberately unfixed — decide before coding
+> §5.15 itself is now 🟡: its two user-visible helpers ship
+> (`stage-timezone-helper`, `stage-priv-write-helper`), and
+> `jupiter-hw-support` is skipped by operator decision.
 >
-> - **§5.13 `stage-repos` lets Arch shadow Valve's packages.** `pacman -S
->   gamescope` installs the bare compositor, not the SteamOS session. The naive
->   fix (Valve's repos first) risks wide downgrades — **audit the overlap
->   first** (`mesa`, `vulkan-radeon`, `lib32-vulkan-radeon`).
+> *(**§5.16 and §5.18 are both closed.** §5.16's cause was sddm's stop timing
+> out; §5.18's was `steam-launcher.service` taking up to ~53 s to stop, so the
+> incoming session started into a teardown. Autologin attempts across 20
+> switches went **600 → 283 → 20**, the ideal. Residual: a switch away from
+> Gaming Mode can take **~1 minute**, dominated by Valve's `TimeoutStopSec=60` —
+> correct and flicker-free, but not fast.)*
+>
+> ### One defect still deliberately unfixed — decide before coding
+>
 > - **§5.12 the 4.0 installer defaults to full-disk encryption.** Inherit it and
 >   the ISO produces a device its owner cannot boot without a keyboard.
 >
+> *(§5.13 is **closed** — session 16 audited the overlap. 101 package names
+> collide and Valve's is older in 50, so reordering repos is rejected; the real
+> surface is one package and the fix is `pacman -S jupiter-staging/gamescope`.
+> See `docs/findings/P16-repo-overlap-audit.md`.)*
+>
 > ### Good work available *without* the Deck
 >
-> §5.13's overlap audit · T4's installer screens and OSK (re-scoped by §5.9 —
+> T4's installer screens and OSK (re-scoped by §5.9 —
 > lizard mode already makes the installer navigable, so the real gap is **text
 > entry**) · T5's ISO fork (`docs/tasks/T5-iso-and-payload.md`), which now has
 > four constraints: offline-only pacman, the encryption default, repo precedence,
@@ -136,8 +172,8 @@ it.
 | `docs/findings/` | Research outputs. Evidence behind the decisions in `docs/PROGRESS.md`. |
 | `docs/drafts/` | Staged upstream report. **Nothing sent. Do not send.** |
 | `src/omarchy-deck-kernel.sh` | T1's deliverable. Ten idempotent stages, VM-tested and hardware-validated. |
-| `src/deck-session.sh` | T3's session-switch layer — **six** install stages, each self-verifying. Also owns the `steamos-update` stub, the greeter rotation and the SDDM restart drop-in. |
-| `test/unit/test-deck-session.sh` | Pins that script's two protocol contracts. No Deck, no VM, no root. |
+| `src/deck-session.sh` | T3's session-switch layer — **nine** install stages, each self-verifying. Also owns the three `steamos-polkit-helpers` (update stub, timezone, priv-write), the greeter rotation and the SDDM restart drop-in. |
+| `test/unit/test-deck-session.sh` | Pins that script's protocol contracts and both new helpers' argument validation — 36 assertions, mutation-tested. No Deck, no VM, no root. |
 | `src/deck-input-mapper.py` | T2/T3's gamepad→keyboard mapper. |
 
 New files go in the matching directory — `docs/findings/` for research
@@ -198,18 +234,20 @@ VM.
 | R1 | `docs/tasks/R1-research-questions.md` | Opus/Sonnet | ✅ done |
 | T1 | `docs/tasks/T1-kernel-and-boot.md` | **Opus** | ✅ done — **hardware-validated 2026-08-10** |
 | T2 | `docs/tasks/T2-gamepad-input-spike.md` | **Opus** | ✅ done |
-| T3 | `docs/tasks/T3-gaming-mode.md` | Sonnet/Opus | 🟡 **the core promise works through Steam's own UI** (§5.10 ✅, §5.14 ✅, §5.11 greeter+desktop ✅). Left: §5.15, §5.16, P2.1–P2.4 |
+| T3 | `docs/tasks/T3-gaming-mode.md` | Sonnet/Opus | 🟡 **the core promise works, and the switch is now soak-proven** (§5.10 ✅, §5.14 ✅, §5.11 ✅, §5.15 ✅, §5.16 ✅, §5.18 ✅). Left: §5.17, P2.1–P2.4 |
 | T4 | `docs/tasks/T4-installer-ui.md` | Sonnet | ⬜ **unblocked, re-scoped by §5.9** → P2.5–P2.6 |
 | T5 | `docs/tasks/T5-iso-and-payload.md` | Sonnet/Opus | ⬜ P2.7–P2.8, now with §5.12/§5.13 constraints |
 | T6 | `docs/tasks/T6-integration-release.md` | **Opus** | ⬜ phase 3 |
 
 **Phase 1 is closed and P2.0 is done.** Sensible entry points:
 
-- **With the Deck** (operator present): **P2.0b** — §5.15's polkit-helper scope
-  decision, which is what stands between Gaming Mode and a working brightness
-  slider. Then **P2.0c** (§5.16's root cause) and **P2.1/P2.2**.
-- **Without the Deck:** **§5.13**'s repo-overlap audit, **P2.5** (T4's installer
-  screens — text entry is the real gap) or **P2.7** (T5's `omarchy-iso` fork).
+- **With the Deck** (operator present): **P2.0d** — §5.17, removing
+  `99-deck-testing` and re-verifying what it has been masking. Then **P2.1/P2.2**
+  (input mapper, hardware parity). *(P2.0b, P2.0c and P2.0e are done —
+  session 16.)*
+- **Without the Deck:** **P2.5** (T4's installer screens — text entry is the
+  real gap) or **P2.7** (T5's `omarchy-iso` fork, which now also owns §5.17's
+  "never bake `99-deck-testing` into the image" guard).
 
 ⚠️ **P2.3 (TDP, fan curves, battery) still requires per-item operator approval
 every single time.** That rule has not moved.

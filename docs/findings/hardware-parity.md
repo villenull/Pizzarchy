@@ -1,0 +1,105 @@
+# Hardware parity — Gaming Mode vs Omarchy desktop (ROADMAP P2.2)
+
+**Session 16, 2026-08-10.** OLED Deck (Valve Galileo), Omarchy 4.0 + Neptune
+`6.11.11-valve29`. Both columns come from the **same probe script** run in each
+session, so the comparison is like-for-like rather than two different
+investigations.
+
+> **What this is and is not.** Every row below is *programmatically* observable —
+> a device enumerates, a service is active, a node exists. **None of it proves a
+> human experience.** Audio being routed is not "sound comes out"; a gyro node
+> existing is not "the gyro works". Rows needing a person are marked ⏸ and left
+> for a session with someone holding the Deck.
+>
+> **P2.3's rows (TDP, fan curves, charge limits) are deliberately absent.**
+> `CLAUDE.md` requires per-item operator approval for those every time. Nothing
+> here reads or writes them beyond a battery percentage.
+
+## Parity table
+
+| Subsystem | Desktop (Hyprland) | Gaming Mode (gamescope) | Verdict |
+|---|---|---|---|
+| **Wi-Fi device** | `wlo1`, `ath11k_pci` | `wlo1`, `ath11k_pci` | ✅ identical |
+| **Wi-Fi state** | connected | connected | ✅ identical |
+| **Bluetooth service** | active | active | ✅ identical |
+| **BT adapter** | `90:03:71:41:8E:68`, powered | same, powered | ✅ identical |
+| **BT rfkill** | not blocked | not blocked | ✅ identical |
+| **PipeWire / WirePlumber** | active / active | active / active | ✅ identical |
+| **Audio sinks** | 2 | 2 | ✅ identical |
+| **Default sink** | `…nau8821-max.HiFi__Speaker__sink` | same | ✅ identical |
+| **Audio sources** | 3 | 3 | ✅ identical |
+| **Audio cards** | 2 (HDMI + `nau8821-max`) | same 2 | ✅ identical |
+| **Display** | `card0-eDP-1` connected | same | ✅ identical |
+| **Backlight** | `59457/65535` readable | same | ✅ identical |
+| **Kernel** | Neptune `6.11.11-valve29` | same | ✅ identical |
+| **Input devices** | **17** | **16** | ⚠️ differs — see below |
+| **Joystick nodes** | `js0`, `js1` | `js0` only | ⚠️ differs — see below |
+| Speaker output audible | ⏸ | ⏸ | needs a human |
+| Headphone jack detect | ⏸ | ⏸ | needs a human |
+| Mic capture | ⏸ | ⏸ | needs a human |
+| Trackpads / haptics | ⏸ | ⏸ | needs a human |
+| Gyro actually responding | ⏸ | ⏸ | needs a human |
+| Button mapping correctness | ⏸ | ⏸ | needs a human |
+| BT pairing with a real device | ⏸ | ⏸ | needs a human |
+
+**Everything that can be checked without hands is at parity except input**, and
+the input difference is Steam behaving as designed rather than a defect.
+
+## The input difference: Steam replaces the native nodes
+
+Diffing the device name sets between sessions:
+
+```
+ONLY in desktop:     "Steam Deck"                  (event7 js0)
+                     "Steam Deck Motion Sensors"   (event8 js1)
+ONLY in gamescope:   "Microsoft X-Box 360 pad 0"
+```
+
+So when Steam runs it **takes the controller over via hidraw and re-presents it
+as a virtual Xbox 360 pad**, and the native `Steam Deck` gamepad and motion
+sensor nodes disappear. That is why the count drops 17 → 16 and `js1` goes away.
+
+### Full enumeration, desktop session
+
+| Device | Handlers | Role |
+|---|---|---|
+| `Valve Software Steam Controller` | `event5 mouse1` | trackpads → **mouse** (lizard mode) |
+| `Valve Software Steam Controller` | `sysrq kbd event6` | buttons → **keyboard** (lizard mode) |
+| `Steam Deck` | `event7 js0` | **the real gamepad node** |
+| `Steam Deck Motion Sensors` | `event8 js1` | gyro / accelerometer |
+| `FTS3528:00 2808:1015` | `event18 mouse2` | touchscreen |
+| `FTS3528:00 … UNKNOWN` | `event19 mouse3` | touchscreen (second) |
+| `AT Translated Set 2 keyboard` | `event4` | built-in keyboard |
+| `Power Button` ×2, `Lid Switch`, `Video Bus`, `PC Speaker`, HDMI audio ×4, headset jack | — | platform |
+
+## ⚠️ Two things this corrects or sharpens for T4 / P2.1
+
+**1. Event node numbers are NOT stable between the live ISO and the installed
+system.** §5.9 recorded, from the live ISO: buttons on the keyboard-emulation
+node **`event5`**, trackpads on **`event4`**, real gamepad on **`event11`**. On
+this installed system the same roles sit on **`event6`** (kbd), **`event5`**
+(mouse) and **`event7`** (gamepad). Anything that hardcodes those numbers from
+§5.9 will bind the wrong device. `src/deck-input-mapper.py` selects by
+*capability* (`BTN_SOUTH`), not by number or name, which is the right design and
+is reconfirmed by this.
+
+**2. The device is named `"Steam Deck"`, not `"Steam Deck Controller"`.** A probe
+searching for the latter returns zero in both sessions. Worth stating because
+this session already lost time to a near-miss name (`gamescope` vs
+`gamescope-wl`); anything matching input devices by name needs the exact string.
+
+**Consequence for P2.1:** the desktop input mapper has the native `Steam Deck`
+node (`event7 js0`) available, because Steam is not running there. It does not
+have to contend with the virtual Xbox pad, which only exists in Gaming Mode.
+
+## Reproducing
+
+`hw-probe.sh` (session 16 scratch) prints a stable `key=value` report; run it in
+each session and `diff`. Two traps it hit, both worth avoiding:
+
+- **Never `grep`/read `/dev/input/event*`** to test for liveness — reading an
+  input node **blocks until an event arrives**, which hangs the probe. Count the
+  nodes instead.
+- **Time-box every external call.** Over SSH there is no terminal and no session
+  bus, so `bluetoothctl` and `pactl` block indefinitely. Export
+  `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS` and wrap each call in `timeout`.

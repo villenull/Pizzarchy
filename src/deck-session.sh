@@ -57,11 +57,45 @@
 # Steam needs a SECOND thing, found later and by measurement rather than
 # reasoning: it drives a set of privileged helpers out of
 # /usr/bin/steamos-polkit-helpers/, by ABSOLUTE path. That whole tree belongs
-# to SteamOS and is absent here, so each call returns 127. Only one of them is
-# handled in this script (steamos-update, whose absence blocks Steam's
-# first-run setup behind a false network error); the rest -- brightness via
-# steamos-priv-write, timezone, fan control -- are a larger open question, not
-# a detail. See PROGRESS.md 5.15.
+# to SteamOS and is absent here, so each call returns 127. Three of them are
+# handled in this script -- steamos-update (whose absence blocks Steam's
+# first-run setup behind a false network error), steamos-set-timezone and
+# steamos-priv-write. The rest (fan control, ALS, dock/BIOS updaters) are
+# deliberately NOT supplied: see PROGRESS.md 5.15 for the jupiter-hw-support
+# decision, and note that jupiter-fan-control lands in P2.3, which requires
+# per-item operator approval every time.
+#
+# ===========================================================================
+# WHY steamos-priv-write IS WORTH SHIPPING -- it is NOT "brightness is broken"
+# ===========================================================================
+#
+# Steam does not simply fail when a privileged helper is missing. It falls
+# back, and the fallback is the problem. Read from Steam's own console log on
+# this hardware, one slider movement:
+#
+#   privileged write polkit:39638 -> /sys/class/backlight/amdgpu_bl0/brightness
+#   RunCommand: ... /usr/bin/steamos-polkit-helpers/steamos-priv-write \
+#                     "/sys/class/backlight/amdgpu_bl0/brightness" "39638"
+#   Error: BWriteValueToFileAsUser: steamos-priv-write failed ...: 39638
+#   RunCommand: ... echo "39638" | sudo -n tee "/sys/.../brightness"
+#   RunCommand: ... sudo -n chmod a+w "/sys/.../brightness"
+#
+# Three tiers: the helper, then `sudo -n tee`, then `sudo -n chmod a+w` so no
+# privilege is needed next time. So on THIS device the brightness slider works
+# -- but only because /etc/sudoers.d/99-deck-testing grants the desktop user
+# blanket NOPASSWD, a test-rig artifact owned by no package. Remove that (and
+# the shipped ISO must) and tiers 2 and 3 both fail with it.
+#
+# PROGRESS.md 5.15 recorded "the slider does nothing". That is the right
+# conclusion about the PRODUCT reached through a wrong belief about the test
+# Deck, where it currently works. Do not "verify" this by moving the slider
+# here and concluding it is fine.
+#
+# Supplying tier 1 is therefore a security fix as much as a feature: it stops
+# Steam reaching for blanket sudo, and it stops the chmod that leaves sysfs
+# nodes world-writable after every Gaming Mode start (observed: both
+# .../amdgpu_bl0/brightness and .../status:white/led_brightness_multiplier
+# are mode 666, restamped each boot).
 #
 # Note the two families resolve DIFFERENTLY, but BOTH land in /usr/bin:
 #   steamos-session-select        via PATH, and that PATH is only
@@ -118,6 +152,20 @@ readonly STEAM_SHIM_LEGACY=/usr/local/bin/steamos-session-select
 readonly STEAM_RUNTIME_PATH=/usr/bin:/bin
 readonly SUDOERS_FILE=/etc/sudoers.d/99-deck-session-select
 readonly RETURN_DESKTOP_FILE=/usr/share/applications/deck-return-to-gaming.desktop
+
+# --- Desktop-mode input mapper (ROADMAP P2.1, T3 §4) ----------------------
+readonly MAPPER_SRC_NAME=deck-input-mapper.py
+readonly MAPPER_BIN=/usr/local/bin/deck-input-mapper
+# /etc/systemd/user, not ~/.config: this is installed by an installer and has to
+# apply to whatever user the image creates, so T5 can bake it in unchanged.
+readonly MAPPER_UNIT=/etc/systemd/user/deck-input-mapper.service
+
+# VERIFIED on hardware, and worth verifying again if Omarchy's session wiring
+# changes: `hyprland-session.target` does NOT exist, and a unit WantedBy a
+# nonexistent target enables without error and never starts -- silent success,
+# which this project forbids. Omarchy 4.0 drives Hyprland through uwsm, whose
+# real target is this one.
+readonly MAPPER_WANTED_BY=wayland-session@hyprland.desktop.target
 readonly STATE_FILE=/var/lib/deck-session/next-session
 
 # Steam resolves its privileged helpers by ABSOLUTE path, not through PATH --
@@ -131,6 +179,20 @@ readonly STATE_FILE=/var/lib/deck-session/next-session
 # families resolve the same way.
 readonly POLKIT_HELPER_DIR=/usr/bin/steamos-polkit-helpers
 readonly UPDATE_STUB="${POLKIT_HELPER_DIR}/steamos-update"
+readonly TIMEZONE_HELPER="${POLKIT_HELPER_DIR}/steamos-set-timezone"
+readonly PRIV_WRITE_HELPER="${POLKIT_HELPER_DIR}/steamos-priv-write"
+
+# Separate drop-ins, one per helper, rather than one file granting both. They
+# are independent grants with different blast radii and either may need to be
+# revoked without the other.
+readonly PRIV_WRITE_SUDOERS=/etc/sudoers.d/99-deck-priv-write
+readonly TIMEZONE_SUDOERS=/etc/sudoers.d/99-deck-set-timezone
+
+# Called by absolute path from the timezone helper's sudo line, because that is
+# the form omarchy-settings-dev's own sudoers rule matches (see
+# stage_timezone_helper). `timedatectl` bare would resolve through PATH and
+# miss the grant.
+readonly TIMEDATECTL_BIN=/usr/bin/timedatectl
 
 # Named once so the stub, its --help and this script's own output cannot drift
 # into telling a user three different things about how to update the machine.
@@ -165,6 +227,33 @@ readonly SDDM_GREETER_DROPIN=/etc/sddm.conf.d/zy-deck-greeter.conf
 # A systemd drop-in, NOT an sddm.conf one -- this is about the unit's restart
 # policy, not about SDDM's own settings.
 readonly SDDM_UNIT_DROPIN=/etc/systemd/system/sddm.service.d/50-deck-switch-resilience.conf
+
+# The restart is handed to a transient unit rather than run inline. See
+# render_restart_helper for the three measured reasons.
+readonly RESTART_HELPER=/usr/local/lib/deck-session/restart-sddm
+readonly SWITCH_UNIT=deck-session-switch
+
+# sddm ships TimeoutStopSec=5, and a Gaming Mode teardown does not fit in it --
+# measured at 5.008s, i.e. systemd SIGKILLed sddm mid-teardown and then started
+# the replacement 3ms later, against a VT the killed compositor still held.
+# 30s is generous rather than tuned: the cost of it being too long is a slow
+# switch, and the cost of it being too short is a device with no session.
+readonly SDDM_STOP_TIMEOUT=30
+
+# Bound on the post-stop settle loop, in 0.1s units. Never unbounded: a stuck
+# seat must not mean sddm is never started again.
+#
+# 60s, matching steam-launcher.service's own TimeoutStopSec. R-28: that unit is
+# PartOf=graphical-session.target and Steam takes tens of seconds to exit --
+# measured at ~29s, and systemd will wait 60. Giving up before systemd does
+# would just hand the problem back to the autologin retry loop, which is the
+# thrash this bound exists to prevent.
+#
+# It sounds long and is not, on the normal path: the loop breaks the moment the
+# check passes, and 18 of 20 measured switches clear it immediately. The cost is
+# paid only when Steam is genuinely still shutting down, and the alternative
+# there is 30s of visible flicker rather than 30s of waiting.
+readonly VT_SETTLE_MAX=600
 
 # Our greeter config is a self-contained MIRROR of upstream's settings plus the
 # monitor transform -- not an include, because Hyprland's Lua parser offers no
@@ -205,9 +294,12 @@ readonly -a INSTALL_STAGES=(
   stage-session-select
   stage-steam-hook
   stage-update-stub
+  stage-timezone-helper
+  stage-priv-write-helper
   stage-greeter-rotation
   stage-sddm-resilience
   stage-return-icon
+  stage-input-mapper
 )
 
 log()  { printf '[%s] %s\n' "$PROG" "$*"; }
@@ -264,14 +356,21 @@ stage_preconditions() {
   for d in /usr/share/wayland-sessions /usr/local/share/wayland-sessions; do
     [[ -f "$d/${GAMING_SESSION}.desktop" ]] && { found="$d/${GAMING_SESSION}.desktop"; break; }
   done
+  # NOTE the qualified package name in the message. `pacman -S gamescope`
+  # installs ARCH's build, which is the bare compositor and ships none of this
+  # -- pacman resolves by repo order, not version, and Arch's repos come first
+  # by design (PROGRESS.md 5.13, docs/findings/P16-repo-overlap-audit.md).
+  # Arch's is 3.16.25-1, Valve's is 3.16.25-3: same upstream version, so a
+  # version check would not tell them apart. Checking for the session FILE is
+  # what distinguishes them, which is why this test is written this way.
   [[ -n $found ]] ||
-    fail "no ${GAMING_SESSION}.desktop in any wayland-sessions directory. Install gamescope from jupiter-staging (it ships the whole SteamOS session), then re-run."
+    fail "no ${GAMING_SESSION}.desktop in any wayland-sessions directory. Install Valve's build explicitly -- 'sudo pacman -S jupiter-staging/gamescope' -- because a bare 'pacman -S gamescope' installs Arch's bare compositor, which ships no SteamOS session. Then re-run."
   log "gaming session: ${found}"
 
   # The launcher the session entry points at has to exist too -- a dangling
   # Exec= is exactly the silent failure this project exists to prevent.
   command -v start-gamescope-session >/dev/null 2>&1 ||
-    fail "${found} exists but start-gamescope-session is not on PATH -- the gamescope install is incomplete. Do not switch sessions until this resolves."
+    fail "${found} exists but start-gamescope-session is not on PATH -- the gamescope install is incomplete, or the session file came from somewhere other than Valve's package. Reinstall with 'sudo pacman -S jupiter-staging/gamescope'. Do not switch sessions until this resolves."
 
   # Resolve the desktop session by discovery. Omarchy ships its own entry in
   # /usr/local/share, which is why this is not hardcoded.
@@ -431,23 +530,62 @@ cat >"\$SDDM_DROPIN" <<INNER
 [Autologin]
 User=${invoking_user}
 Session=\${target}
+# Relogin=true, and this is a SAFETY property, not a convenience (PROGRESS.md
+# 5.18). SDDM ships Relogin=false in /usr/lib/sddm/sddm.conf.d/default.conf,
+# which means autologin fires ONCE: if that session dies, SDDM shows the
+# greeter. Measured on hardware, soak cycle 4 --
+#
+#   Starting Wayland user session: "uwsm start ... Hyprland"
+#   Session started true
+#   session closed for user deck        <- one millisecond later
+#   Adding new display...               <- the greeter
+#
+# On a Deck that greeter is a password prompt with no keyboard to answer it,
+# i.e. an unrecoverable state, which CLAUDE.md's controller-only rule forbids.
+# Retrying autologin is the same tradeoff already taken in
+# stage-sddm-resilience: a loop that can still recover beats a dead end that
+# cannot. If the session is genuinely broken this loops -- that is a dev-time
+# failure, visible in the journal, with Ctrl+Alt+F2 as the escape.
+Relogin=true
 INNER
 
-# Verify the write landed rather than trusting the redirect. Both keys are
+# Verify the write landed rather than trusting the redirect. All three keys are
 # checked: Session= alone is the exact silent failure this stage exists to
-# avoid, so a drop-in missing User= must be treated as a failed write.
+# avoid, so a drop-in missing User= must be treated as a failed write, and
+# without Relogin= a dead session strands the user at a password prompt.
 grep -q "^Session=\${target}\$" "\$SDDM_DROPIN" ||
   die "wrote \$SDDM_DROPIN but Session=\${target} is not there on re-read"
 grep -q "^User=${invoking_user}\$" "\$SDDM_DROPIN" ||
   die "wrote \$SDDM_DROPIN but User=${invoking_user} is not there on re-read -- SDDM ignores [Autologin] without it"
+grep -q "^Relogin=true\$" "\$SDDM_DROPIN" ||
+  die "wrote \$SDDM_DROPIN but Relogin=true is not there on re-read -- without it a session that dies leaves a password greeter no controller can answer"
 
 printf 'deck-session-select: next session is %s (%s)\n' "\$target" "\$found"
 
 if [[ \$restart -eq 1 ]]; then
-  printf 'deck-session-select: restarting sddm\n'
-  # Restart, not stop+start: a single atomic transaction avoids the window
-  # where no display manager is running.
-  systemctl restart sddm
+  printf 'deck-session-select: handing the sddm restart to ${SWITCH_UNIT}.service\n'
+  # NOT \`systemctl restart sddm\` from here. That is what PROGRESS.md 5.16 is
+  # about, and the reason is measured, not theoretical -- see
+  # render_restart_helper. Two things make running it inline wrong:
+  #
+  #   1. sddm's KillMode=control-group means this process is inside the cgroup
+  #      the stop is about to kill. The caller dies mid-restart.
+  #   2. \`restart\` issues the start as soon as the stop job finishes -- 3ms
+  #      after a SIGKILL, in the failure that was recorded -- so the new sddm
+  #      races a VT the killed compositor has not released.
+  #
+  # A transient unit lives in system.slice, so it survives the teardown and can
+  # sequence stop -> settle -> start properly.
+
+  # Clear any stale unit from a previous switch so --unit= cannot collide.
+  # --collect should already have removed it; this is belt and braces.
+  systemctl reset-failed ${SWITCH_UNIT}.service 2>/dev/null || true
+
+  systemd-run --collect --quiet \\
+    --unit=${SWITCH_UNIT} \\
+    --description='deck-session-select: sddm restart for a session switch' \\
+    ${RESTART_HELPER} ||
+      die "could not launch ${SWITCH_UNIT}.service; the session was NOT switched. The next-session state is already written, so a reboot will land in \$target."
 fi
 EOF
 
@@ -455,6 +593,24 @@ EOF
     fail "could not install ${SELECT_BIN}"
   rm -f "$tmp"
   $SUDO test -x "$SELECT_BIN" || fail "${SELECT_BIN} is not executable after install"
+
+  # --- the restart helper the transient unit runs ---
+  assert_ours_or_absent "$RESTART_HELPER" "something else"
+  log "installing ${RESTART_HELPER}"
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$RESTART_HELPER")" ||
+    fail "could not create $(dirname "$RESTART_HELPER")"
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_restart_helper "$invoking_user" >"$tmp" ||
+    fail "could not render the sddm restart helper"
+  $SUDO install -m 0755 -o root -g root "$tmp" "$RESTART_HELPER" ||
+    fail "could not install ${RESTART_HELPER}"
+  rm -f "$tmp"
+  $SUDO test -x "$RESTART_HELPER" || fail "${RESTART_HELPER} is not executable after install"
+
+  # systemd-run is how the restart escapes sddm's cgroup. Without it the switch
+  # silently falls back to nothing at all, so check now rather than at 2am.
+  command -v systemd-run >/dev/null 2>&1 ||
+    fail "systemd-run not found; ${SELECT_BIN} needs it to restart sddm outside the session being torn down"
 
   # --- sudoers drop-in, validated before installation ---
   # invoking_user is resolved and guarded at the top of this stage, where the
@@ -486,6 +642,170 @@ EOF
 
 # ---------------------------------------------------------------------------
 
+# The body of the transient unit that actually restarts sddm. Written to
+# stdout; split out so test/unit/test-deck-session.sh can check its shape with
+# no Deck, no root and no VM, the same way render_update_stub is.
+#
+# WHY THIS EXISTS AT ALL -- measured on hardware, PROGRESS.md 5.16 / R-26:
+#
+#   13:11:02.815  sddm: Signal received: SIGTERM
+#   13:11:07.822  sddm: sddm-helper (start-gamescope-session) crashed (exit code 1)
+#   13:11:07.823  systemd: sddm.service: State 'stop-sigterm' timed out. Killing.
+#   13:11:07.823  systemd: Killing process 939 (sddm) with signal SIGKILL
+#   13:11:07.826  systemd: sddm.service: Failed with result 'timeout'
+#   13:11:07.830  systemd: Started Simple Desktop Display Manager      <- +3ms
+#   13:11:11      systemd: Start request repeated too quickly -> start-limit-hit
+#
+# The teardown did not fit in sddm's TimeoutStopSec=5, so systemd killed it and
+# started the replacement three milliseconds later, against a VT the killed
+# compositor still held. The greeter crashed, Restart=always retried, and
+# StartLimitBurst=2 latched the unit to failed -- no graphical session, and on
+# the product no way back.
+#
+# NOTE this corrects R-26's own account of the fix. It called RestartSec=3 "the
+# more important half", reasoning that at 100ms every retry lands before the VT
+# is free. RestartSec does not gate this at all: the fatal start came from an
+# explicit `systemctl restart` transaction, and RestartSec only spaces
+# Restart=always auto-restarts. That is why the gap was 3ms and not 100ms. The
+# shipped drop-in helps the retry path; it never touched the cause.
+#
+# Takes the desktop user as $1. It has a default so the unit suite can render
+# this without a Deck: relying on stage_session_select's `local invoking_user`
+# being visible through bash's dynamic scoping would work when called from
+# there and blow up under `set -u` when called directly.
+render_restart_helper() {
+  local session_user=${1:-${SUDO_USER:-${USER:-$(id -un)}}}
+  cat <<EOF
+#!/usr/bin/env bash
+#
+# restart-sddm -- stop sddm, wait for the seat to be free, start it again.
+${INSTALL_MARKER}
+#
+# Run as a transient systemd unit (${SWITCH_UNIT}.service) launched by
+# deck-session-select, NOT inline. sddm's KillMode=control-group would
+# otherwise kill the caller mid-restart, because a session switch is issued
+# from inside the session being torn down.
+#
+# The sequence is stop -> settle -> start rather than \`systemctl restart\`
+# precisely so the start cannot be issued while the previous compositor still
+# holds the VT. See deck-session.sh's render_restart_helper for the journal
+# extract this is built from.
+#
+set -uo pipefail
+
+note() {
+  printf 'restart-sddm: %s\n' "\$1" >&2
+  command -v logger >/dev/null 2>&1 && logger -t restart-sddm -- "\$1"
+  return 0
+}
+
+# Blocking: systemd does not return until the stop job is done, including the
+# SIGKILL fallback. With TimeoutStopSec raised to ${SDDM_STOP_TIMEOUT}s in the
+# drop-in, this is normally a clean teardown rather than a kill.
+if ! systemctl stop sddm; then
+  note "'systemctl stop sddm' reported failure; continuing to the start anyway, because leaving the device with no display manager is the worse outcome"
+fi
+
+# The stop job is complete, but the outgoing graphical session can still be
+# unwinding. TWO conditions, because either alone is not enough:
+#
+#   1. logind has dropped the seat's sessions. Not fuser -- systemd-logind
+#      holds /dev/tty1 permanently, so fuser reports the VT busy forever.
+#   2. no compositor process remains for the desktop user.
+#
+# (2) was added after PROGRESS.md 5.18: on soak cycle 4 the seat list was
+# already empty while the previous session's uwsm/Hyprland was still exiting,
+# sddm started the next session into that, and it died one millisecond later.
+# An empty seat list is NOT the same as the outgoing session being finished.
+session_user=${session_user}
+
+# ⚠️ THESE ARE comm NAMES, MEASURED ON HARDWARE -- NOT BINARY NAMES.
+#
+# The kernel truncates comm to 15 characters (TASK_COMM_LEN), and \`pgrep -x\`
+# matches against comm. An earlier version of this gate listed 'gamescope' and
+# was a NO-OP for the whole Gaming Mode direction:
+#
+#   inside a live gamescope session, \`pgrep -u deck -x gamescope\` returns 0
+#   the compositor's comm is 'gamescope-wl'; its launcher is 'start-gamescope'
+#   (truncated from start-gamescope-session)
+#
+# A gate that matches nothing reports "settled" instantly and looks like it is
+# working, which is precisely the silent success this project exists to avoid.
+# Verified present, per session:
+#   desktop  -> Hyprland, start-hyprland, uwsm  (also quickshell, omarchy-hyprlan)
+#   gaming   -> gamescope-wl, start-gamescope
+# Re-measure with \`ps -u <user> -o comm= | sort -u\` before editing this list.
+# THIRD condition, and the one that addresses PROGRESS.md 5.18(a)'s root cause.
+#
+# R-28: steam-launcher.service is PartOf=graphical-session.target with
+# TimeoutStopSec=60, and Steam takes tens of seconds to exit -- measured at ~29s
+# with NO "Stopped Steam Launcher" line in between, while every other unit stops
+# in ~50ms. It is a UNIT IN THE USER MANAGER, so neither of the two conditions
+# above can see it: it owns no logind session and its processes are not named
+# after a compositor. Starting sddm into that window is what makes the incoming
+# session's `uwsm start ... Hyprland` exit in ~1ms.
+#
+# Asked generally (any deactivating unit) rather than by name, because
+# steam-launcher is simply the slowest example rather than a special case.
+user_manager_busy() {
+  local out
+  # A user manager that is not running is legitimately "nothing to wait for",
+  # and errors here must not hang the switch -- but they must not be invisible
+  # either, so the outcome is reported in the settle note below.
+  out=\$(systemctl --machine="\${session_user}@.host" --user \\
+          list-units --state=deactivating --no-legend 2>/dev/null) || {
+    USER_MANAGER_QUERY_OK=0
+    return 1
+  }
+  USER_MANAGER_QUERY_OK=1
+  [[ -n \$out ]]
+}
+
+outgoing_gone() {
+  [[ -z \$(loginctl show-seat seat0 -p Sessions --value 2>/dev/null) ]] || return 1
+  # -x: exact comm match, so this cannot match a window title or a wrapper
+  # script whose command line merely mentions one of them. -f would.
+  pgrep -u "\$session_user" -x 'Hyprland|start-hyprland|gamescope-wl|start-gamescope|uwsm' >/dev/null 2>&1 && return 1
+  user_manager_busy && return 1
+  return 0
+}
+
+settled=0
+i=0
+USER_MANAGER_QUERY_OK=-1   # -1 = never attempted, 0 = failed, 1 = succeeded
+while [[ \$i -lt ${VT_SETTLE_MAX} ]]; do
+  if outgoing_gone; then
+    settled=1
+    break
+  fi
+  i=\$((i + 1))
+  sleep 0.1
+done
+
+# The user-manager query is the condition that addresses 5.18(a)'s cause, so a
+# silently failing one would quietly restore the old behaviour. Say which.
+case \${USER_MANAGER_QUERY_OK} in
+  0) note "could not query \${session_user}'s systemd user manager, so the steam-launcher teardown check (PROGRESS.md 5.18a / R-28) did NOT run. The switch will still work, but the autologin thrash can return." ;;
+esac
+
+if [[ \$settled -eq 1 ]]; then
+  note "outgoing session gone after \$((i / 10)).\$((i % 10))s; starting sddm"
+else
+  # Loud, and then proceed anyway. A stuck seat is still better answered by
+  # starting sddm than by leaving the device with nothing -- this whole file
+  # exists because the device was left with nothing.
+  note "outgoing session was STILL present after ${VT_SETTLE_MAX} tenths of a second; starting sddm anyway. steam-launcher.service is the usual reason (R-28) -- check 'journalctl _PID=\$(pgrep -u \${session_user} -x systemd)' for a 'Stopping Steam Launcher...' with no matching 'Stopped'."
+fi
+
+if ! systemctl start sddm; then
+  note "'systemctl start sddm' FAILED -- the device may have no graphical session. Recover with: systemctl reset-failed sddm && systemctl start sddm"
+  exit 1
+fi
+EOF
+}
+
+# ---------------------------------------------------------------------------
+
 stage_steam_hook() {
   # Steam's Power -> Switch to Desktop runs `steamos-session-select desktop`.
   # Providing it under that exact name is what makes Steam's own affordance
@@ -499,14 +819,8 @@ stage_steam_hook() {
   log "installing Steam's Switch-to-Desktop hook: ${STEAM_SHIM}"
   local wrapper
   wrapper=$(mktemp) || fail "mktemp failed"
-  cat >"$wrapper" <<EOF
-#!/usr/bin/env bash
-# steamos-session-select -- compatibility shim so Steam's "Switch to Desktop"
-# works. Steam calls this unprivileged; the real work needs root.
-${INSTALL_MARKER}
-set -euo pipefail
-exec sudo -n ${SELECT_BIN} "\$@"
-EOF
+  render_steam_shim >"$wrapper" ||
+    fail "could not render the steamos-session-select shim"
   $SUDO install -m 0755 -o root -g root "$wrapper" "$STEAM_SHIM" ||
     fail "could not install ${STEAM_SHIM}"
   rm -f "$wrapper"
@@ -534,6 +848,30 @@ EOF
   log "verified: Steam can resolve it on PATH=${STEAM_RUNTIME_PATH} -> ${resolved}"
 
   log "stage-steam-hook: ok"
+}
+
+# The Steam-facing shim's body, written to stdout.
+#
+# Split out of stage_steam_hook so test/unit/test-deck-session.sh can reach it.
+# It was the last generated file in this script still written as an inline
+# heredoc, and the suite's own header flagged it as the remaining blind spot:
+# its INSTALL_MARKER line was unverified, and the marker is what stops a re-run
+# refusing to proceed (or clobbering somebody else's file). Session 16's
+# mutation run confirmed the gap was real -- deleting that marker was the one
+# fault the suite could not see.
+#
+# `exec sudo -n`, not plain sudo: this shim is the whole call path from Steam
+# to ${SELECT_BIN}, and -n guarantees it can never block on a password prompt
+# Steam has no way to render.
+render_steam_shim() {
+  cat <<EOF
+#!/usr/bin/env bash
+# steamos-session-select -- compatibility shim so Steam's "Switch to Desktop"
+# works. Steam calls this unprivileged; the real work needs root.
+${INSTALL_MARKER}
+set -euo pipefail
+exec sudo -n ${SELECT_BIN} "\$@"
+EOF
 }
 
 # ---------------------------------------------------------------------------
@@ -715,6 +1053,376 @@ EOF
 
 # ---------------------------------------------------------------------------
 
+stage_timezone_helper() {
+  # Steam's OOBE timezone picker calls this once per highlighted entry --
+  # 28 times in one pass on this hardware -- always with a single positional
+  # argument, read from Steam's own log rather than guessed:
+  #
+  #   /usr/bin/steamos-polkit-helpers/steamos-set-timezone America/Chicago
+  #
+  # Without it every call returns 127 and the picker silently does nothing:
+  # the user chooses a timezone, sees no error, and the clock stays wrong.
+  assert_ours_or_absent "$TIMEZONE_HELPER" "a real SteamOS helper"
+
+  command -v "$TIMEDATECTL_BIN" >/dev/null 2>&1 ||
+    fail "${TIMEDATECTL_BIN} not found; the timezone helper would install and then fail at runtime"
+
+  log "installing the steamos-set-timezone helper: ${TIMEZONE_HELPER}"
+  $SUDO install -d -m 0755 -o root -g root "$POLKIT_HELPER_DIR" ||
+    fail "could not create ${POLKIT_HELPER_DIR}"
+
+  local tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_timezone_helper >"$tmp" ||
+    fail "could not render the steamos-set-timezone helper"
+  $SUDO install -m 0755 -o root -g root "$tmp" "$TIMEZONE_HELPER" ||
+    fail "could not install ${TIMEZONE_HELPER}"
+  rm -f "$tmp"
+
+  # --- the sudoers grant ---
+  #
+  # omarchy-settings-dev ALREADY ships an equivalent rule, found on this
+  # hardware in /etc/sudoers.d/omarchy-tzupdate:
+  #
+  #   %wheel ALL=(root) NOPASSWD: /usr/bin/tzupdate, /usr/bin/timedatectl set-timezone *
+  #
+  # and the desktop user is in wheel, so this helper would work with no grant
+  # of our own. We install one anyway, deliberately: that file belongs to a
+  # package on a beta distro, and if it changed the picker would go back to
+  # failing silently -- the exact defect this stage exists to remove, in a
+  # place nobody would look. Duplicating one narrow rule is cheap; sudo takes
+  # the last match and both say the same thing.
+  local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
+  [[ -n $invoking_user && $invoking_user != root ]] ||
+    fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
+
+  log "granting ${invoking_user} NOPASSWD on '${TIMEDATECTL_BIN} set-timezone' only"
+  tmp=$(mktemp) || fail "mktemp failed"
+  cat >"$tmp" <<EOF
+# Installed by ${PROG}.sh. Lets Steam's OOBE timezone picker set the system
+# timezone from Gaming Mode, where there is no keyboard to answer a polkit
+# admin prompt (org.freedesktop.timedate1.set-timezone defaults to
+# auth_admin_keep, which is unanswerable on a controller).
+#
+# Scoped to one subcommand of one absolute path. Deliberately NOT the whole of
+# timedatectl: set-time and set-ntp are not needed here.
+${invoking_user} ALL=(root) NOPASSWD: ${TIMEDATECTL_BIN} set-timezone *
+EOF
+  $SUDO visudo -c -f "$tmp" >/dev/null ||
+    fail "generated sudoers snippet failed validation -- refusing to install it. Candidate left at ${tmp}"
+  $SUDO install -m 0440 -o root -g root "$tmp" "$TIMEZONE_SUDOERS" ||
+    fail "could not install ${TIMEZONE_SUDOERS}"
+  rm -f "$tmp"
+
+  # Verify by running it, not by trusting the write -- and verify against the
+  # timezone the machine is ALREADY set to, so a passing test changes nothing.
+  local before after
+  before=$(timedatectl show -p Timezone --value) ||
+    fail "could not read the current timezone"
+  "$TIMEZONE_HELPER" "$before" ||
+    fail "${TIMEZONE_HELPER} failed setting the timezone to its current value (${before}). The helper installed but does not work; the picker would still fail silently."
+  after=$(timedatectl show -p Timezone --value) ||
+    fail "could not re-read the timezone after the helper ran"
+  [[ $after == "$before" ]] ||
+    fail "the helper changed the timezone from ${before} to ${after} while being asked for ${before}"
+
+  # A bad timezone must be refused, not passed to timedatectl. Steam sends only
+  # names out of its own list, but a helper that writes whatever it is handed
+  # is not one worth having behind a sudo grant.
+  local rc=0
+  "$TIMEZONE_HELPER" ../../etc/shadow >/dev/null 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] ||
+    fail "${TIMEZONE_HELPER} accepted a path-traversal timezone. It must validate against /usr/share/zoneinfo before elevating."
+
+  log "verified: helper set the timezone to its existing value (${after}) and rejects a traversal argument"
+  log "stage-timezone-helper: ok"
+}
+
+# The timezone helper's body, written to stdout. Split out for the same reason
+# render_update_stub is -- see the note above that function.
+render_timezone_helper() {
+  cat <<EOF
+#!/usr/bin/env bash
+#
+# steamos-set-timezone -- set the system timezone for Steam's Gaming Mode.
+${INSTALL_MARKER}
+#
+# WHY THIS EXISTS
+#   Steam's first-run timezone picker runs this exact absolute path, once per
+#   entry it highlights. On SteamOS it is one of Valve's polkit helpers. This
+#   device is Arch + Omarchy, that tree does not exist here, and every call
+#   returned 127 -- so the picker appeared to work and changed nothing.
+#
+# WHY IT USES sudo AND NOT polkit
+#   timedatectl already speaks polkit, but org.freedesktop.timedate1's
+#   set-timezone action defaults to auth_admin_keep: an admin password prompt.
+#   In Gaming Mode there is no keyboard to answer it. A narrow sudoers grant
+#   (see ${TIMEZONE_SUDOERS}) is the mechanism that works on a controller.
+#
+set -euo pipefail
+
+note() {
+  printf 'steamos-set-timezone: %s\n' "\$1" >&2
+  command -v logger >/dev/null 2>&1 && logger -t steamos-set-timezone -- "\$1"
+  return 0
+}
+
+tz=\${1-}
+
+if [[ -z \$tz ]]; then
+  note "called with no timezone argument"
+  exit 2
+fi
+
+# Validate BEFORE elevating. The sudo grant below covers 'timedatectl
+# set-timezone <anything>', so this check is the only thing standing between a
+# caller-supplied string and a privileged command.
+#
+# Rejecting '..' explicitly: the zoneinfo test alone would already refuse a
+# traversal, but failing on the shape of the argument gives a caller a
+# comprehensible error instead of "no such timezone".
+case \$tz in
+  ..|../*|*/..|*/../*)
+    note "refusing a timezone containing '..': '\${tz}'"
+    exit 3
+    ;;
+  /*)
+    note "refusing an absolute path as a timezone: '\${tz}'"
+    exit 3
+    ;;
+esac
+
+if [[ ! \$tz =~ ^[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*\$ ]]; then
+  note "refusing a timezone with unexpected characters: '\${tz}'"
+  exit 3
+fi
+
+# The authoritative check: it has to be a zone this system actually has.
+if [[ ! -f /usr/share/zoneinfo/\${tz} ]]; then
+  note "no such timezone on this system: '\${tz}'"
+  exit 3
+fi
+
+if [[ \$EUID -eq 0 ]]; then
+  exec ${TIMEDATECTL_BIN} set-timezone "\$tz"
+fi
+
+# -n so this can never block waiting for a password. Steam discards our
+# stderr and would hang rather than show a prompt it cannot render.
+#
+# The refusal is distinguished from a timedatectl failure so the journal line
+# names the right cause -- Steam discards stderr, so that line is the only
+# place a human ever sees why the picker stopped working.
+rc=0
+sudo -n ${TIMEDATECTL_BIN} set-timezone "\$tz" || rc=\$?
+if [[ \$rc -ne 0 ]]; then
+  if ! sudo -n -l ${TIMEDATECTL_BIN} set-timezone "\$tz" >/dev/null 2>&1; then
+    note "sudo will not run '${TIMEDATECTL_BIN} set-timezone' without a password, so the timezone cannot be set. Check ${TIMEZONE_SUDOERS}."
+  else
+    note "'${TIMEDATECTL_BIN} set-timezone \${tz}' failed with status \${rc}."
+  fi
+  exit 4
+fi
+EOF
+}
+
+# ---------------------------------------------------------------------------
+
+stage_priv_write_helper() {
+  # Tier 1 of the three-tier fallback documented in this file's header. See
+  # that note before touching this: the point is NOT that brightness is broken
+  # on this Deck (it works, via blanket sudo), it is that the fallbacks which
+  # make it work must not ship.
+  #
+  # Signature, read from Steam's log rather than guessed -- two quoted
+  # positional arguments, path then value:
+  #
+  #   steamos-priv-write "/sys/class/backlight/amdgpu_bl0/brightness" "39638"
+  #   steamos-priv-write "/sys/class/leds/status:white/led_brightness_multiplier" "100"
+  #   steamos-priv-write "/dev/drm_dp_aux0" ""
+  #
+  # The third is why this whitelists rather than writes what it is told: a DP
+  # AUX channel is a display-link side band, Steam passes it an EMPTY value,
+  # and what that does is not understood here. It is not whitelisted, so this
+  # helper refuses it loudly. Steam already tolerates that refusal -- it has
+  # been getting 127 for it all along.
+  assert_ours_or_absent "$PRIV_WRITE_HELPER" "a real SteamOS helper"
+
+  log "installing the steamos-priv-write helper: ${PRIV_WRITE_HELPER}"
+  $SUDO install -d -m 0755 -o root -g root "$POLKIT_HELPER_DIR" ||
+    fail "could not create ${POLKIT_HELPER_DIR}"
+
+  local tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_priv_write_helper >"$tmp" ||
+    fail "could not render the steamos-priv-write helper"
+  $SUDO install -m 0755 -o root -g root "$tmp" "$PRIV_WRITE_HELPER" ||
+    fail "could not install ${PRIV_WRITE_HELPER}"
+  rm -f "$tmp"
+
+  local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
+  [[ -n $invoking_user && $invoking_user != root ]] ||
+    fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
+
+  log "granting ${invoking_user} NOPASSWD on ${PRIV_WRITE_HELPER} only"
+  tmp=$(mktemp) || fail "mktemp failed"
+  cat >"$tmp" <<EOF
+# Installed by ${PROG}.sh. Lets Gaming Mode write the small set of sysfs nodes
+# it needs (screen brightness, the status LED) without Steam falling back to
+# 'sudo -n tee' on an arbitrary path and then 'sudo -n chmod a+w' on it.
+#
+# The grant is on the helper, not on the paths, so the WHITELIST INSIDE THE
+# HELPER is the actual security boundary. The helper is root-owned 0755: a
+# user who could rewrite it would already have root. Read the header of
+# ${PROG}.sh before widening either.
+${invoking_user} ALL=(root) NOPASSWD: ${PRIV_WRITE_HELPER}
+EOF
+  $SUDO visudo -c -f "$tmp" >/dev/null ||
+    fail "generated sudoers snippet failed validation -- refusing to install it. Candidate left at ${tmp}"
+  $SUDO install -m 0440 -o root -g root "$tmp" "$PRIV_WRITE_SUDOERS" ||
+    fail "could not install ${PRIV_WRITE_SUDOERS}"
+  rm -f "$tmp"
+
+  # Verify by running it against the real backlight, at its CURRENT value, so
+  # a passing check leaves the screen exactly as it found it.
+  local bl=/sys/class/backlight/amdgpu_bl0/brightness
+  if [[ -r $bl ]]; then
+    local before after
+    before=$(cat "$bl") || fail "could not read ${bl}"
+    "$PRIV_WRITE_HELPER" "$bl" "$before" ||
+      fail "${PRIV_WRITE_HELPER} failed writing ${bl} its own current value (${before}). Gaming Mode's brightness slider would fall through to the sudo tee/chmod path."
+    after=$(cat "$bl") || fail "could not re-read ${bl}"
+    [[ $after == "$before" ]] ||
+      fail "${PRIV_WRITE_HELPER} changed ${bl} from ${before} to ${after} while being asked for ${before}"
+    log "verified: wrote ${bl} its existing value (${before}) through the helper"
+  else
+    warn "${bl} not present, so the helper's write path was NOT exercised. On non-Deck hardware that is expected; on a Deck it is not."
+  fi
+
+  # The whitelist is the security boundary, so prove it refuses rather than
+  # trusting that it is written correctly.
+  local rc=0
+  "$PRIV_WRITE_HELPER" /etc/shadow x >/dev/null 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] ||
+    fail "${PRIV_WRITE_HELPER} accepted /etc/shadow. Its whitelist is the only thing bounding a root write; it is not working."
+
+  rc=0
+  "$PRIV_WRITE_HELPER" "$bl" 'not-a-number' >/dev/null 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] ||
+    fail "${PRIV_WRITE_HELPER} accepted a non-numeric brightness value."
+
+  log "verified: refuses a non-whitelisted path and a non-numeric value"
+  log "stage-priv-write-helper: ok"
+  log "NOTE: this covers brightness and the status LED only. Steam also asks"
+  log "      for /dev/drm_dp_aux0, which is deliberately NOT whitelisted."
+}
+
+# The priv-write helper's body, written to stdout. Split out for the same
+# reason render_update_stub is -- see the note above that function.
+render_priv_write_helper() {
+  cat <<EOF
+#!/usr/bin/env bash
+#
+# steamos-priv-write -- write a value to one of a few allowed sysfs nodes,
+# on behalf of Steam's Gaming Mode.
+${INSTALL_MARKER}
+#
+# WHY THIS EXISTS
+#   Steam changes screen brightness by running this exact absolute path. When
+#   it is missing, Steam does not give up -- it falls back to
+#   'echo VALUE | sudo -n tee PATH' and then 'sudo -n chmod a+w PATH'. Those
+#   need blanket passwordless sudo, and the chmod leaves system nodes
+#   world-writable after every Gaming Mode start. Answering here means Steam
+#   never reaches for either.
+#
+# THE WHITELIST BELOW IS THE SECURITY BOUNDARY
+#   The sudoers grant that makes this work covers this binary with ANY
+#   arguments. Nothing else bounds what gets written as root. Do not widen the
+#   patterns without deciding that the new path is safe for an unprivileged
+#   caller to set to an arbitrary integer.
+#
+set -euo pipefail
+
+note() {
+  printf 'steamos-priv-write: %s\n' "\$1" >&2
+  command -v logger >/dev/null 2>&1 && logger -t steamos-priv-write -- "\$1"
+  return 0
+}
+
+path=\${1-}
+value=\${2-}
+
+if [[ -z \$path ]]; then
+  note "called with no path"
+  exit 2
+fi
+
+# Reject traversal on the literal argument. The patterns below anchor on a
+# leading /sys/class/... prefix, and bash's case globs let '*' span '/', so
+# without this a '..' could walk out of the whitelisted subtree.
+case \$path in
+  *..*)
+    note "refusing a path containing '..': '\${path}'"
+    exit 3
+    ;;
+esac
+
+# One component, no slashes in it. Colons are allowed because real LED names
+# carry them ('status:white').
+if   [[ \$path =~ ^/sys/class/backlight/[A-Za-z0-9_.:+-]+/brightness\$ ]]; then
+  :
+elif [[ \$path =~ ^/sys/class/leds/[A-Za-z0-9_.:+-]+/led_brightness_multiplier\$ ]]; then
+  :
+else
+  # LOUD, not silent. Steam discards stderr, so the journal line is where a
+  # human finds out that a Steam client started asking for something new --
+  # which is the signal to decide whether it belongs here, not to widen the
+  # list reflexively.
+  note "refusing a path that is not whitelisted: '\${path}'. If Gaming Mode now needs it, add it deliberately in deck-session.sh."
+  exit 3
+fi
+
+# Every whitelisted node takes an unsigned integer. Steam does send an empty
+# value for other paths (notably /dev/drm_dp_aux0), so this is a real case and
+# not a theoretical one.
+if [[ ! \$value =~ ^[0-9]+\$ ]]; then
+  note "refusing a non-numeric value '\${value}' for '\${path}'"
+  exit 4
+fi
+
+if [[ \$EUID -ne 0 ]]; then
+  # -n so this can never block on a password prompt Steam cannot render.
+  # Re-runs this same file, so every check above runs again as root.
+  #
+  # NOT 'exec sudo': on a refusal, exec leaves only sudo's own message on a
+  # stderr that Steam discards, so the failure would reach nobody. Running it
+  # as a child costs one process and lets the refusal be identified and
+  # journalled. The inner run's exit code is propagated unchanged, so the
+  # codes above still mean what they say.
+  rc=0
+  sudo -n ${PRIV_WRITE_HELPER} "\$path" "\$value" || rc=\$?
+  if [[ \$rc -ne 0 ]] && ! sudo -n -l ${PRIV_WRITE_HELPER} >/dev/null 2>&1; then
+    note "sudo will not run ${PRIV_WRITE_HELPER} without a password, so Gaming Mode cannot set '\${path}'. Check ${PRIV_WRITE_SUDOERS}."
+  fi
+  exit \$rc
+fi
+
+if [[ ! -w \$path ]]; then
+  note "'\${path}' is not writable even as root"
+  exit 5
+fi
+
+# The kernel rejects out-of-range values itself; report that rather than
+# swallowing it, so a failed write is never mistaken for a successful one.
+if ! printf '%s\n' "\$value" >"\$path" 2>/dev/null; then
+  note "the kernel refused value '\${value}' for '\${path}'"
+  exit 6
+fi
+EOF
+}
+
+# ---------------------------------------------------------------------------
+
 stage_greeter_rotation() {
   # The SDDM greeter is one of the three surfaces that render sideways. It is
   # fixed the same way the desktop is -- a compositor transform -- because the
@@ -842,18 +1550,22 @@ stage_sddm_resilience() {
   #
   # The mechanism, from sddm's shipped unit:
   #
-  #   StartLimitIntervalSec=30    StartLimitBurst=2    RestartSec=100ms
+  #   TimeoutStopSec=5   StartLimitIntervalSec=30   StartLimitBurst=2   RestartSec=100ms
   #
-  # Switching restarts SDDM while gamescope still holds VT1. SDDM's first
-  # display attempt raced that teardown and died with HELPER_TTY_ERROR; systemd
-  # retried 100ms later, far too soon for the VT to have settled, so that failed
-  # too; two failures inside 30s exhausted the burst and the unit latched to
-  # `failed` permanently. A transient, self-healing condition was converted into
-  # a black screen by a rate limit.
+  # The FIRST domino is the stop timing out, which R-26 did not record. A
+  # Gaming Mode teardown does not fit in 5s (Steam is slow to exit), so systemd
+  # SIGKILLs sddm and then runs the restart's start job 3ms later, against a VT
+  # the killed compositor still holds. The greeter dies, Restart=always retries,
+  # and StartLimitBurst=2 latches the unit to `failed` -- no graphical session,
+  # and on the product no way back.
   #
-  # RestartSec is the more important half: at 100ms the retry is guaranteed to
-  # land before the VT is free, so the limit gets spent on attempts that could
-  # never have worked.
+  # ⚠️ R-26 called RestartSec=3 "the more important half", reasoning that at
+  # 100ms every retry lands before the VT is free. RestartSec does not gate the
+  # fatal start at all -- that one comes from an explicit `systemctl restart`
+  # transaction, and RestartSec only spaces Restart=always auto-restarts. Hence
+  # the measured 3ms. Both directives below still earn their place on the RETRY
+  # path, but the cause is addressed by TimeoutStopSec here plus the stop ->
+  # settle -> start sequencing in render_restart_helper.
   #
   # TRADEOFF, deliberate: disabling the rate limit means a genuinely broken SDDM
   # config retries forever instead of stopping. On a device with no keyboard,
@@ -871,16 +1583,24 @@ stage_sddm_resilience() {
 ${INSTALL_MARKER}
 #
 # Session switching restarts SDDM while the outgoing compositor still holds
-# VT1. Upstream's StartLimitIntervalSec=30 / StartLimitBurst=2 / RestartSec=100ms
-# turns that transient race into a PERMANENT failure: the Deck ends up with no
-# graphical session and needs 'systemctl reset-failed sddm' from a shell.
+# VT1. Upstream's TimeoutStopSec=5 / StartLimitIntervalSec=30 /
+# StartLimitBurst=2 / RestartSec=100ms turns that transient race into a
+# PERMANENT failure: the Deck ends up with no graphical session and needs
+# 'systemctl reset-failed sddm' from a shell.
 [Unit]
 # 0 disables rate limiting. See the tradeoff note in stage-sddm-resilience.
 StartLimitIntervalSec=0
 
 [Service]
-# Give the outgoing session time to release the VT before retrying. 100ms did
-# not, and every retry inside that window is wasted.
+# THE CAUSE. Upstream's 5s does not fit a Gaming Mode teardown -- measured at
+# 5.008s, i.e. systemd SIGKILLed sddm mid-teardown and started the replacement
+# 3ms later against a VT that was still held. Letting the stop finish is what
+# stops the race happening, rather than surviving it.
+TimeoutStopSec=${SDDM_STOP_TIMEOUT}
+
+# Give the outgoing session time to release the VT before RETRYING. 100ms did
+# not, and every retry inside that window is wasted. This governs the
+# Restart=always path only; it does not affect an explicit restart.
 RestartSec=3
 EOF
   $SUDO install -m 0644 -o root -g root "$tmp" "$SDDM_UNIT_DROPIN" ||
@@ -892,16 +1612,132 @@ EOF
   # Verify the values systemd ACTUALLY resolved. A drop-in in the right place
   # with a typo'd directive is silently ignored, so reading the file back would
   # prove nothing.
-  local limit restart_usec
+  local limit restart_usec stop_usec
   limit=$(systemctl show sddm -p StartLimitIntervalUSec --value 2>/dev/null)
   restart_usec=$(systemctl show sddm -p RestartUSec --value 2>/dev/null)
+  stop_usec=$(systemctl show sddm -p TimeoutStopUSec --value 2>/dev/null)
   [[ $limit == "0" || $limit == "infinity" ]] ||
     fail "installed ${SDDM_UNIT_DROPIN} but systemd still reports StartLimitIntervalUSec=${limit}. The drop-in was not applied; a failed switch would still leave the Deck with no session."
+
+  # This one is a fail, not a warn: it is the directive that addresses the
+  # cause. At upstream's 5s the teardown is SIGKILLed and the race is back.
+  [[ $stop_usec == "${SDDM_STOP_TIMEOUT}s" || $stop_usec == "${SDDM_STOP_TIMEOUT}"* ]] ||
+    fail "TimeoutStopSec resolved to '${stop_usec}', not ${SDDM_STOP_TIMEOUT}s. That is the directive that keeps sddm's teardown from being SIGKILLed at 5s, which is what puts the VT race back."
+
   [[ $restart_usec == "3s" ]] ||
     warn "RestartSec resolved to '${restart_usec}', not 3s. The rate limit is lifted so a switch can still recover, but retries may again land before the VT is free."
 
-  log "verified: StartLimitIntervalUSec=${limit}, RestartUSec=${restart_usec}"
+  log "verified: StartLimitIntervalUSec=${limit}, TimeoutStopUSec=${stop_usec}, RestartUSec=${restart_usec}"
   log "stage-sddm-resilience: ok"
+}
+
+# ---------------------------------------------------------------------------
+
+stage_input_mapper() {
+  # Ships src/deck-input-mapper.py as a --user service so the Deck's controller
+  # drives the Omarchy desktop. Gaming Mode needs nothing here: Steam takes the
+  # controller over itself (docs/findings/hardware-parity.md).
+  #
+  # The mapper picks its device by CAPABILITY (BTN_SOUTH), not by name or event
+  # number. That matters: node numbers are not stable between the live ISO and
+  # an installed system -- PROGRESS.md 5.9's event5/event4/event11 are event6/
+  # event5/event7 here -- and the device is named "Steam Deck", not "Steam Deck
+  # Controller". Anything matching on either would bind the wrong node.
+  local src_dir
+  src_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+  [[ -f "${src_dir}/${MAPPER_SRC_NAME}" ]] ||
+    fail "${MAPPER_SRC_NAME} not found beside ${PROG}.sh (looked in ${src_dir}). This stage installs it; sync the whole src/ directory, not just this script."
+
+  # python-evdev is in Arch's [extra], NOT the AUR -- CLAUDE.md forbids AUR-only
+  # dependencies. Checked by import rather than by `pacman -Q`, because that is
+  # what actually has to work at runtime.
+  python3 -c 'import evdev' 2>/dev/null ||
+    fail "python-evdev is not importable. Install it with 'sudo pacman -S --needed python-evdev' (it is in [extra], not the AUR). The mapper cannot run without it."
+
+  # /dev/uinput is the other hard precondition: no uinput, no virtual keyboard.
+  # On this device the ACL comes from steam-jupiter-stable's udev rules
+  # (60-steam-input.rules tags uinput uaccess), so it is granted to whoever holds
+  # the active local session -- NOT via the `input` group, which T3 §4 assumed.
+  # Tested by opening it, because the permission bits alone do not tell you:
+  # /dev/uinput is root:root 0660 and the access is an ACL.
+  python3 -c 'import os; os.close(os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK))' 2>/dev/null ||
+    warn "/dev/uinput is not writable by ${USER:-$(id -un)} right now. If this user has no active local graphical session that is expected (uaccess grants it per-session) and the service will still work once logged in. If it persists inside the desktop, the mapper will fail to create its virtual keyboard."
+
+  log "installing the input mapper: ${MAPPER_BIN}"
+  $SUDO install -m 0755 -o root -g root "${src_dir}/${MAPPER_SRC_NAME}" "$MAPPER_BIN" ||
+    fail "could not install ${MAPPER_BIN}"
+
+  assert_ours_or_absent "$MAPPER_UNIT" "something else"
+  log "installing the user unit: ${MAPPER_UNIT}"
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$MAPPER_UNIT")" ||
+    fail "could not create $(dirname "$MAPPER_UNIT")"
+
+  local tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  cat >"$tmp" <<EOF
+${INSTALL_MARKER}
+[Unit]
+Description=Steam Deck controller to keyboard/mouse mapper (Desktop Mode)
+Documentation=file://${MAPPER_BIN}
+# PartOf, so it goes away with the session rather than lingering into Gaming
+# Mode, where Steam owns the controller and a second reader would fight it.
+# PartOf propagates stop/restart only -- it adds no ordering.
+PartOf=graphical-session.target
+#
+# ⚠️ DELIBERATELY NO After=graphical-session.target. That looks obviously right
+# and creates an ORDERING CYCLE with the target this unit is WantedBy:
+#
+#   deck-input-mapper.service: Found ordering cycle:
+#     graphical-session.target/start after wayland-session@hyprland.desktop.target/start
+#     after deck-input-mapper.service/start - after graphical-session.target
+#   Job deck-input-mapper.service/start deleted to break ordering cycle
+#
+# systemd resolves the cycle by DELETING this unit's start job, so the service
+# silently never runs. Measured on hardware. The mapper needs no ordering
+# anyway: it reads evdev and writes uinput, and never talks to the compositor.
+#
+# StartLimit* live in [Unit], not [Service]. Putting them in [Service] is not an
+# error -- systemd logs "Unknown key ... ignoring" and carries on unbounded.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+ExecStart=${MAPPER_BIN}
+# The pad may not have enumerated yet at session start. Restart rather than
+# fail permanently -- but bounded (above), so a genuinely missing device shows
+# up in the journal instead of spinning silently.
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=${MAPPER_WANTED_BY}
+EOF
+  $SUDO install -m 0644 -o root -g root "$tmp" "$MAPPER_UNIT" ||
+    fail "could not install ${MAPPER_UNIT}"
+  rm -f "$tmp"
+
+  # The target must EXIST. A unit WantedBy a nonexistent target enables with no
+  # error and never starts, which is the silent failure T3 §4 warns about.
+  #
+  # `list-units`, NOT `list-unit-files`: this is a TEMPLATE INSTANCE that uwsm
+  # creates at runtime, so it has no unit file on disk and list-unit-files finds
+  # nothing. The first version of this check used that and warned on a target
+  # that was demonstrably active -- a check failing for the wrong reason is as
+  # bad as one passing for the wrong reason.
+  if systemctl --user list-units --all --no-legend "$MAPPER_WANTED_BY" 2>/dev/null | grep -q .; then
+    log "verified: ${MAPPER_WANTED_BY} exists in this user manager"
+  else
+    warn "${MAPPER_WANTED_BY} is not known to this user manager. Over SSH with no graphical session that is normal; inside the desktop it means the unit will enable and never start -- check 'systemctl --user list-units --all | grep wayland-session'."
+  fi
+
+  $SUDO systemctl --global enable deck-input-mapper.service >/dev/null 2>&1 ||
+    fail "could not enable deck-input-mapper.service for all users"
+
+  log "verified: unit installed and enabled --global, wanted by ${MAPPER_WANTED_BY}"
+  log "stage-input-mapper: ok"
+  log "NOTE: it starts with the NEXT desktop session. Button-mapping correctness"
+  log "      cannot be checked from here -- it needs someone pressing buttons."
 }
 
 # ---------------------------------------------------------------------------
@@ -911,8 +1747,26 @@ stage_return_icon() {
   # every launcher on every shell reads /usr/share/applications, so this works
   # identically on Omarchy 3.x (waybar-era) and on 4.0's Quickshell rewrite.
   #
+  # Icon=input-gaming, and both halves of that are deliberate.
+  #
+  # It RESOLVES: the previous value `steamicon` matched nothing on this system
+  # (the installed files are steam.png), so the entry showed a broken icon.
+  # Verified against /usr/share/icons rather than assumed.
+  #
+  # And it is NOT Valve artwork. `steam` would resolve, but
+  # docs/findings/P16-redistribution-and-trademark.md says not to ship Valve's
+  # iconography. input-gaming is a standard freedesktop name.
+  #
   # PINNING it to a bar/dock IS shell-specific and is deliberately NOT done
-  # here -- see TASK-T3 step 6.
+  # here -- see TASK-T3 step 6. For Omarchy 4.0 the mechanism is the Quickshell
+  # menu, extended via ~/.config/omarchy/extensions/omarchy-menu.jsonc:
+  #
+  #   "gaming": {"icon":"\udb81\udcb4","label":"Return to Gaming Mode",
+  #              "action":"${STEAM_SHIM} gamescope"}
+  #
+  # That takes a Nerd Font GLYPH rather than an icon file, which sidesteps the
+  # artwork question entirely. It is per-user config, so T5 has to seed it the
+  # same way it seeds monitors.lua -- see PROGRESS.md 5.11.
   log "installing ${RETURN_DESKTOP_FILE}"
   local tmp
   tmp=$(mktemp) || fail "mktemp failed"
@@ -922,7 +1776,7 @@ Type=Application
 Name=Return to Gaming Mode
 Comment=Switch back to the Steam Big Picture session
 Exec=${STEAM_SHIM} gamescope
-Icon=steamicon
+Icon=input-gaming
 Terminal=false
 Categories=Game;
 Keywords=steam;gaming;gamescope;deck;
@@ -935,6 +1789,91 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+
+# Does one sudoers line hand out effectively-unrestricted root?
+#
+# Split out as a pure predicate so test/unit/test-deck-session.sh can exercise
+# it with no Deck and no root. Takes the line, returns 0 if it is blanket.
+#
+# "Blanket" means the command spec is ALL. It deliberately does NOT try to
+# judge whether a *named* command is dangerous, because that judgement is
+# hopeless: this project's own audit trail shows the install stages legitimately
+# running `install` against /etc/sudoers.d/, and a NOPASSWD grant on `install`,
+# `tee`, `cp` or `chmod` is full root by a longer route. See
+# docs/findings/P16-repo-overlap-audit.md's sibling note in PROGRESS.md 5.17.
+# So this flags the honest case and leaves the rest to a human.
+sudoers_line_is_blanket() {
+  local line=$1
+  # Strip comments and surrounding whitespace.
+  line=${line%%#*}
+  line=${line#"${line%%[![:space:]]*}"}
+  line=${line%"${line##*[![:space:]]}"}
+  [[ -n $line ]] || return 1
+  # Defaults lines are settings, not grants.
+  [[ $line == Defaults* ]] && return 1
+  # A grant looks like:  <who> <host>=(<runas>) [NOPASSWD:] <commands>
+  # Blanket iff the command spec, after the last ':' or ')', is exactly ALL.
+  local cmds=${line##*)}
+  cmds=${cmds##*:}
+  cmds=${cmds#"${cmds%%[![:space:]]*}"}
+  cmds=${cmds%"${cmds##*[![:space:]]}"}
+  [[ $cmds == ALL ]]
+}
+
+# Does the line grant its commands WITHOUT a password?
+#
+# Split from the blanket test because the two combine differently, and getting
+# that wrong makes the release check unusable. `deck ALL=(ALL) ALL` is blanket
+# but password-protected -- it is the ordinary admin grant every Arch/Omarchy
+# install ships, and failing a release on it would be a false positive that
+# teaches people to ignore the check. The hazard is blanket AND passwordless.
+sudoers_line_is_nopasswd() {
+  local line=$1
+  line=${line%%#*}
+  [[ $line == *NOPASSWD:* ]]
+}
+
+# NOT in INSTALL_STAGES. This installs nothing and is for release verification
+# (T6) and for answering PROGRESS.md 5.17 on a given machine.
+stage_audit_privileges() {
+  log "auditing sudoers grants under /etc/sudoers.d"
+  local f found=0 line
+  local -a passwordless=() with_password=()
+
+  while IFS= read -r f; do
+    [[ -n $f ]] || continue
+    while IFS= read -r line; do
+      sudoers_line_is_blanket "$line" || continue
+      if sudoers_line_is_nopasswd "$line"; then
+        passwordless+=("${f##*/}: ${line}")
+      else
+        with_password+=("${f##*/}: ${line}")
+      fi
+    done < <($SUDO cat "$f" 2>/dev/null)
+    found=$((found + 1))
+  done < <($SUDO sh -c 'ls -1 /etc/sudoers.d/* 2>/dev/null')
+
+  log "inspected ${found} drop-in(s)"
+
+  # Informational, deliberately NOT a failure: this is the ordinary admin grant
+  # every Arch/Omarchy install ships. Failing on it would be the false positive
+  # that teaches people to ignore this check.
+  local b
+  for b in "${with_password[@]}"; do
+    log "blanket grant, password required (normal): ${b}"
+  done
+
+  if [[ ${#passwordless[@]} -eq 0 ]]; then
+    log "no PASSWORDLESS blanket grants -- nothing here would ship unrestricted root"
+    log "stage-audit-privileges: ok"
+    return 0
+  fi
+
+  for b in "${passwordless[@]}"; do
+    warn "PASSWORDLESS BLANKET ROOT: ${b}"
+  done
+  fail "${#passwordless[@]} sudoers drop-in(s) grant unrestricted root with NO password. On this dev Deck that is deliberate (PROGRESS.md 5.17 -- the iterate-in-place loop needs it), but an ISO that ships one is not a product. Exclude them from the image before release."
+}
 
 stage_default_session() {
   # Deliberately NOT in INSTALL_STAGES. Flipping the default is the one
@@ -970,7 +1909,7 @@ main() {
       log "Test first:  ${STEAM_SHIM} gamescope     (switches now, ends this session)"
       log "Then, once proven: ./${PROG}.sh stage-default-session"
       ;;
-    list-stages) printf '%s\n' "${INSTALL_STAGES[@]}" stage-default-session ;;
+    list-stages) printf '%s\n' "${INSTALL_STAGES[@]}" stage-audit-privileges stage-default-session ;;
     -h|--help|help)
       cat <<EOF
 ${PROG}.sh -- two-way Gaming Mode <-> Desktop session switching for a Deck
@@ -978,15 +1917,22 @@ ${PROG}.sh -- two-way Gaming Mode <-> Desktop session switching for a Deck
   ${PROG}.sh                        install everything except the default flip
   ${PROG}.sh <stage>                run one stage
   ${PROG}.sh list-stages            stage names, for CI
+  ${PROG}.sh stage-audit-privileges report sudoers drop-ins that grant blanket
+                                    root; fails if any do (release check, T6)
   ${PROG}.sh stage-default-session  make Gaming Mode the default (do this last)
 
 After installing:
   steamos-session-select gamescope  switch to Gaming Mode now
   steamos-session-select desktop    switch to the desktop now
 
-Stages also cover two Gaming Mode / display defects (PROGRESS.md 5.11, 5.14):
+Stages also cover Gaming Mode / display defects (PROGRESS.md 5.11, 5.14, 5.15):
   stage-update-stub        a steamos-update stub, so Steam's first run stops
                            reporting a false network error
+  stage-timezone-helper    steamos-set-timezone, so OOBE's timezone picker
+                           stops silently doing nothing
+  stage-priv-write-helper  steamos-priv-write, so Gaming Mode's brightness
+                           slider stops falling back to blanket 'sudo tee'
+                           and 'sudo chmod a+w' on system nodes
   stage-greeter-rotation   rotates the SDDM greeter for the Deck's panel.
                            The user's desktop needs a matching transform in
                            ~/.config/hypr/monitors.lua; the Limine menu and

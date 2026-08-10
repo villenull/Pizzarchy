@@ -560,7 +560,16 @@ While in the live environment, still record for T4/T5:
 
 *(Both recon items above are now answered — see §5.9.)*
 
-### 5.9 ⚠️ NEW, and it re-scopes T4: the gamepad node is silent in the live ISO
+### 5.9 ⚠️ It re-scopes T4: the gamepad node is silent in the live ISO
+
+> ⚠️ **Session 16 addendum — the event numbers below are LIVE-ISO ONLY.** On the
+> installed system the same roles sit on different nodes: buttons on `event6`
+> (not `event5`), trackpads on `event5` (not `event4`), the real gamepad on
+> `event7` (not `event11`), and the device is named **`"Steam Deck"`**, not
+> `"Steam Deck Controller"`. Anything hardcoding these numbers binds the wrong
+> device. `src/deck-input-mapper.py` selects by *capability* (`BTN_SOUTH`),
+> which is why it is unaffected. Full enumeration:
+> `docs/findings/hardware-parity.md`.
 
 Measured 2026-08-10 (`docs/findings/P15-live-iso-recon.md` §R-8). With Steam not
 running, the Deck's controller firmware is in **lizard mode**, and lizard mode
@@ -618,7 +627,7 @@ project ships corrects the panel and the fix is per-surface, in userspace.
 
 | Surface | Status | Fix |
 |---|---|---|
-| Limine menu | ❌ rotated | **no known fix yet** — and it is the first thing a user sees. **T5** |
+| Limine menu | 🟡 **fix identified, NOT applied** | `interface_rotation: 270` — Limine ≥ v10; Deck runs **12.5.2**. Boot-chain change, held for approval. See below |
 | Console / TTY | ❌ rotated | `fbcon=rotate:1` on the cmdline — boot-chain change, **held for operator approval** |
 | SDDM greeter | ✅ **fixed, seen** | `stage-greeter-rotation` in `src/deck-session.sh` |
 | Omarchy / Hyprland | ✅ **fixed, seen** | `~/.config/hypr/monitors.lua` |
@@ -638,6 +647,39 @@ project ships corrects the panel and the fix is per-surface, in userspace.
   divides 1280×800 evenly). `GDK_SCALE` went 2 → 1 to match, or GTK apps render
   ~2.5× and clip.
 
+### The Limine menu CAN be rotated — `interface_rotation` (session 16)
+
+§5.11 recorded "no known fix yet". There is one. Limine has a global
+**`interface_rotation`** taking `0`, `90`, `180`, `270`, default `0`, which
+rotates the menu/editor/console **only** — it does not affect the booted OS.
+It needs **Limine ≥ v10**; the Deck runs **12.5.2**, and other `interface_*`
+globals are already in its config, so the option is available today.
+
+```
+interface_rotation: 270
+```
+
+`270` to match the desktop's `transform 3`. ⚠️ **Unverified against a screen** —
+§5.11's whole history is a recorded transform value that turned out upside down,
+so treat the number as a hypothesis until someone looks at the panel.
+
+**⚠️ NOT APPLIED.** Editing `/boot/limine.conf` is a boot-chain change, and this
+project holds those for operator approval (same rule as `fbcon=rotate:1`).
+
+**Where it has to go, which is the non-obvious part.** Three things write that
+file:
+
+| Writer | Behaviour |
+|---|---|
+| `limine-entry-tool` (binary) | manages **entries** and `default_entry`; leaves other globals alone |
+| Omarchy theming | writes `interface_*` / `term_*` globals |
+| **`omarchy refresh limine`** | **`mv`s `/boot/limine.conf` aside and copies `/usr/share/omarchy/default/limine/limine.conf` over it** — a hand edit is destroyed |
+
+So a hand edit to `/boot/limine.conf` survives kernel updates but **not**
+`omarchy refresh limine`. For the product, **T5 must bake `interface_rotation`
+into the image**, exactly as it must for the desktop's `monitors.lua` below —
+same class of problem, same fix.
+
 ⚠️ **The desktop half is per-user config** (`~/.config/hypr/monitors.lua`), so it
 is currently fixed only for `deck` on the test Deck. **T5 must bake it into the
 image** — `/etc/skel/.config/hypr/` or an Omarchy default — or a fresh install
@@ -655,17 +697,42 @@ Upstream's installer is fully driveable from a config file, and accepts
 integration point than post-install scripting, and it makes automated QEMU
 install testing tractable.
 
-### 5.13 🐞 `stage-repos` lets Arch's packages shadow Valve's
+### 5.13 ✅ `stage-repos` repo ordering — AUDITED and RESOLVED 2026-08-10
 
-Valve's repos are appended **after** `[extra]`, and pacman is first-match, so
-`pacman -S gamescope` installs Arch's build (bare compositor) instead of
-Valve's (the whole SteamOS session). The conversion reports success while
-leaving a device that cannot enter Gaming Mode.
+Valve's repos are appended **after** `[extra]`, and pacman resolves `-S <name>`
+by **repo order, not version**, so `pacman -S gamescope` installs Arch's build
+(bare compositor) instead of Valve's (the whole SteamOS session). The defect is
+real. The proposed fix — Valve's repos first, matching SteamOS — is **rejected
+on measured evidence**. Full data: `docs/findings/P16-repo-overlap-audit.md`.
 
-**Unfixed on purpose** — putting Valve's repos first matches SteamOS but hands
-blanket precedence to repos pinning older common packages. **Enumerate the
-overlap first** (`mesa`, `vulkan-radeon`, `lib32-vulkan-radeon` are the
-suspects). §R-15.
+**101 package names overlap; Valve's is OLDER in 50 of them**, including
+`filesystem` 2021.12.07 (vs 2025.10.12), `linux-lts` 5.15.74 (vs 6.18.43),
+`plymouth` 22.02 (vs 26.134), and the whole `mesa`/`vulkan-*`/`lib32-vulkan-*`
+stack — the three suspects this section named all confirm. Decisively: the test
+Deck runs **Arch's** `mesa` and `vulkan-radeon` and Gaming Mode works, so
+Valve's are not merely riskier, they are unnecessary.
+
+**The blast radius is one package.** Everything `omarchy-deck-kernel.sh`
+installs (`linux-neptune-611`, its headers, `linux-firmware-neptune`,
+`steamdeck-dsp`) is **Valve-only**, so order never affected it. Of the 51
+"Valve newer" overlaps, nearly all are Valve rebuilds of identical upstream
+versions (`systemd 261.2-1.1` vs `261.2-1`); only **`gamescope`** differs in
+substance (Valve `3.16.25-3` ships the session, Arch `3.16.25-1` does not).
+
+**Fix adopted: qualify the package, do not reorder repos.**
+
+```bash
+pacman -S jupiter-staging/gamescope     # not: pacman -S gamescope
+```
+
+⚠️ Valve's gamescope is *newer* and pacman still picks Arch's — order beats
+version. Don't conclude from "Valve's is newer" that the bug can't bite.
+
+Two follow-ons: **`mangohud` should come from Arch** (its `0.8.4-1` is newer
+than Valve's `0.8.3…-4` and already ships `/usr/bin/mangoapp`, verified on the
+Deck); and `deck-session.sh`'s precondition already catches the wrong build,
+because it tests for the session *file*, not a version — the two builds share
+an upstream version, so a version check could not tell them apart.
 
 ### 5.14 ✅ Gaming Mode's update check — **RESOLVED 2026-08-10 with a stub**
 
@@ -690,7 +757,50 @@ on the Deck before it was caught. The stage now asserts apply is non-zero.
 
 This closed only *one* helper. The wider surface is **§5.15**.
 
-### 5.15 ⚠️ NEW, and it is the widest gap left: Steam's privileged-helper surface is missing
+### 5.15 🟡 Steam's privileged-helper surface — the two user-visible ones are SHIPPED; the rest is deliberately skipped
+
+**Updated 2026-08-10, session 16 (P2.0b).** `steamos-set-timezone` and
+`steamos-priv-write` are now installed by `src/deck-session.sh`
+(`stage-timezone-helper`, `stage-priv-write-helper`), both hardware-verified
+with a real change and restore. The operator decided **not** to take
+`jupiter-hw-support`, so the six `jupiter-*` helpers stay absent — none has a
+user-visible effect yet, and `jupiter-fan-control` belongs to P2.3, which
+needs per-item approval anyway.
+
+⚠️ **The reasoning recorded below was wrong in a way worth keeping.** It said
+the missing `steamos-priv-write` means "the Gaming Mode brightness slider does
+nothing". **On the test Deck the slider works.** Steam does not give up when a
+helper is missing — it falls back twice, measured from its own console log:
+
+```
+1.  /usr/bin/steamos-polkit-helpers/steamos-priv-write "<path>" "<value>"   -> 127
+2.  echo "<value>" | sudo -n tee "<path>"                                   -> works
+3.  sudo -n chmod a+w "<path>"                                              -> works
+```
+
+Tiers 2 and 3 succeed **only** because `/etc/sudoers.d/99-deck-testing` grants
+`deck ALL=(ALL) NOPASSWD: ALL` — see §5.17. So the conclusion about the
+*product* was right and the belief about the *present* was wrong, which is the
+more dangerous half: anyone "verifying" this by moving the slider on this Deck
+would have concluded there was no bug.
+
+Tier 3 is also why `/sys/class/backlight/amdgpu_bl0/brightness` and
+`/sys/class/leds/status:white/led_brightness_multiplier` are **mode 666**,
+restamped every Gaming Mode start. That is Steam's doing, not a hand-edit.
+Supplying tier 1 is therefore a **security** change as much as a feature: it
+stops Steam reaching for blanket sudo and stops the `chmod`.
+
+**The narrow grants are proven operative** — measured 2026-08-10 with
+`99-deck-testing` temporarily removed (§5.17), so nothing else could have
+authorized them. Both helpers still changed brightness and timezone, and
+`steamos-priv-write` still refused `/etc/shadow` with real privilege on the
+line.
+
+Not whitelisted on purpose: **`/dev/drm_dp_aux0`**, which Steam asks to write
+with an *empty* value. What that does is not understood, so the helper refuses
+it loudly. Steam has been getting 127 for it all along and tolerates it.
+
+<details><summary>Original §5.15 text (kept for the audit trail — its "the slider does nothing" premise is corrected above)</summary>
 
 §5.14 was one symptom of something larger. Steam drives system functions through
 helpers at **`/usr/bin/steamos-polkit-helpers/`**, invoked by **absolute path**.
@@ -722,7 +832,215 @@ lands in P2.3, which requires per-item operator approval every time.
 Full inventory and options: `docs/findings/P2-steam-integration-and-rotation.md`
 §R-20.
 
-### 5.16 🐞 The session switch can leave the Deck with NO session — mitigated, root cause open
+</details>
+
+### 5.17 🐞 NEW — `99-deck-testing` gives the desktop user blanket passwordless sudo, and it is masking real defects
+
+`/etc/sudoers.d/99-deck-testing` contains:
+
+```
+deck ALL=(ALL) NOPASSWD: ALL
+```
+
+Owned by **no package** — a test-rig file, almost certainly added during P1.5
+so the `tools/deck-sync.sh` SSH loop could run stages unattended. Two
+consequences, and the second is the expensive one:
+
+1. **It must never ship.** An ISO that grants its default user blanket
+   passwordless root is not a product.
+2. **It makes the test Deck more capable than the product, silently.** §5.15 is
+   the worked example: Steam's `sudo -n tee` / `sudo -n chmod a+w` fallbacks
+   work here and will not work on a shipped install, so a defect looks fixed
+   when it is not. Anything verified on this Deck that touches privilege is
+   suspect until re-checked without this file.
+
+It also sorts **last** in `/etc/sudoers.d/` (`99-deck-testing` > `99-deck-…`),
+and sudo takes the last match, so it overrides every narrow grant this project
+installs — including the two from §5.15 and `99-deck-session-select`.
+
+**Measured with it removed, 2026-08-10** (temporarily, with a `systemd-run`
+deadman restore; operator-approved). This is the product configuration, and it
+settles two things at once:
+
+| Probe | Result | What it means |
+|---|---|---|
+| `sudo -n true` | ✅ refused | the blanket grant was genuinely gone, so the rest is meaningful |
+| Steam tier 2, `echo V \| sudo -n tee PATH` | ✅ refused | **§5.15's product prediction is correct** — Steam's fallback dies, so without our helper the brightness slider really would do nothing |
+| Steam tier 3, `sudo -n chmod a+w PATH` | ✅ refused | the world-writable sysfs nodes are a test-rig artifact, not a shipped one |
+| direct write as `deck` (node reset to 0644) | ✅ refused | no ambient permission was masking the result |
+| `steamos-priv-write` → brightness | **works** | authorized by `99-deck-priv-write`, nothing else |
+| `steamos-set-timezone` → timezone | **works** | authorized by the narrow grant, nothing else |
+| `steamos-priv-write /etc/shadow` | ✅ refused | the whitelist holds with real privilege on the line |
+
+⚠️ The backlight node was reset to **0644** for that test and **left there** —
+it is the correct mode, and with tier 1 answering, Steam no longer re-`chmod`s
+it. If it is ever found at 666 again, Steam fell back, which means a helper
+broke.
+
+### ⚠️ A "narrower replacement grant" is IMPOSSIBLE — measured, 2026-08-10
+
+This section used to say the fix was a narrower grant for `tools/deck-sync.sh`.
+**It is not achievable, and the sudo audit trail proves it.** Distinct binaries
+the install stages ran as root in one day:
+
+```
+install(81) test(69) tee(61) grep(29) systemctl(22) cat(22) snapper(18)
+visudo(15) pacman(8) find(7) chmod(7) sed(6) rm(6) cp(6) mount umount passwd
+```
+
+and the destinations include **`/etc/sudoers.d/` itself**:
+
+```
+/usr/bin/install  /etc/sudoers.d/99-deck-priv-write
+/usr/bin/install  /etc/sudoers.d/99-deck-session-select
+/usr/bin/chmod    /etc/sudoers.d/99-deck-testing
+```
+
+A NOPASSWD grant on `install`, `tee`, `cp` or `chmod` with arbitrary arguments
+**is** full root — it can write any file anywhere, including a new sudoers
+drop-in. Granting the stage *scripts* instead is worse: they live in a
+user-writable directory, so that is a one-line privilege escalation. The dev
+loop legitimately needs root, and no honest narrowing exists. Saying so is more
+useful than shipping something that only looks narrow.
+
+**So the resolution is not a narrower grant; it is keeping this off the image.**
+
+1. **`./deck-session.sh stage-audit-privileges`** — not in `INSTALL_STAGES`; a
+   T6 release check. Reports every blanket grant and **fails** on any that is
+   also passwordless. Against the Deck it reports `03_deck`
+   (`deck ALL=(ALL) ALL`) as normal-and-password-required, and fails on
+   `99-deck-testing`. ⚠️ Its first version failed on **both** — exactly the
+   false positive that gets a release check ignored — so "blanket" and
+   "passwordless" are deliberately separate predicates.
+2. **T5/P2.7 must exclude it from the payload.** That is where the real guard
+   belongs, because the ISO is what ships.
+
+`deck` has a password set (`passwd -S deck` → `P`) and `03_deck` grants
+`deck ALL=(ALL) ALL`, so removing the passwordless file is recoverable rather
+than a lockout — it costs only the unattended SSH loop.
+
+### 5.18 ✅ A failed session start dropped the user at a PASSWORD GREETER — RESOLVED 2026-08-10
+
+Found by session 16's soak test, cycle 4 of 20. This is §5.16's failure in the
+form a user actually meets, and it is worse than "no session": it is a login
+screen that a controller cannot answer.
+
+```
+14:45:59.845  Session "omarchy.desktop" selected ... for VT 1
+14:45:59.872  Authentication for user "deck" successful
+14:45:59.996  Starting Wayland user session: "uwsm start -g -1 -e -D Hyprland ..."
+14:46:00.000  Session started true
+14:46:00.001  session closed for user deck        <- ONE MILLISECOND later
+14:46:00.007  Auth: sddm-helper exited with 5
+14:46:00.008  Adding new display...              <- the GREETER
+```
+
+Two independent faults, and both need fixing:
+
+**(a) The incoming session dies because the outgoing one has not finished.**
+`uwsm start … Hyprland` exited in ~1 ms. At the moment of failure seat0 still
+carried a leftover `deck` user session plus its user manager alongside the new
+greeter. `render_restart_helper`'s settle step waits for
+`loginctl show-seat seat0 -p Sessions` to empty, which is **not the same thing**
+as the user's systemd manager and `uwsm` having finished — so the settle can
+report "free" while the previous graphical session is still unwinding.
+
+**(b) SDDM then shows the greeter instead of retrying, because
+`Relogin=false`** — the shipped default, in
+`/usr/lib/sddm/sddm.conf.d/default.conf`. Autologin fires once; if that session
+dies, the user gets a password prompt. On this device that is unrecoverable
+without a keyboard, which violates `CLAUDE.md`'s controller-only rule.
+
+(b) is the safety net and the more important half: fixing (a) makes the failure
+rarer, but only (b) decides what the user sees when it still happens. Operator
+chose `Relogin=true` — the same posture already taken in
+`stage-sddm-resilience`, a loop that can still recover beating a dead end that
+cannot, with Ctrl+Alt+F2 as the dev escape.
+
+**Status: RESOLVED.** Three 20-cycle soaks, measured by autologin attempts —
+the only metric that shows the failure, since `Relogin=true` hides it from
+everything else:
+
+| | attempts / 20 switches | |
+|---|---|---|
+| original | **600** | thrash on 5 of 20 cycles |
+| after the comm-name fix | **283** | bimodal: 16 clean, 2 thrashing (104, 155) |
+| **after R-28's user-manager gate** | **20** | **every cycle at exactly 1 — the ideal** |
+
+The middle row was the diagnostic clue: bimodal, not a spread, so a switch
+either landed first time or fell into a distinct ~30 s state — a failure *mode*,
+which is what led to R-28.
+
+**What a switch costs now.** Settle times observed: **0.0 s on 17 of 20**, and
+**52.7 / 52.8 / 53.3 s** on the three where Steam was genuinely still shutting
+down. None reached the 60 s bound, so every wait was real rather than a timeout.
+That is the deliberate trade: up to ~53 s of *waiting* instead of ~30 s of
+*flickering*, and it is dominated by Valve's `steam-launcher.service`
+`TimeoutStopSec=60`, not by anything this project controls.
+
+⚠️ **A switch away from Gaming Mode can therefore take ~1 minute.** It is
+correct and flicker-free, but it is not fast, and the cause is Steam's own
+shutdown time. Worth revisiting in P2.4 if the shell can show progress.
+
+⚠️ **The gate had a defect of its own, now fixed.** It listed `gamescope` as a
+process name. The kernel truncates `comm` to 15 chars and `pgrep -x` matches
+`comm`, so inside a live gamescope session `pgrep -u deck -x gamescope` returns
+**0** — the compositor is `gamescope-wl`, its launcher `start-gamescope`. That
+half of the gate matched nothing and reported "settled" instantly. Correcting it
+is what took 600 attempts down to 283. Names verified on both sessions:
+`Hyprland`, `start-hyprland`, `uwsm` (desktop); `gamescope-wl`,
+`start-gamescope` (gaming).
+
+⚠️ **What the gate still misses.** It waits on
+`loginctl show-seat seat0 -p Sessions` plus that `pgrep`. Neither sees:
+
+- **Seatless leftover sessions.** During the thrash, `loginctl list-sessions`
+  carried several `deck` sessions with seat `-`, which `show-seat seat0` does
+  not report at all.
+- **uwsm's state inside the user manager.** `user@1000.service` stays
+  `active/running` across switches, and `uwsm start` is what exits immediately.
+
+**Measured, so the next attempt does not repeat it:** `graphical-session.target`
+in the user manager **flaps** across a switch (active → inactive → active within
+~1.6 s), so it is not usable as a settle signal on its own. And "no session for
+the user" can never be true while anyone is on SSH — the discriminator that does
+work is **`Type=wayland`**, which excludes both the `manager`-class session and
+`tty` (SSH) sessions.
+
+**✅ Root cause identified — R-28.** `steam-launcher.service` (Valve's, shipped
+with gamescope) is `PartOf=graphical-session.target` with **`TimeoutStopSec=60`**,
+and Steam takes tens of seconds to exit. Both thrashing cycles show the same
+user-manager signature: `Stopping Steam Launcher...` with **no matching
+`Stopped` line and ~29 s of silence**, while every other unit stops in ~50 ms.
+sddm has already restarted by then, so the new session's `uwsm start … Hyprland`
+starts into a user manager still tearing the old session down and exits in ~1 ms;
+`Relogin=true` then retries until the teardown completes.
+
+That explains the bimodality (whether Steam exits promptly), the 30–40 s
+duration, and why the settle gate did not help: `steam-launcher.service` is a
+**unit in the user manager**, not a process or a logind session, so neither of
+the gate's conditions can see it.
+
+**✅ Fixed 2026-08-10 (session 16).** `render_restart_helper`'s settle gate got a
+third condition: **no unit in the desktop user's systemd manager may be
+`deactivating`**, asked generally rather than by name, via
+`systemctl --machine=<user>@.host --user`. `VT_SETTLE_MAX` went 15 s → **60 s**
+to match `steam-launcher.service`'s own `TimeoutStopSec` — giving up before
+systemd does would hand the problem straight back to the autologin retry loop.
+
+⚠️ Deliberately **not** shortening Valve's `TimeoutStopSec`: Steam is being given
+that time to shut down cleanly, and cutting it trades a slow switch for possible
+state corruption.
+
+Both halves are now closed: (b) `Relogin=true` means a dead session can never
+strand a controller-only user at a password prompt, and (a) the incoming session
+no longer starts into a teardown.
+
+⚠️ **This is why "it worked once" was never enough.** P1.5's R-18 and session
+15's R-23 both took this switch successfully; the defect needed 4 cycles to
+appear.
+
+### 5.16 ✅ The session switch could leave the Deck with NO session — RESOLVED 2026-08-10
 
 Found by taking the Gaming→Desktop path for real (§5.10). The switch left the
 Deck with no graphical session, recoverable only via
@@ -736,12 +1054,33 @@ the VT to be free — and two failures inside 30 s latched the unit to `failed`
 **permanently**. A self-healing condition became unrecoverable because of a rate
 limit.
 
-**Mitigated** by `stage-sddm-resilience`: `StartLimitIntervalSec=0` and
-`RestartSec=3`, asserted against the values *systemd resolved*.
+**Root cause found and fixed, 2026-08-10 (session 16).** ⚠️ The mechanism above
+is **incomplete and its fix rationale was wrong** — see `R-27`. The first
+domino is the **stop timing out**: `TimeoutStopSec=5`, teardown measured at
+5.008 s, so systemd SIGKILLed sddm and ran the start job **3 ms** later against
+a VT the killed compositor still held. `RestartSec` never gated that start at
+all — it came from an explicit `systemctl restart` transaction, and `RestartSec`
+only spaces `Restart=always` auto-restarts. It also fired **at boot**, so it was
+never switch-specific.
 
-**Still open — the root cause.** The restart is issued from inside the session
-being torn down. Decoupling it (a transient `systemd-run` unit, so the caller is
-not killed mid-restart) would *avoid* the race rather than only survive it.
+Now fixed in three parts: `TimeoutStopSec=30`; `systemctl restart sddm` replaced
+by an explicit stop → settle → start in `render_restart_helper`; and that
+sequence run from a `systemd-run` transient unit, since `KillMode=control-group`
+kills a caller inside the session being torn down.
+
+**Measured after the fix:** across ~14 switches, including a run that hammered
+10 switches in 50 s, **zero stop timeouts and zero `start-limit-hit`**, and sddm
+never latched — under abusive pacing it retried 11 times and recovered itself,
+where the original defect needed `reset-failed` over SSH.
+
+**Verified, 2026-08-10: the 20-cycle soak passed 20/20** after §5.18(b) landed —
+`NRestarts=0`, `Result=success`, and across the whole run **zero
+`start-limit-hit`, zero stop timeouts, zero `Failed with result`**. sddm never
+failed as a unit. The first soak attempt got 3 cycles before §5.18 stopped it,
+which is how that defect was found.
+
+**§5.16 itself is closed.** What remains is §5.18(a)'s retry thrash, which is a
+session-startup problem, not an sddm-restart one.
 
 ⚠️ **The verification has an honest limit:** the round trip afterwards passed
 *without the race recurring*, so what is proven is that the latch is gone — not
@@ -797,13 +1136,30 @@ DeckShift hand-edits) and installed package-based Omarchy 4.0
 - **LCD Steam Decks are entirely untested.** Only OLED hardware exists. Gate
   LCD-divergent paths on model detection and ship "OLED-verified, LCD-untested"
   rather than claim support.
-- **Trademark / redistribution** — "Steam Deck" and Valve iconography usage
-  (`docs/PLAN.md` §6.1's button glyphs), and whether the ISO may redistribute Valve's
-  kernel and firmware. Flagged as cheap-to-check-early; **not checked.**
-- **Recovery path documentation** — how a user returns to stock SteamOS. An
-  ethical baseline for a wipe-the-device project. **Not written — and now
-  scheduled:** `docs/ROADMAP.md` P3.1 produces it as a byproduct of the phase-3
-  factory reset.
+- **Trademark / redistribution** — ✅ **checked 2026-08-10**,
+  `docs/findings/P16-redistribution-and-trademark.md`. Two results:
+  **(a) `steamdeck-dsp` is `Proprietary` and ships no licence text**, and
+  `omarchy-deck-kernel.sh` installs it — so an ISO that *bundles* Valve packages
+  would redistribute a proprietary blob. It is the Deck's speaker tuning, so
+  dropping it is not free. **The question is contingent on a T5 decision:
+  bundle (→ blocked) vs fetch from Valve's mirror at install time (→ nothing is
+  redistributed). §2.2 retired the offline constraint, so fetch is now
+  available and is the recommendation.**
+  **(b) The Steam Deck logo is unambiguously out**; Valve's guidelines scope
+  themselves to partners under contract and forbid combining the logo with
+  other words or graphics. Draw our own button glyphs for T4 rather than using
+  Valve's. Descriptive use of the words is an operator judgement call; keeping
+  "Steam Deck" out of the project *name* is recommended, and the project is
+  already "Omarchy Deck". A README affiliation disclaimer is the cheap fix.
+- **Recovery path documentation** — 🟡 **drafted 2026-08-10: `docs/RECOVERY.md`.**
+  Written from Valve's published instructions (official image source, Rufus/dd,
+  **Volume Down + Power** to reach the boot manager, full reimage to undo this
+  project). ⚠️ **Not yet exercised by this project** — `docs/ROADMAP.md` P3.1
+  performs a real factory reset and should replace it with a first-hand account.
+  Exact recovery-menu option names are deliberately not quoted: they change
+  between image revisions, and a stale label is worse than describing the
+  intent. Carries the affiliation disclaimer from
+  `docs/findings/P16-redistribution-and-trademark.md`.
 
 ### 5.6 One upstream draft staged and held
 
@@ -960,6 +1316,17 @@ backup rescue (the rebuild wipes both).
   ships **zero** polkit helpers (it is GRUB machinery). It does not ship
   `steamos-session-select` either — no configured repo does. `jupiter-hw-support`
   ships six of the helpers, at 94 MiB installed and a **plymouth** dependency.
+- **Steam FALLS BACK when a polkit helper is missing; it does not just fail.**
+  For a privileged write it tries the helper, then `echo V | sudo -n tee PATH`,
+  then `sudo -n chmod a+w PATH` so the next write needs no privilege at all.
+  Measured from its console log. Two things follow: a missing helper can look
+  like it is working (§5.15), and Steam leaves system nodes **world-writable**
+  after every Gaming Mode start. Never conclude a helper is unnecessary because
+  the feature works on the test Deck.
+- **Steam's helper argv, measured, not inferred.** `steamos-set-timezone
+  America/Chicago` (one positional). `steamos-priv-write "<path>" "<value>"`
+  (two, quoted). It also calls `steamos-priv-write "/dev/drm_dp_aux0" ""` — an
+  **empty** value — so any value validation must handle that case for real.
 - **`src/deck-session.sh` is source-safe as of 08698ba** — `main "$@"` is guarded
   on `[[ ${BASH_SOURCE[0]} == "$0" ]]` so `test/unit/test-deck-session.sh` can
   source it and call `render_update_stub` / `assert_ours_or_absent` with no root,
@@ -985,4 +1352,5 @@ One line each. Detail lives in git history and in the `FINDING-*.md` files.
 | 7 | First physical hardware run; two real bugs found; R1 §10.3 resolved; Steam/gamescope installed; prior-art check done |
 | 8 | First Gaming Mode boot, via a DeckShift hybrid splice (since reversed — §2.3) |
 | 15 | **Phase 2 opener, 2026-08-10.** §5.10 closed — Steam's own Switch-to-Desktop works, with **two** causes not one (OOBE, plus the runtime narrowing PATH to `/usr/bin:/bin`, which made the `/usr/local/bin` shim unreachable all along). §5.14 closed with a stub, after learning its exit codes are a protocol: apply exiting 0 made Steam **reboot the Deck**. §5.11's greeter + desktop fixed — transform is **3**, not the recorded 1, and Omarchy's `auto` scale left a 640×400 desktop. A `#` marker in a Lua file taught us Hyprland **silently discards** an unparseable config. Opened §5.15 (the whole polkit-helper surface, incl. brightness) and §5.16 (the switch latched sddm into permanent failure). |
+| 16 | **P2.0b + P2.0c, 2026-08-10.** `steamos-set-timezone` + `steamos-priv-write` shipped as two new `deck-session.sh` stages, both signatures **read from Steam's log** rather than inferred, both hardware-verified with a real change and restore. Operator skipped `jupiter-hw-support`. Corrected §5.15: the brightness slider **works** on this Deck — Steam falls back to `sudo -n tee` and then `sudo -n chmod a+w`, which is also what makes those sysfs nodes 666. Opened §5.17 (`99-deck-testing`'s blanket NOPASSWD masks privilege defects and must not ship). Then **P2.0c**: §5.16's real cause was the **stop timing out** (`TimeoutStopSec=5`, teardown 5.008s → SIGKILL → start 3ms later), not the retry spacing — R-26's `RestartSec` rationale was wrong, and it fired at **boot**, not only on switches. Fixed with `TimeoutStopSec=30` + stop→settle→start in a `systemd-run` transient unit; **20/20 soak clean**. The soak also found **§5.18**: a dead session lands on a password greeter, because SDDM ships `Relogin=false`. Then **P2.0e/§5.13**: the repo overlap was **audited** (101 collisions, Valve older in 50 -> reordering rejected; the fix is `pacman -S jupiter-staging/gamescope`), and the suite's last blind spot closed. Two defects were introduced by this session's own fixes and caught by mutation testing and soaking, not review -- a settle gate matching the comm name `gamescope`, which no process has. Unit suite 17 -> **53 assertions**, mutation-tested **34/34**. |
 | 9 | **One long session, 2026-08-09/10 — the scope reset and all of phase 1's non-hardware work.** Five scope decisions (§2): the ISO is the deliverable again, network-at-install is fine, target 4.0, DeckShift dropped, Deck rebuilds allowed. Docs consolidated (`PROGRESS` 1403→~600 lines, `WHERE-WE-ARE` folded in, `PLAN` frozen with a known-wrong-sections banner); `docs/ROADMAP.md` written (three phases); dead drafts removed. **P1.1:** `stage-default-entry` with the path form *proven by boot*, substrate rebuilt with real snapper snapshots (which immediately caught the hook test's own substring miscount), three deliberate-failure tests. **P1.2–P1.3:** T2 spike resolved — a gamepad drives `gum` and `archinstall` at the kernel input layer, so T4 is days not weeks. **P1.4 (half):** 4.0 beta ISO built; static inspection decided T4's OSK question and found the OLED Deck's `nfa765` Wi-Fi firmware present (§5.1). Repo reorganized out of the flat layout (a root `*.sh` glob had silently gone from checking every script to none). |

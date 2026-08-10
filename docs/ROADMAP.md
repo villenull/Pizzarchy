@@ -107,12 +107,14 @@ short, targeted Deck iterations over `tools/deck-sync.sh`.
 | # | Item | Where | Task ref |
 |---|---|---|---|
 | P2.0 ✅ | **Done 2026-08-10 (session 15).** §5.10 Steam's own Switch-to-Desktop proven end to end; §5.14 updater stub; §5.11 greeter + desktop rotation. Opened §5.15, §5.16 | Deck | `docs/findings/P2-steam-integration-and-rotation.md` |
-| P2.0b | **§5.15** — decide and ship the missing `steamos-polkit-helpers`. Owns Gaming Mode's **brightness slider** (`steamos-priv-write`) and OOBE's timezone. `jupiter-hw-support` supplies six but costs 94 MiB + plymouth | Deck + Dev | `docs/PROGRESS.md` §5.15 |
-| P2.0c | **§5.16** root cause — decouple the sddm restart from the session being torn down (transient `systemd-run` unit), then cycle the switch enough times to trust it | Deck | `docs/PROGRESS.md` §5.16 |
-| P2.1 | Desktop-mode input mapper as a `--user` service + `squeekboard`, on the Deck; verify against 4.0's `uwsm` targets | Deck (short) | `docs/tasks/T3-gaming-mode.md` §4 |
-| P2.2 | Hardware parity batch 1: Wi-Fi, BT, audio, trackpads/gyro, buttons in both sessions → `docs/findings/hardware-parity.md` | Deck | `docs/tasks/T3-gaming-mode.md` §5 |
+| P2.0b ✅ | **Done 2026-08-10 (session 16).** §5.15's two user-visible helpers shipped as `deck-session.sh` stages: `steamos-set-timezone` and `steamos-priv-write`, signatures measured from Steam's log, both hardware-verified. `jupiter-hw-support` **skipped** by operator decision. Opened §5.17 | Deck + Dev | `docs/PROGRESS.md` §5.15 |
+| P2.0d 🟡 | **§5.17** — *answered, not closed.* A narrower grant is **impossible** (the stages write to `/etc/sudoers.d/` itself), so the fix is to keep it off the image. `stage-audit-privileges` now gates it; **P2.7 must exclude it from the payload** | Deck + Dev | `docs/PROGRESS.md` §5.17 |
+| P2.0c ✅ | **Done 2026-08-10 (session 16).** §5.16's real cause found (the STOP times out) and fixed; **20/20 soak cycles clean**, zero start-limit-hit. Found and half-fixed §5.18 on the way | Deck | `docs/PROGRESS.md` §5.16, R-27 |
+| P2.0e ✅ | **Done 2026-08-10 (session 16).** §5.18 resolved — cause was `steam-launcher.service`'s 60s teardown (R-28). Autologin attempts across 20 switches: 600 → 283 → **20 (ideal)** | Deck | `docs/PROGRESS.md` §5.18, R-28 |
+| P2.1 🟡 | **Mapper as a `--user` service: DONE (session 16).** `stage-input-mapper` installs it + the unit; verified on hardware — service active, bound `event7 (Steam Deck)` by capability, virtual keyboard created. **Left: `squeekboard` OSK**, and button-mapping correctness (needs a human) | Deck (short) | `docs/tasks/T3-gaming-mode.md` §4 |
+| P2.2 🟡 | Hardware parity batch 1 → `docs/findings/hardware-parity.md`. **Programmatic half done (session 16):** Wi-Fi, BT, audio, display, kernel all at parity; input differs because Steam replaces the native nodes with a virtual Xbox pad. **Remaining rows need a human** (audible sound, haptics, gyro response, button mapping, BT pairing) | Deck | `docs/tasks/T3-gaming-mode.md` §5 |
 | P2.3 | Hardware parity batch 2: TDP, fan, battery — **operator approval per item, every time** | Deck | `docs/tasks/T3-gaming-mode.md` §5 |
-| P2.4 | Shell integration on Quickshell (now testable): pin the return icon, QAM/Power-menu trigger placement | Deck (short) | `docs/tasks/T3-gaming-mode.md` §6 |
+| P2.4 🟡 | Shell integration on Quickshell. **Mechanism found (session 16):** the Omarchy menu is extensible via `~/.config/omarchy/extensions/omarchy-menu.jsonc`, taking a **Nerd Font glyph** (no Valve artwork needed). Also fixed a broken `Icon=steamicon` in the launcher entry. **Left:** add the row, and QAM/Power-menu placement | Deck (short) | `docs/tasks/T3-gaming-mode.md` §6 |
 | P2.5 | T4: the 8 installer screens, per T2's finding; rotation handling per P1.5's recon | QEMU | `docs/tasks/T4-installer-ui.md` |
 | P2.6 | T4: full install flow in QEMU with virtual gamepad only, no keyboard | QEMU | `docs/tasks/T4-installer-ui.md` |
 | P2.7 | T5: fork `omarchy-iso`; Deck pacman package + `pre-refresh-pacman.d/` hook; Valve repos into the build; live-image firmware per §5.1's answer; `lib32-vulkan-radeon` pinned. **Also now: bake the desktop rotation into the image** (§5.11 — it currently lives in one user's `~/.config/hypr/monitors.lua`) | Dev | `docs/tasks/T5-iso-and-payload.md` |
@@ -140,7 +142,7 @@ exactly what we did.
 
 | # | Item | Task ref |
 |---|---|---|
-| P3.1 | Factory-reset the Deck via Valve's recovery image; **document the recovery path while doing it** (this becomes the README section) | `docs/tasks/T6-integration-release.md` §4 |
+| P3.1 | Factory-reset the Deck via Valve's recovery image. **`docs/RECOVERY.md` is already drafted (session 16) from Valve's published process** — P3.1's job is now to *exercise* it and replace the draft with a first-hand account, including the real recovery-menu option names | `docs/tasks/T6-integration-release.md` §4 |
 | P3.2 | Full hardware matrix, one run, in order: Ventoy boot → controller-only install (no keyboard attached, Wi-Fi joined on-screen) → first boot lands in Gaming Mode → Steam signs in → hardware works → Desktop Mode → back → reboots persist | `docs/tasks/T6-integration-release.md` §2 |
 | P3.3 | Kernel-update resilience: force a kernel reinstall, reboot, Neptune entry still default | `docs/tasks/T6-integration-release.md` §3 |
 | P3.4 | Fix → re-run the affected portion; be honest about blast radius | `docs/tasks/T6-integration-release.md` §2 |
@@ -161,12 +163,14 @@ exactly what we did.
 | Risk | Phase | Mitigation |
 |---|---|---|
 | ~~Live ISO can't drive the OLED radio~~ | 1 | **RETIRED** — works on hardware (R-0). No firmware needs baking into the live image |
-| ~~Live ISO renders rotated / unusable~~ | 1 | **NARROWED TWICE.** Greeter and desktop are fixed and seen (§5.11, transform **3**). What remains is the **Limine menu** — no known fix, and the first thing a user sees — plus the TTY (`fbcon=rotate:1`, boot-chain, awaiting approval) |
-| Steam's system integration is absent, not just its updater | 2 | §5.15 — 14 polkit helpers Steam calls by absolute path; brightness and timezone are the user-visible ones. Scope undecided |
-| A session switch bricks the display manager | 2 | §5.16 — mitigated by lifting sddm's restart rate limit; root cause (restart issued from the dying session) still open, and the race is intermittent so absence of failure proves little |
+| ~~Live ISO renders rotated / unusable~~ | 1 | **NARROWED TWICE.** Greeter and desktop are fixed and seen (§5.11, transform **3**). What remains is the **Limine menu** — **fix found** (`interface_rotation: 270`, Limine ≥v10; Deck has 12.5.2) but not applied, boot-chain — plus the TTY (`fbcon=rotate:1`, same). Both await approval, and **T5 must bake both into the image** |
+| Steam's system integration is absent, not just its updater | 2 | **NARROWED** — §5.15's two user-visible helpers (brightness, timezone) now ship; the six `jupiter-*` are skipped by decision. Residual: Steam **falls back** to blanket `sudo` when a helper is missing, so absence looks like health on a test rig |
+| The test Deck is more privileged than the product, hiding defects | 2 | §5.17 — `99-deck-testing` grants the desktop user blanket NOPASSWD and sorts last, overriding every narrow grant. Anything privilege-dependent verified here is suspect until re-checked without it |
+| ~~A session switch bricks the display manager~~ | 2 | **RETIRED** — §5.16 resolved: cause was sddm's stop timing out, now `TimeoutStopSec=30` + stop→settle→start in a transient unit. 20/20 soak clean |
+| ~~A switch visibly thrashes before it lands~~ | 2 | **RETIRED** — §5.18 resolved (R-28). Residual: a switch *away from* Gaming Mode can take ~1 min, dominated by Valve's `steam-launcher` `TimeoutStopSec=60`. Correct and flicker-free, but not fast |
 | ~~Stock Omarchy ISO won't boot/install on Deck~~ | 1 | **RETIRED** — boots and installs; the surprise was its **encryption default** (§5.12) |
 | Our fork inherits upstream's encryption default | 2 | Ship it off by default; TPM2 auto-unlock as follow-on (§5.12) |
-| Valve's packages shadowed by Arch's | 2 | `stage-repos` ordering bug, unfixed pending an overlap audit (§5.13) |
+| ~~Valve's packages shadowed by Arch's~~ | 2 | **RETIRED** — audit done (P16). 101 overlaps, Valve older in 50, so reordering is rejected; the real surface is one package and the fix is `pacman -S jupiter-staging/gamescope` (§5.13) |
 | T2 concludes custom UI needed for many screens | 1→2 | That's what the spike is *for*; scope conversation before phase 2 |
 | Omarchy 4.0 beta churn breaks shell hooks | 2 | Keep integration points thin (`docs/PLAN.md` §11); re-verify at P3.6 |
 | TDP/fan work damages hardware | 2 | Per-item operator approval, every time — unchanged hard rule |

@@ -101,11 +101,58 @@ found and corrected there:
 - `WantedBy=` must be `wayland-session@hyprland.desktop.target`. The obvious
   `hyprland-session.target` **does not exist**, and a unit wanted by a
   nonexistent target enables without error and never starts.
-- **The install must add the user to the `input` group.** `uaccess` does not
-  cover `/dev/uinput`, and `SupplementaryGroups=` is not permitted in a
-  `--user` unit.
+  ✅ **Re-verified on hardware, session 16** — the target exists and is active.
+  ⚠️ Check it with `systemctl --user list-units`, **not `list-unit-files`**: it
+  is a template instance uwsm creates at runtime, so it has no file on disk and
+  `list-unit-files` reports it missing.
+- ~~**The install must add the user to the `input` group.** `uaccess` does not
+  cover `/dev/uinput`~~ — ⚠️ **corrected, session 16.** `uaccess` *does* cover
+  it here: `/dev/uinput` carries a `user:deck:rw-` ACL, granted by
+  `60-steam-input.rules` from **`steam-jupiter-stable`**. Verified by opening
+  the device, not by reading permission bits — it is `root:root 0660` and the
+  access is an ACL, so the bits alone tell you nothing. The dependency to record
+  is on **Valve's udev rules being installed**, not on group membership.
+
+### Two unit-file defects found by actually starting it (session 16)
+
+Both would have shipped from a review; neither is visible without running it.
+
+- **`After=graphical-session.target` creates an ORDERING CYCLE** with the target
+  the unit is `WantedBy`. systemd resolves it by *deleting the start job*, so
+  the service silently never runs. The mapper needs no ordering at all — it
+  reads evdev and writes uinput and never talks to the compositor.
+- **`StartLimitBurst`/`StartLimitIntervalSec` belong in `[Unit]`, not
+  `[Service]`.** In `[Service]` systemd logs `Unknown key … ignoring` and
+  carries on with no rate limit.
 
 Use `squeekboard` (Arch `extra`) for the OSK, not `wvkbd` (AUR-only).
+
+### squeekboard on Hyprland 0.56.2 — probed on hardware, session 16
+
+✅ **It runs.** Installed from `[extra]` (1.43.1-5) and started against the live
+session, it stays up — so Hyprland advertises the input-method protocols it
+needs. Two warnings appear:
+
+- `No system layout present` — **actionable, and fixed by configuring an input
+  source**: `gsettings set org.gnome.desktop.input-sources sources "[('xkb','us')]"`.
+  It was empty (`@a(ss) []`) on this Deck. The warning disappears once set.
+- `Could not register to session manager: … org.gnome.SessionManager` —
+  **harmless**, a GNOME integration attempt with no owner on Hyprland.
+
+⚠️ **Not verified, and it is the part that matters:** whether the keyboard
+actually *appears when a text field takes focus*. That needs someone looking at
+the screen and touching an entry box. Everything above only establishes that the
+process runs and is configured.
+
+**Reaching the session over SSH:** `WAYLAND_DISPLAY` is **empty in Hyprland's
+own `environ`** — it sets that for children rather than inheriting it, and
+`HYPRLAND_INSTANCE_SIGNATURE` is absent too. Pull the environment from a *child*
+(`quickshell`, `waybar`) instead:
+
+```bash
+CHILD=$(pgrep -u deck -x quickshell | head -1)
+eval "$(tr '\0' '\n' < /proc/$CHILD/environ | grep -E '^(WAYLAND_DISPLAY|XDG_RUNTIME_DIR|HYPRLAND_INSTANCE_SIGNATURE|DBUS_SESSION_BUS_ADDRESS)=' | sed 's/^/export /')"
+```
 
 Shares an implementation with T2's mapper — build once, scope twice.
 

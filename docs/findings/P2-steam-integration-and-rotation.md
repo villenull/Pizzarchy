@@ -281,6 +281,11 @@ with **no graphical session at all**, recoverable only via
 `systemctl reset-failed sddm` over SSH — exactly what a controller-only user
 does not have. In the product this is a black screen with no way back.
 
+> ⚠️ **Session 16 corrected the mechanism below and the fix rationale with it.**
+> The first domino is **the stop timing out**, which this section missed, and
+> `RestartSec` turns out not to gate the fatal start at all. Read §R-27 before
+> relying on anything in the rest of this section.
+
 Mechanism, from sddm's shipped unit:
 
 ```
@@ -318,7 +323,59 @@ same switch successfully and never saw it.
 **Root cause not addressed:** the restart is still issued from inside the
 session being torn down. Decoupling it (a transient `systemd-run` unit, so the
 caller is not killed mid-restart) would reduce the chance of the race rather
-than only surviving it. Left as follow-up.
+than only surviving it. Left as follow-up. **→ done in §R-27.**
+
+---
+
+## R-27. §5.16's real mechanism — the stop times out, and `RestartSec` never applied
+
+Session 16, from the journal of the boot on which R-26's failure occurred.
+R-26 reasoned from sddm's restart policy without reading the stop:
+
+```
+13:11:02.815  sddm: Signal received: SIGTERM
+13:11:07.822  sddm: sddm-helper (start-gamescope-session) crashed (exit code 1)
+13:11:07.823  systemd: sddm.service: State 'stop-sigterm' timed out. Killing.
+13:11:07.823  systemd: Killing process 939 (sddm) with signal SIGKILL
+13:11:07.826  systemd: sddm.service: Failed with result 'timeout'
+13:11:07.830  systemd: Started Simple Desktop Display Manager        <- +3 ms
+13:11:11      systemd: Start request repeated too quickly -> start-limit-hit
+```
+
+`TimeoutStopUSec=5s`; the teardown took **5.008 s**. So the first domino is not
+the retry spacing, it is that **a Gaming Mode teardown does not fit in sddm's
+stop timeout** — Steam is slow to exit — and systemd SIGKILLs sddm mid-teardown.
+The start job then runs **3 ms** later against a VT the killed compositor was
+still holding.
+
+**Two corrections to R-26:**
+
+1. **`RestartSec` does not gate the fatal start.** R-26 called `RestartSec=3`
+   "the more important half", reasoning that at 100 ms every retry lands before
+   the VT is free. But that start came from an explicit `systemctl restart`
+   transaction, and `RestartSec` only spaces `Restart=always` auto-restarts —
+   which is why the measured gap was 3 ms, not 100 ms. The shipped drop-in
+   helped the *retry* path and never touched the cause.
+2. **It is not switch-specific.** This occurrence was at **boot**, not during a
+   session switch. Any sddm restart whose teardown overruns 5 s can do it.
+
+**Fix, three parts** (`src/deck-session.sh`):
+
+| Part | What | Why |
+|---|---|---|
+| `TimeoutStopSec=30` | in the sddm drop-in | lets the teardown finish instead of being killed — this is the cause |
+| stop → settle → start | `render_restart_helper`, replacing `systemctl restart sddm` | a start can never be issued 3 ms after a kill |
+| `systemd-run --collect` transient unit | `deck-session-select` | sddm's `KillMode=control-group` kills a caller inside the session being torn down |
+
+The settle step waits on **`loginctl show-seat seat0 -p Sessions`**, not
+`fuser /dev/tty1`: `systemd-logind` holds `/dev/tty1` permanently, so a
+fuser-based check reports the VT busy forever and would always run to its
+bound. The loop is bounded (5 s) and, on hitting the bound, says so and starts
+sddm anyway — a stuck seat must not mean the display manager is never started
+again, which is the same black screen by another route.
+
+`stage-sddm-resilience` now **fails** rather than warns if `TimeoutStopSec` did
+not resolve to 30 s, since that is the directive doing the real work.
 
 ---
 
@@ -341,3 +398,73 @@ failed the stage loudly and survived untouched.
 Full script re-run end to end on the configured Deck: all six stages
 idempotent, no errors.
 </content>
+
+---
+
+## R-28. ✅ §5.18(a)'s root cause: `steam-launcher.service` stops for ~30 s and the new session starts into it
+
+Session 16. §5.18(a) was "the incoming session dies in ~1 ms and `Relogin=true`
+retries until one sticks", with the cause unidentified. It is identified.
+
+Both thrashing cycles in the 20-cycle soak have the same signature in the
+**user** manager's journal (`systemd[35310]`, uid 1000) — and it is the one unit
+that never reports stopping:
+
+```
+15:27:14.858  Stopped target Gamescope Session.
+15:27:14.859  Stopping Accessibility services bus...
+15:27:14.861  Stopping Steam Launcher...             <- no "Stopped" line, ever
+15:27:14.916  Stopped mangoapp.
+15:27:14.920  Stopped Accessibility services bus.
+      ...     29 SECONDS OF SILENCE ...
+15:27:43.775  Starting Virtual filesystem service...
+```
+
+Cycle 14 is identical with a 28 s gap. Every other unit stops in ~50 ms.
+
+`steam-launcher.service` is Valve's, shipped by the gamescope package:
+
+```
+PartOf=graphical-session.target
+TimeoutStopSec=60
+KillSignal=SIGCONT
+KillMode=mixed
+ExecStop=/bin/bash -c 'kill -TERM $(pgrep -P $MAINPID || echo $MAINPID)'
+```
+
+### The chain
+
+1. Switching away from Gaming Mode stops `gamescope-session.target`, which
+   stops `steam-launcher.service` because it is `PartOf` the graphical session.
+2. **Steam is slow to exit** — tens of seconds, and the unit permits 60.
+3. sddm has meanwhile already stopped and restarted (our restart helper's gate
+   passed, correctly: no compositor processes remain).
+4. The new session's `uwsm start … Hyprland` starts into a **user manager still
+   tearing the previous graphical session down**, and exits in ~1 ms.
+5. `Relogin=true` retries ~3×/s until the teardown finishes, then it sticks.
+
+### Why this explains everything observed
+
+- **The bimodal distribution.** 16/20 cycles at one attempt, two at 104/155.
+  Whether Steam exits promptly decides which. In cycle 6, Steam was still
+  *initialising* when the switch arrived (`BVerifyInstalledFiles` at 15:27:15)
+  — a Steam mid-startup takes the long path out.
+- **The 30–40 s duration**, which matches the ~29 s stop gap plus overhead.
+- **Why the settle gate did not help.** It waits on compositor *processes* and
+  on logind's seat list. `steam-launcher.service` is neither — it is a **unit in
+  the user manager**, invisible to both.
+- **Why `graphical-session.target` flapped** when probed earlier: it is
+  `PartOf`-linked to units still stopping, so it is not a settle signal on its
+  own.
+
+### What to do about it (P2.0e, not implemented here)
+
+The gate needs a **user-manager** condition, not another process name. The
+narrow form is to wait for `steam-launcher.service` to leave `deactivating`;
+the general form is to wait until no unit in that manager is `deactivating`.
+Reach it from the root transient unit with
+`systemctl --machine=<user>@.host --user`.
+
+⚠️ Do **not** simply shorten `TimeoutStopSec` on Valve's unit. Steam is being
+given that time to shut down cleanly, and cutting it risks corrupting its state
+— a different and worse bug than a slow switch.

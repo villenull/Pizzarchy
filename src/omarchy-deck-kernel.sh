@@ -345,7 +345,30 @@ stage_preconditions() {
 # ---------------------------------------------------------------------------
 # Stage 1: Valve repos
 # ---------------------------------------------------------------------------
-
+#
+# ⚠️ DO NOT MOVE VALVE'S REPOS ABOVE ARCH'S. This is appended deliberately, and
+# the question has been settled with data rather than opinion --
+# docs/findings/P16-repo-overlap-audit.md, PROGRESS.md 5.13.
+#
+# pacman resolves `-S <name>` by REPO ORDER, not by version, so appending does
+# mean `pacman -S gamescope` gets Arch's build instead of Valve's. That is a
+# real defect. The tempting fix -- Valve first, matching SteamOS -- was measured
+# against the actual repo databases and rejected:
+#
+#   101 package names overlap; Valve's version is OLDER in 50 of them.
+#   Among them: filesystem 2021.12.07 (vs Arch 2025.10.12), linux-lts 5.15.74
+#   (vs 6.18.43), plymouth 22.02 (vs 26.134), and the entire mesa/vulkan stack.
+#
+# The test Deck runs ARCH's mesa and vulkan-radeon and Gaming Mode works, so
+# Valve's are not merely riskier, they are unnecessary. Meanwhile every package
+# THIS script installs (linux-neptune-611, its headers, linux-firmware-neptune,
+# steamdeck-dsp) exists only in Valve's repos, so order cannot affect them.
+#
+# The defect's entire practical surface is one package, and the fix is to
+# qualify it at the call site rather than to reorder anything:
+#
+#   pacman -S jupiter-staging/gamescope     # NOT: pacman -S gamescope
+#
 stage_repos() {
   local repo added=0
   for repo in "${VALVE_REPOS[@]}"; do
