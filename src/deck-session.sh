@@ -699,11 +699,27 @@ fi
 # An empty seat list is NOT the same as the outgoing session being finished.
 session_user=${session_user}
 
+# ⚠️ THESE ARE comm NAMES, MEASURED ON HARDWARE -- NOT BINARY NAMES.
+#
+# The kernel truncates comm to 15 characters (TASK_COMM_LEN), and \`pgrep -x\`
+# matches against comm. An earlier version of this gate listed 'gamescope' and
+# was a NO-OP for the whole Gaming Mode direction:
+#
+#   inside a live gamescope session, \`pgrep -u deck -x gamescope\` returns 0
+#   the compositor's comm is 'gamescope-wl'; its launcher is 'start-gamescope'
+#   (truncated from start-gamescope-session)
+#
+# A gate that matches nothing reports "settled" instantly and looks like it is
+# working, which is precisely the silent success this project exists to avoid.
+# Verified present, per session:
+#   desktop  -> Hyprland, start-hyprland, uwsm  (also quickshell, omarchy-hyprlan)
+#   gaming   -> gamescope-wl, start-gamescope
+# Re-measure with \`ps -u <user> -o comm= | sort -u\` before editing this list.
 outgoing_gone() {
   [[ -z \$(loginctl show-seat seat0 -p Sessions --value 2>/dev/null) ]] || return 1
-  # -x: exact names only, so this cannot match a window title or a wrapper
-  # script that merely mentions one of them.
-  pgrep -u "\$session_user" -x 'Hyprland|gamescope|uwsm' >/dev/null 2>&1 && return 1
+  # -x: exact comm match, so this cannot match a window title or a wrapper
+  # script whose command line merely mentions one of them. -f would.
+  pgrep -u "\$session_user" -x 'Hyprland|start-hyprland|gamescope-wl|start-gamescope|uwsm' >/dev/null 2>&1 && return 1
   return 0
 }
 

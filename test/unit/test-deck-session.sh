@@ -639,11 +639,23 @@ grep -q "pgrep" "$rs_helper" ||
 pgrep_line=$(grep -E '^\s*pgrep ' "$rs_helper")
 [[ -n $pgrep_line ]] ||
   fail_test "the settle gate has a pgrep line to check"
-for proc in Hyprland gamescope uwsm; do
+
+# comm NAMES, measured on hardware -- not binary names. The kernel truncates
+# comm to 15 chars and `pgrep -x` matches comm, so 'gamescope' (the binary)
+# matches NOTHING: the compositor's comm is 'gamescope-wl' and its launcher is
+# 'start-gamescope'. The first version of this gate listed 'gamescope' and was
+# a silent no-op for the entire Gaming Mode direction.
+for proc in Hyprland start-hyprland gamescope-wl start-gamescope uwsm; do
   grep -qF -- "$proc" <<<"$pgrep_line" ||
-    fail_test "the settle gate's pgrep pattern includes '${proc}'" "it runs under the USER manager, not sddm's cgroup, so stopping sddm does not wait for it. pgrep line: ${pgrep_line}"
+    fail_test "the settle gate's pgrep pattern includes '${proc}'" "measured comm name; without it the gate silently matches nothing for that session type. pgrep line: ${pgrep_line}"
 done
-pass "the settle gate also waits for Hyprland/gamescope/uwsm to exit -- they outlive 'systemctl stop sddm' because they belong to the user manager"
+
+# The specific regression: bare 'gamescope' as a standalone alternative matches
+# no real process. Catching it needs a word-boundary check, since the correct
+# names contain 'gamescope' as a substring.
+grep -qE "[|']gamescope[|']" <<<"$pgrep_line" &&
+  fail_test "the gate must not match on bare 'gamescope'" "no process has that comm -- the compositor is 'gamescope-wl'. A bare 'gamescope' alternative is the no-op that shipped and had to be corrected. pgrep line: ${pgrep_line}"
+pass "the pgrep pattern uses measured comm names for BOTH sessions, and not the bare binary name 'gamescope' which matches no process"
 
 grep -qE 'pgrep -u "\$session_user" -x' "$rs_helper" ||
   fail_test "the process check is scoped to the desktop user AND exact-matched" "-u keeps it from matching another user's processes; -x keeps 'gamescope' from matching a window title or wrapper script"
