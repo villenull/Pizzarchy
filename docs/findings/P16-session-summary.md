@@ -45,6 +45,8 @@ Later in the same session, working unattended:
 | **§5.18(a) root-caused and fixed** | `steam-launcher.service` `TimeoutStopSec=60`; retries went **600 → 283 → 20** |
 | **P2.1 mapper shipped** | `stage-input-mapper` + `--user` unit; verified binding `event7 (Steam Deck)` on hardware. Two unit defects found by *running* it (ordering cycle, `StartLimit*` in the wrong section) |
 | **P2.1 OSK probed** | `squeekboard` **runs on Hyprland 0.56.2**; needed an input source set via gsettings. Whether it appears on text focus is **unverified — needs eyes** |
+| **§5.11 Limine menu** | **fix found** — `interface_rotation: 270` (Limine ≥v10; Deck has 12.5.2). Not applied: boot-chain. `omarchy refresh limine` would destroy a hand edit, so T5 must bake it in |
+| **Recovery docs drafted** | `docs/RECOVERY.md` — the undo button, open since the original plan. Not yet exercised; P3.1 replaces it with first-hand |
 
 `jupiter-hw-support` was **skipped** by operator decision — its six `jupiter-*`
 helpers have no user-visible effect yet, and `jupiter-fan-control` belongs to
