@@ -166,6 +166,7 @@ exactly what we did.
 ## Phase 4 — Generalise: the Deck enablement layer
 
 **Full detail: `docs/tasks/T7-enablement-layer.md`.**
+**Why a flasher was reframed into this: `docs/findings/P16-scope-flasher-vs-layer.md`.**
 
 Phase 3 ships *one* Deck-ready distro. Phase 4 makes the second one cheap.
 

@@ -42,6 +42,13 @@ work without waiting for further instruction.**
 > `git rev-list --left-right --count origin/main...main` rather than trusting a
 > number written here — this block has been stale twice before.
 >
+> ⚠️ **And treat the rest of this file the same way.** At the end of session 16
+> it was re-read as a new session would, and **six claims were stale** — five
+> numbers and a set of entry points describing work already finished. Numbers
+> here (assertion counts, fact counts, mutation totals, constraint counts) are
+> cheap to re-verify against the tree and have been wrong before. Verify, then
+> trust.
+>
 > **Start with the session summaries, newest first** —
 > `docs/findings/P16-session-summary.md`, then
 > `docs/findings/P2-session-summary.md` and
@@ -57,7 +64,8 @@ work without waiting for further instruction.**
 >    the wrong thing
 > 2. `docs/PROGRESS.md` **§5.9–§5.18** — the open issues. §5.10/§5.13/§5.14/
 >    §5.16/§5.18 are now closed; **§5.17 is the live one**
-> 3. `docs/ROADMAP.md` phase 2 — the work queue from here
+> 3. `docs/ROADMAP.md` — **four** phases now; phase 2 is the live work queue and
+>    **phase 4 is new** (the enablement layer)
 > 4. `docs/PROGRESS.md` §7 — 38 facts that each cost real time; do not
 >    re-derive them
 >
@@ -134,6 +142,48 @@ work without waiting for further instruction.**
 > switches went **600 → 283 → 20**, the ideal. Residual: a switch away from
 > Gaming Mode can take **~1 minute**, dominated by Valve's `TimeoutStopSec=60` —
 > correct and flicker-free, but not fast.)*
+>
+> ### 🆕 There is now a PHASE 4 — read this before proposing a pivot
+>
+> **Operator direction, end of session 16.** Phases 1–3 ship *one* Deck-ready
+> distro. **Phase 4 generalises it into a Deck enablement layer** so the next
+> distro costs ~a day of Claude-assisted porting instead of sixteen sessions.
+> Spec: `docs/tasks/T7-enablement-layer.md`. Ordering: `docs/ROADMAP.md` phase 4.
+> Decision record: `docs/PROGRESS.md` §5.19.
+>
+> ⚠️ **"A day" buys ported-and-conformance-green. NOT shippable.** §5.18 first
+> appeared on soak cycle 4, §5.16 needed a journal read across two boots, and
+> three of this project's own *checks* were wrong about themselves. Soak time is
+> wall-clock and no abstraction compresses it. Do not quote "a day to ship".
+>
+> **Phase 4 comes AFTER phase 3, deliberately.** Abstracting from one *finished,
+> soak-proven* example is engineering; from an unfinished one it is guessing.
+> P4.2 proves the extraction by making Omarchy consume the core with the
+> existing **62 assertions and the soak unchanged** — if those need editing, the
+> seam is wrong.
+>
+> ### ⛔ A Deck-specific USB flasher was considered and REFRAMED — don't re-propose it cold
+>
+> Full reasoning: **`docs/findings/P16-scope-flasher-vs-layer.md`**. The short
+> version, because this idea is intuitive and will come back:
+>
+> - **"Take any ISO and apply our script" does not work.** The script *is* the
+>   distro-specific part — 26% of `omarchy-deck-kernel.sh`, 13% of
+>   `deck-session.sh`, and the portable remainder is scaffolding around a core of
+>   `pacman`/`limine`/`mkinitcpio`/`sddm`/`uwsm` you would rewrite, not port.
+> - **The flasher is the easy ~10%**; Ventoy (which this project already uses),
+>   Etcher and Rufus got there first. The cost is per-distro enablement, which is
+>   multiplicative and a maintenance treadmill.
+> - **Hosting images reopens `steamdeck-dsp`** (`Proprietary`, no licence text)
+>   as redistribution at scale, and puts a stranger's bricked handheld on the
+>   support surface with `docs/RECOVERY.md` still unexercised.
+> - **Bazzite already ships `bazzite-deck` images**; ChimeraOS covers the console
+>   case. Deck-ready images are largely solved for gaming distros.
+> - **What IS differentiated: the controller-only install**, including Wi-Fi
+>   passphrase entry. That is T4, and nobody else is doing it.
+>
+> If revisited, re-test the **prior art** (a market position that can change),
+> not the premise — how distributions differ will not change.
 >
 > ### One defect still deliberately unfixed — decide before coding
 >
