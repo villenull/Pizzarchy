@@ -564,7 +564,10 @@ pass "a zero value is accepted -- not conflated with the empty string that Steam
 # in that order, with a bounded wait between them.
 
 rs_helper="$work/restart-sddm"
-render_restart_helper >"$rs_helper"
+# Explicit user argument: the default exists only so this call cannot blow up
+# under `set -u`, and passing one proves it is threaded into the body rather
+# than silently dropped.
+render_restart_helper soaktestuser >"$rs_helper"
 chmod +x "$rs_helper"
 
 bash -n "$rs_helper" 2>"$work/stderr" ||
@@ -620,5 +623,44 @@ pass "the settle loop is bounded by a literal count, so a stuck seat cannot mean
 awk -v s="$start_ln" 'NR<s && /settled -eq 1/{f=1} END{exit !f}' "$rs_helper" ||
   fail_test "the helper distinguishes 'settled' from 'gave up waiting'" "both paths must reach the start, but only one of them is normal"
 pass "the helper reports whether the seat settled or the bound was hit, and starts sddm either way"
+
+# --- PROGRESS.md 5.18(a): an empty seat list is NOT 'the session is gone' ----
+#
+# On soak cycle 4 the seat list was already empty while the previous session's
+# uwsm/Hyprland was still exiting; sddm started the next session into that and
+# it died one millisecond later. So the gate has to check BOTH.
+
+grep -q "pgrep" "$rs_helper" ||
+  fail_test "the settle gate checks for surviving compositor processes" "an empty logind seat list is not the same as the outgoing session being finished -- that is exactly what made soak cycle 4 fail"
+# Matched against the pgrep line itself, not the whole file: these names also
+# appear in the helper's comments, and a whole-file grep passes on the prose
+# while the code has stopped checking for them. (Found by mutation -- dropping
+# uwsm from the pattern was not caught until this was narrowed.)
+pgrep_line=$(grep -E '^\s*pgrep ' "$rs_helper")
+[[ -n $pgrep_line ]] ||
+  fail_test "the settle gate has a pgrep line to check"
+for proc in Hyprland gamescope uwsm; do
+  grep -qF -- "$proc" <<<"$pgrep_line" ||
+    fail_test "the settle gate's pgrep pattern includes '${proc}'" "it runs under the USER manager, not sddm's cgroup, so stopping sddm does not wait for it. pgrep line: ${pgrep_line}"
+done
+pass "the settle gate also waits for Hyprland/gamescope/uwsm to exit -- they outlive 'systemctl stop sddm' because they belong to the user manager"
+
+grep -qE 'pgrep -u "\$session_user" -x' "$rs_helper" ||
+  fail_test "the process check is scoped to the desktop user AND exact-matched" "-u keeps it from matching another user's processes; -x keeps 'gamescope' from matching a window title or wrapper script"
+pass "the process check is both user-scoped (-u) and exact (-x), so it cannot match a wrapper or another user"
+
+# The rendered user must be the one that was passed in, not whatever the
+# rendering shell happened to be running as.
+grep -q "^session_user=soaktestuser$" "$rs_helper" ||
+  fail_test "render_restart_helper threads its user argument into the body" "got: $(grep '^session_user=' "$rs_helper")"
+pass "render_restart_helper bakes in the user it was given, not the rendering shell's own user"
+
+# Both conditions must be able to fail the check independently -- an 'or' here
+# would make the seat test pointless the moment no compositor was running.
+grep -q "return 1" "$rs_helper" ||
+  fail_test "the settle predicate can reject on either condition"
+[[ $(grep -c "return 1" "$rs_helper") -ge 2 ]] ||
+  fail_test "each settle condition rejects independently" "only one 'return 1' found; an or-style check would let an empty seat list alone satisfy the gate, which is the 5.18 defect"
+pass "the seat-list and process conditions each reject independently, so neither alone can satisfy the gate"
 
 echo "all deck-session.sh tests passed"

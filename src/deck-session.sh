@@ -228,7 +228,13 @@ readonly SDDM_STOP_TIMEOUT=30
 
 # Bound on the post-stop settle loop, in 0.1s units. Never unbounded: a stuck
 # seat must not mean sddm is never started again.
-readonly VT_SETTLE_MAX=50
+#
+# 15s, not the 5s this started at. uwsm and Hyprland run under the USER manager
+# (user@1000.service), not sddm's cgroup, so `systemctl stop sddm` returning
+# says nothing about them -- they exit on their own schedule afterwards. The
+# loop breaks as soon as the check passes, so a generous bound costs nothing on
+# the normal path and only matters when something is genuinely slow.
+readonly VT_SETTLE_MAX=150
 
 # Our greeter config is a self-contained MIRROR of upstream's settings plus the
 # monitor transform -- not an include, because Hyprland's Lua parser offers no
@@ -497,15 +503,35 @@ cat >"\$SDDM_DROPIN" <<INNER
 [Autologin]
 User=${invoking_user}
 Session=\${target}
+# Relogin=true, and this is a SAFETY property, not a convenience (PROGRESS.md
+# 5.18). SDDM ships Relogin=false in /usr/lib/sddm/sddm.conf.d/default.conf,
+# which means autologin fires ONCE: if that session dies, SDDM shows the
+# greeter. Measured on hardware, soak cycle 4 --
+#
+#   Starting Wayland user session: "uwsm start ... Hyprland"
+#   Session started true
+#   session closed for user deck        <- one millisecond later
+#   Adding new display...               <- the greeter
+#
+# On a Deck that greeter is a password prompt with no keyboard to answer it,
+# i.e. an unrecoverable state, which CLAUDE.md's controller-only rule forbids.
+# Retrying autologin is the same tradeoff already taken in
+# stage-sddm-resilience: a loop that can still recover beats a dead end that
+# cannot. If the session is genuinely broken this loops -- that is a dev-time
+# failure, visible in the journal, with Ctrl+Alt+F2 as the escape.
+Relogin=true
 INNER
 
-# Verify the write landed rather than trusting the redirect. Both keys are
+# Verify the write landed rather than trusting the redirect. All three keys are
 # checked: Session= alone is the exact silent failure this stage exists to
-# avoid, so a drop-in missing User= must be treated as a failed write.
+# avoid, so a drop-in missing User= must be treated as a failed write, and
+# without Relogin= a dead session strands the user at a password prompt.
 grep -q "^Session=\${target}\$" "\$SDDM_DROPIN" ||
   die "wrote \$SDDM_DROPIN but Session=\${target} is not there on re-read"
 grep -q "^User=${invoking_user}\$" "\$SDDM_DROPIN" ||
   die "wrote \$SDDM_DROPIN but User=${invoking_user} is not there on re-read -- SDDM ignores [Autologin] without it"
+grep -q "^Relogin=true\$" "\$SDDM_DROPIN" ||
+  die "wrote \$SDDM_DROPIN but Relogin=true is not there on re-read -- without it a session that dies leaves a password greeter no controller can answer"
 
 printf 'deck-session-select: next session is %s (%s)\n' "\$target" "\$found"
 
@@ -547,7 +573,7 @@ EOF
   $SUDO install -d -m 0755 -o root -g root "$(dirname "$RESTART_HELPER")" ||
     fail "could not create $(dirname "$RESTART_HELPER")"
   tmp=$(mktemp) || fail "mktemp failed"
-  render_restart_helper >"$tmp" ||
+  render_restart_helper "$invoking_user" >"$tmp" ||
     fail "could not render the sddm restart helper"
   $SUDO install -m 0755 -o root -g root "$tmp" "$RESTART_HELPER" ||
     fail "could not install ${RESTART_HELPER}"
@@ -615,7 +641,13 @@ EOF
 # explicit `systemctl restart` transaction, and RestartSec only spaces
 # Restart=always auto-restarts. That is why the gap was 3ms and not 100ms. The
 # shipped drop-in helps the retry path; it never touched the cause.
+#
+# Takes the desktop user as $1. It has a default so the unit suite can render
+# this without a Deck: relying on stage_session_select's `local invoking_user`
+# being visible through bash's dynamic scoping would work when called from
+# there and blow up under `set -u` when called directly.
 render_restart_helper() {
+  local session_user=${1:-${SUDO_USER:-${USER:-$(id -un)}}}
   cat <<EOF
 #!/usr/bin/env bash
 #
@@ -647,14 +679,31 @@ if ! systemctl stop sddm; then
   note "'systemctl stop sddm' reported failure; continuing to the start anyway, because leaving the device with no display manager is the worse outcome"
 fi
 
-# The stop job is complete, but a compositor that had to be killed can still
-# hold the VT briefly. logind dropping the seat's sessions is the signal that
-# it is really free -- fuser is not, because systemd-logind holds /dev/tty1
-# permanently and would always report it busy.
+# The stop job is complete, but the outgoing graphical session can still be
+# unwinding. TWO conditions, because either alone is not enough:
+#
+#   1. logind has dropped the seat's sessions. Not fuser -- systemd-logind
+#      holds /dev/tty1 permanently, so fuser reports the VT busy forever.
+#   2. no compositor process remains for the desktop user.
+#
+# (2) was added after PROGRESS.md 5.18: on soak cycle 4 the seat list was
+# already empty while the previous session's uwsm/Hyprland was still exiting,
+# sddm started the next session into that, and it died one millisecond later.
+# An empty seat list is NOT the same as the outgoing session being finished.
+session_user=${session_user}
+
+outgoing_gone() {
+  [[ -z \$(loginctl show-seat seat0 -p Sessions --value 2>/dev/null) ]] || return 1
+  # -x: exact names only, so this cannot match a window title or a wrapper
+  # script that merely mentions one of them.
+  pgrep -u "\$session_user" -x 'Hyprland|gamescope|uwsm' >/dev/null 2>&1 && return 1
+  return 0
+}
+
 settled=0
 i=0
 while [[ \$i -lt ${VT_SETTLE_MAX} ]]; do
-  if [[ -z \$(loginctl show-seat seat0 -p Sessions --value 2>/dev/null) ]]; then
+  if outgoing_gone; then
     settled=1
     break
   fi
