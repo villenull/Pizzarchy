@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Iterate on Deck-side scripts without reinstalling: rsync changed *.sh
-# files over SSH, run one named stage remotely, stream back journalctl
+# Iterate on Deck-side scripts without reinstalling: rsync changed *.sh and
+# *.py files over SSH, run one named stage remotely, stream back journalctl
 # covering that run. Target loop time: ~30s, versus a full reinstall
 # (PLAN.md §9.4) — the single biggest win for T3's hardware work.
 #
@@ -58,10 +58,10 @@ log() { printf '[deck-sync] %s\n' "$*" >&2; }
 [[ -d $SRC_DIR ]] || { log "source dir not found: $SRC_DIR"; exit 2; }
 [[ -f "$SRC_DIR/$STAGE" ]] || { log "stage script not found: $SRC_DIR/$STAGE"; exit 2; }
 
-log "syncing *.sh from $SRC_DIR -> ${SSH_TARGET}:~/${DECK_REMOTE_DIR}/"
+log "syncing *.sh and *.py from $SRC_DIR -> ${SSH_TARGET}:~/${DECK_REMOTE_DIR}/"
 rsync -az --delete \
   -e "ssh -p $DECK_SSH_PORT -o BatchMode=yes -o ConnectTimeout=10" \
-  --include='*.sh' --include='*/' --exclude='*' \
+  --include='*.sh' --include='*.py' --include='*/' --exclude='*' \
   "$SRC_DIR"/ "${SSH_TARGET}:${DECK_REMOTE_DIR}/" || {
   log "rsync failed — is sshd enabled on the Deck and DECK_HOST/DECK_USER correct?"
   exit 1

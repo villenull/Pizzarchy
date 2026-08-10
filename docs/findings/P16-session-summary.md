@@ -35,6 +35,15 @@ here is suspect until re-checked without it.
 | **§5.13 answered with data** | 101 overlaps measured; reordering rejected; fix is one qualified package |
 | Unit suite 17 → **53 assertions**, all four generated files covered | mutation-tested **34/34**, zero holes |
 
+Later in the same session, working unattended:
+
+| Item | Result |
+|---|---|
+| **§5.17 answered** | a narrower sudo grant is **impossible** — the stages write to `/etc/sudoers.d/` itself. Shipped `stage-audit-privileges` as a T6 release gate instead |
+| **P2.2 programmatic half** | Wi-Fi, BT, audio, display, kernel **at parity**; input differs only because Steam replaces the native nodes with a virtual Xbox pad. `docs/findings/hardware-parity.md` |
+| **§5.5 answered** | `steamdeck-dsp` is **`Proprietary`** with no licence text, so a *bundling* ISO is blocked; *fetching* redistributes nothing. Logo out, glyphs to be redrawn. `docs/findings/P16-redistribution-and-trademark.md` |
+| **§5.18(a) root-caused and fixed** | `steam-launcher.service` `TimeoutStopSec=60`; retries went **600 → 283 → 20** |
+
 `jupiter-hw-support` was **skipped** by operator decision — its six `jupiter-*`
 helpers have no user-visible effect yet, and `jupiter-fan-control` belongs to
 P2.3, which needs per-item approval anyway.

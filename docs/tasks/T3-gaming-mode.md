@@ -101,9 +101,29 @@ found and corrected there:
 - `WantedBy=` must be `wayland-session@hyprland.desktop.target`. The obvious
   `hyprland-session.target` **does not exist**, and a unit wanted by a
   nonexistent target enables without error and never starts.
-- **The install must add the user to the `input` group.** `uaccess` does not
-  cover `/dev/uinput`, and `SupplementaryGroups=` is not permitted in a
-  `--user` unit.
+  ✅ **Re-verified on hardware, session 16** — the target exists and is active.
+  ⚠️ Check it with `systemctl --user list-units`, **not `list-unit-files`**: it
+  is a template instance uwsm creates at runtime, so it has no file on disk and
+  `list-unit-files` reports it missing.
+- ~~**The install must add the user to the `input` group.** `uaccess` does not
+  cover `/dev/uinput`~~ — ⚠️ **corrected, session 16.** `uaccess` *does* cover
+  it here: `/dev/uinput` carries a `user:deck:rw-` ACL, granted by
+  `60-steam-input.rules` from **`steam-jupiter-stable`**. Verified by opening
+  the device, not by reading permission bits — it is `root:root 0660` and the
+  access is an ACL, so the bits alone tell you nothing. The dependency to record
+  is on **Valve's udev rules being installed**, not on group membership.
+
+### Two unit-file defects found by actually starting it (session 16)
+
+Both would have shipped from a review; neither is visible without running it.
+
+- **`After=graphical-session.target` creates an ORDERING CYCLE** with the target
+  the unit is `WantedBy`. systemd resolves it by *deleting the start job*, so
+  the service silently never runs. The mapper needs no ordering at all — it
+  reads evdev and writes uinput and never talks to the compositor.
+- **`StartLimitBurst`/`StartLimitIntervalSec` belong in `[Unit]`, not
+  `[Service]`.** In `[Service]` systemd logs `Unknown key … ignoring` and
+  carries on with no rate limit.
 
 Use `squeekboard` (Arch `extra`) for the OSK, not `wvkbd` (AUR-only).
 

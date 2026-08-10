@@ -152,6 +152,20 @@ readonly STEAM_SHIM_LEGACY=/usr/local/bin/steamos-session-select
 readonly STEAM_RUNTIME_PATH=/usr/bin:/bin
 readonly SUDOERS_FILE=/etc/sudoers.d/99-deck-session-select
 readonly RETURN_DESKTOP_FILE=/usr/share/applications/deck-return-to-gaming.desktop
+
+# --- Desktop-mode input mapper (ROADMAP P2.1, T3 §4) ----------------------
+readonly MAPPER_SRC_NAME=deck-input-mapper.py
+readonly MAPPER_BIN=/usr/local/bin/deck-input-mapper
+# /etc/systemd/user, not ~/.config: this is installed by an installer and has to
+# apply to whatever user the image creates, so T5 can bake it in unchanged.
+readonly MAPPER_UNIT=/etc/systemd/user/deck-input-mapper.service
+
+# VERIFIED on hardware, and worth verifying again if Omarchy's session wiring
+# changes: `hyprland-session.target` does NOT exist, and a unit WantedBy a
+# nonexistent target enables without error and never starts -- silent success,
+# which this project forbids. Omarchy 4.0 drives Hyprland through uwsm, whose
+# real target is this one.
+readonly MAPPER_WANTED_BY=wayland-session@hyprland.desktop.target
 readonly STATE_FILE=/var/lib/deck-session/next-session
 
 # Steam resolves its privileged helpers by ABSOLUTE path, not through PATH --
@@ -285,6 +299,7 @@ readonly -a INSTALL_STAGES=(
   stage-greeter-rotation
   stage-sddm-resilience
   stage-return-icon
+  stage-input-mapper
 )
 
 log()  { printf '[%s] %s\n' "$PROG" "$*"; }
@@ -1614,6 +1629,115 @@ EOF
 
   log "verified: StartLimitIntervalUSec=${limit}, TimeoutStopUSec=${stop_usec}, RestartUSec=${restart_usec}"
   log "stage-sddm-resilience: ok"
+}
+
+# ---------------------------------------------------------------------------
+
+stage_input_mapper() {
+  # Ships src/deck-input-mapper.py as a --user service so the Deck's controller
+  # drives the Omarchy desktop. Gaming Mode needs nothing here: Steam takes the
+  # controller over itself (docs/findings/hardware-parity.md).
+  #
+  # The mapper picks its device by CAPABILITY (BTN_SOUTH), not by name or event
+  # number. That matters: node numbers are not stable between the live ISO and
+  # an installed system -- PROGRESS.md 5.9's event5/event4/event11 are event6/
+  # event5/event7 here -- and the device is named "Steam Deck", not "Steam Deck
+  # Controller". Anything matching on either would bind the wrong node.
+  local src_dir
+  src_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+  [[ -f "${src_dir}/${MAPPER_SRC_NAME}" ]] ||
+    fail "${MAPPER_SRC_NAME} not found beside ${PROG}.sh (looked in ${src_dir}). This stage installs it; sync the whole src/ directory, not just this script."
+
+  # python-evdev is in Arch's [extra], NOT the AUR -- CLAUDE.md forbids AUR-only
+  # dependencies. Checked by import rather than by `pacman -Q`, because that is
+  # what actually has to work at runtime.
+  python3 -c 'import evdev' 2>/dev/null ||
+    fail "python-evdev is not importable. Install it with 'sudo pacman -S --needed python-evdev' (it is in [extra], not the AUR). The mapper cannot run without it."
+
+  # /dev/uinput is the other hard precondition: no uinput, no virtual keyboard.
+  # On this device the ACL comes from steam-jupiter-stable's udev rules
+  # (60-steam-input.rules tags uinput uaccess), so it is granted to whoever holds
+  # the active local session -- NOT via the `input` group, which T3 §4 assumed.
+  # Tested by opening it, because the permission bits alone do not tell you:
+  # /dev/uinput is root:root 0660 and the access is an ACL.
+  python3 -c 'import os; os.close(os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK))' 2>/dev/null ||
+    warn "/dev/uinput is not writable by ${USER:-$(id -un)} right now. If this user has no active local graphical session that is expected (uaccess grants it per-session) and the service will still work once logged in. If it persists inside the desktop, the mapper will fail to create its virtual keyboard."
+
+  log "installing the input mapper: ${MAPPER_BIN}"
+  $SUDO install -m 0755 -o root -g root "${src_dir}/${MAPPER_SRC_NAME}" "$MAPPER_BIN" ||
+    fail "could not install ${MAPPER_BIN}"
+
+  assert_ours_or_absent "$MAPPER_UNIT" "something else"
+  log "installing the user unit: ${MAPPER_UNIT}"
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$MAPPER_UNIT")" ||
+    fail "could not create $(dirname "$MAPPER_UNIT")"
+
+  local tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  cat >"$tmp" <<EOF
+${INSTALL_MARKER}
+[Unit]
+Description=Steam Deck controller to keyboard/mouse mapper (Desktop Mode)
+Documentation=file://${MAPPER_BIN}
+# PartOf, so it goes away with the session rather than lingering into Gaming
+# Mode, where Steam owns the controller and a second reader would fight it.
+# PartOf propagates stop/restart only -- it adds no ordering.
+PartOf=graphical-session.target
+#
+# ⚠️ DELIBERATELY NO After=graphical-session.target. That looks obviously right
+# and creates an ORDERING CYCLE with the target this unit is WantedBy:
+#
+#   deck-input-mapper.service: Found ordering cycle:
+#     graphical-session.target/start after wayland-session@hyprland.desktop.target/start
+#     after deck-input-mapper.service/start - after graphical-session.target
+#   Job deck-input-mapper.service/start deleted to break ordering cycle
+#
+# systemd resolves the cycle by DELETING this unit's start job, so the service
+# silently never runs. Measured on hardware. The mapper needs no ordering
+# anyway: it reads evdev and writes uinput, and never talks to the compositor.
+#
+# StartLimit* live in [Unit], not [Service]. Putting them in [Service] is not an
+# error -- systemd logs "Unknown key ... ignoring" and carries on unbounded.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+ExecStart=${MAPPER_BIN}
+# The pad may not have enumerated yet at session start. Restart rather than
+# fail permanently -- but bounded (above), so a genuinely missing device shows
+# up in the journal instead of spinning silently.
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=${MAPPER_WANTED_BY}
+EOF
+  $SUDO install -m 0644 -o root -g root "$tmp" "$MAPPER_UNIT" ||
+    fail "could not install ${MAPPER_UNIT}"
+  rm -f "$tmp"
+
+  # The target must EXIST. A unit WantedBy a nonexistent target enables with no
+  # error and never starts, which is the silent failure T3 §4 warns about.
+  #
+  # `list-units`, NOT `list-unit-files`: this is a TEMPLATE INSTANCE that uwsm
+  # creates at runtime, so it has no unit file on disk and list-unit-files finds
+  # nothing. The first version of this check used that and warned on a target
+  # that was demonstrably active -- a check failing for the wrong reason is as
+  # bad as one passing for the wrong reason.
+  if systemctl --user list-units --all --no-legend "$MAPPER_WANTED_BY" 2>/dev/null | grep -q .; then
+    log "verified: ${MAPPER_WANTED_BY} exists in this user manager"
+  else
+    warn "${MAPPER_WANTED_BY} is not known to this user manager. Over SSH with no graphical session that is normal; inside the desktop it means the unit will enable and never start -- check 'systemctl --user list-units --all | grep wayland-session'."
+  fi
+
+  $SUDO systemctl --global enable deck-input-mapper.service >/dev/null 2>&1 ||
+    fail "could not enable deck-input-mapper.service for all users"
+
+  log "verified: unit installed and enabled --global, wanted by ${MAPPER_WANTED_BY}"
+  log "stage-input-mapper: ok"
+  log "NOTE: it starts with the NEXT desktop session. Button-mapping correctness"
+  log "      cannot be checked from here -- it needs someone pressing buttons."
 }
 
 # ---------------------------------------------------------------------------
