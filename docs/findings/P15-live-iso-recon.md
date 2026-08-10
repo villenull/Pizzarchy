@@ -445,3 +445,81 @@ conversion**, and only then decide whether T3/T5 must ship a fix.
 If it does still need fixing, the lever is SDDM's compositor (Omarchy 4.0 uses
 SDDM, so `sddm.conf`'s Wayland compositor settings), *not* `fbcon=rotate:`
 — fbcon governs the text console, which is not what the greeter draws on.
+
+## R-13. ✅ Phase E — the stock→Neptune conversion, validated on hardware
+
+`docs/PROGRESS.md` §5.2's last T1 gap, closed 2026-08-10. All ten stages run over
+SSH via `tools/deck-sync.sh`, one at a time, **every one exit 0**:
+
+```
+stage-preconditions  ok   hardware: Valve Galileo
+stage-repos          ok   jupiter-staging + holo-staging ADDED (2 added, 0 present)
+stage-esp-detect     ok   ESP /boot (nvme0n1p1), config /boot/limine.conf
+stage-firmware-swap  ok   REMOVED 11 Arch firmware packages
+stage-kernel         ok   linux-neptune-611 6.11.11-valve29-1 + firmware-neptune
+stage-uki            ok   /boot/EFI/Linux/omarchy_linux-neptune-611.efi
+stage-prune          ok   nothing stale
+stage-default-entry  ok   '2' -> 'Omarchy/linux-neptune-611'   <- real path, first time
+stage-hook           ok   95-omarchy-deck-kernel.hook installed
+stage-esp-permissions ok  fmask=0133,dmask=0022 via full umount/mount cycle
+```
+
+**Seven of the ten ran their REAL path for the first time**, not the no-op path
+the old hand-converted Deck could only exercise. In particular the firmware
+swap genuinely removed Arch's split packages (`linux-firmware` + 10
+subpackages — exactly the count §7 predicted Valve's `conflicts`/`replaces`
+would miss), and the ESP permission stage completed a real umount/mount cycle
+on a live system.
+
+### Checkpoint β — unattended boot, proven
+
+Rebooted with **no key pressed**, menu allowed to time out:
+
+| Assertion | Result |
+|---|---|
+| `uname -r` | `6.11.11-valve29-1-neptune-611-g2dcfaf4df7ac` ✅ |
+| `LoaderEntrySelected` efivar | `Omarchy/linux-neptune-611` ✅ |
+| `reconcile` exit code / writes | `0`, wrote nothing — all "up to date" ✅ |
+| Wi-Fi / Bluetooth / audio on Neptune | `wl*` present, `hci0` present, 2 audio cards ✅ |
+| ESP mount options after reboot | `fmask=0133,dmask=0022` persisted ✅ |
+
+The `LoaderEntrySelected` read is the load-bearing one: it is the firmware's
+own record of what it booted, so the **path form** of `default_entry` is
+confirmed honored on real hardware, not merely in QEMU.
+
+Snapshots for the abort ladder: **#1** `pre-Neptune`, **#2** `neptune converted`.
+
+### R-13a. Rotation is NOT fixed by the Neptune kernel
+
+The open question from R-12 is answered, and the answer is no:
+
+```
+fbcon/rotate = 0        (Neptune, same as stock Arch; the live ISO's t2 kernel had 1)
+panel_orientation       absent on card1-eDP-1
+```
+
+So **no kernel available to this project auto-corrects the panel** — only the
+live ISO's `linux-t2` build did. Consequences:
+
+- The rotation correction must come from **userspace**, per surface:
+  - **Console/TTY** → `fbcon=rotate:1` on the kernel cmdline.
+  - **SDDM greeter and Hyprland** → compositor-level transform
+    (Hyprland `monitor = eDP-1,…,transform,1`), *not* `fbcon=`.
+  - **Gaming Mode** → gamescope handles rotation natively; expected fine.
+- **R-4's advice is now reversed.** It said "do not add a rotation flag, the
+  kernel already corrects it" — true only of the live ISO's t2 kernel. On the
+  shipped configuration a flag (or compositor transform) **is** required.
+  This is a T3/P2.4 item, and a visible one: it affects the login screen.
+
+### R-13b. Minor: a symlink loop from a Valve package
+
+Recurring in the journal, harmless so far but worth knowing:
+
+```
+Failed to chase '/usr/lib/systemd/system/multi-user.target.wants/cec-sysconf.service':
+Too many levels of symbolic links
+```
+
+Appears after `stage-kernel`, i.e. from a `jupiter-staging`/`holo-staging`
+package, not from anything this project writes. Nothing has failed because of
+it. Note it before blaming our own code for a boot oddity later.
