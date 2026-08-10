@@ -57,11 +57,45 @@
 # Steam needs a SECOND thing, found later and by measurement rather than
 # reasoning: it drives a set of privileged helpers out of
 # /usr/bin/steamos-polkit-helpers/, by ABSOLUTE path. That whole tree belongs
-# to SteamOS and is absent here, so each call returns 127. Only one of them is
-# handled in this script (steamos-update, whose absence blocks Steam's
-# first-run setup behind a false network error); the rest -- brightness via
-# steamos-priv-write, timezone, fan control -- are a larger open question, not
-# a detail. See PROGRESS.md 5.15.
+# to SteamOS and is absent here, so each call returns 127. Three of them are
+# handled in this script -- steamos-update (whose absence blocks Steam's
+# first-run setup behind a false network error), steamos-set-timezone and
+# steamos-priv-write. The rest (fan control, ALS, dock/BIOS updaters) are
+# deliberately NOT supplied: see PROGRESS.md 5.15 for the jupiter-hw-support
+# decision, and note that jupiter-fan-control lands in P2.3, which requires
+# per-item operator approval every time.
+#
+# ===========================================================================
+# WHY steamos-priv-write IS WORTH SHIPPING -- it is NOT "brightness is broken"
+# ===========================================================================
+#
+# Steam does not simply fail when a privileged helper is missing. It falls
+# back, and the fallback is the problem. Read from Steam's own console log on
+# this hardware, one slider movement:
+#
+#   privileged write polkit:39638 -> /sys/class/backlight/amdgpu_bl0/brightness
+#   RunCommand: ... /usr/bin/steamos-polkit-helpers/steamos-priv-write \
+#                     "/sys/class/backlight/amdgpu_bl0/brightness" "39638"
+#   Error: BWriteValueToFileAsUser: steamos-priv-write failed ...: 39638
+#   RunCommand: ... echo "39638" | sudo -n tee "/sys/.../brightness"
+#   RunCommand: ... sudo -n chmod a+w "/sys/.../brightness"
+#
+# Three tiers: the helper, then `sudo -n tee`, then `sudo -n chmod a+w` so no
+# privilege is needed next time. So on THIS device the brightness slider works
+# -- but only because /etc/sudoers.d/99-deck-testing grants the desktop user
+# blanket NOPASSWD, a test-rig artifact owned by no package. Remove that (and
+# the shipped ISO must) and tiers 2 and 3 both fail with it.
+#
+# PROGRESS.md 5.15 recorded "the slider does nothing". That is the right
+# conclusion about the PRODUCT reached through a wrong belief about the test
+# Deck, where it currently works. Do not "verify" this by moving the slider
+# here and concluding it is fine.
+#
+# Supplying tier 1 is therefore a security fix as much as a feature: it stops
+# Steam reaching for blanket sudo, and it stops the chmod that leaves sysfs
+# nodes world-writable after every Gaming Mode start (observed: both
+# .../amdgpu_bl0/brightness and .../status:white/led_brightness_multiplier
+# are mode 666, restamped each boot).
 #
 # Note the two families resolve DIFFERENTLY, but BOTH land in /usr/bin:
 #   steamos-session-select        via PATH, and that PATH is only
@@ -131,6 +165,20 @@ readonly STATE_FILE=/var/lib/deck-session/next-session
 # families resolve the same way.
 readonly POLKIT_HELPER_DIR=/usr/bin/steamos-polkit-helpers
 readonly UPDATE_STUB="${POLKIT_HELPER_DIR}/steamos-update"
+readonly TIMEZONE_HELPER="${POLKIT_HELPER_DIR}/steamos-set-timezone"
+readonly PRIV_WRITE_HELPER="${POLKIT_HELPER_DIR}/steamos-priv-write"
+
+# Separate drop-ins, one per helper, rather than one file granting both. They
+# are independent grants with different blast radii and either may need to be
+# revoked without the other.
+readonly PRIV_WRITE_SUDOERS=/etc/sudoers.d/99-deck-priv-write
+readonly TIMEZONE_SUDOERS=/etc/sudoers.d/99-deck-set-timezone
+
+# Called by absolute path from the timezone helper's sudo line, because that is
+# the form omarchy-settings-dev's own sudoers rule matches (see
+# stage_timezone_helper). `timedatectl` bare would resolve through PATH and
+# miss the grant.
+readonly TIMEDATECTL_BIN=/usr/bin/timedatectl
 
 # Named once so the stub, its --help and this script's own output cannot drift
 # into telling a user three different things about how to update the machine.
@@ -205,6 +253,8 @@ readonly -a INSTALL_STAGES=(
   stage-session-select
   stage-steam-hook
   stage-update-stub
+  stage-timezone-helper
+  stage-priv-write-helper
   stage-greeter-rotation
   stage-sddm-resilience
   stage-return-icon
@@ -715,6 +765,376 @@ EOF
 
 # ---------------------------------------------------------------------------
 
+stage_timezone_helper() {
+  # Steam's OOBE timezone picker calls this once per highlighted entry --
+  # 28 times in one pass on this hardware -- always with a single positional
+  # argument, read from Steam's own log rather than guessed:
+  #
+  #   /usr/bin/steamos-polkit-helpers/steamos-set-timezone America/Chicago
+  #
+  # Without it every call returns 127 and the picker silently does nothing:
+  # the user chooses a timezone, sees no error, and the clock stays wrong.
+  assert_ours_or_absent "$TIMEZONE_HELPER" "a real SteamOS helper"
+
+  command -v "$TIMEDATECTL_BIN" >/dev/null 2>&1 ||
+    fail "${TIMEDATECTL_BIN} not found; the timezone helper would install and then fail at runtime"
+
+  log "installing the steamos-set-timezone helper: ${TIMEZONE_HELPER}"
+  $SUDO install -d -m 0755 -o root -g root "$POLKIT_HELPER_DIR" ||
+    fail "could not create ${POLKIT_HELPER_DIR}"
+
+  local tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_timezone_helper >"$tmp" ||
+    fail "could not render the steamos-set-timezone helper"
+  $SUDO install -m 0755 -o root -g root "$tmp" "$TIMEZONE_HELPER" ||
+    fail "could not install ${TIMEZONE_HELPER}"
+  rm -f "$tmp"
+
+  # --- the sudoers grant ---
+  #
+  # omarchy-settings-dev ALREADY ships an equivalent rule, found on this
+  # hardware in /etc/sudoers.d/omarchy-tzupdate:
+  #
+  #   %wheel ALL=(root) NOPASSWD: /usr/bin/tzupdate, /usr/bin/timedatectl set-timezone *
+  #
+  # and the desktop user is in wheel, so this helper would work with no grant
+  # of our own. We install one anyway, deliberately: that file belongs to a
+  # package on a beta distro, and if it changed the picker would go back to
+  # failing silently -- the exact defect this stage exists to remove, in a
+  # place nobody would look. Duplicating one narrow rule is cheap; sudo takes
+  # the last match and both say the same thing.
+  local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
+  [[ -n $invoking_user && $invoking_user != root ]] ||
+    fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
+
+  log "granting ${invoking_user} NOPASSWD on '${TIMEDATECTL_BIN} set-timezone' only"
+  tmp=$(mktemp) || fail "mktemp failed"
+  cat >"$tmp" <<EOF
+# Installed by ${PROG}.sh. Lets Steam's OOBE timezone picker set the system
+# timezone from Gaming Mode, where there is no keyboard to answer a polkit
+# admin prompt (org.freedesktop.timedate1.set-timezone defaults to
+# auth_admin_keep, which is unanswerable on a controller).
+#
+# Scoped to one subcommand of one absolute path. Deliberately NOT the whole of
+# timedatectl: set-time and set-ntp are not needed here.
+${invoking_user} ALL=(root) NOPASSWD: ${TIMEDATECTL_BIN} set-timezone *
+EOF
+  $SUDO visudo -c -f "$tmp" >/dev/null ||
+    fail "generated sudoers snippet failed validation -- refusing to install it. Candidate left at ${tmp}"
+  $SUDO install -m 0440 -o root -g root "$tmp" "$TIMEZONE_SUDOERS" ||
+    fail "could not install ${TIMEZONE_SUDOERS}"
+  rm -f "$tmp"
+
+  # Verify by running it, not by trusting the write -- and verify against the
+  # timezone the machine is ALREADY set to, so a passing test changes nothing.
+  local before after
+  before=$(timedatectl show -p Timezone --value) ||
+    fail "could not read the current timezone"
+  "$TIMEZONE_HELPER" "$before" ||
+    fail "${TIMEZONE_HELPER} failed setting the timezone to its current value (${before}). The helper installed but does not work; the picker would still fail silently."
+  after=$(timedatectl show -p Timezone --value) ||
+    fail "could not re-read the timezone after the helper ran"
+  [[ $after == "$before" ]] ||
+    fail "the helper changed the timezone from ${before} to ${after} while being asked for ${before}"
+
+  # A bad timezone must be refused, not passed to timedatectl. Steam sends only
+  # names out of its own list, but a helper that writes whatever it is handed
+  # is not one worth having behind a sudo grant.
+  local rc=0
+  "$TIMEZONE_HELPER" ../../etc/shadow >/dev/null 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] ||
+    fail "${TIMEZONE_HELPER} accepted a path-traversal timezone. It must validate against /usr/share/zoneinfo before elevating."
+
+  log "verified: helper set the timezone to its existing value (${after}) and rejects a traversal argument"
+  log "stage-timezone-helper: ok"
+}
+
+# The timezone helper's body, written to stdout. Split out for the same reason
+# render_update_stub is -- see the note above that function.
+render_timezone_helper() {
+  cat <<EOF
+#!/usr/bin/env bash
+#
+# steamos-set-timezone -- set the system timezone for Steam's Gaming Mode.
+${INSTALL_MARKER}
+#
+# WHY THIS EXISTS
+#   Steam's first-run timezone picker runs this exact absolute path, once per
+#   entry it highlights. On SteamOS it is one of Valve's polkit helpers. This
+#   device is Arch + Omarchy, that tree does not exist here, and every call
+#   returned 127 -- so the picker appeared to work and changed nothing.
+#
+# WHY IT USES sudo AND NOT polkit
+#   timedatectl already speaks polkit, but org.freedesktop.timedate1's
+#   set-timezone action defaults to auth_admin_keep: an admin password prompt.
+#   In Gaming Mode there is no keyboard to answer it. A narrow sudoers grant
+#   (see ${TIMEZONE_SUDOERS}) is the mechanism that works on a controller.
+#
+set -euo pipefail
+
+note() {
+  printf 'steamos-set-timezone: %s\n' "\$1" >&2
+  command -v logger >/dev/null 2>&1 && logger -t steamos-set-timezone -- "\$1"
+  return 0
+}
+
+tz=\${1-}
+
+if [[ -z \$tz ]]; then
+  note "called with no timezone argument"
+  exit 2
+fi
+
+# Validate BEFORE elevating. The sudo grant below covers 'timedatectl
+# set-timezone <anything>', so this check is the only thing standing between a
+# caller-supplied string and a privileged command.
+#
+# Rejecting '..' explicitly: the zoneinfo test alone would already refuse a
+# traversal, but failing on the shape of the argument gives a caller a
+# comprehensible error instead of "no such timezone".
+case \$tz in
+  ..|../*|*/..|*/../*)
+    note "refusing a timezone containing '..': '\${tz}'"
+    exit 3
+    ;;
+  /*)
+    note "refusing an absolute path as a timezone: '\${tz}'"
+    exit 3
+    ;;
+esac
+
+if [[ ! \$tz =~ ^[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*\$ ]]; then
+  note "refusing a timezone with unexpected characters: '\${tz}'"
+  exit 3
+fi
+
+# The authoritative check: it has to be a zone this system actually has.
+if [[ ! -f /usr/share/zoneinfo/\${tz} ]]; then
+  note "no such timezone on this system: '\${tz}'"
+  exit 3
+fi
+
+if [[ \$EUID -eq 0 ]]; then
+  exec ${TIMEDATECTL_BIN} set-timezone "\$tz"
+fi
+
+# -n so this can never block waiting for a password. Steam discards our
+# stderr and would hang rather than show a prompt it cannot render.
+#
+# The refusal is distinguished from a timedatectl failure so the journal line
+# names the right cause -- Steam discards stderr, so that line is the only
+# place a human ever sees why the picker stopped working.
+rc=0
+sudo -n ${TIMEDATECTL_BIN} set-timezone "\$tz" || rc=\$?
+if [[ \$rc -ne 0 ]]; then
+  if ! sudo -n -l ${TIMEDATECTL_BIN} set-timezone "\$tz" >/dev/null 2>&1; then
+    note "sudo will not run '${TIMEDATECTL_BIN} set-timezone' without a password, so the timezone cannot be set. Check ${TIMEZONE_SUDOERS}."
+  else
+    note "'${TIMEDATECTL_BIN} set-timezone \${tz}' failed with status \${rc}."
+  fi
+  exit 4
+fi
+EOF
+}
+
+# ---------------------------------------------------------------------------
+
+stage_priv_write_helper() {
+  # Tier 1 of the three-tier fallback documented in this file's header. See
+  # that note before touching this: the point is NOT that brightness is broken
+  # on this Deck (it works, via blanket sudo), it is that the fallbacks which
+  # make it work must not ship.
+  #
+  # Signature, read from Steam's log rather than guessed -- two quoted
+  # positional arguments, path then value:
+  #
+  #   steamos-priv-write "/sys/class/backlight/amdgpu_bl0/brightness" "39638"
+  #   steamos-priv-write "/sys/class/leds/status:white/led_brightness_multiplier" "100"
+  #   steamos-priv-write "/dev/drm_dp_aux0" ""
+  #
+  # The third is why this whitelists rather than writes what it is told: a DP
+  # AUX channel is a display-link side band, Steam passes it an EMPTY value,
+  # and what that does is not understood here. It is not whitelisted, so this
+  # helper refuses it loudly. Steam already tolerates that refusal -- it has
+  # been getting 127 for it all along.
+  assert_ours_or_absent "$PRIV_WRITE_HELPER" "a real SteamOS helper"
+
+  log "installing the steamos-priv-write helper: ${PRIV_WRITE_HELPER}"
+  $SUDO install -d -m 0755 -o root -g root "$POLKIT_HELPER_DIR" ||
+    fail "could not create ${POLKIT_HELPER_DIR}"
+
+  local tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_priv_write_helper >"$tmp" ||
+    fail "could not render the steamos-priv-write helper"
+  $SUDO install -m 0755 -o root -g root "$tmp" "$PRIV_WRITE_HELPER" ||
+    fail "could not install ${PRIV_WRITE_HELPER}"
+  rm -f "$tmp"
+
+  local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
+  [[ -n $invoking_user && $invoking_user != root ]] ||
+    fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
+
+  log "granting ${invoking_user} NOPASSWD on ${PRIV_WRITE_HELPER} only"
+  tmp=$(mktemp) || fail "mktemp failed"
+  cat >"$tmp" <<EOF
+# Installed by ${PROG}.sh. Lets Gaming Mode write the small set of sysfs nodes
+# it needs (screen brightness, the status LED) without Steam falling back to
+# 'sudo -n tee' on an arbitrary path and then 'sudo -n chmod a+w' on it.
+#
+# The grant is on the helper, not on the paths, so the WHITELIST INSIDE THE
+# HELPER is the actual security boundary. The helper is root-owned 0755: a
+# user who could rewrite it would already have root. Read the header of
+# ${PROG}.sh before widening either.
+${invoking_user} ALL=(root) NOPASSWD: ${PRIV_WRITE_HELPER}
+EOF
+  $SUDO visudo -c -f "$tmp" >/dev/null ||
+    fail "generated sudoers snippet failed validation -- refusing to install it. Candidate left at ${tmp}"
+  $SUDO install -m 0440 -o root -g root "$tmp" "$PRIV_WRITE_SUDOERS" ||
+    fail "could not install ${PRIV_WRITE_SUDOERS}"
+  rm -f "$tmp"
+
+  # Verify by running it against the real backlight, at its CURRENT value, so
+  # a passing check leaves the screen exactly as it found it.
+  local bl=/sys/class/backlight/amdgpu_bl0/brightness
+  if [[ -r $bl ]]; then
+    local before after
+    before=$(cat "$bl") || fail "could not read ${bl}"
+    "$PRIV_WRITE_HELPER" "$bl" "$before" ||
+      fail "${PRIV_WRITE_HELPER} failed writing ${bl} its own current value (${before}). Gaming Mode's brightness slider would fall through to the sudo tee/chmod path."
+    after=$(cat "$bl") || fail "could not re-read ${bl}"
+    [[ $after == "$before" ]] ||
+      fail "${PRIV_WRITE_HELPER} changed ${bl} from ${before} to ${after} while being asked for ${before}"
+    log "verified: wrote ${bl} its existing value (${before}) through the helper"
+  else
+    warn "${bl} not present, so the helper's write path was NOT exercised. On non-Deck hardware that is expected; on a Deck it is not."
+  fi
+
+  # The whitelist is the security boundary, so prove it refuses rather than
+  # trusting that it is written correctly.
+  local rc=0
+  "$PRIV_WRITE_HELPER" /etc/shadow x >/dev/null 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] ||
+    fail "${PRIV_WRITE_HELPER} accepted /etc/shadow. Its whitelist is the only thing bounding a root write; it is not working."
+
+  rc=0
+  "$PRIV_WRITE_HELPER" "$bl" 'not-a-number' >/dev/null 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] ||
+    fail "${PRIV_WRITE_HELPER} accepted a non-numeric brightness value."
+
+  log "verified: refuses a non-whitelisted path and a non-numeric value"
+  log "stage-priv-write-helper: ok"
+  log "NOTE: this covers brightness and the status LED only. Steam also asks"
+  log "      for /dev/drm_dp_aux0, which is deliberately NOT whitelisted."
+}
+
+# The priv-write helper's body, written to stdout. Split out for the same
+# reason render_update_stub is -- see the note above that function.
+render_priv_write_helper() {
+  cat <<EOF
+#!/usr/bin/env bash
+#
+# steamos-priv-write -- write a value to one of a few allowed sysfs nodes,
+# on behalf of Steam's Gaming Mode.
+${INSTALL_MARKER}
+#
+# WHY THIS EXISTS
+#   Steam changes screen brightness by running this exact absolute path. When
+#   it is missing, Steam does not give up -- it falls back to
+#   'echo VALUE | sudo -n tee PATH' and then 'sudo -n chmod a+w PATH'. Those
+#   need blanket passwordless sudo, and the chmod leaves system nodes
+#   world-writable after every Gaming Mode start. Answering here means Steam
+#   never reaches for either.
+#
+# THE WHITELIST BELOW IS THE SECURITY BOUNDARY
+#   The sudoers grant that makes this work covers this binary with ANY
+#   arguments. Nothing else bounds what gets written as root. Do not widen the
+#   patterns without deciding that the new path is safe for an unprivileged
+#   caller to set to an arbitrary integer.
+#
+set -euo pipefail
+
+note() {
+  printf 'steamos-priv-write: %s\n' "\$1" >&2
+  command -v logger >/dev/null 2>&1 && logger -t steamos-priv-write -- "\$1"
+  return 0
+}
+
+path=\${1-}
+value=\${2-}
+
+if [[ -z \$path ]]; then
+  note "called with no path"
+  exit 2
+fi
+
+# Reject traversal on the literal argument. The patterns below anchor on a
+# leading /sys/class/... prefix, and bash's case globs let '*' span '/', so
+# without this a '..' could walk out of the whitelisted subtree.
+case \$path in
+  *..*)
+    note "refusing a path containing '..': '\${path}'"
+    exit 3
+    ;;
+esac
+
+# One component, no slashes in it. Colons are allowed because real LED names
+# carry them ('status:white').
+if   [[ \$path =~ ^/sys/class/backlight/[A-Za-z0-9_.:+-]+/brightness\$ ]]; then
+  :
+elif [[ \$path =~ ^/sys/class/leds/[A-Za-z0-9_.:+-]+/led_brightness_multiplier\$ ]]; then
+  :
+else
+  # LOUD, not silent. Steam discards stderr, so the journal line is where a
+  # human finds out that a Steam client started asking for something new --
+  # which is the signal to decide whether it belongs here, not to widen the
+  # list reflexively.
+  note "refusing a path that is not whitelisted: '\${path}'. If Gaming Mode now needs it, add it deliberately in deck-session.sh."
+  exit 3
+fi
+
+# Every whitelisted node takes an unsigned integer. Steam does send an empty
+# value for other paths (notably /dev/drm_dp_aux0), so this is a real case and
+# not a theoretical one.
+if [[ ! \$value =~ ^[0-9]+\$ ]]; then
+  note "refusing a non-numeric value '\${value}' for '\${path}'"
+  exit 4
+fi
+
+if [[ \$EUID -ne 0 ]]; then
+  # -n so this can never block on a password prompt Steam cannot render.
+  # Re-runs this same file, so every check above runs again as root.
+  #
+  # NOT 'exec sudo': on a refusal, exec leaves only sudo's own message on a
+  # stderr that Steam discards, so the failure would reach nobody. Running it
+  # as a child costs one process and lets the refusal be identified and
+  # journalled. The inner run's exit code is propagated unchanged, so the
+  # codes above still mean what they say.
+  rc=0
+  sudo -n ${PRIV_WRITE_HELPER} "\$path" "\$value" || rc=\$?
+  if [[ \$rc -ne 0 ]] && ! sudo -n -l ${PRIV_WRITE_HELPER} >/dev/null 2>&1; then
+    note "sudo will not run ${PRIV_WRITE_HELPER} without a password, so Gaming Mode cannot set '\${path}'. Check ${PRIV_WRITE_SUDOERS}."
+  fi
+  exit \$rc
+fi
+
+if [[ ! -w \$path ]]; then
+  note "'\${path}' is not writable even as root"
+  exit 5
+fi
+
+# The kernel rejects out-of-range values itself; report that rather than
+# swallowing it, so a failed write is never mistaken for a successful one.
+if ! printf '%s\n' "\$value" >"\$path" 2>/dev/null; then
+  note "the kernel refused value '\${value}' for '\${path}'"
+  exit 6
+fi
+EOF
+}
+
+# ---------------------------------------------------------------------------
+
 stage_greeter_rotation() {
   # The SDDM greeter is one of the three surfaces that render sideways. It is
   # fixed the same way the desktop is -- a compositor transform -- because the
@@ -984,9 +1404,14 @@ After installing:
   steamos-session-select gamescope  switch to Gaming Mode now
   steamos-session-select desktop    switch to the desktop now
 
-Stages also cover two Gaming Mode / display defects (PROGRESS.md 5.11, 5.14):
+Stages also cover Gaming Mode / display defects (PROGRESS.md 5.11, 5.14, 5.15):
   stage-update-stub        a steamos-update stub, so Steam's first run stops
                            reporting a false network error
+  stage-timezone-helper    steamos-set-timezone, so OOBE's timezone picker
+                           stops silently doing nothing
+  stage-priv-write-helper  steamos-priv-write, so Gaming Mode's brightness
+                           slider stops falling back to blanket 'sudo tee'
+                           and 'sudo chmod a+w' on system nodes
   stage-greeter-rotation   rotates the SDDM greeter for the Deck's panel.
                            The user's desktop needs a matching transform in
                            ~/.config/hypr/monitors.lua; the Limine menu and
