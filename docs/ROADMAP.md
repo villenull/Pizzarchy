@@ -142,7 +142,7 @@ exactly what we did.
 
 | # | Item | Task ref |
 |---|---|---|
-| P3.1 | Factory-reset the Deck via Valve's recovery image; **document the recovery path while doing it** (this becomes the README section) | `docs/tasks/T6-integration-release.md` §4 |
+| P3.1 | Factory-reset the Deck via Valve's recovery image. **`docs/RECOVERY.md` is already drafted (session 16) from Valve's published process** — P3.1's job is now to *exercise* it and replace the draft with a first-hand account, including the real recovery-menu option names | `docs/tasks/T6-integration-release.md` §4 |
 | P3.2 | Full hardware matrix, one run, in order: Ventoy boot → controller-only install (no keyboard attached, Wi-Fi joined on-screen) → first boot lands in Gaming Mode → Steam signs in → hardware works → Desktop Mode → back → reboots persist | `docs/tasks/T6-integration-release.md` §2 |
 | P3.3 | Kernel-update resilience: force a kernel reinstall, reboot, Neptune entry still default | `docs/tasks/T6-integration-release.md` §3 |
 | P3.4 | Fix → re-run the affected portion; be honest about blast radius | `docs/tasks/T6-integration-release.md` §2 |

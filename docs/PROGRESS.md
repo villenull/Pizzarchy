@@ -1151,10 +1151,15 @@ DeckShift hand-edits) and installed package-based Omarchy 4.0
   Valve's. Descriptive use of the words is an operator judgement call; keeping
   "Steam Deck" out of the project *name* is recommended, and the project is
   already "Omarchy Deck". A README affiliation disclaimer is the cheap fix.
-- **Recovery path documentation** — how a user returns to stock SteamOS. An
-  ethical baseline for a wipe-the-device project. **Not written — and now
-  scheduled:** `docs/ROADMAP.md` P3.1 produces it as a byproduct of the phase-3
-  factory reset.
+- **Recovery path documentation** — 🟡 **drafted 2026-08-10: `docs/RECOVERY.md`.**
+  Written from Valve's published instructions (official image source, Rufus/dd,
+  **Volume Down + Power** to reach the boot manager, full reimage to undo this
+  project). ⚠️ **Not yet exercised by this project** — `docs/ROADMAP.md` P3.1
+  performs a real factory reset and should replace it with a first-hand account.
+  Exact recovery-menu option names are deliberately not quoted: they change
+  between image revisions, and a stale label is worse than describing the
+  intent. Carries the affiliation disclaimer from
+  `docs/findings/P16-redistribution-and-trademark.md`.
 
 ### 5.6 One upstream draft staged and held
 
