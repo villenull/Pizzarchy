@@ -111,6 +111,39 @@ readonly UPDATE_STUB="${POLKIT_HELPER_DIR}/steamos-update"
 # into telling a user three different things about how to update the machine.
 readonly REAL_UPDATE_HINT='sudo pacman -Syu'
 
+# --- Display rotation (PROGRESS.md 5.11) ----------------------------------
+#
+# The Deck's panel scans out 800x1280 PORTRAIT and is mounted rotated, so every
+# surface that does not rotate itself renders sideways. fbcon/rotate is 0 on
+# both stock Arch and Neptune, so no kernel this project ships corrects it and
+# the fix is per-surface, in userspace. Gaming Mode is exempt: gamescope
+# applies its own transform.
+#
+# transform 3 (270 deg) and NOT 1: both were applied on this hardware and
+# looked at, and 1 renders upside down. R-19 recorded transform,1 by inference.
+readonly PANEL_OUTPUT=eDP-1
+readonly PANEL_TRANSFORM=3
+readonly PANEL_SCALE=1.25
+
+# Omarchy's greeter config is package-owned (omarchy-settings-dev), so editing
+# it in place would be undone by the next upgrade. Ship our own beside it and
+# repoint SDDM instead.
+readonly GREETER_LUA=/usr/local/share/deck-session/greeter-hyprland.lua
+readonly UPSTREAM_GREETER_LUA=/usr/share/sddm/hyprland.lua
+
+# Ours must sort AFTER Omarchy's 10-wayland.conf (which sets CompositorCommand)
+# to win, and is deliberately a different file from SDDM_DROPIN because
+# deck-session-select rewrites that one on every switch -- a CompositorCommand
+# living there would vanish the first time anyone changed session.
+readonly SDDM_GREETER_DROPIN=/etc/sddm.conf.d/zy-deck-greeter.conf
+
+# Our greeter config is a self-contained MIRROR of upstream's settings plus the
+# monitor transform -- not an include, because Hyprland's Lua parser offers no
+# documented way to source another file and a greeter that fails to parse is a
+# device with no graphical way in. The cost of copying is drift, so the stage
+# checks this hash and warns when upstream's file changes. Update both together.
+readonly UPSTREAM_GREETER_SHA256=353fe59d7d46b21946cdc48000eef7b131e9e577c1d6117f07c3137cdbf0fe67
+
 # Every file this script installs carries this line, so a re-run recognises
 # its own output (the idempotency requirement) and refuses to clobber someone
 # else's. Keyed on a marker rather than on file type, because a symlink test
@@ -134,6 +167,7 @@ readonly -a INSTALL_STAGES=(
   stage-session-select
   stage-steam-hook
   stage-update-stub
+  stage-greeter-rotation
   stage-return-icon
 )
 
@@ -576,6 +610,108 @@ EOF
 
 # ---------------------------------------------------------------------------
 
+stage_greeter_rotation() {
+  # The SDDM greeter is one of the three surfaces that render sideways. It is
+  # fixed the same way the desktop is -- a compositor transform -- because the
+  # greeter IS a Hyprland instance: Omarchy drives it with
+  #
+  #   CompositorCommand=start-hyprland -- --config /usr/share/sddm/hyprland.lua
+  #
+  # so the greeter reads a Hyprland Lua config and hl.monitor() applies there
+  # exactly as it does in the user's session.
+  #
+  # NOT fixed here, and not fixable this way:
+  #   - the Limine boot menu, which renders before any compositor exists. It is
+  #     the first thing a user sees and still has no known fix (R-19).
+  #   - the console/TTY, which needs fbcon=rotate:1 on the kernel cmdline. That
+  #     touches the boot chain and is held for separate operator approval.
+  [[ -f $UPSTREAM_GREETER_LUA ]] ||
+    fail "${UPSTREAM_GREETER_LUA} not found -- Omarchy's greeter config has moved, so mirroring it here would be guesswork. Re-check CompositorCommand in /etc/sddm.conf.d/ before continuing."
+
+  # Drift check. Ours is a copy, so upstream changing its greeter settings is
+  # something a human has to notice; a silent divergence would show up months
+  # later as a greeter that lost a setting nobody remembers.
+  local actual
+  actual=$(sha256sum "$UPSTREAM_GREETER_LUA" | awk '{print $1}')
+  if [[ $actual != "$UPSTREAM_GREETER_SHA256" ]]; then
+    warn "${UPSTREAM_GREETER_LUA} has changed since ${GREETER_LUA} was mirrored from it (expected ${UPSTREAM_GREETER_SHA256:0:12}…, got ${actual:0:12}…). Diff the two and re-mirror, then update UPSTREAM_GREETER_SHA256. Proceeding: the transform below is still correct, but any NEW upstream greeter setting is not being carried over."
+  fi
+
+  log "installing the greeter compositor config: ${GREETER_LUA}"
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$GREETER_LUA")" ||
+    fail "could not create $(dirname "$GREETER_LUA")"
+
+  local tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  cat >"$tmp" <<EOF
+-- Hyprland config for the SDDM Wayland greeter on a Steam Deck.
+${INSTALL_MARKER}
+--
+-- A MIRROR of ${UPSTREAM_GREETER_LUA} (Omarchy's own greeter config, package
+-- owned by omarchy-settings-dev) plus the panel transform. Editing upstream's
+-- file directly would be reverted by the next package upgrade, so SDDM is
+-- repointed here instead -- see ${SDDM_GREETER_DROPIN}.
+--
+-- If upstream's greeter config gains a setting, it must be copied down here by
+-- hand. stage-greeter-rotation warns when its hash changes.
+hl.config({
+  misc = {
+    disable_hyprland_logo = true,
+    disable_splash_rendering = true,
+    force_default_wallpaper = 0,
+  },
+
+  animations = {
+    enabled = false,
+  },
+})
+
+-- The whole reason this file exists. transform = ${PANEL_TRANSFORM} (270 deg), confirmed by
+-- looking at the hardware; ${PANEL_OUTPUT} scans out portrait and is mounted rotated.
+-- transform = 1 renders upside down.
+hl.monitor({ output = "${PANEL_OUTPUT}", mode = "preferred", position = "auto", scale = ${PANEL_SCALE}, transform = ${PANEL_TRANSFORM} })
+EOF
+  $SUDO install -m 0644 -o root -g root "$tmp" "$GREETER_LUA" ||
+    fail "could not install ${GREETER_LUA}"
+  rm -f "$tmp"
+
+  log "pointing SDDM's greeter compositor at it: ${SDDM_GREETER_DROPIN}"
+  tmp=$(mktemp) || fail "mktemp failed"
+  cat >"$tmp" <<EOF
+# Written by ${PROG}.sh. Repoints SDDM's Wayland greeter compositor at a config
+# that rotates the Deck's panel (PROGRESS.md 5.11).
+${INSTALL_MARKER}
+#
+# Named 'zy-' so it sorts AFTER Omarchy's 10-wayland.conf and wins the
+# CompositorCommand key, and so it stays clear of 'zz-deck-session.conf', which
+# deck-session-select rewrites on every session switch.
+[General]
+DisplayServer=wayland
+
+[Wayland]
+CompositorCommand=start-hyprland -- --config ${GREETER_LUA}
+EOF
+  $SUDO install -m 0644 -o root -g root "$tmp" "$SDDM_GREETER_DROPIN" ||
+    fail "could not install ${SDDM_GREETER_DROPIN}"
+  rm -f "$tmp"
+
+  # Verify the override actually wins. SDDM takes the LAST value for a key
+  # across /etc/sddm.conf.d/*.conf in lexical order, so asserting our file
+  # exists proves nothing about which value the greeter will use.
+  local winner
+  winner=$(cat /etc/sddm.conf.d/*.conf 2>/dev/null | grep '^CompositorCommand=' | tail -1)
+  [[ $winner == "CompositorCommand=start-hyprland -- --config ${GREETER_LUA}" ]] ||
+    fail "installed ${SDDM_GREETER_DROPIN} but the last CompositorCommand across /etc/sddm.conf.d is '${winner}'. Something sorts after 'zy-' and overrides it; the greeter would still render rotated."
+  log "verified: ours is the winning CompositorCommand"
+
+  log "stage-greeter-rotation: ok"
+  log "NOTE: autologin means the greeter is normally skipped, so this is not"
+  log "      exercised on a normal boot. To see it, disable the [Autologin]"
+  log "      section and restart sddm."
+}
+
+# ---------------------------------------------------------------------------
+
 stage_return_icon() {
   # A .desktop entry is the shell-agnostic half of "return to Gaming Mode":
   # every launcher on every shell reads /usr/share/applications, so this works
@@ -653,6 +789,14 @@ ${PROG}.sh -- two-way Gaming Mode <-> Desktop session switching for a Deck
 After installing:
   steamos-session-select gamescope  switch to Gaming Mode now
   steamos-session-select desktop    switch to the desktop now
+
+Stages also cover two Gaming Mode / display defects (PROGRESS.md 5.11, 5.14):
+  stage-update-stub        a steamos-update stub, so Steam's first run stops
+                           reporting a false network error
+  stage-greeter-rotation   rotates the SDDM greeter for the Deck's panel.
+                           The user's desktop needs a matching transform in
+                           ~/.config/hypr/monitors.lua; the Limine menu and
+                           the TTY are NOT covered here.
 
 Exit codes: 0 success, 1 stage failure, 2 usage error.
 EOF
