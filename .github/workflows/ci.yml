@@ -39,23 +39,25 @@ jobs:
 
       - name: shellcheck
         run: |
-          shopt -s nullglob
-          files=(*.sh)
+          mapfile -t files < <(git ls-files '*.sh')
           [[ ${#files[@]} -gt 0 ]] || { echo "no *.sh files found"; exit 1; }
-          shellcheck "${files[@]}"
+          echo "checking ${#files[@]} scripts"
+          # -x follows sourced libraries; .shellcheckrc sets source-path=SCRIPTDIR
+          shellcheck -x "${files[@]}"
 
       - name: python syntax check
         run: |
-          shopt -s nullglob
-          for f in *.py; do
+          mapfile -t files < <(git ls-files '*.py')
+          [[ ${#files[@]} -gt 0 ]] || { echo "no *.py files found"; exit 1; }
+          for f in "${files[@]}"; do
             echo "checking $f"
             python3 -m py_compile "$f"
           done
 
       - name: bash -n syntax check
         run: |
-          shopt -s nullglob
-          for f in *.sh; do
+          mapfile -t files < <(git ls-files '*.sh')
+          for f in "${files[@]}"; do
             echo "checking $f"
             bash -n "$f"
           done
@@ -63,8 +65,10 @@ jobs:
       - name: Python unit tests
         run: |
           shopt -s nullglob
+          pytests=(test/unit/test-*.py)
+          [[ ${#pytests[@]} -gt 0 ]] || { echo "no python unit suites found"; exit 1; }
           status=0
-          for t in test-*.py; do
+          for t in "${pytests[@]}"; do
             echo "=== $t ==="
             python3 "$t" || status=1
           done
@@ -73,8 +77,8 @@ jobs:
       - name: Unit tests
         run: |
           shopt -s nullglob
-          tests=(test-*.sh)
-          [[ ${#tests[@]} -gt 0 ]] || { echo "no test-*.sh files found"; exit 1; }
+          tests=(test/unit/test-*.sh)
+          [[ ${#tests[@]} -gt 0 ]] || { echo "no unit test suites found"; exit 1; }
           status=0
           for f in "${tests[@]}"; do
             echo "::group::$f"
@@ -118,7 +122,7 @@ jobs:
           shopt -s nullglob
           isos=(*.iso)
           [[ ${#isos[@]} -eq 1 ]] || { echo "expected exactly one built .iso, found ${#isos[@]}"; exit 1; }
-          VM_INSTALL_TIMEOUT_SEC=3600 ./vm-install-test.sh "${isos[0]}"
+          VM_INSTALL_TIMEOUT_SEC=3600 ./test/vm/vm-install-test.sh "${isos[0]}"
 
       - name: Upload ISO artifact
         if: always()
