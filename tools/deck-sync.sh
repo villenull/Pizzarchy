@@ -27,11 +27,13 @@
 #                    argument so the existing two-positional interface,
 #                    and every existing invocation, are untouched.
 #
-# NOT YET RUN AGAINST REAL HARDWARE — no Deck reachable from this dev
-# environment. Per TASK-T0-test-infrastructure.md §4 ("deck-sync.sh
-# written (untested against real hardware is OK here — flag it for the
-# operator)"), this is expected for T0 §1's block; verify on first real
-# use and fix whatever's wrong rather than trusting this comment.
+# HARDWARE-VALIDATED 2026-08-10 (P1.5): drove all ten stages of
+# omarchy-deck-kernel.sh and all session stages of deck-session.sh over SSH
+# against the real Deck, including the stock→Neptune conversion. The
+# `ssh steamdeck` alias in the dev machine's ~/.ssh/config matches the
+# DECK_HOST/DECK_USER defaults below, so no env vars are needed there.
+# (This block previously claimed the script had never run against hardware;
+# that stopped being true in P1.5 — see PROGRESS.md §5.4.)
 #
 # Idempotency is the *stage script's* responsibility (CLAUDE.md: "every
 # install stage independently re-runnable and idempotent") — this wrapper

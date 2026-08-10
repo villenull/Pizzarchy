@@ -45,6 +45,20 @@
 # So: install a `steamos-session-select` that behaves the way Steam expects,
 # plus a matching path back from the desktop.
 #
+# Steam needs a SECOND thing, found later and by measurement rather than
+# reasoning: it drives a set of privileged helpers out of
+# /usr/bin/steamos-polkit-helpers/, by ABSOLUTE path. That whole tree belongs
+# to SteamOS and is absent here, so each call returns 127. Only one of them is
+# handled in this script (steamos-update, whose absence blocks Steam's
+# first-run setup behind a false network error); the rest -- brightness via
+# steamos-priv-write, timezone, fan control -- are a larger open question, not
+# a detail. See PROGRESS.md 5.15.
+#
+# Note the two families resolve DIFFERENTLY, and conflating them would install
+# a working-looking file somewhere Steam never looks:
+#   steamos-session-select        via PATH        -> /usr/local/bin is fine
+#   steamos-polkit-helpers/*      absolute path   -> must be /usr/bin/...
+#
 # ===========================================================================
 # SECURITY TRADEOFF -- read before extending
 # ===========================================================================
@@ -81,6 +95,28 @@ readonly SUDOERS_FILE=/etc/sudoers.d/99-deck-session-select
 readonly RETURN_DESKTOP_FILE=/usr/share/applications/deck-return-to-gaming.desktop
 readonly STATE_FILE=/var/lib/deck-session/next-session
 
+# Steam resolves its privileged helpers by ABSOLUTE path, not through PATH --
+# measured from Steam's own logs on this hardware, not inferred:
+#
+#   PATH="${SYSTEM_PATH-${PATH}}"  /usr/bin/steamos-polkit-helpers/steamos-update check
+#
+# so anything installed here has to live at that exact path. /usr/local/bin is
+# not an option for these the way it is for steamos-session-select (which Steam
+# *does* invoke through PATH). Nothing in this project may assume the two
+# families resolve the same way.
+readonly POLKIT_HELPER_DIR=/usr/bin/steamos-polkit-helpers
+readonly UPDATE_STUB="${POLKIT_HELPER_DIR}/steamos-update"
+
+# Named once so the stub, its --help and this script's own output cannot drift
+# into telling a user three different things about how to update the machine.
+readonly REAL_UPDATE_HINT='sudo pacman -Syu'
+
+# Every file this script installs carries this line, so a re-run recognises
+# its own output (the idempotency requirement) and refuses to clobber someone
+# else's. Keyed on a marker rather than on file type, because a symlink test
+# would not survive the first time we install a real script.
+readonly INSTALL_MARKER="# installed-by: ${PROG}.sh"
+
 # BUG FIX (was 95-deck-session.conf): SDDM reads /etc/sddm.conf.d/*.conf in
 # lexical order and LATER files win. The previous name carried a comment
 # claiming it "sorts after Omarchy's autologin.conf" -- it does not, because
@@ -97,6 +133,7 @@ readonly -a INSTALL_STAGES=(
   stage-preconditions
   stage-session-select
   stage-steam-hook
+  stage-update-stub
   stage-return-icon
 )
 
@@ -193,6 +230,20 @@ stage_preconditions() {
 }
 
 # ---------------------------------------------------------------------------
+
+# Refuse to overwrite a file this script did not write.
+#
+# If a package ever lands one of these paths for real -- SteamOS's own
+# customizations, or a future jupiter-* package -- its version is the
+# authoritative one and quietly replacing it with ours would be the wrong
+# outcome, in a place nobody would think to look. Fail loudly instead and let
+# a human decide.
+assert_ours_or_absent() {
+  local path=$1 whose=$2
+  if $SUDO test -e "$path" && ! $SUDO grep -qF -- "$INSTALL_MARKER" "$path" 2>/dev/null; then
+    fail "${path} exists but was not written by ${PROG}.sh -- ${whose} owns it. Inspect it rather than overwriting it."
+  fi
+}
 
 # Prove the NOPASSWD grant actually works.
 #
@@ -366,15 +417,7 @@ stage_steam_hook() {
   # Providing it under that exact name is what makes Steam's own affordance
   # work, which matters because it is the controller-reachable one.
   #
-  # Refuse to clobber a steamos-session-select this script did not write -- if
-  # SteamOS's own customizations package ever lands here, its version is the
-  # authoritative one and silently replacing it would be wrong. Keyed on a
-  # marker line rather than on the file being a symlink, so a re-run of this
-  # script recognises its own output (the idempotency requirement).
-  local marker="# installed-by: ${PROG}.sh"
-  if $SUDO test -e "$STEAM_SHIM" && ! $SUDO grep -qF -- "$marker" "$STEAM_SHIM" 2>/dev/null; then
-    fail "${STEAM_SHIM} exists but was not written by ${PROG}.sh -- something else owns it (DeckShift? SteamOS's steamos-customizations?). Inspect it rather than overwriting it."
-  fi
+  assert_ours_or_absent "$STEAM_SHIM" "something else (DeckShift? SteamOS's steamos-customizations?)"
 
   # Steam invokes this unprivileged, so the shim escalates on its own via the
   # narrowly-scoped sudoers grant from stage-session-select. A plain symlink
@@ -386,7 +429,7 @@ stage_steam_hook() {
 #!/usr/bin/env bash
 # steamos-session-select -- compatibility shim so Steam's "Switch to Desktop"
 # works. Steam calls this unprivileged; the real work needs root.
-${marker}
+${INSTALL_MARKER}
 set -euo pipefail
 exec sudo -n ${SELECT_BIN} "\$@"
 EOF
@@ -395,6 +438,140 @@ EOF
   rm -f "$wrapper"
 
   log "stage-steam-hook: ok"
+}
+
+# ---------------------------------------------------------------------------
+
+stage_update_stub() {
+  # Steam's first run in Gaming Mode reports "unable to download the required
+  # updates -- please check your network connection (2)". The network is fine;
+  # the error is a lie. What actually happens, from Steam's own logs:
+  #
+  #   YieldingCheckForUpdateOS: Command '... /usr/bin/steamos-polkit-helpers/steamos-update check ...' returned: 127
+  #   YieldingApplyUpdateOS: applying OS update
+  #   steamos-update returned: 127
+  #   YieldingApplyUpdateOS: OS update result: 2
+  #
+  # 127 is "command not found": the whole ${POLKIT_HELPER_DIR} tree is absent,
+  # because it belongs to SteamOS and this device is Arch + Omarchy. Steam
+  # renders that as a network error and, during OOBE, will not proceed past it.
+  #
+  # No configured repo provides this binary. jupiter-hw-support ships six other
+  # helpers but not this one, and steamos-customizations-jupiter ships none at
+  # all (it is GRUB machinery, which the Limine-only constraint forbids anyway).
+  # So there is nothing to install and the choice is between a stub and leaving
+  # a false error on the first screen a user ever sees. Operator chose the stub
+  # -- see PROGRESS.md 5.14.
+  #
+  # It is deliberately NOT a step toward a real updater. This device genuinely
+  # cannot self-update the way SteamOS does (no RAUC, no A/B rootfs), and the
+  # stub says so in its header, in --help, and in the journal.
+  assert_ours_or_absent "$UPDATE_STUB" "a real SteamOS updater"
+
+  log "installing the steamos-update stub: ${UPDATE_STUB}"
+  $SUDO install -d -m 0755 -o root -g root "$POLKIT_HELPER_DIR" ||
+    fail "could not create ${POLKIT_HELPER_DIR}"
+
+  local tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  cat >"$tmp" <<EOF
+#!/usr/bin/env bash
+#
+# steamos-update -- A STUB. IT UPDATES NOTHING.
+${INSTALL_MARKER}
+#
+# WHY THIS EXISTS
+#   Steam's Gaming Mode checks for OS updates by running this exact absolute
+#   path. On SteamOS it is a real updater backed by RAUC and an A/B rootfs.
+#   This device is not SteamOS -- it is Arch + Omarchy, updated with pacman --
+#   so the path was missing, Steam got exit 127, and it told the user "unable
+#   to download the required updates: check your network connection". That
+#   message is alarming and false, and during first-run setup Steam will not
+#   move past it.
+#
+# WHAT IT DOES
+#   Answers "already up to date" and exits. It does not download, stage,
+#   verify or apply anything, and it is not a partial implementation of
+#   something that will.
+#
+# TO ACTUALLY UPDATE THIS SYSTEM
+#   ${REAL_UPDATE_HINT}   (from Desktop Mode)
+#
+set -euo pipefail
+
+# An unrecognised verb must not be answered silently -- this project exists
+# partly because upstream tooling reported success while doing nothing. Steam
+# discards our stderr, so the journal is the only place a human can find it.
+note() {
+  printf 'steamos-update (stub): %s\n' "\$1" >&2
+  command -v logger >/dev/null 2>&1 && logger -t steamos-update-stub -- "\$1"
+  return 0
+}
+
+case \${1-} in
+  check)
+    # 7 is SteamOS's "already up to date". Exit 0 would tell Steam an update
+    # IS available, and it would immediately call us again to apply it --
+    # ending in the same failure dialog by a longer route.
+    exit 7
+    ;;
+  --supports-duplicate-detection)
+    # A capability probe. We download nothing, so we cannot detect a duplicate
+    # download; claiming the capability would invite Steam to depend on
+    # behaviour that does not exist. Non-zero means "not supported", which is
+    # what Steam already observed while this path was missing, so this keeps
+    # it on the code path it has been using all along.
+    exit 1
+    ;;
+  ""|apply)
+    # The apply path. \`check\` above should stop Steam ever reaching this.
+    note "nothing to apply; this OS is updated with '${REAL_UPDATE_HINT}'"
+    exit 0
+    ;;
+  -h|--help|help)
+    cat <<'USAGE'
+steamos-update (STUB) -- reports "up to date" and does nothing else.
+
+This is NOT the real SteamOS updater. It exists so Steam's Gaming Mode stops
+reporting a network error for a missing SteamOS binary. This device is Arch +
+Omarchy; its OS does not update the way SteamOS's does.
+
+  check                            exit 7 (already up to date)
+  --supports-duplicate-detection   exit 1 (not supported)
+  (no argument) | apply            no-op, exit 0
+
+To really update this system, from Desktop Mode:  ${REAL_UPDATE_HINT}
+USAGE
+    exit 0
+    ;;
+  *)
+    # Answer as "up to date" rather than erroring: an unanticipated verb from
+    # a future Steam client should not resurrect the first-run dialog. The
+    # journal line above is how this stops being silent.
+    note "unrecognised argument '\$1' -- answering 'up to date'. If Steam now depends on this verb, the stub needs extending."
+    exit 7
+    ;;
+esac
+EOF
+  $SUDO install -m 0755 -o root -g root "$tmp" "$UPDATE_STUB" ||
+    fail "could not install ${UPDATE_STUB}"
+  rm -f "$tmp"
+
+  # Verify by running it, not by trusting the write. `check` answering 7 is the
+  # single behaviour Steam's first-run flow depends on.
+  local rc=0
+  "$UPDATE_STUB" check >/dev/null 2>&1 || rc=$?
+  [[ $rc -eq 7 ]] ||
+    fail "${UPDATE_STUB} installed but 'check' exited ${rc}, not 7. Steam reads 7 as 'up to date'; anything else puts the first-run update dialog back."
+
+  rc=0
+  "$UPDATE_STUB" --supports-duplicate-detection >/dev/null 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] ||
+    fail "${UPDATE_STUB} claims duplicate-detection support (exit 0). It does not implement it; that would make Steam depend on behaviour that is not there."
+
+  log "verified: 'check' exits 7 (up to date), capability probe declines"
+  log "stage-update-stub: ok"
+  log "NOTE: this stub updates nothing. Real updates: ${REAL_UPDATE_HINT}"
 }
 
 # ---------------------------------------------------------------------------
