@@ -950,8 +950,16 @@ backup rescue (the rebuild wipes both).
   locally-installed `omarchy` skill documents the 3.x git layout and is wrong
   for this system.
 - `steamos-customizations-jupiter` **is** available in `jupiter-staging` and
-  ships **zero** polkit helpers (it is GRUB machinery). `jupiter-hw-support`
-  ships six of them, at 94 MiB installed and a **plymouth** dependency.
+  ships **zero** polkit helpers (it is GRUB machinery). It does not ship
+  `steamos-session-select` either — no configured repo does. `jupiter-hw-support`
+  ships six of the helpers, at 94 MiB installed and a **plymouth** dependency.
+- **`src/deck-session.sh` is source-safe as of 08698ba** — `main "$@"` is guarded
+  on `[[ ${BASH_SOURCE[0]} == "$0" ]]` so `test/unit/test-deck-session.sh` can
+  source it and call `render_update_stub` / `assert_ours_or_absent` with no root,
+  Deck or VM. **Consequence: anything added at TOP LEVEL below the constants
+  executes at source time, inside the unit test.** Keep new work inside
+  functions. A sourcing shell also inherits `set -euo pipefail` and every
+  constant as `readonly`, so sourcing twice into one shell aborts.
 
 ---
 

@@ -35,12 +35,21 @@
 # ===========================================================================
 #
 # Steam's "Power -> Switch to Desktop" in Gaming Mode shells out to
-# `steamos-session-select desktop`. That binary lives in SteamOS's
-# steamos-customizations and is in NO repo configured here (verified with
-# `pacman -F` against core/extra/multilib/omarchy/jupiter-staging/
-# holo-staging). Without it, Steam's own affordance silently does nothing --
-# which is PLAN.md 8.1's failure mode, in the one place a controller-only
-# user has no way to work around.
+# `steamos-session-select <target>`, and the target it actually passes is
+# **plasma**, not `desktop` -- SteamOS's desktop is KDE. Observed in the sudo
+# audit trail on this hardware. stage_session_select's dispatch accepts
+# desktop|plasma|omarchy for that reason; do not "simplify" the plasma arm away.
+#
+# That binary is in NO repo configured here -- re-verified with `pacman -F`
+# against core/extra/multilib/omarchy/jupiter-staging/holo-staging, which finds
+# nothing. Note the attribution this comment used to carry was wrong:
+# steamos-customizations-jupiter IS available (jupiter-staging) and does NOT
+# ship it; that package is GRUB and holo-* machinery, which the Limine-only
+# constraint forbids anyway.
+#
+# Without the binary, Steam's own affordance silently does nothing -- which is
+# PLAN.md 8.1's failure mode, in the one place a controller-only user has no way
+# to work around.
 #
 # So: install a `steamos-session-select` that behaves the way Steam expects,
 # plus a matching path back from the desktop.

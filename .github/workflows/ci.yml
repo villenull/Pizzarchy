@@ -5,8 +5,13 @@
 # isn't a project file-organization choice.
 #
 # Two jobs, cheapest-first (PLAN.md §9's five-tier testing strategy):
-#   lint-and-unit-test  — every push/PR. shellcheck + bash -n + the
-#                         rootless test-vm-*.sh unit suites. Seconds.
+#   lint-and-unit-test  — every push/PR. shellcheck + bash -n + the rootless
+#                         unit suites, discovered as test/unit/test-*.sh.
+#                         Seconds. (This said "test-vm-*.sh" until a non-vm
+#                         suite landed — test-deck-session.sh. The glob has
+#                         always been test-*.sh; the comment was narrower than
+#                         the code, which is the direction that makes a reader
+#                         think a suite isn't running.)
 #   iso-install-test    — tags only. Builds the ISO and runs
 #                         vm-install-test.sh against it (T0 §1's tier-1
 #                         harness). NOTE: GitHub-hosted runners have no
