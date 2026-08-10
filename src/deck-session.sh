@@ -1648,6 +1648,91 @@ EOF
 
 # ---------------------------------------------------------------------------
 
+# Does one sudoers line hand out effectively-unrestricted root?
+#
+# Split out as a pure predicate so test/unit/test-deck-session.sh can exercise
+# it with no Deck and no root. Takes the line, returns 0 if it is blanket.
+#
+# "Blanket" means the command spec is ALL. It deliberately does NOT try to
+# judge whether a *named* command is dangerous, because that judgement is
+# hopeless: this project's own audit trail shows the install stages legitimately
+# running `install` against /etc/sudoers.d/, and a NOPASSWD grant on `install`,
+# `tee`, `cp` or `chmod` is full root by a longer route. See
+# docs/findings/P16-repo-overlap-audit.md's sibling note in PROGRESS.md 5.17.
+# So this flags the honest case and leaves the rest to a human.
+sudoers_line_is_blanket() {
+  local line=$1
+  # Strip comments and surrounding whitespace.
+  line=${line%%#*}
+  line=${line#"${line%%[![:space:]]*}"}
+  line=${line%"${line##*[![:space:]]}"}
+  [[ -n $line ]] || return 1
+  # Defaults lines are settings, not grants.
+  [[ $line == Defaults* ]] && return 1
+  # A grant looks like:  <who> <host>=(<runas>) [NOPASSWD:] <commands>
+  # Blanket iff the command spec, after the last ':' or ')', is exactly ALL.
+  local cmds=${line##*)}
+  cmds=${cmds##*:}
+  cmds=${cmds#"${cmds%%[![:space:]]*}"}
+  cmds=${cmds%"${cmds##*[![:space:]]}"}
+  [[ $cmds == ALL ]]
+}
+
+# Does the line grant its commands WITHOUT a password?
+#
+# Split from the blanket test because the two combine differently, and getting
+# that wrong makes the release check unusable. `deck ALL=(ALL) ALL` is blanket
+# but password-protected -- it is the ordinary admin grant every Arch/Omarchy
+# install ships, and failing a release on it would be a false positive that
+# teaches people to ignore the check. The hazard is blanket AND passwordless.
+sudoers_line_is_nopasswd() {
+  local line=$1
+  line=${line%%#*}
+  [[ $line == *NOPASSWD:* ]]
+}
+
+# NOT in INSTALL_STAGES. This installs nothing and is for release verification
+# (T6) and for answering PROGRESS.md 5.17 on a given machine.
+stage_audit_privileges() {
+  log "auditing sudoers grants under /etc/sudoers.d"
+  local f found=0 line
+  local -a passwordless=() with_password=()
+
+  while IFS= read -r f; do
+    [[ -n $f ]] || continue
+    while IFS= read -r line; do
+      sudoers_line_is_blanket "$line" || continue
+      if sudoers_line_is_nopasswd "$line"; then
+        passwordless+=("${f##*/}: ${line}")
+      else
+        with_password+=("${f##*/}: ${line}")
+      fi
+    done < <($SUDO cat "$f" 2>/dev/null)
+    found=$((found + 1))
+  done < <($SUDO sh -c 'ls -1 /etc/sudoers.d/* 2>/dev/null')
+
+  log "inspected ${found} drop-in(s)"
+
+  # Informational, deliberately NOT a failure: this is the ordinary admin grant
+  # every Arch/Omarchy install ships. Failing on it would be the false positive
+  # that teaches people to ignore this check.
+  local b
+  for b in "${with_password[@]}"; do
+    log "blanket grant, password required (normal): ${b}"
+  done
+
+  if [[ ${#passwordless[@]} -eq 0 ]]; then
+    log "no PASSWORDLESS blanket grants -- nothing here would ship unrestricted root"
+    log "stage-audit-privileges: ok"
+    return 0
+  fi
+
+  for b in "${passwordless[@]}"; do
+    warn "PASSWORDLESS BLANKET ROOT: ${b}"
+  done
+  fail "${#passwordless[@]} sudoers drop-in(s) grant unrestricted root with NO password. On this dev Deck that is deliberate (PROGRESS.md 5.17 -- the iterate-in-place loop needs it), but an ISO that ships one is not a product. Exclude them from the image before release."
+}
+
 stage_default_session() {
   # Deliberately NOT in INSTALL_STAGES. Flipping the default is the one
   # irreversible-feeling step: autologin is enabled, so SDDM shows no session
@@ -1682,7 +1767,7 @@ main() {
       log "Test first:  ${STEAM_SHIM} gamescope     (switches now, ends this session)"
       log "Then, once proven: ./${PROG}.sh stage-default-session"
       ;;
-    list-stages) printf '%s\n' "${INSTALL_STAGES[@]}" stage-default-session ;;
+    list-stages) printf '%s\n' "${INSTALL_STAGES[@]}" stage-audit-privileges stage-default-session ;;
     -h|--help|help)
       cat <<EOF
 ${PROG}.sh -- two-way Gaming Mode <-> Desktop session switching for a Deck
@@ -1690,6 +1775,8 @@ ${PROG}.sh -- two-way Gaming Mode <-> Desktop session switching for a Deck
   ${PROG}.sh                        install everything except the default flip
   ${PROG}.sh <stage>                run one stage
   ${PROG}.sh list-stages            stage names, for CI
+  ${PROG}.sh stage-audit-privileges report sudoers drop-ins that grant blanket
+                                    root; fails if any do (release check, T6)
   ${PROG}.sh stage-default-session  make Gaming Mode the default (do this last)
 
 After installing:

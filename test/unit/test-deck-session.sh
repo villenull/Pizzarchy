@@ -769,4 +769,80 @@ grep -qE 'exec sudo -n .* "\$@"' "$shim" ||
   fail_test "the shim forwards its arguments" "Steam passes the target session as an argument; without \"\$@\" deck-session-select is called with none and dies on 'no session specified'"
 pass "the shim forwards \"\$@\" -- Steam passes the target session ('plasma') as an argument"
 
+# ===========================================================================
+# 7. sudoers_line_is_blanket -- the release check's predicate (PROGRESS.md 5.17)
+# ===========================================================================
+#
+# The whole point of this predicate is that it flags ONLY the honest case, a
+# command spec of ALL. It deliberately does not try to judge whether a named
+# command is dangerous, because that judgement is hopeless: this project's own
+# sudo audit trail shows the install stages running `install` against
+# /etc/sudoers.d/ itself, so a NOPASSWD grant on install/tee/cp/chmod is full
+# root by a longer route. A predicate that pretended otherwise would give false
+# assurance, which is worse than none.
+
+blanket_yes=(
+  "deck ALL=(ALL) NOPASSWD: ALL"
+  "deck ALL=(ALL) ALL"
+  "%wheel ALL=(ALL:ALL) ALL"
+  "  deck   ALL=(root)   NOPASSWD:   ALL   "
+  "deck ALL=(ALL) NOPASSWD: ALL # trailing comment"
+)
+for line in "${blanket_yes[@]}"; do
+  sudoers_line_is_blanket "$line" ||
+    fail_test "recognises a blanket grant" "missed: ${line}"
+done
+pass "recognises blanket grants, including extra whitespace, runas lists and trailing comments"
+
+blanket_no=(
+  "deck ALL=(root) NOPASSWD: /usr/local/bin/deck-session-select"
+  "deck ALL=(root) NOPASSWD: /usr/bin/timedatectl set-timezone *"
+  "%wheel ALL=(root) NOPASSWD: /usr/bin/tzupdate, /usr/bin/timedatectl set-timezone *"
+  "Defaults passwd_tries=10"
+  "Defaults env_reset"
+  "# deck ALL=(ALL) NOPASSWD: ALL"
+  ""
+  "   "
+)
+for line in "${blanket_no[@]}"; do
+  ! sudoers_line_is_blanket "$line" ||
+    fail_test "does not flag a scoped grant, a Defaults line, a comment or a blank" "wrongly flagged: '${line}'"
+done
+pass "does not flag scoped grants, Defaults lines, commented-out grants or blank lines"
+
+# The four grants this project actually installs must all read as scoped --
+# if any of them tripped the release check, the check would be unusable.
+for line in \
+  "deck ALL=(root) NOPASSWD: /usr/local/bin/deck-session-select" \
+  "deck ALL=(root) NOPASSWD: /usr/bin/steamos-polkit-helpers/steamos-priv-write" \
+  "deck ALL=(root) NOPASSWD: /usr/bin/timedatectl set-timezone *"
+do
+  ! sudoers_line_is_blanket "$line" ||
+    fail_test "this project's own grants read as scoped" "flagged its own grant: ${line}"
+done
+pass "the grants this project installs all read as scoped, so the release check is usable as-is"
+
+# The two predicates combine, and getting the combination wrong is what makes a
+# release check get ignored. `deck ALL=(ALL) ALL` is blanket but
+# password-protected -- the ordinary admin grant every Arch/Omarchy install
+# ships. Failing a release on that is a false positive; only blanket AND
+# passwordless is the hazard. Found by running the real check against the Deck,
+# which flagged 03_deck on the first attempt.
+sudoers_line_is_nopasswd "deck ALL=(ALL) NOPASSWD: ALL" ||
+  fail_test "recognises NOPASSWD"
+! sudoers_line_is_nopasswd "deck ALL=(ALL) ALL" ||
+  fail_test "does not treat a password-required grant as NOPASSWD" "this is the ordinary admin grant; flagging it is the false positive that gets the check ignored"
+! sudoers_line_is_nopasswd "# deck ALL=(ALL) NOPASSWD: ALL" ||
+  fail_test "a commented-out NOPASSWD grant is not a grant"
+pass "NOPASSWD is detected separately from blanket, so the ordinary password-protected admin grant is not a release failure"
+
+# The exact pair seen on the real Deck: one of each.
+sudoers_line_is_blanket   "deck ALL=(ALL) ALL"           &&
+! sudoers_line_is_nopasswd "deck ALL=(ALL) ALL"          ||
+  fail_test "03_deck's real line classifies as blanket-but-password-required"
+sudoers_line_is_blanket   "deck ALL=(ALL) NOPASSWD: ALL" &&
+  sudoers_line_is_nopasswd "deck ALL=(ALL) NOPASSWD: ALL" ||
+  fail_test "99-deck-testing's real line classifies as blanket AND passwordless"
+pass "the two real drop-ins on the Deck (03_deck, 99-deck-testing) classify as intended -- only the second is a release failure"
+
 echo "all deck-session.sh tests passed"
