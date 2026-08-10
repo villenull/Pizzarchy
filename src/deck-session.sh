@@ -153,6 +153,10 @@ readonly UPSTREAM_GREETER_LUA=/usr/share/sddm/hyprland.lua
 # living there would vanish the first time anyone changed session.
 readonly SDDM_GREETER_DROPIN=/etc/sddm.conf.d/zy-deck-greeter.conf
 
+# A systemd drop-in, NOT an sddm.conf one -- this is about the unit's restart
+# policy, not about SDDM's own settings.
+readonly SDDM_UNIT_DROPIN=/etc/systemd/system/sddm.service.d/50-deck-switch-resilience.conf
+
 # Our greeter config is a self-contained MIRROR of upstream's settings plus the
 # monitor transform -- not an include, because Hyprland's Lua parser offers no
 # documented way to source another file and a greeter that fails to parse is a
@@ -193,6 +197,7 @@ readonly -a INSTALL_STAGES=(
   stage-steam-hook
   stage-update-stub
   stage-greeter-rotation
+  stage-sddm-resilience
   stage-return-icon
 )
 
@@ -796,6 +801,78 @@ EOF
   log "NOTE: autologin means the greeter is normally skipped, so this is not"
   log "      exercised on a normal boot. To see it, disable the [Autologin]"
   log "      section and restart sddm."
+}
+
+# ---------------------------------------------------------------------------
+
+stage_sddm_resilience() {
+  # Observed on hardware, switching Gaming Mode -> Desktop through Steam's own
+  # menu item: the switch left the Deck with NO graphical session at all, and
+  # recovering needed `systemctl reset-failed sddm` over SSH -- which is exactly
+  # what a controller-only user does not have.
+  #
+  # The mechanism, from sddm's shipped unit:
+  #
+  #   StartLimitIntervalSec=30    StartLimitBurst=2    RestartSec=100ms
+  #
+  # Switching restarts SDDM while gamescope still holds VT1. SDDM's first
+  # display attempt raced that teardown and died with HELPER_TTY_ERROR; systemd
+  # retried 100ms later, far too soon for the VT to have settled, so that failed
+  # too; two failures inside 30s exhausted the burst and the unit latched to
+  # `failed` permanently. A transient, self-healing condition was converted into
+  # a black screen by a rate limit.
+  #
+  # RestartSec is the more important half: at 100ms the retry is guaranteed to
+  # land before the VT is free, so the limit gets spent on attempts that could
+  # never have worked.
+  #
+  # TRADEOFF, deliberate: disabling the rate limit means a genuinely broken SDDM
+  # config retries forever instead of stopping. On a device with no keyboard,
+  # a loop that can still recover beats a black screen that cannot -- and a
+  # permanently broken config is a dev-time failure, which the journal shows
+  # either way.
+  log "installing SDDM restart resilience: ${SDDM_UNIT_DROPIN}"
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$SDDM_UNIT_DROPIN")" ||
+    fail "could not create $(dirname "$SDDM_UNIT_DROPIN")"
+
+  local tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  cat >"$tmp" <<EOF
+# Written by ${PROG}.sh -- see stage-sddm-resilience.
+${INSTALL_MARKER}
+#
+# Session switching restarts SDDM while the outgoing compositor still holds
+# VT1. Upstream's StartLimitIntervalSec=30 / StartLimitBurst=2 / RestartSec=100ms
+# turns that transient race into a PERMANENT failure: the Deck ends up with no
+# graphical session and needs 'systemctl reset-failed sddm' from a shell.
+[Unit]
+# 0 disables rate limiting. See the tradeoff note in stage-sddm-resilience.
+StartLimitIntervalSec=0
+
+[Service]
+# Give the outgoing session time to release the VT before retrying. 100ms did
+# not, and every retry inside that window is wasted.
+RestartSec=3
+EOF
+  $SUDO install -m 0644 -o root -g root "$tmp" "$SDDM_UNIT_DROPIN" ||
+    fail "could not install ${SDDM_UNIT_DROPIN}"
+  rm -f "$tmp"
+
+  $SUDO systemctl daemon-reload || fail "systemctl daemon-reload failed"
+
+  # Verify the values systemd ACTUALLY resolved. A drop-in in the right place
+  # with a typo'd directive is silently ignored, so reading the file back would
+  # prove nothing.
+  local limit restart_usec
+  limit=$(systemctl show sddm -p StartLimitIntervalUSec --value 2>/dev/null)
+  restart_usec=$(systemctl show sddm -p RestartUSec --value 2>/dev/null)
+  [[ $limit == "0" || $limit == "infinity" ]] ||
+    fail "installed ${SDDM_UNIT_DROPIN} but systemd still reports StartLimitIntervalUSec=${limit}. The drop-in was not applied; a failed switch would still leave the Deck with no session."
+  [[ $restart_usec == "3s" ]] ||
+    warn "RestartSec resolved to '${restart_usec}', not 3s. The rate limit is lifted so a switch can still recover, but retries may again land before the VT is free."
+
+  log "verified: StartLimitIntervalUSec=${limit}, RestartUSec=${restart_usec}"
+  log "stage-sddm-resilience: ok"
 }
 
 # ---------------------------------------------------------------------------
