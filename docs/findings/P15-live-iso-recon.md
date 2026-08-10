@@ -523,3 +523,43 @@ Too many levels of symbolic links
 Appears after `stage-kernel`, i.e. from a `jupiter-staging`/`holo-staging`
 package, not from anything this project writes. Nothing has failed because of
 it. Note it before blaming our own code for a boot oddity later.
+
+## R-14. Post-conversion: backlight comes up at 1%, and the greeter wants a password
+
+Two things observed on the first Neptune boot. One is a real finding, one is
+not — recorded together because both were noticed at the same moment and the
+distinction matters.
+
+### R-14a. Backlight defaults to minimum on the Neptune kernel — real
+
+```
+/sys/class/backlight/amdgpu_bl0/brightness = 655   (max 65535)  -> 1%
+systemd-backlight@backlight:amdgpu_bl0.service  active (exited)
+/var/lib/systemd/backlight/                     EMPTY
+```
+
+`systemd-backlight` ran but had **no saved state to restore**: this is a fresh
+install *and* a new kernel, so the backlight device path had no history. The
+panel came up at its floor and that became the state.
+
+Not damage, and trivially fixed (`echo 32768 > .../brightness`), but it is a
+genuine **first-boot user-experience defect**, and the product's first boot is
+exactly the moment it would bite. On a controller-only device the user may not
+have an obvious way to raise brightness before they can see the screen.
+
+**T3/P2.2 action:** the session layer (or the installed payload) should set a
+sane default backlight on first boot rather than inheriting the floor. Worth
+checking whether Gaming Mode/gamescope sets its own — it may mask the problem
+in one session and not the other.
+
+### R-14b. The SDDM password prompt is NOT a regression
+
+Flagged during the same reboot, but expected: that is SDDM's greeter asking
+for the *user* password, not a LUKS passphrase (encryption is off — root is
+plain btrfs, and the cmdline carries no `cryptdevice=`). A disk passphrase
+prompt would appear before boot completes, as plain text.
+
+**However, it does surface a real product requirement:** the goal is booting
+straight to Gaming Mode like stock SteamOS, which does not stop at a login
+screen. **Autologin is therefore a T3 requirement**, not an optional nicety,
+and it is not yet configured. Nothing in the plan had called it out explicitly.
