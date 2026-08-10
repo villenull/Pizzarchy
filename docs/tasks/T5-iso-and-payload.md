@@ -133,3 +133,15 @@ in `docs/PROGRESS.md`.
 - Wi-Fi cannot be made to work in the live image — that partially reopens
   `docs/PROGRESS.md` §2.2 and is a scope conversation
 - Size exceeds a 32GB USB
+
+## Constraint added by session 16 (PROGRESS.md 5.17)
+
+The build MUST fail if the payload contains any sudoers drop-in granting
+blanket passwordless root. `/etc/sudoers.d/99-deck-testing` exists on the dev
+Deck deliberately -- the iterate-in-place loop needs it, and no narrower grant
+is possible because the install stages legitimately write to `/etc/sudoers.d/`
+itself. It must never reach the ISO.
+
+`src/deck-session.sh stage-audit-privileges` implements the predicate and can
+be reused: it fails on blanket AND passwordless, while treating the ordinary
+password-protected `deck ALL=(ALL) ALL` as normal.

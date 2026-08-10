@@ -835,12 +835,47 @@ it is the correct mode, and with tier 1 answering, Steam no longer re-`chmod`s
 it. If it is ever found at 666 again, Steam fell back, which means a helper
 broke.
 
-**Still not removed permanently** — doing so breaks the unattended SSH loop
-this project iterates with (`tools/deck-sync.sh` runs stages via `sudo -n`), so
-it needs a narrower replacement grant first. `deck` has a password set
-(`passwd -S deck` → `P`) and `03_deck` grants `deck ALL=(ALL) ALL`, so removal
-is recoverable rather than a lockout. Decide before P2.7 bakes anything into
-the image.
+### ⚠️ A "narrower replacement grant" is IMPOSSIBLE — measured, 2026-08-10
+
+This section used to say the fix was a narrower grant for `tools/deck-sync.sh`.
+**It is not achievable, and the sudo audit trail proves it.** Distinct binaries
+the install stages ran as root in one day:
+
+```
+install(81) test(69) tee(61) grep(29) systemctl(22) cat(22) snapper(18)
+visudo(15) pacman(8) find(7) chmod(7) sed(6) rm(6) cp(6) mount umount passwd
+```
+
+and the destinations include **`/etc/sudoers.d/` itself**:
+
+```
+/usr/bin/install  /etc/sudoers.d/99-deck-priv-write
+/usr/bin/install  /etc/sudoers.d/99-deck-session-select
+/usr/bin/chmod    /etc/sudoers.d/99-deck-testing
+```
+
+A NOPASSWD grant on `install`, `tee`, `cp` or `chmod` with arbitrary arguments
+**is** full root — it can write any file anywhere, including a new sudoers
+drop-in. Granting the stage *scripts* instead is worse: they live in a
+user-writable directory, so that is a one-line privilege escalation. The dev
+loop legitimately needs root, and no honest narrowing exists. Saying so is more
+useful than shipping something that only looks narrow.
+
+**So the resolution is not a narrower grant; it is keeping this off the image.**
+
+1. **`./deck-session.sh stage-audit-privileges`** — not in `INSTALL_STAGES`; a
+   T6 release check. Reports every blanket grant and **fails** on any that is
+   also passwordless. Against the Deck it reports `03_deck`
+   (`deck ALL=(ALL) ALL`) as normal-and-password-required, and fails on
+   `99-deck-testing`. ⚠️ Its first version failed on **both** — exactly the
+   false positive that gets a release check ignored — so "blanket" and
+   "passwordless" are deliberately separate predicates.
+2. **T5/P2.7 must exclude it from the payload.** That is where the real guard
+   belongs, because the ISO is what ships.
+
+`deck` has a password set (`passwd -S deck` → `P`) and `03_deck` grants
+`deck ALL=(ALL) ALL`, so removing the passwordless file is recoverable rather
+than a lockout — it costs only the unattended SSH loop.
 
 ### 5.18 ✅ A failed session start dropped the user at a PASSWORD GREETER — RESOLVED 2026-08-10
 
