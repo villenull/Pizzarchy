@@ -655,17 +655,42 @@ Upstream's installer is fully driveable from a config file, and accepts
 integration point than post-install scripting, and it makes automated QEMU
 install testing tractable.
 
-### 5.13 🐞 `stage-repos` lets Arch's packages shadow Valve's
+### 5.13 ✅ `stage-repos` repo ordering — AUDITED and RESOLVED 2026-08-10
 
-Valve's repos are appended **after** `[extra]`, and pacman is first-match, so
-`pacman -S gamescope` installs Arch's build (bare compositor) instead of
-Valve's (the whole SteamOS session). The conversion reports success while
-leaving a device that cannot enter Gaming Mode.
+Valve's repos are appended **after** `[extra]`, and pacman resolves `-S <name>`
+by **repo order, not version**, so `pacman -S gamescope` installs Arch's build
+(bare compositor) instead of Valve's (the whole SteamOS session). The defect is
+real. The proposed fix — Valve's repos first, matching SteamOS — is **rejected
+on measured evidence**. Full data: `docs/findings/P16-repo-overlap-audit.md`.
 
-**Unfixed on purpose** — putting Valve's repos first matches SteamOS but hands
-blanket precedence to repos pinning older common packages. **Enumerate the
-overlap first** (`mesa`, `vulkan-radeon`, `lib32-vulkan-radeon` are the
-suspects). §R-15.
+**101 package names overlap; Valve's is OLDER in 50 of them**, including
+`filesystem` 2021.12.07 (vs 2025.10.12), `linux-lts` 5.15.74 (vs 6.18.43),
+`plymouth` 22.02 (vs 26.134), and the whole `mesa`/`vulkan-*`/`lib32-vulkan-*`
+stack — the three suspects this section named all confirm. Decisively: the test
+Deck runs **Arch's** `mesa` and `vulkan-radeon` and Gaming Mode works, so
+Valve's are not merely riskier, they are unnecessary.
+
+**The blast radius is one package.** Everything `omarchy-deck-kernel.sh`
+installs (`linux-neptune-611`, its headers, `linux-firmware-neptune`,
+`steamdeck-dsp`) is **Valve-only**, so order never affected it. Of the 51
+"Valve newer" overlaps, nearly all are Valve rebuilds of identical upstream
+versions (`systemd 261.2-1.1` vs `261.2-1`); only **`gamescope`** differs in
+substance (Valve `3.16.25-3` ships the session, Arch `3.16.25-1` does not).
+
+**Fix adopted: qualify the package, do not reorder repos.**
+
+```bash
+pacman -S jupiter-staging/gamescope     # not: pacman -S gamescope
+```
+
+⚠️ Valve's gamescope is *newer* and pacman still picks Arch's — order beats
+version. Don't conclude from "Valve's is newer" that the bug can't bite.
+
+Two follow-ons: **`mangohud` should come from Arch** (its `0.8.4-1` is newer
+than Valve's `0.8.3…-4` and already ships `/usr/bin/mangoapp`, verified on the
+Deck); and `deck-session.sh`'s precondition already catches the wrong build,
+because it tests for the session *file*, not a version — the two builds share
+an upstream version, so a version check could not tell them apart.
 
 ### 5.14 ✅ Gaming Mode's update check — **RESOLVED 2026-08-10 with a stub**
 

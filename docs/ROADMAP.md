@@ -170,7 +170,7 @@ exactly what we did.
 | A switch visibly thrashes before it lands | 2 | §5.18(a) — the incoming session dies and `Relogin=true` retries ~3/s for up to 38s. Always recovers unattended; not a finished experience |
 | ~~Stock Omarchy ISO won't boot/install on Deck~~ | 1 | **RETIRED** — boots and installs; the surprise was its **encryption default** (§5.12) |
 | Our fork inherits upstream's encryption default | 2 | Ship it off by default; TPM2 auto-unlock as follow-on (§5.12) |
-| Valve's packages shadowed by Arch's | 2 | `stage-repos` ordering bug, unfixed pending an overlap audit (§5.13) |
+| ~~Valve's packages shadowed by Arch's~~ | 2 | **RETIRED** — audit done (P16). 101 overlaps, Valve older in 50, so reordering is rejected; the real surface is one package and the fix is `pacman -S jupiter-staging/gamescope` (§5.13) |
 | T2 concludes custom UI needed for many screens | 1→2 | That's what the spike is *for*; scope conversation before phase 2 |
 | Omarchy 4.0 beta churn breaks shell hooks | 2 | Keep integration points thin (`docs/PLAN.md` §11); re-verify at P3.6 |
 | TDP/fan work damages hardware | 2 | Per-item operator approval, every time — unchanged hard rule |

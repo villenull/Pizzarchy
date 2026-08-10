@@ -336,14 +336,21 @@ stage_preconditions() {
   for d in /usr/share/wayland-sessions /usr/local/share/wayland-sessions; do
     [[ -f "$d/${GAMING_SESSION}.desktop" ]] && { found="$d/${GAMING_SESSION}.desktop"; break; }
   done
+  # NOTE the qualified package name in the message. `pacman -S gamescope`
+  # installs ARCH's build, which is the bare compositor and ships none of this
+  # -- pacman resolves by repo order, not version, and Arch's repos come first
+  # by design (PROGRESS.md 5.13, docs/findings/P16-repo-overlap-audit.md).
+  # Arch's is 3.16.25-1, Valve's is 3.16.25-3: same upstream version, so a
+  # version check would not tell them apart. Checking for the session FILE is
+  # what distinguishes them, which is why this test is written this way.
   [[ -n $found ]] ||
-    fail "no ${GAMING_SESSION}.desktop in any wayland-sessions directory. Install gamescope from jupiter-staging (it ships the whole SteamOS session), then re-run."
+    fail "no ${GAMING_SESSION}.desktop in any wayland-sessions directory. Install Valve's build explicitly -- 'sudo pacman -S jupiter-staging/gamescope' -- because a bare 'pacman -S gamescope' installs Arch's bare compositor, which ships no SteamOS session. Then re-run."
   log "gaming session: ${found}"
 
   # The launcher the session entry points at has to exist too -- a dangling
   # Exec= is exactly the silent failure this project exists to prevent.
   command -v start-gamescope-session >/dev/null 2>&1 ||
-    fail "${found} exists but start-gamescope-session is not on PATH -- the gamescope install is incomplete. Do not switch sessions until this resolves."
+    fail "${found} exists but start-gamescope-session is not on PATH -- the gamescope install is incomplete, or the session file came from somewhere other than Valve's package. Reinstall with 'sudo pacman -S jupiter-staging/gamescope'. Do not switch sessions until this resolves."
 
   # Resolve the desktop session by discovery. Omarchy ships its own entry in
   # /usr/local/share, which is why this is not hardcoded.
