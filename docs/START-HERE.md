@@ -251,7 +251,7 @@ VM.
 
 ## 4. The work queue
 
-**The ordering lives in `docs/ROADMAP.md` — three phases.** Task-to-phase mapping:
+**The ordering lives in `docs/ROADMAP.md` — four phases.** Task-to-phase mapping:
 
 | Task | File | Model | State |
 |---|---|---|---|
@@ -263,6 +263,7 @@ VM.
 | T4 | `docs/tasks/T4-installer-ui.md` | Sonnet | ⬜ **unblocked, re-scoped by §5.9** → P2.5–P2.6 |
 | T5 | `docs/tasks/T5-iso-and-payload.md` | Sonnet/Opus | ⬜ P2.7–P2.8, now with §5.12/§5.13 constraints |
 | T6 | `docs/tasks/T6-integration-release.md` | **Opus** | ⬜ phase 3 |
+| T7 | `docs/tasks/T7-enablement-layer.md` | **Opus** | ⬜ **phase 4 — NEW.** Generalise into a Deck enablement layer so the next distro is ~a day. Deliberately after phase 3: abstracting from one *finished* example is engineering, from one unfinished example is guessing |
 
 **Phase 1 is closed. P2.0, P2.0b, P2.0c and P2.0e are done**, and P2.1/P2.2/P2.4
 are done as far as a script can verify them. Sensible entry points:

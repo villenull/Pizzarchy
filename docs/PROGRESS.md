@@ -1175,6 +1175,40 @@ DeckShift drop (§2.4). Nothing has ever been posted anywhere.
 
 ---
 
+## 5.19 Phase 4 — the Deck enablement layer (added 2026-08-10)
+
+Operator direction, session 16: after phase 3 releases one Deck-ready distro,
+generalise the result so making the *next* distro Deck-ready is roughly a day of
+Claude-assisted porting plus a hardware validation pass.
+
+Spec: `docs/tasks/T7-enablement-layer.md`. Ordering: `docs/ROADMAP.md` phase 4.
+
+**The sizing that shaped it**, measured rather than estimated:
+
+| | distro-specific |
+|---|---|
+| `src/omarchy-deck-kernel.sh` | **26%** of code lines |
+| `src/deck-session.sh` | **13%** |
+| `src/deck-input-mapper.py` | **0%** |
+
+⚠️ The percentages *understate* the lock-in: the portable remainder is
+scaffolding around a distro-specific core (`pacman`, `jupiter-staging`,
+`limine`, `mkinitcpio`, `sddm`, `uwsm`). You would not port that core; you would
+rewrite it. What is genuinely portable is the five `render_*` helper bodies, the
+session-switch *policy*, the mapper, the probes — and §7's 38 facts, which are
+the single biggest accelerator and are not code at all.
+
+⚠️ **"A day" buys ported-and-conformance-green, NOT shippable.** §5.18 surfaced
+on soak cycle 4; §5.16 needed a journal read across two boots; three of this
+project's own checks were wrong about themselves. Soak time is wall-clock.
+
+**Deliberately out of scope: hosting or distributing distro images.** That
+reopens `steamdeck-dsp` (`Proprietary`, no licence text) as redistribution at
+scale, and Bazzite/ChimeraOS already ship Deck-ready images. The differentiated
+thing here is the **controller-only install** and the layer beneath it.
+
+---
+
 ## 6. Blocked on human
 
 - **`docs/ROADMAP.md` P1.4 — Ventoy on the test USB + the stock Omarchy 4.0 beta

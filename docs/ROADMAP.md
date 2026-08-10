@@ -1,5 +1,9 @@
-# ROADMAP — three phases to a released ISO
+# ROADMAP — four phases: a released ISO, then a reusable layer
 
+> **This is the authoritative ordering of the work.** Phases 1–3 ship one
+> Deck-ready distro; **phase 4 (added 2026-08-10)** turns that into a layer so
+> the next one costs ~a day.
+>
 > **This is the authoritative ordering of the work.** `docs/PROGRESS.md` holds
 > current state and findings; `TASK-*.md` hold the per-task detail; this file
 > holds the plan. Written 2026-08-10, after the scope reset (`docs/PROGRESS.md` §2).
@@ -18,6 +22,7 @@ Desktop Mode button that opens **Omarchy 4.0** and a way back.
 | **1 — Answer the unknowns, rebuild the test bed** | Every open question that can change a design gets answered; the Deck is rebuilt onto Omarchy 4.0 | QEMU + one big Deck session |
 | **2 — Build the product** | Installer UI, session/parity completion, the ISO itself | Dev machine + QEMU, short Deck iterations |
 | **3 — Prove it like a user, release** | Factory-reset the Deck, install from our ISO exactly as an end user would, release | Deck |
+| **4 — Generalise: the Deck enablement layer** | Turn one distro's hard-won result into a layer, so the next distro is ~a day of porting instead of sixteen sessions | Dev machine + one validation pass per distro |
 
 Two operator decisions shape this plan (`docs/PROGRESS.md` §2):
 **wiping/rebuilding the Deck is acceptable** (2026-08-10), and the install
@@ -158,6 +163,55 @@ exactly what we did.
 
 ---
 
+## Phase 4 — Generalise: the Deck enablement layer
+
+**Full detail: `docs/tasks/T7-enablement-layer.md`.**
+
+Phase 3 ships *one* Deck-ready distro. Phase 4 makes the second one cheap.
+
+**Why after phase 3, not during.** Extracting an abstraction from one example is
+guessing; extracting it from one finished, released, soak-proven example is
+engineering. The interface must be derived from what actually turned out to be
+distro-specific — measured at **26%** of `omarchy-deck-kernel.sh` and **13%** of
+`deck-session.sh`, with `deck-input-mapper.py` at **0%** — rather than from what
+looks like it ought to be.
+
+⚠️ **What "a day" buys, stated up front:** ported and conformance-green. **Not
+shippable.** §5.18 first appeared on soak cycle 4, §5.16 needed a journal read
+across two boots, and three of this project's own checks were wrong about
+themselves. Soak time is wall-clock and no abstraction compresses it.
+
+| # | Item | Where |
+|---|---|---|
+| P4.1 | Write the **"Deck-ready" contract** — a capability checklist where every row names its oracle *and* whether a machine or a human decides it | Dev |
+| P4.2 | **Extract the portable core** (the five `render_*` helpers, the session-switch policy, the mapper, the probes). Prove it by making Omarchy consume it with the existing 62 assertions and the soak **unchanged** | Dev |
+| P4.3 | **Define the profile interface**, derived empirically from the measured distro-specific surface — package names, kernel, boot chain, initramfs, display manager, session target | Dev |
+| P4.4 | **Generalise the conformance suite** into one `deck-conformance` runner. Every check must distinguish "found nothing" from "looked in the wrong place" — **mutation-test it** | Dev |
+| P4.5 | **Porting guide + traps document.** The traps are the higher-value half: `comm` truncation, `After=` ordering cycles, `StartLimit*` placement, Steam's fallbacks, blocking reads on input nodes, `uaccess` vs groups | Dev |
+| P4.6 | **Port a second, NON-Arch distro** and record the real elapsed time. The only real test of the claim | Dev + Deck |
+| P4.7 | Consider **upstreaming** the `steamos-*` helpers — ⚠️ public action, needs operator approval | — |
+
+### Exit criteria
+
+- [ ] Omarchy runs on the extracted core with the existing suite **unchanged**
+- [ ] A distro profile is under ~250 lines against a documented interface
+- [ ] `deck-conformance` prints the capability matrix and is mutation-tested
+- [ ] **A second, non-Arch distro is ported, with its real elapsed time written
+      down** — including where the interface leaked
+- [ ] The guide states plainly that a day buys *green*, not *shippable*
+
+### Deliberately out of scope
+
+**Hosting or distributing distro images.** This layer is code. Shipping images
+reopens `steamdeck-dsp` (`Proprietary`, no licence text) as a redistribution
+problem at scale, and puts a stranger's bricked handheld on the support surface
+— see `docs/findings/P16-redistribution-and-trademark.md`. [Bazzite](https://docs.bazzite.gg/Handheld_and_HTPC_edition/Steam_Gaming_Mode/)
+and ChimeraOS already ship Deck-ready images; the differentiated thing here is
+the **controller-only install** and the enablement layer beneath it, not the
+flashing.
+
+---
+
 ## Standing risks, by phase
 
 | Risk | Phase | Mitigation |
@@ -176,3 +230,6 @@ exactly what we did.
 | TDP/fan work damages hardware | 2 | Per-item operator approval, every time — unchanged hard rule |
 | 4.0 stable lands late | 3 | Everything through P3.5 works on beta; only P3.6 gates on stable |
 | LCD divergence | 3 | Ship "OLED-verified, LCD-untested," recruit a tester after release |
+| The abstraction is extracted from one example and fits only it | 4 | P4.2 proves it by making Omarchy consume the core with the suite **unchanged**; P4.6 tests it on a deliberately non-Arch distro |
+| A conformance suite goes green for the wrong reason | 4 | Three of this project's own checks already did. Every check must distinguish "found nothing" from "looked in the wrong place"; mutation-test the suite |
+| "~A day" gets quoted as "a day to ship" | 4 | The guide and the ROADMAP both state it buys ported-and-green. Soak time is wall-clock |
