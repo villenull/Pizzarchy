@@ -561,7 +561,55 @@ stage_update_stub() {
 
   local tmp
   tmp=$(mktemp) || fail "mktemp failed"
-  cat >"$tmp" <<EOF
+  render_update_stub >"$tmp" ||
+    fail "could not render the steamos-update stub"
+
+  $SUDO install -m 0755 -o root -g root "$tmp" "$UPDATE_STUB" ||
+    fail "could not install ${UPDATE_STUB}"
+  rm -f "$tmp"
+
+  # Verify by running it, not by trusting the write. `check` answering 7 is the
+  # single behaviour Steam's first-run flow depends on.
+  local rc=0
+  "$UPDATE_STUB" check >/dev/null 2>&1 || rc=$?
+  [[ $rc -eq 7 ]] ||
+    fail "${UPDATE_STUB} installed but 'check' exited ${rc}, not 7. Steam reads 7 as 'up to date'; anything else puts the first-run update dialog back."
+
+  rc=0
+  "$UPDATE_STUB" --supports-duplicate-detection >/dev/null 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] ||
+    fail "${UPDATE_STUB} claims duplicate-detection support (exit 0). It does not implement it; that would make Steam depend on behaviour that is not there."
+
+  # The apply path must NOT exit 0. This assertion is the whole reason it is
+  # here: an earlier version of this stub exited 0, Steam read that as "update
+  # applied", and rebooted the Deck to finish it -- once per OOBE pass.
+  rc=0
+  "$UPDATE_STUB" >/dev/null 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] ||
+    fail "${UPDATE_STUB} exits 0 on the apply path. Steam reads 0 as 'an OS update was applied' and REBOOTS the device to complete it, on every first-run pass. It must report 'nothing to apply' (7) instead."
+
+  log "verified: 'check' exits 7 (up to date), capability probe declines,"
+  log "          apply exits ${rc} (non-zero, so Steam will not reboot)"
+  log "stage-update-stub: ok"
+  log "NOTE: this stub updates nothing. Real updates: ${REAL_UPDATE_HINT}"
+}
+
+# The stub's body, written to stdout.
+#
+# Split out of stage_update_stub so test/unit/test-deck-session.sh can render
+# it and execute the result with no root, no Deck and no VM. The exit codes
+# below are a protocol Steam depends on, and two of them were settled by
+# measurement on hardware rather than by reading Steam's docs -- see the case
+# arms. The three assertions above still run against the really-installed file
+# on a real Deck; the unit test is additive, not a replacement for them.
+#
+# Deliberately takes no path argument. UPDATE_STUB stays a readonly absolute
+# because Steam resolves this helper by absolute path (see POLKIT_HELPER_DIR
+# above); making it overridable would create a way to install a
+# working-looking stub somewhere Steam never looks, which is the exact class
+# of silent failure this file's header warns about.
+render_update_stub() {
+  cat <<EOF
 #!/usr/bin/env bash
 #
 # steamos-update -- A STUB. IT UPDATES NOTHING.
@@ -654,34 +702,6 @@ USAGE
     ;;
 esac
 EOF
-  $SUDO install -m 0755 -o root -g root "$tmp" "$UPDATE_STUB" ||
-    fail "could not install ${UPDATE_STUB}"
-  rm -f "$tmp"
-
-  # Verify by running it, not by trusting the write. `check` answering 7 is the
-  # single behaviour Steam's first-run flow depends on.
-  local rc=0
-  "$UPDATE_STUB" check >/dev/null 2>&1 || rc=$?
-  [[ $rc -eq 7 ]] ||
-    fail "${UPDATE_STUB} installed but 'check' exited ${rc}, not 7. Steam reads 7 as 'up to date'; anything else puts the first-run update dialog back."
-
-  rc=0
-  "$UPDATE_STUB" --supports-duplicate-detection >/dev/null 2>&1 || rc=$?
-  [[ $rc -ne 0 ]] ||
-    fail "${UPDATE_STUB} claims duplicate-detection support (exit 0). It does not implement it; that would make Steam depend on behaviour that is not there."
-
-  # The apply path must NOT exit 0. This assertion is the whole reason it is
-  # here: an earlier version of this stub exited 0, Steam read that as "update
-  # applied", and rebooted the Deck to finish it -- once per OOBE pass.
-  rc=0
-  "$UPDATE_STUB" >/dev/null 2>&1 || rc=$?
-  [[ $rc -ne 0 ]] ||
-    fail "${UPDATE_STUB} exits 0 on the apply path. Steam reads 0 as 'an OS update was applied' and REBOOTS the device to complete it, on every first-run pass. It must report 'nothing to apply' (7) instead."
-
-  log "verified: 'check' exits 7 (up to date), capability probe declines,"
-  log "          apply exits ${rc} (non-zero, so Steam will not reboot)"
-  log "stage-update-stub: ok"
-  log "NOTE: this stub updates nothing. Real updates: ${REAL_UPDATE_HINT}"
 }
 
 # ---------------------------------------------------------------------------
@@ -970,4 +990,14 @@ EOF
   esac
 }
 
-main "$@"
+# Sourcing this file defines its functions and runs nothing, so
+# test/unit/test-deck-session.sh can call render_update_stub and
+# assert_ours_or_absent directly without installing anything. Executing it
+# behaves exactly as it did before this guard existed.
+#
+# Two things a sourcing shell inherits and must expect: `set -euo pipefail`
+# from the top of this file, and every constant above as `readonly` -- so
+# sourcing twice into one shell aborts on "readonly variable". Source once.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi
