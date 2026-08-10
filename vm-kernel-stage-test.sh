@@ -111,6 +111,7 @@ EXPECTED_STAGES=(
   stage-kernel
   stage-uki
   stage-prune
+  stage-default-entry
   stage-hook
   stage-esp-permissions
 )

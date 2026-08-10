@@ -1,0 +1,8 @@
+# Build artifacts that must never enter git history: disk images and ISOs
+# are gigabytes, and the substrate is reproducible from vm-neptune-image.sh.
+# (A 2.2 GiB substrate image once reached a local commit via `git add -A`
+# and broke the push -- this file is why that cannot recur.)
+*.raw
+*.qcow2
+*.iso
+*.img

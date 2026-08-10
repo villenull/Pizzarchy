@@ -696,6 +696,185 @@ limine_entry_count() {
   $SUDO grep -cE -- "^[[:space:]]*path:.*/EFI/Linux/${esc}([#[:space:]]|$)" "$LIMINE_CONFIG" || true
 }
 
+# ---------------------------------------------------------------------------
+# default_entry -- which entry the Limine menu boots unattended.
+#
+# WHY THIS EXISTS (found on the first physical hardware run, session 7):
+# nothing in the toolchain owns this value. limine-entry-tool, limine-update
+# and limine-snapper-sync all write *entries*; none of them touch
+# `default_entry:`. On the operator's Deck it was a static `2` written at
+# install time, which resolved to the STOCK Arch kernel -- so the machine
+# booted with degraded Deck hardware support unless a human interrupted the
+# menu, and nothing anywhere would ever have reported that.
+#
+# WHY AN ENTRY PATH AND NOT AN INDEX: `default_entry` accepts a 1-based index
+# or an entry path like `Omarchy/linux-neptune-611` (Limine CONFIG.md,
+# "default_entry"). The index form is fragile by construction here:
+# limine-snapper-sync inserts and removes a Snapshots submenu as snapshots
+# come and go, so the number an index resolves to is not stable. The path
+# form is keyed on entry *names*, which that churn does not touch.
+# vm-default-entry-test.sh proves the path form is genuinely honoured (by
+# booting a non-first entry and checking the Boot Loader Interface's
+# LoaderEntrySelected EFI variable) -- observing "the right kernel booted"
+# on an entry that is also first proves nothing, since a parse failure that
+# falls back to the first entry looks identical.
+# ---------------------------------------------------------------------------
+
+# limine_menu_path_for <uki-path> -- the menu path (e.g.
+# "Omarchy/linux-neptune-611") of the entry whose `path:` line boots that
+# UKI. Parsed from the config rather than assumed, so a different
+# TARGET_OS_NAME or menu nesting still resolves. Returns 1 if no entry
+# references the UKI.
+limine_menu_path_for() {
+  local uki=$1
+  local base=${uki##*/}
+  # ENVIRON rather than -v: awk -v processes backslash escapes in the value,
+  # which would corrupt the regex metacharacter escaping done below.
+  # shellcheck disable=SC2016 # the $-free single-quoted program is awk, not shell
+  $SUDO env UKI_BASE="$base" awk '
+    BEGIN {
+      base = ENVIRON["UKI_BASE"]
+      gsub(/[][\\.^$*+?(){}|]/, "\\\\&", base)
+      uki_re = "/EFI/Linux/" base "(#|[[:space:]]|$)"
+      curdepth = 0
+    }
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      if (line ~ /^\//) {
+        depth = 0
+        while (substr(line, depth + 1, 1) == "/") depth++
+        name = substr(line, depth + 1)
+        sub(/^\+/, "", name)          # + marks the directory expanded; not part of the name
+        sub(/[[:space:]]+$/, "", name)
+        names[depth] = name
+        curdepth = depth
+        next
+      }
+      if (line ~ /^path:/ && line ~ uki_re && curdepth > 0) {
+        p = names[1]
+        for (i = 2; i <= curdepth; i++) p = p "/" names[i]
+        print p
+        found = 1
+        exit
+      }
+    }
+    END { if (!found) exit 1 }
+  ' "$LIMINE_CONFIG"
+}
+
+# limine_default_entry -- the current `default_entry:` value, or nothing.
+limine_default_entry() {
+  $SUDO sed -nE 's/^[[:space:]]*default_entry:[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\1/p' \
+    "$LIMINE_CONFIG" | head -n 1
+}
+
+# limine_set_default_entry <entry-path> -- rewrite (or insert) the
+# `default_entry:` line, then verify the write landed by re-reading it.
+limine_set_default_entry() {
+  local want=$1 tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+
+  # shellcheck disable=SC2016 # single-quoted awk program, nothing to expand
+  if $SUDO awk -v want="$want" '
+      BEGIN { done = 0 }
+      {
+        if (!done && $0 ~ /^[[:space:]]*default_entry:/) {
+          print "default_entry: " want
+          done = 1
+        } else {
+          print
+        }
+      }
+      END { if (!done) exit 3 }
+    ' "$LIMINE_CONFIG" >"$tmp"; then
+    : # replaced an existing line
+  elif [[ $? -eq 3 ]]; then
+    # No existing line: insert as the first line. Limine reads global options
+    # anywhere outside an entry, and the top of the file cannot be inside one.
+    { printf 'default_entry: %s\n' "$want"; $SUDO cat "$LIMINE_CONFIG"; } >"$tmp" ||
+      fail "could not read ${LIMINE_CONFIG} to prepend default_entry"
+  else
+    fail "could not rewrite ${LIMINE_CONFIG} (awk failed reading it)"
+  fi
+
+  $SUDO cp "$tmp" "$LIMINE_CONFIG" ||
+    fail "could not write ${LIMINE_CONFIG}"
+  rm -f "$tmp"
+
+  # Verify against the file, not the exit codes (PLAN.md §8.1).
+  local now
+  now=$(limine_default_entry)
+  [[ $now == "$want" ]] ||
+    fail "wrote default_entry: ${want} but re-reading ${LIMINE_CONFIG} gives '${now:-<nothing>}'"
+}
+
+# apply_default_entry <pkgbase> -- point default_entry at <pkgbase>'s menu
+# entry, writing only when it does not already. The shared core of
+# stage_default_entry and the reconcile path.
+apply_default_entry() {
+  local pkgbase=$1 uki menu_path current
+  uki=$(find_uki_for "$pkgbase") ||
+    fail "no UKI for ${pkgbase} on the ESP -- run '${PROG}.sh stage-uki' first. Refusing to write a default_entry that cannot resolve."
+  menu_path=$(limine_menu_path_for "$uki") ||
+    fail "no Limine menu entry's path: line boots ${uki##*/} -- the UKI exists but is not in the menu. Run '${PROG}.sh stage-uki' and inspect ${LIMINE_CONFIG}."
+
+  current=$(limine_default_entry)
+  if [[ $current == "$menu_path" ]]; then
+    log "default_entry up to date: ${menu_path}"
+    return 0
+  fi
+
+  log "default_entry: '${current:-<unset>}' -> '${menu_path}'"
+  limine_set_default_entry "$menu_path"
+  log "default_entry verified: $(limine_default_entry) (boots ${uki##*/} unattended)"
+}
+
+# default_entry_pick_pkgbase -- which installed Neptune kernel the default
+# should boot. Prints the pkgbase, or returns: 1 = none installed,
+# 2 = ambiguous (pin not installed, several others are).
+default_entry_pick_pkgbase() {
+  local -a installed=()
+  mapfile -t installed < <(installed_neptune_pkgbases)
+  if in_list "$KERNEL_PKG" "${installed[@]}"; then
+    printf '%s\n' "$KERNEL_PKG"
+    return 0
+  fi
+  case ${#installed[@]} in
+    0) return 1 ;;
+    1) printf '%s\n' "${installed[0]}"; return 0 ;;
+    *) return 2 ;;
+  esac
+}
+
+stage_default_entry() {
+  local pkgbase rc=0
+  pkgbase=$(default_entry_pick_pkgbase) || rc=$?
+  case $rc in
+    0) ;;
+    1) fail "no linux-neptune-* kernel is installed -- nothing for default_entry to boot. Run '${PROG}.sh stage-kernel' first." ;;
+    2) fail "the pinned ${KERNEL_PKG} is not installed but several other Neptune kernels are ($(installed_neptune_pkgbases | tr '\n' ' ')) -- ambiguous. Set OMARCHY_DECK_NEPTUNE_SERIES to the series the default should boot and re-run." ;;
+    *) fail "internal error: default_entry_pick_pkgbase returned ${rc}" ;;
+  esac
+  if [[ $pkgbase != "$KERNEL_PKG" ]]; then
+    log "pinned ${KERNEL_PKG} is not installed; defaulting to the only installed Neptune kernel: ${pkgbase}"
+  fi
+  apply_default_entry "$pkgbase"
+}
+
+# reconcile flavor: same policy, but a machine with no Neptune kernel at all
+# is a deliberate state (everything just got removed) -- warn loudly and leave
+# default_entry alone rather than guess at a non-Neptune default.
+reconcile_default_entry() {
+  local pkgbase rc=0
+  pkgbase=$(default_entry_pick_pkgbase) || rc=$?
+  case $rc in
+    0) apply_default_entry "$pkgbase" ;;
+    1) log "WARNING: no linux-neptune-* kernel installed -- leaving default_entry as '$(limine_default_entry)'. If that no longer resolves, Limine falls back to its first entry." ;;
+    2) fail "reconcile: pinned ${KERNEL_PKG} not installed and several other Neptune kernels are -- ambiguous default_entry. Set OMARCHY_DECK_NEPTUNE_SERIES and re-run '${PROG}.sh stage-default-entry'." ;;
+  esac
+}
+
 # reconcile_uki <pkgbase> -- verify, and repair only if verification fails,
 # the UKI and Limine entry for ONE installed Neptune kernel.
 #
@@ -854,6 +1033,10 @@ stage_reconcile() {
   fi
 
   stage_prune
+
+  # After prune, so a default that pointed at a just-pruned entry gets
+  # repointed rather than re-verified against a menu line that is gone.
+  reconcile_default_entry
 }
 
 # hook_text -- the ALPM hook, written to stdout.
@@ -1261,6 +1444,7 @@ readonly -a INSTALL_STAGES=(
   stage-kernel
   stage-uki
   stage-prune
+  stage-default-entry
   stage-hook
   stage-esp-permissions
 )
@@ -1270,6 +1454,7 @@ readonly -a INSTALL_STAGES=(
 readonly -a ESP_DEPENDENT_STAGES=(
   stage-uki
   stage-prune
+  stage-default-entry
   stage-esp-permissions
 )
 

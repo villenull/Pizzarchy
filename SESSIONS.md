@@ -84,7 +84,7 @@ is fine when they're both Sonnet; avoid it when either is Opus.
 
 | Block | What | Model | Notes |
 |---|---|---|---|
-| P1.1 | VM substrate gap + `stage-default-entry` + deliberate-failure test | **Opus** | Boot-critical. QEMU-only — good short-window block |
+| P1.1 | ✅ done 2026-08-10 — substrate gap + `stage-default-entry` + failure tests, four suites green | **Opus** | |
 | P1.2 | Gamepad mapper prototype; drive archinstall/gum | **Opus** | Design-heavy |
 | P1.3 | OSK + `FINDING-T2-gamepad-spike.md` | Sonnet | Decides T4's scope |
 | P1.4 | Ventoy USB + stock Omarchy 4.0 beta ISO | — | **Operator.** |

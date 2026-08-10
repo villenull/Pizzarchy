@@ -198,9 +198,15 @@ snap() {
   [[ -f $UKI ]] && present=1
   [[ -f $UKI ]] && sha=$(sha256sum "$UKI" | cut -d' ' -f1)
   [[ -f $UKI ]] && mtime=$(stat -c %Y "$UKI")
-  refs=$(grep -cF "omarchy_${KP}.efi" /boot/limine.conf 2>/dev/null || true)
+  # Anchored to real bootable entries under /EFI/Linux/, NOT a bare substring
+  # count: the substrate now carries a genuine limine-snapper-sync Snapshots
+  # submenu whose limine_history/ path lines embed the same UKI basenames. A
+  # substring count reads 2 for a correct config -- the exact miscount that
+  # failed the first physical hardware run (PROGRESS.md 3.6 bug 1), which
+  # this probe itself carried until the substrate could finally expose it.
+  refs=$(grep -cE "^[[:space:]]*path:.*/EFI/Linux/omarchy_${KP}\.efi(#|[[:space:]]|$)" /boot/limine.conf 2>/dev/null || true)
   [[ -f $STALE_UKI ]] && stale_present=1
-  stale_refs=$(grep -cF "omarchy_${STALE_KP}.efi" /boot/limine.conf 2>/dev/null || true)
+  stale_refs=$(grep -cE "^[[:space:]]*path:.*/EFI/Linux/omarchy_${STALE_KP}\.efi(#|[[:space:]]|$)" /boot/limine.conf 2>/dev/null || true)
   nept=$(find /boot/EFI/Linux -maxdepth 1 -name '*linux-neptune-*.efi' 2>/dev/null | wc -l)
   emit "${tag}.uki_present=${present}"
   emit "${tag}.uki_sha=${sha}"
