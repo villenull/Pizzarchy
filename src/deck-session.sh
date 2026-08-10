@@ -148,7 +148,16 @@ readonly UPSTREAM_GREETER_SHA256=353fe59d7d46b21946cdc48000eef7b131e9e577c1d6117
 # its own output (the idempotency requirement) and refuses to clobber someone
 # else's. Keyed on a marker rather than on file type, because a symlink test
 # would not survive the first time we install a real script.
-readonly INSTALL_MARKER="# installed-by: ${PROG}.sh"
+#
+# The COMMENT PREFIX varies by file type and the bare text is what we match on.
+# This is not fussiness: the marker was originally '#'-only, and embedding it in
+# a Lua config put a '#' on line 2, where Lua only accepts one on line 1. That
+# is a syntax error, so Hyprland discarded the entire greeter config and fell
+# back to defaults -- rotated -- without logging anything. Add a new prefix here
+# rather than reusing one that happens to be nearby.
+readonly INSTALL_MARKER_TEXT="installed-by: ${PROG}.sh"
+readonly INSTALL_MARKER="# ${INSTALL_MARKER_TEXT}"        # shell, ini/sddm.conf
+readonly INSTALL_MARKER_LUA="-- ${INSTALL_MARKER_TEXT}"   # lua (hyprland config)
 
 # BUG FIX (was 95-deck-session.conf): SDDM reads /etc/sddm.conf.d/*.conf in
 # lexical order and LATER files win. The previous name carried a comment
@@ -274,7 +283,8 @@ stage_preconditions() {
 # a human decide.
 assert_ours_or_absent() {
   local path=$1 whose=$2
-  if $SUDO test -e "$path" && ! $SUDO grep -qF -- "$INSTALL_MARKER" "$path" 2>/dev/null; then
+  # Matched on the bare text, so a file using any comment prefix is recognised.
+  if $SUDO test -e "$path" && ! $SUDO grep -qF -- "$INSTALL_MARKER_TEXT" "$path" 2>/dev/null; then
     fail "${path} exists but was not written by ${PROG}.sh -- ${whose} owns it. Inspect it rather than overwriting it."
   fi
 }
@@ -645,7 +655,7 @@ stage_greeter_rotation() {
   tmp=$(mktemp) || fail "mktemp failed"
   cat >"$tmp" <<EOF
 -- Hyprland config for the SDDM Wayland greeter on a Steam Deck.
-${INSTALL_MARKER}
+${INSTALL_MARKER_LUA}
 --
 -- A MIRROR of ${UPSTREAM_GREETER_LUA} (Omarchy's own greeter config, package
 -- owned by omarchy-settings-dev) plus the panel transform. Editing upstream's
@@ -671,6 +681,23 @@ hl.config({
 -- transform = 1 renders upside down.
 hl.monitor({ output = "${PANEL_OUTPUT}", mode = "preferred", position = "auto", scale = ${PANEL_SCALE}, transform = ${PANEL_TRANSFORM} })
 EOF
+  # Prove it PARSES before installing it. Hyprland does not fail loudly on a
+  # broken Lua config: it discards the file, falls back to built-in defaults,
+  # and logs nothing beyond "loading lua mgr". The greeter then comes up
+  # rotated and unstyled, looking like the transform simply did not work. This
+  # check exists because that is exactly what happened -- a '#' comment on
+  # line 2, legal in shell, a syntax error in Lua.
+  if command -v luac >/dev/null 2>&1; then
+    local luaerr
+    if ! luaerr=$(luac -p "$tmp" 2>&1); then
+      rm -f "$tmp"
+      fail "the greeter config this stage generates is not valid Lua: ${luaerr}. Refusing to install it -- Hyprland would silently ignore it and the greeter would render rotated with no error anywhere."
+    fi
+    log "verified: generated greeter config is valid Lua"
+  else
+    warn "luac not found, so the generated greeter config was NOT syntax-checked. A Lua syntax error here is silent: Hyprland discards the config and falls back to defaults. Install the 'lua' package to enable this check."
+  fi
+
   $SUDO install -m 0644 -o root -g root "$tmp" "$GREETER_LUA" ||
     fail "could not install ${GREETER_LUA}"
   rm -f "$tmp"
