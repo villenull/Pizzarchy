@@ -112,7 +112,7 @@ short, targeted Deck iterations over `tools/deck-sync.sh`.
 | P2.0c ✅ | **Done 2026-08-10 (session 16).** §5.16's real cause found (the STOP times out) and fixed; **20/20 soak cycles clean**, zero start-limit-hit. Found and half-fixed §5.18 on the way | Deck | `docs/PROGRESS.md` §5.16, R-27 |
 | P2.0e ✅ | **Done 2026-08-10 (session 16).** §5.18 resolved — cause was `steam-launcher.service`'s 60s teardown (R-28). Autologin attempts across 20 switches: 600 → 283 → **20 (ideal)** | Deck | `docs/PROGRESS.md` §5.18, R-28 |
 | P2.1 | Desktop-mode input mapper as a `--user` service + `squeekboard`, on the Deck; verify against 4.0's `uwsm` targets | Deck (short) | `docs/tasks/T3-gaming-mode.md` §4 |
-| P2.2 | Hardware parity batch 1: Wi-Fi, BT, audio, trackpads/gyro, buttons in both sessions → `docs/findings/hardware-parity.md` | Deck | `docs/tasks/T3-gaming-mode.md` §5 |
+| P2.2 🟡 | Hardware parity batch 1 → `docs/findings/hardware-parity.md`. **Programmatic half done (session 16):** Wi-Fi, BT, audio, display, kernel all at parity; input differs because Steam replaces the native nodes with a virtual Xbox pad. **Remaining rows need a human** (audible sound, haptics, gyro response, button mapping, BT pairing) | Deck | `docs/tasks/T3-gaming-mode.md` §5 |
 | P2.3 | Hardware parity batch 2: TDP, fan, battery — **operator approval per item, every time** | Deck | `docs/tasks/T3-gaming-mode.md` §5 |
 | P2.4 | Shell integration on Quickshell (now testable): pin the return icon, QAM/Power-menu trigger placement | Deck (short) | `docs/tasks/T3-gaming-mode.md` §6 |
 | P2.5 | T4: the 8 installer screens, per T2's finding; rotation handling per P1.5's recon | QEMU | `docs/tasks/T4-installer-ui.md` |

@@ -560,7 +560,16 @@ While in the live environment, still record for T4/T5:
 
 *(Both recon items above are now answered — see §5.9.)*
 
-### 5.9 ⚠️ NEW, and it re-scopes T4: the gamepad node is silent in the live ISO
+### 5.9 ⚠️ It re-scopes T4: the gamepad node is silent in the live ISO
+
+> ⚠️ **Session 16 addendum — the event numbers below are LIVE-ISO ONLY.** On the
+> installed system the same roles sit on different nodes: buttons on `event6`
+> (not `event5`), trackpads on `event5` (not `event4`), the real gamepad on
+> `event7` (not `event11`), and the device is named **`"Steam Deck"`**, not
+> `"Steam Deck Controller"`. Anything hardcoding these numbers binds the wrong
+> device. `src/deck-input-mapper.py` selects by *capability* (`BTN_SOUTH`),
+> which is why it is unaffected. Full enumeration:
+> `docs/findings/hardware-parity.md`.
 
 Measured 2026-08-10 (`docs/findings/P15-live-iso-recon.md` §R-8). With Steam not
 running, the Deck's controller firmware is in **lizard mode**, and lizard mode
