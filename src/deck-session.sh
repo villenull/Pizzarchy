@@ -1747,8 +1747,26 @@ stage_return_icon() {
   # every launcher on every shell reads /usr/share/applications, so this works
   # identically on Omarchy 3.x (waybar-era) and on 4.0's Quickshell rewrite.
   #
+  # Icon=input-gaming, and both halves of that are deliberate.
+  #
+  # It RESOLVES: the previous value `steamicon` matched nothing on this system
+  # (the installed files are steam.png), so the entry showed a broken icon.
+  # Verified against /usr/share/icons rather than assumed.
+  #
+  # And it is NOT Valve artwork. `steam` would resolve, but
+  # docs/findings/P16-redistribution-and-trademark.md says not to ship Valve's
+  # iconography. input-gaming is a standard freedesktop name.
+  #
   # PINNING it to a bar/dock IS shell-specific and is deliberately NOT done
-  # here -- see TASK-T3 step 6.
+  # here -- see TASK-T3 step 6. For Omarchy 4.0 the mechanism is the Quickshell
+  # menu, extended via ~/.config/omarchy/extensions/omarchy-menu.jsonc:
+  #
+  #   "gaming": {"icon":"\udb81\udcb4","label":"Return to Gaming Mode",
+  #              "action":"${STEAM_SHIM} gamescope"}
+  #
+  # That takes a Nerd Font GLYPH rather than an icon file, which sidesteps the
+  # artwork question entirely. It is per-user config, so T5 has to seed it the
+  # same way it seeds monitors.lua -- see PROGRESS.md 5.11.
   log "installing ${RETURN_DESKTOP_FILE}"
   local tmp
   tmp=$(mktemp) || fail "mktemp failed"
@@ -1758,7 +1776,7 @@ Type=Application
 Name=Return to Gaming Mode
 Comment=Switch back to the Steam Big Picture session
 Exec=${STEAM_SHIM} gamescope
-Icon=steamicon
+Icon=input-gaming
 Terminal=false
 Categories=Game;
 Keywords=steam;gaming;gamescope;deck;
