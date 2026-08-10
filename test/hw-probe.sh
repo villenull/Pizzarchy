@@ -55,12 +55,12 @@ for want in 'Steam Deck Controller' 'Steam Virtual Gamepad' 'FTS3528' 'AT Transl
 done
 # NOT `grep /dev/input/event*` -- reading an input node BLOCKS until an event
 # arrives, which is how this probe hung the first time. Count the nodes.
-kv input.event.nodes "$(ls -1 /dev/input/event* 2>/dev/null | wc -l)"
-kv input.js.nodes "$(ls -1 /dev/input/js* 2>/dev/null | wc -l)"
+kv input.event.nodes "$(set -- /dev/input/event*; [ -e "$1" ] && echo $# || echo 0)"
+kv input.js.nodes "$(set -- /dev/input/js*; [ -e "$1" ] && echo $# || echo 0)"
 kv input.accel "$(ls /sys/bus/iio/devices/ 2>/dev/null | paste -sd,)"
 
 echo "### display"
-kv display.drm "$(ls -1 /sys/class/drm/ 2>/dev/null | grep -c 'card[0-9]-')"
+kv display.drm "$(set -- /sys/class/drm/card[0-9]-*; [ -e "$1" ] && echo $# || echo 0)"
 kv display.connected "$(for c in /sys/class/drm/card*-*/status; do [ -r "$c" ] && [ "$(cat "$c")" = connected ] && basename "$(dirname "$c")"; done | paste -sd,)"
 kv display.backlight "$(cat /sys/class/backlight/amdgpu_bl0/brightness 2>/dev/null)/$(cat /sys/class/backlight/amdgpu_bl0/max_brightness 2>/dev/null)"
 
