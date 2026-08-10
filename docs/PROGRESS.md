@@ -817,7 +817,50 @@ it needs a narrower replacement grant first. `deck` has a password set
 is recoverable rather than a lockout. Decide before P2.7 bakes anything into
 the image.
 
-### 5.16 🐞 The session switch can leave the Deck with NO session — mitigated, root cause open
+### 5.18 🐞 NEW and product-critical: a failed session start drops the user at a PASSWORD GREETER
+
+Found by session 16's soak test, cycle 4 of 20. This is §5.16's failure in the
+form a user actually meets, and it is worse than "no session": it is a login
+screen that a controller cannot answer.
+
+```
+14:45:59.845  Session "omarchy.desktop" selected ... for VT 1
+14:45:59.872  Authentication for user "deck" successful
+14:45:59.996  Starting Wayland user session: "uwsm start -g -1 -e -D Hyprland ..."
+14:46:00.000  Session started true
+14:46:00.001  session closed for user deck        <- ONE MILLISECOND later
+14:46:00.007  Auth: sddm-helper exited with 5
+14:46:00.008  Adding new display...              <- the GREETER
+```
+
+Two independent faults, and both need fixing:
+
+**(a) The incoming session dies because the outgoing one has not finished.**
+`uwsm start … Hyprland` exited in ~1 ms. At the moment of failure seat0 still
+carried a leftover `deck` user session plus its user manager alongside the new
+greeter. `render_restart_helper`'s settle step waits for
+`loginctl show-seat seat0 -p Sessions` to empty, which is **not the same thing**
+as the user's systemd manager and `uwsm` having finished — so the settle can
+report "free" while the previous graphical session is still unwinding.
+
+**(b) SDDM then shows the greeter instead of retrying, because
+`Relogin=false`** — the shipped default, in
+`/usr/lib/sddm/sddm.conf.d/default.conf`. Autologin fires once; if that session
+dies, the user gets a password prompt. On this device that is unrecoverable
+without a keyboard, which violates `CLAUDE.md`'s controller-only rule.
+
+(b) is the safety net and the more important half: fixing (a) makes the failure
+rarer, but only (b) decides what the user sees when it still happens.
+**Tradeoff to decide before changing it:** `Relogin=true` on a genuinely broken
+session gives a fast autologin loop with no greeter to escape to. That is the
+same posture already chosen in `stage-sddm-resilience` — a loop that can still
+recover beats a dead end that cannot — and Ctrl+Alt+F2 remains the dev escape.
+
+⚠️ **This is why "it worked once" was never enough.** P1.5's R-18 and session
+15's R-23 both took this switch successfully; the defect needed 4 cycles to
+appear.
+
+### 5.16 🐞 The session switch can leave the Deck with NO session — root cause FIXED, verification incomplete
 
 Found by taking the Gaming→Desktop path for real (§5.10). The switch left the
 Deck with no graphical session, recoverable only via
@@ -831,12 +874,29 @@ the VT to be free — and two failures inside 30 s latched the unit to `failed`
 **permanently**. A self-healing condition became unrecoverable because of a rate
 limit.
 
-**Mitigated** by `stage-sddm-resilience`: `StartLimitIntervalSec=0` and
-`RestartSec=3`, asserted against the values *systemd resolved*.
+**Root cause found and fixed, 2026-08-10 (session 16).** ⚠️ The mechanism above
+is **incomplete and its fix rationale was wrong** — see `R-27`. The first
+domino is the **stop timing out**: `TimeoutStopSec=5`, teardown measured at
+5.008 s, so systemd SIGKILLed sddm and ran the start job **3 ms** later against
+a VT the killed compositor still held. `RestartSec` never gated that start at
+all — it came from an explicit `systemctl restart` transaction, and `RestartSec`
+only spaces `Restart=always` auto-restarts. It also fired **at boot**, so it was
+never switch-specific.
 
-**Still open — the root cause.** The restart is issued from inside the session
-being torn down. Decoupling it (a transient `systemd-run` unit, so the caller is
-not killed mid-restart) would *avoid* the race rather than only survive it.
+Now fixed in three parts: `TimeoutStopSec=30`; `systemctl restart sddm` replaced
+by an explicit stop → settle → start in `render_restart_helper`; and that
+sequence run from a `systemd-run` transient unit, since `KillMode=control-group`
+kills a caller inside the session being torn down.
+
+**Measured after the fix:** across ~14 switches, including a run that hammered
+10 switches in 50 s, **zero stop timeouts and zero `start-limit-hit`**, and sddm
+never latched — under abusive pacing it retried 11 times and recovered itself,
+where the original defect needed `reset-failed` over SSH.
+
+**Verification still incomplete.** The 20-cycle soak got 3 clean cycles and then
+hit a *different* defect at cycle 4 — **§5.18**, which is now the blocker. The
+switch cannot be called robust until that is fixed and the soak actually runs to
+20.
 
 ⚠️ **The verification has an honest limit:** the round trip afterwards passed
 *without the race recurring*, so what is proven is that the latch is gone — not
