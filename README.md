@@ -24,13 +24,14 @@ Read START-HERE.md and begin.
 | File | What it is |
 |---|---|
 | `START-HERE.md` | **Entry point.** Work queue, autonomy rules, model routing. |
+| `ROADMAP.md` | **The plan** — three phases from here to a released ISO. |
 | `CLAUDE.md` | Hard constraints. Auto-loaded every session. |
 | `PROGRESS.md` | **Authoritative state.** Scope decisions, findings, open issues, and the facts not to re-derive. |
 | `SESSIONS.md` | Usage-limit budgeting and the block schedule. |
 | `PLAN.md` | The original plan. **Frozen and partly superseded** — read its banner first. |
 | `TASK-*.md` | Eight work specs: objective, steps, done-criteria, escalation. |
 | `FINDING-*.md` | Research outputs — the evidence behind each decision. |
-| `DRAFT-*.md` | Staged upstream reports and outreach. Nothing sent. |
+| `DRAFT-*.md` | One staged upstream bug report. Nothing sent. |
 | `omarchy-deck-kernel.sh` | Kernel/boot automation. Nine idempotent stages, shellcheck-clean, VM-tested and **validated on physical hardware**. |
 | `deck-session.sh` | Gaming Mode ↔ Desktop Mode session switching. |
 | `vm-*.sh`, `test-vm-*.sh` | QEMU test harness and unit suites. |

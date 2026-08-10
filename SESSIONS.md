@@ -80,31 +80,26 @@ is fine when they're both Sonnet; avoid it when either is Opus.
 | 8 | ✅ First hardware run | T1 | **Opus** | Two real bugs; R1 §10.3 decided |
 | 9 | ✅ Scope reset + doc consolidation | — | **Opus** | ISO target, Omarchy 4.0, DeckShift dropped |
 
-### Remaining
+### Remaining — see `ROADMAP.md` for the full phase plan
 
-| # | Block | Task | Model | Notes |
-|---|---|---|---|---|
-| 10 | **Wi-Fi in the live ISO** | `PROGRESS.md` §5.1 | Sonnet | ⚠️ **Do first.** Cheap, and a "no" reshapes T5. **Hardware.** |
-| 11 | Gamepad mapper + OSK spike | T2 §1–4 | **Opus** | Design-heavy. Must work in the *live ISO* |
-| 12 | Write the T2 finding | T2 §5 | Sonnet | Decides T4's scope |
-| 13 | Close the VM substrate gap + `stage-default-entry` | T1 §7–8 | **Opus** | Boot-critical. Both are QEMU-only |
-| 14 | Remove DeckShift, prove both switch directions | T3 §2–3 | Sonnet | **Hardware. Ask first.** |
-| 15 | Input mapper in the desktop session | T3 §4 | Sonnet | Shares T2's implementation |
-| 16 | Hardware parity batch 1 | T3 §5 | Sonnet | Wi-Fi, BT, audio, input. **Hardware.** |
-| 17 | Hardware parity batch 2 | T3 §5 | **Opus** | TDP/fan/thermal. **Hardware. Ask first.** |
-| 18–19 | Installer screens | T4 | Sonnet | 8 screens; screen 7 needs controller text entry |
-| 20 | Full flow in QEMU | T4 | Sonnet | No keyboard attached |
-| 21–22 | Fork ISO builder + payload | T5 | Opus (repo plumbing), Sonnet (rest) | |
-| 23 | Rebase onto Omarchy 4.0 stable | T6 §1 | **Opus** | T3's shell hooks most at risk |
-| 24 | Hardware matrix + release | T6 §2–7 | **Opus** | **Hardware.** All nine steps in one run. |
+| Block | What | Model | Notes |
+|---|---|---|---|
+| P1.1 | VM substrate gap + `stage-default-entry` + deliberate-failure test | **Opus** | Boot-critical. QEMU-only — good short-window block |
+| P1.2 | Gamepad mapper prototype; drive archinstall/gum | **Opus** | Design-heavy |
+| P1.3 | OSK + `FINDING-T2-gamepad-spike.md` | Sonnet | Decides T4's scope |
+| P1.4 | Ventoy USB + stock Omarchy 4.0 beta ISO | — | **Operator.** |
+| P1.5 | Deck recon + rebuild: live-ISO Wi-Fi/rotation, wipe → 4.0, kernel script conversion run, session switching | Sonnet | **Hardware. Ask first. USB keyboard needed.** |
+| P2.1 | Input mapper in the desktop session | Sonnet | Shares P1.2's implementation |
+| P2.2 | Hardware parity batch 1 | Sonnet | Wi-Fi, BT, audio, input. **Hardware.** |
+| P2.3 | Hardware parity batch 2 | **Opus** | TDP/fan/thermal. **Hardware. Ask first, per item.** |
+| P2.4 | Quickshell integration: pin icon, QAM trigger | Sonnet | Now testable — 4.0 on the Deck |
+| P2.5–6 | Installer screens + full QEMU flow | Sonnet | 8 screens; no keyboard attached |
+| P2.7–8 | Fork ISO builder + payload + CI artifact | Opus (repo plumbing), Sonnet (rest) | |
+| P3.1–7 | Factory reset → full matrix → resilience → release | **Opus** | **Hardware.** See `ROADMAP.md` phase 3 |
 
-Blocks 10–22 are 4.0-stable-independent — run them before stable lands.
-Block 23 onward requires Omarchy 4.0 stable.
-
-⚠️ **Two of these are ordering traps.** Block 10 is tiny and ranks first
-because a bad answer changes T5's design. Block 13 is listed after T2 only
-because T2 is on the critical path to the ISO — if a window is short, block
-13 is the better fit, since both halves are QEMU-only and need no hardware.
+Everything through P3.5 works on 4.0 beta; only P3.6 (rebase) gates on
+stable. P1.1–P1.3 need no hardware and can run in any order; P1.5 should
+follow P1.1 so the fresh install gets `stage-default-entry`.
 
 ## Session open / close ritual
 

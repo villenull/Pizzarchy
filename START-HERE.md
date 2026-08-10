@@ -31,12 +31,13 @@ it.
 | File | Read it when |
 |---|---|
 | `CLAUDE.md` | Auto-loaded every session. Hard constraints. |
+| `ROADMAP.md` | **The plan — three phases.** Where the current block fits and what gates what. |
 | `PROGRESS.md` | **Every session start. This is the authoritative state.** Scope, findings, open issues, and ~20 facts not to re-derive. |
 | `SESSIONS.md` | Usage-limit budgeting and the block schedule. |
 | `PLAN.md` | **Frozen and partly superseded.** Read the banner at the top first. Good for §6.1a (installer screens), §8 (bug hypotheses), §9 (test tiers), §11 (maintenance risks). |
 | `TASK-*.md` | One per work block. |
 | `FINDING-*.md` | Research outputs. Evidence behind the decisions in `PROGRESS.md`. |
-| `DRAFT-*.md` | Staged upstream reports/outreach. **Nothing sent. Do not send.** |
+| `DRAFT-*.md` | Staged upstream report. **Nothing sent. Do not send.** |
 | `omarchy-deck-kernel.sh` | T1's deliverable. Nine idempotent stages, VM-tested and hardware-validated. |
 | `deck-session.sh` | T3's session-switch layer. |
 
@@ -89,26 +90,24 @@ subdirectories.**
 
 ## 4. The work queue
 
+**The ordering lives in `ROADMAP.md` — three phases.** Task-to-phase mapping:
+
 | Task | File | Model | State |
 |---|---|---|---|
-| T0 | `TASK-T0-test-infrastructure.md` | Sonnet | ✅ done |
+| T0 | `TASK-T0-test-infrastructure.md` | Sonnet | ✅ done (Ventoy gap → P1.4) |
 | R1 | `TASK-R1-research-questions.md` | Opus/Sonnet | ✅ done |
-| T1 | `TASK-T1-kernel-and-boot.md` | **Opus** | ✅ done, one gap open |
-| T2 | `TASK-T2-gamepad-input-spike.md` | **Opus** | ⬜ **next** — sizes T4 |
-| T3 | `TASK-T3-gaming-mode.md` | Sonnet/Opus | 🟡 in progress |
-| T4 | `TASK-T4-installer-ui.md` | Sonnet | ⬜ blocked on T2 |
-| T5 | `TASK-T5-iso-and-payload.md` | Sonnet/Opus | ⬜ not started |
-| T6 | `TASK-T6-integration-release.md` | **Opus** | ⬜ gated on Omarchy 4.0 stable |
+| T1 | `TASK-T1-kernel-and-boot.md` | **Opus** | 🟡 loose ends → P1.1 |
+| T2 | `TASK-T2-gamepad-input-spike.md` | **Opus** | ⬜ **next** → P1.2–P1.3 |
+| T3 | `TASK-T3-gaming-mode.md` | Sonnet/Opus | 🟡 P1.5 + P2.1–P2.4 |
+| T4 | `TASK-T4-installer-ui.md` | Sonnet | ⬜ P2.5–P2.6, blocked on T2 |
+| T5 | `TASK-T5-iso-and-payload.md` | Sonnet/Opus | ⬜ P2.7–P2.8 |
+| T6 | `TASK-T6-integration-release.md` | **Opus** | ⬜ phase 3 |
 
-**Start with T2.** It is the only thing standing between here and knowing
-whether T4 is days or weeks of work, and T4 is on the critical path to the
-ISO. Its scope grew slightly: the mapper and on-screen keyboard now have to
-work **in the live ISO**, because the user types a Wi-Fi password before
-anything is installed (`PROGRESS.md` §2.2).
-
-⚠️ **`PROGRESS.md` §5.1 is cheaper than T2 and ranks above it** if the
-operator is willing to boot the stock ISO on the Deck: does Wi-Fi work at all
-from the live environment? A no there reshapes T5.
+**Start with phase 1's parallel-safe work:** P1.1 (T1 loose ends, QEMU-only)
+and the T2 spike. The Deck recon/rebuild session (P1.4–P1.5) needs the
+operator — it wipes the Deck onto a fresh Omarchy 4.0 and answers the live-ISO
+Wi-Fi question, both approved in principle (`PROGRESS.md` §2.5) but confirmed
+per-session.
 
 ---
 

@@ -13,9 +13,9 @@ A Steam Deck–native, controller-only installer ISO for **Omarchy 4.0
 (Quattro)** that preserves stock SteamOS Gaming Mode and adds a Desktop Mode
 (Omarchy/Hyprland) reachable by button/icon, not just a keybind.
 
-Full spec: `PLAN.md`. **It is frozen and partly superseded** — read the
-banner at its top before trusting any section. Current state and every
-decision that overrode it: `PROGRESS.md`.
+The plan and its ordering: `ROADMAP.md` (three phases). Current state and
+every decision: `PROGRESS.md`. Original spec: `PLAN.md` — **frozen and
+partly superseded**; read the banner at its top before trusting any section.
 
 ## Hard constraints — don't violate without asking
 
@@ -52,7 +52,11 @@ shellcheck/unit tests (seconds) → automated QEMU install (minutes) →
 physical Deck only for kernel boot, gyro/haptics/trackpads, audio DSP,
 Wi-Fi/BT, TDP/fan, gamescope, session switching, and RC-only full installs.
 
-Never propose reinstalling on the Deck as a first resort. Ask if unsure.
+Never propose reinstalling on the Deck as a first resort for *iteration* —
+there is almost always a faster tier. The planned rebuild and factory reset
+in `ROADMAP.md` (P1.5, P3.1) are the deliberate exceptions, approved in
+principle 2026-08-10; still confirm with the operator before executing
+either. Ask if unsure.
 
 ## Model routing
 

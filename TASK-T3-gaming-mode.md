@@ -64,17 +64,17 @@ which is in no repo configured here (verified with `pacman -F` across all six).
 Without it, Steam's own affordance **silently does nothing** — `PLAN.md` §8.1's
 failure mode, in the one place a controller-only user cannot work around it.
 
-### 2. Remove DeckShift from the test Deck ⚠️ operator approval required
+### 2. ~~Remove DeckShift from the test Deck~~ — superseded by the rebuild
 
-The Deck currently runs a DeckShift hybrid, including a hand-edit at
-`/usr/local/bin/gamescope-session-nm-wrapper:163`.
+The Deck currently runs a DeckShift hybrid (hand-edit at
+`/usr/local/bin/gamescope-session-nm-wrapper:163`, plus five other modified
+files — inventory in `FINDING-deckshift-hybrid.md`). **The phase-1 rebuild
+(`ROADMAP.md` P1.5) wipes all of it** — no manual unwind, and the `/tmp`
+backups stop mattering (`PROGRESS.md` §2.5).
 
-**Before anything else: the only backups of six modified system files are in a
-`/tmp` scratchpad on the Deck.** Copy them somewhere durable first. They will
-not survive a reboot.
-
-Then: install `deck-session.sh`'s stages, remove DeckShift, verify the switch
-still works in both directions without it.
+Until that session runs, treat the Deck's current session config as
+known-contaminated: findings gathered on it about session switching do not
+transfer to the clean install.
 
 ### 3. Prove both directions on hardware — the actual gate
 

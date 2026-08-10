@@ -28,14 +28,19 @@ may use Wi-Fi (§2.2).
 | **T5** ISO + package payload | ⬜ not started | Unblocked by R1 and simplified by §2.2; needs T2/T3/T4 for the package list |
 | **T6** Integration + release | ⬜ not started | Gated on Omarchy 4.0 stable |
 
-**Next action:** T2, the gamepad→input spike. It is the only thing standing
-between here and knowing whether T4 is days or weeks of work.
+**The plan is `ROADMAP.md`** — three phases: answer the unknowns and rebuild
+the test bed (1), build the product (2), prove it from a factory reset and
+release (3).
+
+**Next action:** Phase 1 — P1.1 (T1 loose ends in QEMU) and the T2 spike can
+start immediately; the Deck recon/rebuild session (P1.4–P1.5) needs the
+operator.
 
 ---
 
-## 2. Scope — decided 2026-08-09
+## 2. Scope — decided 2026-08-09/10
 
-Four decisions taken together. They interlock; read them as one.
+Five decisions taken together. They interlock; read them as one.
 
 ### 2.1 The ISO is the deliverable
 
@@ -93,8 +98,9 @@ packaging — proven on this exact machine). **T3's shell integration is not
 immune:** the Desktop Mode icon and the Quick Access Menu hook land differently
 on Quickshell than on the 3.x waybar shell.
 
-**Open, needs the operator:** upgrade the test Deck to 4.0 beta, or add a
-second test target. See §6.
+**Resolved by §2.5:** the Deck is rebuilt onto a fresh, package-based
+Omarchy 4.0 in phase 1 (`ROADMAP.md` P1.5) — no in-place upgrade of the git
+install, no second device needed.
 
 ### 2.4 DeckShift is out — this project ships its own session layer
 
@@ -119,6 +125,29 @@ reversed.** Reasons, in order of weight:
 `deck-session.sh` — written and hardware-tested before DeckShift was adopted,
 then retired — **is restored** as the session layer, with its two known bugs
 fixed (§4.2).
+
+### 2.5 Wiping / factory-resetting the Deck is acceptable — decided 2026-08-10
+
+The operator explicitly approved fully restoring the Deck to factory settings
+if needed. This retires the "protect the precious install at all costs"
+posture and lets the plan *use* rebuilds deliberately:
+
+- **Phase 1** (`ROADMAP.md`): wipe the 3.8.4-from-git install and put a
+  fresh, package-based **Omarchy 4.0** on the Deck via the stock ISO — one
+  session that answers §5.1, recons the live environment, validates the
+  stock→Neptune conversion for real, and clears the DeckShift hand-edits.
+- **Phase 3**: factory-reset via Valve's recovery image, then run the full
+  release matrix from the exact state a real user starts from — and write
+  the recovery documentation while doing it.
+
+**What survives:** every write to the Deck still requires asking first;
+snapshots still precede destructive iteration; "never *reinstall to test*"
+still holds for day-to-day work — planned rebuilds in `ROADMAP.md` are the
+deliberate exception, not a shortcut.
+
+**What this de-urgents:** the `/tmp` backups of the six DeckShift-era
+hand-edited files only mattered for restoring the current install's state.
+Since that state is scheduled to be wiped, losing them costs nothing.
 
 ---
 
@@ -366,14 +395,22 @@ reports are not transferable without checking the model.
 **Cheap to settle, and it should be settled before T4 designs a Wi-Fi screen
 around an assumption:**
 
-1. Boot the *stock, unmodified* `omarchy-iso` on the Deck from the Ventoy USB
-   and see whether a wireless interface enumerates and can associate.
+1. Boot the *stock, unmodified* Omarchy 4.0 ISO on the Deck from the Ventoy
+   USB and see whether a wireless interface enumerates and can associate.
+   This is `ROADMAP.md` P1.5's first act, before the wipe.
 2. If it does not, the ISO fork must carry `linux-firmware-neptune` (or the
    specific firmware blob) **in the live environment's own filesystem**, not
    just in the package payload — a different and less obvious change than
    adding a package to the mirror.
 
-If this fails and cannot be fixed in the live image, the offline mirror
+While in the live environment, also record two more things T4/T5 need
+(one boot answers all three):
+
+- **Display rotation.** The Deck panel is portrait-native; the live ISO may
+  render rotated 90°. T4's screens must know.
+- **Input enumeration** — what the controller looks like to the live kernel.
+
+If Wi-Fi fails and cannot be fixed in the live image, the offline mirror
 becomes load-bearing again and §2.2 has to be partially reconsidered. That is
 why it ranks first.
 
@@ -415,6 +452,10 @@ stages only ever ran their no-op path**. The actual conversion — removing Arch
 split `linux-firmware-*` and swapping in Valve's, and cycling the ESP mount on a
 live system — remains VM-only evidence. Biggest remaining hardware gap for T1.
 
+**Closes by design in `ROADMAP.md` P1.5:** the fresh Omarchy 4.0 install is a
+stock-kernel system, so running `omarchy-deck-kernel.sh` on it exercises the
+real conversion path end to end.
+
 Related: bumping the Neptune pin (`NEPTUNE_SERIES_DEFAULT=611`; `618` is the
 newest non-RC series) is a one-line change but should not ship without a
 hardware boot test.
@@ -427,16 +468,18 @@ done. T1 is otherwise complete; this is an unticked box being carried as ticked.
 
 ### 5.6 The test Deck is not running the target OS
 
-See §2.3. Needs an operator decision.
+**Resolved by plan:** §2.5's phase-1 rebuild puts a fresh, package-based
+Omarchy 4.0 on it (`ROADMAP.md` P1.5). Open only until that session runs.
 
 ### 5.7 T0's two remaining gaps
 
 - **Ventoy USB setup has never been executed** (documented in
-  `FINDING-testing-usb.md`, not done). Needed for any real ISO testing in T5/T6.
-- **`deck-sync.sh` has never run against real hardware.** Cheaper to fix now
-  than when written — the Deck is reachable from the operator's network, though
-  not from the dev machine as `steamdeck` (hostname does not resolve; needs an
-  IP or an entry in `/etc/hosts`).
+  `FINDING-testing-usb.md`, not done). Now on the critical path — it is
+  `ROADMAP.md` P1.4.
+- **`deck-sync.sh` has never run against real hardware.** Fold into P1.5's
+  post-install setup: enable `sshd` on the fresh install and give the dev
+  machine a resolvable host (the `steamdeck` hostname currently does not
+  resolve; needs an IP or an `/etc/hosts` entry).
 
 ### 5.8 Untouched risk items from the original plan
 
@@ -447,36 +490,44 @@ See §2.3. Needs an operator decision.
   (`PLAN.md` §6.1's button glyphs), and whether the ISO may redistribute Valve's
   kernel and firmware. Flagged as cheap-to-check-early; **not checked.**
 - **Recovery path documentation** — how a user returns to stock SteamOS. An
-  ethical baseline for a wipe-the-device project. **Not written.**
+  ethical baseline for a wipe-the-device project. **Not written — and now
+  scheduled:** `ROADMAP.md` P3.1 produces it as a byproduct of the phase-3
+  factory reset.
 
-### 5.9 Upstream drafts are staged and held
+### 5.9 One upstream draft staged and held
 
-Five `deckarchy` bug reports, one `basecamp/omarchy` ESP-permissions report, and
-an outreach message to `28allday` are fully drafted and reviewed but
-**deliberately unsent**, by operator choice. Nothing has been posted anywhere.
+`DRAFT-upstream-esp-permissions-omarchy.md` (against `basecamp/omarchy`) is
+fully drafted, reviewed, and **deliberately unsent** by operator choice. It is
+kept because its bug is one this project actively works around — when upstream
+fixes it, `stage_esp_permissions`'s loosening can be revisited.
 
-Note: §2.3 removes the outreach's most concrete ask (a license on DeckShift).
-It is now a collaboration message only.
+The five `deckarchy` bug reports and the `28allday` outreach draft were
+**removed from the tree 2026-08-10** (recoverable from git history): the
+project moved fully past deckarchy, and the outreach's premise died with the
+DeckShift drop (§2.4). Nothing has ever been posted anywhere.
 
 ---
 
 ## 6. Blocked on human
 
-- **Which Omarchy 4.0 test target?** Upgrade the Deck from 3.8.4 to 4.0 beta
-  (risky — single test asset), or add a second target. §2.2.
-- **Remove DeckShift from the Deck.** It is installed, plus a hand-edit at
-  `/usr/local/bin/gamescope-session-nm-wrapper:163`. Staged for approval; do not
-  run unattended.
-  - ⚠️ **The only backups of six modified system files are in a `/tmp`
-    scratchpad on the Deck** and will not survive a reboot or cleanup. Copy them
-    somewhere durable before anything else.
+- **`ROADMAP.md` P1.4 — Ventoy on the test USB + the stock Omarchy 4.0 beta
+  ISO.** `ventoy-bin` is not installed on the dev machine. The ISO can be
+  downloaded, or built locally (a real build already succeeded in session 2 —
+  remember `--network host`).
+- **`ROADMAP.md` P1.5 — the Deck recon + rebuild session.** Needs the
+  operator present, a USB keyboard for the dev-time install, the Valve
+  recovery image on a second USB as the floor, and anything personal copied
+  off the Deck first. Approved in principle by §2.5; still confirm before
+  executing.
 - **Any write to the physical Deck.** Prepare, describe, wait. Batch requests.
 - **Anything touching TDP, fan curves, or charge limits** — every time, no
   exceptions. Genuine hardware-damage risk.
-- **Any public action** — repos, upstream issues, outreach. Three drafts staged.
-- **Ventoy setup on the test USB** (T0 §2), and `ventoy-bin` is not installed.
-- **Do not wipe the existing Deck install.** It is the single most valuable test
-  asset in the project. Snapshot before any destructive test.
+- **Any public action** — repos, upstream issues, outreach. One draft staged
+  (§5.9).
+
+Retired from this list 2026-08-10: "do not wipe the Deck" (superseded by
+§2.5's planned-rebuild posture), the DeckShift manual removal and its `/tmp`
+backup rescue (the rebuild wipes both).
 
 ---
 
@@ -541,4 +592,4 @@ One line each. Detail lives in git history and in the `FINDING-*.md` files.
 | 6 | T1 steps 4+6 — nine independently runnable stages, provably non-interactive |
 | 7 | First physical hardware run; two real bugs found; R1 §10.3 resolved; Steam/gamescope installed; prior-art check done |
 | 8 | First Gaming Mode boot, via a DeckShift hybrid splice (since reversed — §2.3) |
-| 9 | Scope reset: ISO is the deliverable, target Omarchy 4.0, DeckShift dropped. Docs consolidated |
+| 9 | Scope reset: ISO is the deliverable, target Omarchy 4.0, DeckShift dropped. Docs consolidated; `ROADMAP.md` written (three phases); Deck rebuild + factory-reset strategy adopted; dead drafts removed |

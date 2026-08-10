@@ -2,11 +2,13 @@
 
 **STATUS: DRAFT ONLY. Not filed. No `gh` commands run, no network calls
 made. Requires explicit operator approval before posting anywhere** — per
-project hard rule against publishing/posting without approval. The
-operator has separately decided to hold on sending the R1 drafts in
-`DRAFT-upstream-bugs-deckarchy.md`; nothing about that decision should be
-read as an answer for this draft either — it is staged pending its own,
-separate operator review.
+project hard rule against publishing/posting without approval.
+
+*Note (2026-08-10): this is the only draft still in the working tree. The
+earlier `DRAFT-upstream-bugs-deckarchy.md` and `DRAFT-outreach-28allday.md`
+were removed during repo cleanup (recoverable from git history) — the
+project moved past deckarchy entirely, and the outreach's premise died with
+the DeckShift drop. References to the deckarchy draft below are historical.*
 
 This is a standalone writeup of the same bug `DRAFT-upstream-bugs-
 deckarchy.md`'s "Bug 5 of 5" already describes from the `limine-snapper.sh`

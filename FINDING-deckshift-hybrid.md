@@ -13,13 +13,15 @@
 >    session**, and that ChimeraOS's AUR session *collides* with it on
 >    `gamescope-session.target`. That collision is the technical reason
 >    DeckShift and Deck hardware do not compose.
-> 2. **The record of what was hand-edited on the operator's Deck**, which
->    still has to be undone (`TASK-T3` step 2).
+> 2. **The record of what was hand-edited on the operator's Deck.** The
+>    phase-1 rebuild (`ROADMAP.md` P1.5) wipes these rather than unwinding
+>    them; until then this table is the inventory of the contamination.
 > 3. **Two bugs and one group-membership trap** that generalise beyond
 >    DeckShift.
 >
-> ⚠️ **The backup paths below are in `/tmp` and will not survive a reboot.**
-> Copy them somewhere durable before touching the Deck.
+> The `/tmp` backup paths below are no longer load-bearing — restoring the
+> hand-edited state stopped mattering once the rebuild was planned
+> (`PROGRESS.md` §2.5).
 
 ---
 
