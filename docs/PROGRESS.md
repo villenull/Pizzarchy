@@ -19,29 +19,43 @@ may use Wi-Fi (§2.2).
 
 | Task | Status | Notes |
 |---|---|---|
-| **T0** Test infrastructure | ✅ done | QEMU install harness, CI green, SSH loop, unit tests. Two gaps — §5.4 |
+| **T0** Test infrastructure | ✅ done | QEMU install harness, CI green, SSH loop, unit tests. **Both §5.4 gaps closed by P1.5** |
 | **R1** Six research questions | ✅ done | All six resolved. Several overturned the plan — §3 |
-| **T1** Kernel / firmware / boot | ✅ done | Ten stages. Last gap: conversion path on hardware — §5.2, closes in P1.5 |
+| **T1** Kernel / firmware / boot | ✅ done | Ten stages, **hardware-validated end to end 2026-08-10** (§5.2). Neptune pin bump still untested |
 | **T2** Gamepad input spike | ✅ done | Navigation confirmed; T4 is days not weeks. Text entry open — §3.9 |
-| **T3** Gaming Mode + switching | 🟡 **in progress** | Gaming Mode boots. Session layer being rewritten in-repo — §4 |
-| **T4** Controller-only installer | ⬜ not started | Unblocked — scope known (§3.9) |
-| **T5** ISO + package payload | ⬜ not started | Unblocked by R1 and simplified by §2.2; needs T2/T3/T4 for the package list |
+| **T3** Gaming Mode + switching | 🟡 **both directions proven on hardware** (P1.5 phase F) — autologin bug found and fixed. Remaining: Steam's own menu item (§5.10), rotation (§5.11), parity batches |
+| **T4** Controller-only installer | ⬜ not started | **Re-scoped by §5.9** — lizard mode already makes the installer navigable; the real gap is text entry |
+| **T5** ISO + package payload | ⬜ not started | Unblocked by R1 and simplified by §2.2. **New constraints from P1.5:** offline-only pacman (§7), encryption default (§5.12), repo precedence (§5.13) |
 | **T6** Integration + release | ⬜ not started | Gated on Omarchy 4.0 stable |
 
 **The plan is `docs/ROADMAP.md`** — three phases: answer the unknowns and rebuild
 the test bed (1), build the product (2), prove it from a factory reset and
 release (3).
 
-**Next action: P1.5 phase C onward — the wipe + install.** P1.4 is ✅ done
-(Ventoy stick built, ISO verified on it) and **P1.5 phase B is ✅ complete**:
-the live-ISO recon ran 2026-08-10 and closed §5.1 plus every recon item, with
-the Deck still untouched at checkpoint α. Findings:
-`docs/findings/P15-live-iso-recon.md`. Runbook:
-`docs/tasks/P15-deck-rebuild-runbook.md`.
+**P1.5 is ✅ COMPLETE (2026-08-10).** All six phases ran in one session. The
+Deck now runs package-based **Omarchy 4.0 + Neptune 6.11.11-valve29**,
+unencrypted, booting unattended, with both session-switch directions working
+and **zero DeckShift**. Full findings, R-0 through R-18:
+`docs/findings/P15-live-iso-recon.md`; raw evidence in
+`docs/findings/P15-recon-raw/`.
 
-Two deviations from that runbook, agreed with the operator: a **single USB
+Closed by it: §5.1, §5.2, §5.3, §5.4, and phase-1 exit criteria.
+Opened by it: §5.9–§5.14, several of which change T3/T4/T5.
+
+Two deviations from the runbook, agreed with the operator: a **single USB
 stick** (no pre-staged recovery stick — reflash on demand instead) and
 **Wi-Fi rather than Ethernet** for SSH, which worked.
+
+**Deck access for the next session:** `ssh steamdeck` (alias → 192.168.100.25,
+user `deck`, key-based). Passwordless sudo via
+`/etc/sudoers.d/99-deck-testing` — **test-device posture, revisit before
+shipping** (it also masks `deck-session.sh`'s own sudoers verification).
+Snapshots: #1 pre-Neptune, #2 post-conversion, #3 complete.
+
+**Next action: phase 2.** The natural first block is **P2.1/P2.4** — resolve
+§5.10 (Steam's Switch-to-Desktop menu item, the untested half of the
+product's core promise) and §5.11 (rotation), both of which need the Deck and
+a Steam login.
 
 ### 1.1 Artifacts that live OUTSIDE this repo
 
@@ -109,8 +123,10 @@ the installed desktop — a dependency T2 must size.
 This closes the "which Omarchy does this target" question that had been open
 since the first session. **4.0, not 3.x.**
 
-⚠️ **The test Deck runs Omarchy 3.8.4, installed from git** — no `omarchy`
-pacman package at all. So the target and the only test asset now disagree.
+~~⚠️ The test Deck runs Omarchy 3.8.4, installed from git.~~ **No longer true
+as of 2026-08-10** — P1.5 rebuilt it onto package-based 4.0, so target and
+test asset agree. The paragraph below is kept because it explains *why* T3's
+shell integration needs re-verifying on Quickshell.
 T1 is immune (it gates on the Limine UKI *mechanism*, never on Omarchy's
 packaging — proven on this exact machine). **T3's shell integration is not
 immune:** the Desktop Mode icon and the Quick Access Menu hook land differently
@@ -553,7 +569,82 @@ cannot express, or suppress it (via `hid-steam`'s hidraw behavior —
 unverified) and lose the free mouse/keyboard. Recommendation in the finding:
 use it.
 
-### 5.2 T1's stock→Neptune conversion is unvalidated on hardware
+### 5.10 ⚠️ Steam's "Switch to Desktop" menu item is UNPROVEN — the core promise's untested half
+
+P1.5 phase F proved both switch directions, but the Gaming→Desktop one was
+exercised by invoking our shim directly. **Steam's Power menu never offered
+"Switch to Desktop"** (only Sleep/Shutdown/Restart/Cancel), so the path a
+*user* would actually take is untested.
+
+Likely — but **not confirmed** — because Steam never left first-run setup: it
+is not signed in and is blocked behind §5.14's updater error, and its Power
+menu is reduced during OOBE.
+
+Established: Steam invokes the binary via `PATH`, not an absolute path
+(`PATH="${SYSTEM_PATH-${PATH}}" steamos-session-select %s`, from `steamui.so`),
+so `/usr/local/bin` should work **unless** the Steam runtime narrows
+`SYSTEM_PATH` — in which case the shim must move to `/usr/bin`.
+
+**This is the product's central promise** (`docs/PLAN.md` §1: a Desktop Mode
+button "with a way back"). Treat it as open until a signed-in Steam shows the
+item and it works. Details: `docs/findings/P15-live-iso-recon.md` §R-18a.
+
+### 5.11 Rotation must be fixed in userspace — no kernel we ship corrects it
+
+The bootloader (Limine/Ventoy) and the SDDM greeter both render 90° off.
+`fbcon/rotate` is **0** on stock Arch *and* on Neptune; only the live ISO's
+`linux-t2` build set 1. Gaming Mode is fine (gamescope rotates natively).
+
+So: console needs `fbcon=rotate:1`; SDDM and Hyprland need a compositor
+transform; **the Limine menu itself has no fix yet** and is the first thing a
+user sees. T3/P2.4 + T5. See §R-1, §R-12, §R-13a.
+
+### 5.12 The 4.0 installer defaults to FULL-DISK ENCRYPTION
+
+Left unchanged, our fork ships a device that **stops at a passphrase prompt
+with no keyboard** — unbootable for its intended user, and contradicting
+`CLAUDE.md`'s controller-only rule. Recommendation: default OFF, treat TPM2
+auto-unlock as a follow-on, not a release blocker. §R-11.
+
+Upstream's installer is fully driveable from a config file, and accepts
+`--authorized-keys-file` / `--tailscale-authkey-file` — a better T5
+integration point than post-install scripting, and it makes automated QEMU
+install testing tractable.
+
+### 5.13 🐞 `stage-repos` lets Arch's packages shadow Valve's
+
+Valve's repos are appended **after** `[extra]`, and pacman is first-match, so
+`pacman -S gamescope` installs Arch's build (bare compositor) instead of
+Valve's (the whole SteamOS session). The conversion reports success while
+leaving a device that cannot enter Gaming Mode.
+
+**Unfixed on purpose** — putting Valve's repos first matches SteamOS but hands
+blanket precedence to repos pinning older common packages. **Enumerate the
+overlap first** (`mesa`, `vulkan-radeon`, `lib32-vulkan-radeon` are the
+suspects). §R-15.
+
+### 5.14 Gaming Mode's update check fails: `steamos-update` exists in no repo
+
+Steam's first run shows *"unable to download the required updates"* — the
+network is fine (DNS resolves, `store.steampowered.com` → 200, ufw allows
+output). The real log line is an *Updater apply* error, and the SteamOS
+tooling it wants is unobtainable: `steamos-customizations-jupiter` would
+supply it but ships `/etc/grub.d/`, which the Limine-only constraint forbids.
+
+A first-impression defect. Options in §R-17; a stub `steamos-update` looks
+best but is a decision, not a detail.
+
+### 5.2 T1's stock→Neptune conversion is ✅ VALIDATED (was: unvalidated)
+
+**Closed 2026-08-10 by P1.5 phase E.** All ten stages ran on a genuinely
+stock system — seven exercising their real path for the first time — and
+checkpoint β passed: booted unattended into `neptune-611`, with
+`LoaderEntrySelected` reading `Omarchy/linux-neptune-611` from the firmware
+itself, and `reconcile` exiting 0 writing nothing. The pacman hook also held
+`default_entry` across an unrelated package install that rewrote
+`limine.conf` — an unplanned early pass of P3.3. §R-13.
+
+<details><summary>Original statement of the gap</summary>
 
 The operator's Deck was converted by hand months earlier, so **seven of the ten
 stages have only ever run their no-op path**. The actual conversion — removing Arch's
@@ -568,20 +659,23 @@ Related: bumping the Neptune pin (`NEPTUNE_SERIES_DEFAULT=611`; `618` is the
 newest non-RC series) is a one-line change but should not ship without a
 hardware boot test.
 
-### 5.3 The test Deck is not running the target OS
+</details>
 
-**Resolved by plan:** §2.5's phase-1 rebuild puts a fresh, package-based
-Omarchy 4.0 on it (`docs/ROADMAP.md` P1.5). Open only until that session runs.
+### 5.3 The test Deck is not running the target OS — ✅ RESOLVED
+
+**Closed 2026-08-10.** P1.5 wiped the 3.8.4-from-git install (and with it the
+DeckShift hand-edits) and installed package-based Omarchy 4.0
+(`4.0.0.r1617.g6d7826d`). Target and test asset now agree.
 
 ### 5.4 T0's two remaining gaps
 
-- **Ventoy USB setup has never been executed** (documented in
-  `docs/findings/testing-usb.md`, not done). Now on the critical path — it is
-  `docs/ROADMAP.md` P1.4.
-- **`tools/deck-sync.sh` has never run against real hardware.** Fold into P1.5's
-  post-install setup: enable `sshd` on the fresh install and give the dev
-  machine a resolvable host (the `steamdeck` hostname currently does not
-  resolve; needs an IP or an `/etc/hosts` entry).
+- ~~**Ventoy USB setup has never been executed.**~~ ✅ **Closed 2026-08-10** —
+  Ventoy 1.1.17 on the stick, ISO copied and sha256-verified after `sync`,
+  booted on the Deck through the firmware boot picker.
+- ~~**`tools/deck-sync.sh` has never run against real hardware.**~~ ✅ **Closed
+  2026-08-10** — it drove all ten kernel stages and all five session stages
+  over SSH in P1.5. `ssh steamdeck` resolves via a `~/.ssh/config` alias on
+  the dev machine, matching the script's `DECK_HOST`/`DECK_USER` defaults.
 
 ### 5.5 Untouched risk items from the original plan
 

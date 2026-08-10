@@ -60,8 +60,8 @@ acceptable). There is no unrecoverable state on this path.
 | P1.1 ✅ | Close the VM substrate blind spot (snapper snapshot), implement `stage-default-entry` + verify Limine's entry-path form via `LoaderEntrySelected`, run the deliberate-failure test | QEMU | T1 §7–8, `docs/PROGRESS.md` §5.2, §5.3, §5.5 |
 | P1.2 ✅ | T2 spike: `uinput` mapper prototype; drive `archinstall` and `gum` with virtual gamepad only | QEMU | `docs/tasks/T2-gamepad-input-spike.md` |
 | P1.3 ✅ | T2 spike: `squeekboard` OSK — does focus-triggered text entry work, and can it run in a live-ISO-like environment? Write `docs/findings/T2-gamepad-spike.md`; size T4 | QEMU | `docs/tasks/T2-gamepad-input-spike.md` §4–5 |
-| P1.4 🟡 | **ISO ✅ built** (`~/ISOs/omarchy-2026.08.10-x86_64-quattro.iso`). Remaining, operator: Ventoy on the test USB; obtain or build the stock Omarchy 4.0 beta ISO; recovery USB; comms setup | Hardware prep | **`docs/tasks/P15-deck-rebuild-runbook.md`** §1–2 |
-| P1.5 | **Deck session (ask first):** recon → wipe → 4.0 → Neptune conversion → session switching, driven over SSH with camera backup | Deck | **`docs/tasks/P15-deck-rebuild-runbook.md`** §3 |
+| P1.4 ✅ | Ventoy 1.1.17 on the stick + ISO sha256-verified on it; Valve recovery image downloaded (not flashed — single-stick deviation) | Hardware prep | **`docs/tasks/P15-deck-rebuild-runbook.md`** §1–2 |
+| P1.5 ✅ | **Done 2026-08-10, all six phases in one session:** recon → wipe → 4.0 → Neptune conversion → session switching, driven over SSH (Wi-Fi, no camera needed) | Deck | `docs/findings/P15-live-iso-recon.md` |
 
 P1.1–P1.3 need no hardware and can proceed immediately; P1.4–P1.5 need the
 operator. P1.5 should run *after* P1.1 so the fresh install gets the complete
@@ -76,22 +76,26 @@ kernel script including `stage-default-entry`.
   not controller-navigable. (That's the product gap this project exists to
   fill; using a keyboard for our own dev install is fine.)
 
-### Exit criteria
+### Exit criteria — ✅ ALL MET (2026-08-10). **Phase 1 is complete.**
 
-- [x] **T4's OSK question decided** — the live ISO has no Wayland compositor,
-      so a mapper-drawn TTY OSK it is (`docs/findings/T2-gamepad-spike.md` §4)
-- [ ] Wi-Fi in the live ISO: **expected yes** — the ISO ships `ath11k`
-      `nfa765` firmware + `board-2.bin` + `iwd` (`docs/PROGRESS.md` §5.1).
-      Confirm the driver binds on hardware; capture `dmesg | grep ath11k`
-      either way
-- [ ] Display rotation and input behavior in the live ISO: recorded
-- [x] T4's scope known — `docs/findings/T2-gamepad-spike.md` written: **days,
-      not weeks**
-- [x] `stage-default-entry` shipped, path-form **proven by boot** in QEMU
-- [ ] ...and validated on the fresh install (P1.5)
-- [x] Deliberate-failure tests run and recorded (three of them)
-- [ ] Deck runs Omarchy 4.0 + Neptune, boots it unattended, switches to
-      Gaming Mode and back — with zero DeckShift and zero hand-edits
+- [x] **T4's OSK question decided** — mapper-drawn TTY OSK
+      (`docs/findings/T2-gamepad-spike.md` §4)
+- [x] **Wi-Fi in the live ISO: YES**, confirmed on hardware — driver binds,
+      scan, WPA2, DHCP. Chip is **QCA2066**, not the QCNFA765 assumed; the
+      firmware that matters is `ath11k/QCA2066/` (R-0, R-6)
+- [x] Display rotation and input behavior recorded — and richer than expected:
+      **lizard mode leaves the gamepad node silent** (R-8), which re-scopes T4
+- [x] T4's scope known — **days, not weeks**
+- [x] `stage-default-entry` shipped, path-form proven by boot in QEMU
+- [x] ...and validated on the fresh install — `LoaderEntrySelected` read from
+      firmware after an unattended boot (R-13)
+- [x] Deliberate-failure tests run and recorded
+- [x] Deck runs Omarchy 4.0 + Neptune, boots unattended, switches to Gaming
+      Mode and back — **zero DeckShift, zero hand-edits** (R-18)
+
+**Caveat carried into phase 2:** the Gaming→Desktop direction was proven via
+our shim, **not** via Steam's own Power-menu item, which never appeared
+(`docs/PROGRESS.md` §5.10). That is the half a user actually touches.
 
 ---
 
@@ -153,9 +157,11 @@ exactly what we did.
 
 | Risk | Phase | Mitigation |
 |---|---|---|
-| Live ISO can't drive the OLED radio | 1 | Firmware into the live image (`docs/tasks/T5-iso-and-payload.md` §2); worst case partially reopens the offline-mirror question |
-| Live ISO renders rotated / unusable | 1 | Recon in P1.5; kernel cmdline rotation flags exist; gamescope handles it post-install |
-| Stock Omarchy ISO won't boot/install on Deck at all | 1 | Itself a critical T5 finding; recovery image is the floor |
+| ~~Live ISO can't drive the OLED radio~~ | 1 | **RETIRED** — works on hardware (R-0). No firmware needs baking into the live image |
+| ~~Live ISO renders rotated / unusable~~ | 1 | **RETIRED as stated**, but narrowed and still live: the **Limine menu** and **SDDM greeter** render rotated and no kernel we ship corrects it (§5.11). Gaming Mode is fine |
+| ~~Stock Omarchy ISO won't boot/install on Deck~~ | 1 | **RETIRED** — boots and installs; the surprise was its **encryption default** (§5.12) |
+| Our fork inherits upstream's encryption default | 2 | Ship it off by default; TPM2 auto-unlock as follow-on (§5.12) |
+| Valve's packages shadowed by Arch's | 2 | `stage-repos` ordering bug, unfixed pending an overlap audit (§5.13) |
 | T2 concludes custom UI needed for many screens | 1→2 | That's what the spike is *for*; scope conversation before phase 2 |
 | Omarchy 4.0 beta churn breaks shell hooks | 2 | Keep integration points thin (`docs/PLAN.md` §11); re-verify at P3.6 |
 | TDP/fan work damages hardware | 2 | Per-item operator approval, every time — unchanged hard rule |
