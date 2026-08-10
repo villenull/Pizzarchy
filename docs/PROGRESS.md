@@ -690,7 +690,49 @@ on the Deck before it was caught. The stage now asserts apply is non-zero.
 
 This closed only *one* helper. The wider surface is **§5.15**.
 
-### 5.15 ⚠️ NEW, and it is the widest gap left: Steam's privileged-helper surface is missing
+### 5.15 🟡 Steam's privileged-helper surface — the two user-visible ones are SHIPPED; the rest is deliberately skipped
+
+**Updated 2026-08-10, session 16 (P2.0b).** `steamos-set-timezone` and
+`steamos-priv-write` are now installed by `src/deck-session.sh`
+(`stage-timezone-helper`, `stage-priv-write-helper`), both hardware-verified
+with a real change and restore. The operator decided **not** to take
+`jupiter-hw-support`, so the six `jupiter-*` helpers stay absent — none has a
+user-visible effect yet, and `jupiter-fan-control` belongs to P2.3, which
+needs per-item approval anyway.
+
+⚠️ **The reasoning recorded below was wrong in a way worth keeping.** It said
+the missing `steamos-priv-write` means "the Gaming Mode brightness slider does
+nothing". **On the test Deck the slider works.** Steam does not give up when a
+helper is missing — it falls back twice, measured from its own console log:
+
+```
+1.  /usr/bin/steamos-polkit-helpers/steamos-priv-write "<path>" "<value>"   -> 127
+2.  echo "<value>" | sudo -n tee "<path>"                                   -> works
+3.  sudo -n chmod a+w "<path>"                                              -> works
+```
+
+Tiers 2 and 3 succeed **only** because `/etc/sudoers.d/99-deck-testing` grants
+`deck ALL=(ALL) NOPASSWD: ALL` — see §5.17. So the conclusion about the
+*product* was right and the belief about the *present* was wrong, which is the
+more dangerous half: anyone "verifying" this by moving the slider on this Deck
+would have concluded there was no bug.
+
+Tier 3 is also why `/sys/class/backlight/amdgpu_bl0/brightness` and
+`/sys/class/leds/status:white/led_brightness_multiplier` are **mode 666**,
+restamped every Gaming Mode start. That is Steam's doing, not a hand-edit.
+Supplying tier 1 is therefore a **security** change as much as a feature: it
+stops Steam reaching for blanket sudo and stops the `chmod`.
+
+**Still open here:** the narrow sudoers grants the two helpers install are
+visudo-validated but **not proven operative** — `99-deck-testing` sorts last in
+`/etc/sudoers.d/` and sudo takes the last match, so it authorizes the helpers
+today. Proving ours requires removing that file (§5.17).
+
+Not whitelisted on purpose: **`/dev/drm_dp_aux0`**, which Steam asks to write
+with an *empty* value. What that does is not understood, so the helper refuses
+it loudly. Steam has been getting 127 for it all along and tolerates it.
+
+<details><summary>Original §5.15 text (kept for the audit trail — its "the slider does nothing" premise is corrected above)</summary>
 
 §5.14 was one symptom of something larger. Steam drives system functions through
 helpers at **`/usr/bin/steamos-polkit-helpers/`**, invoked by **absolute path**.
@@ -721,6 +763,38 @@ lands in P2.3, which requires per-item operator approval every time.
 
 Full inventory and options: `docs/findings/P2-steam-integration-and-rotation.md`
 §R-20.
+
+</details>
+
+### 5.17 🐞 NEW — `99-deck-testing` gives the desktop user blanket passwordless sudo, and it is masking real defects
+
+`/etc/sudoers.d/99-deck-testing` contains:
+
+```
+deck ALL=(ALL) NOPASSWD: ALL
+```
+
+Owned by **no package** — a test-rig file, almost certainly added during P1.5
+so the `tools/deck-sync.sh` SSH loop could run stages unattended. Two
+consequences, and the second is the expensive one:
+
+1. **It must never ship.** An ISO that grants its default user blanket
+   passwordless root is not a product.
+2. **It makes the test Deck more capable than the product, silently.** §5.15 is
+   the worked example: Steam's `sudo -n tee` / `sudo -n chmod a+w` fallbacks
+   work here and will not work on a shipped install, so a defect looks fixed
+   when it is not. Anything verified on this Deck that touches privilege is
+   suspect until re-checked without this file.
+
+It also sorts **last** in `/etc/sudoers.d/` (`99-deck-testing` > `99-deck-…`),
+and sudo takes the last match, so it currently overrides every narrow grant
+this project installs — including the two from §5.15 and
+`99-deck-session-select`. None of them is proven operative while it exists.
+
+**Not removed yet** — removing it breaks the unattended SSH loop this project
+iterates with. `deck` does have a password set (`passwd -S deck` → `P`) and
+`03_deck` grants `deck ALL=(ALL) ALL`, so removal is recoverable rather than a
+lockout. Decide before P2.7 bakes anything into the image.
 
 ### 5.16 🐞 The session switch can leave the Deck with NO session — mitigated, root cause open
 
@@ -960,6 +1034,17 @@ backup rescue (the rebuild wipes both).
   ships **zero** polkit helpers (it is GRUB machinery). It does not ship
   `steamos-session-select` either — no configured repo does. `jupiter-hw-support`
   ships six of the helpers, at 94 MiB installed and a **plymouth** dependency.
+- **Steam FALLS BACK when a polkit helper is missing; it does not just fail.**
+  For a privileged write it tries the helper, then `echo V | sudo -n tee PATH`,
+  then `sudo -n chmod a+w PATH` so the next write needs no privilege at all.
+  Measured from its console log. Two things follow: a missing helper can look
+  like it is working (§5.15), and Steam leaves system nodes **world-writable**
+  after every Gaming Mode start. Never conclude a helper is unnecessary because
+  the feature works on the test Deck.
+- **Steam's helper argv, measured, not inferred.** `steamos-set-timezone
+  America/Chicago` (one positional). `steamos-priv-write "<path>" "<value>"`
+  (two, quoted). It also calls `steamos-priv-write "/dev/drm_dp_aux0" ""` — an
+  **empty** value — so any value validation must handle that case for real.
 - **`src/deck-session.sh` is source-safe as of 08698ba** — `main "$@"` is guarded
   on `[[ ${BASH_SOURCE[0]} == "$0" ]]` so `test/unit/test-deck-session.sh` can
   source it and call `render_update_stub` / `assert_ours_or_absent` with no root,
@@ -985,4 +1070,5 @@ One line each. Detail lives in git history and in the `FINDING-*.md` files.
 | 7 | First physical hardware run; two real bugs found; R1 §10.3 resolved; Steam/gamescope installed; prior-art check done |
 | 8 | First Gaming Mode boot, via a DeckShift hybrid splice (since reversed — §2.3) |
 | 15 | **Phase 2 opener, 2026-08-10.** §5.10 closed — Steam's own Switch-to-Desktop works, with **two** causes not one (OOBE, plus the runtime narrowing PATH to `/usr/bin:/bin`, which made the `/usr/local/bin` shim unreachable all along). §5.14 closed with a stub, after learning its exit codes are a protocol: apply exiting 0 made Steam **reboot the Deck**. §5.11's greeter + desktop fixed — transform is **3**, not the recorded 1, and Omarchy's `auto` scale left a 640×400 desktop. A `#` marker in a Lua file taught us Hyprland **silently discards** an unparseable config. Opened §5.15 (the whole polkit-helper surface, incl. brightness) and §5.16 (the switch latched sddm into permanent failure). |
+| 16 | **P2.0b, 2026-08-10.** `steamos-set-timezone` + `steamos-priv-write` shipped as two new `deck-session.sh` stages, both signatures **read from Steam's log** rather than inferred, both hardware-verified with a real change and restore. Operator skipped `jupiter-hw-support`. Corrected §5.15: the brightness slider **works** on this Deck — Steam falls back to `sudo -n tee` and then `sudo -n chmod a+w`, which is also what makes those sysfs nodes 666. Opened §5.17 (`99-deck-testing`'s blanket NOPASSWD masks privilege defects and must not ship). Unit suite +19 assertions, mutation-tested 16/16. |
 | 9 | **One long session, 2026-08-09/10 — the scope reset and all of phase 1's non-hardware work.** Five scope decisions (§2): the ISO is the deliverable again, network-at-install is fine, target 4.0, DeckShift dropped, Deck rebuilds allowed. Docs consolidated (`PROGRESS` 1403→~600 lines, `WHERE-WE-ARE` folded in, `PLAN` frozen with a known-wrong-sections banner); `docs/ROADMAP.md` written (three phases); dead drafts removed. **P1.1:** `stage-default-entry` with the path form *proven by boot*, substrate rebuilt with real snapper snapshots (which immediately caught the hook test's own substring miscount), three deliberate-failure tests. **P1.2–P1.3:** T2 spike resolved — a gamepad drives `gum` and `archinstall` at the kernel input layer, so T4 is days not weeks. **P1.4 (half):** 4.0 beta ISO built; static inspection decided T4's OSK question and found the OLED Deck's `nfa765` Wi-Fi firmware present (§5.1). Repo reorganized out of the flat layout (a root `*.sh` glob had silently gone from checking every script to none). |

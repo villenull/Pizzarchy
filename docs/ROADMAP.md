@@ -107,7 +107,8 @@ short, targeted Deck iterations over `tools/deck-sync.sh`.
 | # | Item | Where | Task ref |
 |---|---|---|---|
 | P2.0 ✅ | **Done 2026-08-10 (session 15).** §5.10 Steam's own Switch-to-Desktop proven end to end; §5.14 updater stub; §5.11 greeter + desktop rotation. Opened §5.15, §5.16 | Deck | `docs/findings/P2-steam-integration-and-rotation.md` |
-| P2.0b | **§5.15** — decide and ship the missing `steamos-polkit-helpers`. Owns Gaming Mode's **brightness slider** (`steamos-priv-write`) and OOBE's timezone. `jupiter-hw-support` supplies six but costs 94 MiB + plymouth | Deck + Dev | `docs/PROGRESS.md` §5.15 |
+| P2.0b ✅ | **Done 2026-08-10 (session 16).** §5.15's two user-visible helpers shipped as `deck-session.sh` stages: `steamos-set-timezone` and `steamos-priv-write`, signatures measured from Steam's log, both hardware-verified. `jupiter-hw-support` **skipped** by operator decision. Opened §5.17 | Deck + Dev | `docs/PROGRESS.md` §5.15 |
+| P2.0d | **§5.17** — remove `99-deck-testing`'s blanket NOPASSWD and re-verify everything privilege-dependent without it. Until then no narrow sudoers grant in this project is proven operative, and the test Deck is more capable than the product | Deck | `docs/PROGRESS.md` §5.17 |
 | P2.0c | **§5.16** root cause — decouple the sddm restart from the session being torn down (transient `systemd-run` unit), then cycle the switch enough times to trust it | Deck | `docs/PROGRESS.md` §5.16 |
 | P2.1 | Desktop-mode input mapper as a `--user` service + `squeekboard`, on the Deck; verify against 4.0's `uwsm` targets | Deck (short) | `docs/tasks/T3-gaming-mode.md` §4 |
 | P2.2 | Hardware parity batch 1: Wi-Fi, BT, audio, trackpads/gyro, buttons in both sessions → `docs/findings/hardware-parity.md` | Deck | `docs/tasks/T3-gaming-mode.md` §5 |
@@ -162,7 +163,8 @@ exactly what we did.
 |---|---|---|
 | ~~Live ISO can't drive the OLED radio~~ | 1 | **RETIRED** — works on hardware (R-0). No firmware needs baking into the live image |
 | ~~Live ISO renders rotated / unusable~~ | 1 | **NARROWED TWICE.** Greeter and desktop are fixed and seen (§5.11, transform **3**). What remains is the **Limine menu** — no known fix, and the first thing a user sees — plus the TTY (`fbcon=rotate:1`, boot-chain, awaiting approval) |
-| Steam's system integration is absent, not just its updater | 2 | §5.15 — 14 polkit helpers Steam calls by absolute path; brightness and timezone are the user-visible ones. Scope undecided |
+| Steam's system integration is absent, not just its updater | 2 | **NARROWED** — §5.15's two user-visible helpers (brightness, timezone) now ship; the six `jupiter-*` are skipped by decision. Residual: Steam **falls back** to blanket `sudo` when a helper is missing, so absence looks like health on a test rig |
+| The test Deck is more privileged than the product, hiding defects | 2 | §5.17 — `99-deck-testing` grants the desktop user blanket NOPASSWD and sorts last, overriding every narrow grant. Anything privilege-dependent verified here is suspect until re-checked without it |
 | A session switch bricks the display manager | 2 | §5.16 — mitigated by lifting sddm's restart rate limit; root cause (restart issued from the dying session) still open, and the race is intermittent so absence of failure proves little |
 | ~~Stock Omarchy ISO won't boot/install on Deck~~ | 1 | **RETIRED** — boots and installs; the surprise was its **encryption default** (§5.12) |
 | Our fork inherits upstream's encryption default | 2 | Ship it off by default; TPM2 auto-unlock as follow-on (§5.12) |
