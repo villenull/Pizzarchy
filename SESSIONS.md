@@ -65,37 +65,46 @@ In rough order of impact for a project like this:
 
 ## Block plan
 
-~20 blocks. Each is scoped to comfortably fit one 5-hour window with
-headroom — if a block finishes early, **stop and `/clear` rather than
-starting the next one**, unless the window has real room left. Running two
-blocks in one window is fine when they're both Sonnet; avoid it when either
-is Opus.
+Each block is scoped to comfortably fit one 5-hour window with headroom — if
+a block finishes early, **stop and `/clear` rather than starting the next
+one**, unless the window has real room left. Running two blocks in one window
+is fine when they're both Sonnet; avoid it when either is Opus.
+
+**Blocks 1–9 are done.** Nine sessions consumed; see `PROGRESS.md` §8.
 
 | # | Block | Task | Model | Notes |
 |---|---|---|---|---|
-| 1 | QEMU install harness | T0 §1 | Sonnet | Artifact assertions, not log scraping |
-| 2 | Iteration tooling + CI | T0 §2–6 | Sonnet | `deck-sync.sh`, override loader, shellcheck |
-| 3 | **Steam-offline + mirror signing** | R1 10.4, 10.1 | Sonnet (10.4), Opus (10.1) | Highest-stakes findings. Do early. |
-| 4 | Remaining research | R1 10.2, 10.3, 10.5, 10.6 | Sonnet | Use subagents for repo reading |
-| 5 | Harden + generalize kernel script | T1 §1–2 | **Opus** | Version constant, ESP logic |
-| 6 | Pacman hook + stage split | T1 §3, §6 | **Opus** | Boot-critical |
-| 7 | VM validation | T1 §4–5 | Sonnet | Idempotency proof, failure test |
-| 8 | Build input mapper | T2 §2 | **Opus** | Design-heavy |
-| 9 | Test mapper + write finding | T2 §3–5 | Sonnet | Decides T4's scope |
-| 10 | Fork + strip + flip default | T3 §1–2 | Sonnet | |
-| 11 | Session switching, both ways | T3 §3–4 | Sonnet | Verify against Quattro |
-| 12 | Hardware parity batch 1 | T3 §5 | Sonnet | Wi-Fi, BT, audio, input. **Hardware.** |
-| 13 | Hardware parity batch 2 | T3 §5–6 | **Opus** | TDP/fan/thermal. **Hardware. Ask first.** |
-| 14 | Installer screens 1–4 | T4 | Sonnet | |
-| 15 | Installer screens 5–8 | T4 | Sonnet | |
-| 16 | Full offline flow in QEMU | T4 | Sonnet | No keyboard, no network |
-| 17 | Fork ISO builder + mirror | T5 §1–2 | Opus (signing), Sonnet (rest) | |
-| 18 | Offline verify + size check | T5 §3–5 | Sonnet | Hypervisor-level network off |
-| 19 | Rebase onto Quattro stable | T6 §1 | **Opus** | T3's UI hooks most at risk |
-| 20 | Hardware matrix + release | T6 §2–7 | **Opus** | **Hardware.** All nine steps in one run. |
+| 1–2 | ✅ Test infrastructure | T0 | Sonnet | QEMU harness, `deck-sync.sh`, CI, shellcheck |
+| 3–4 | ✅ Research | R1 | Opus/Sonnet | All six questions resolved |
+| 5–7 | ✅ Kernel + boot chain | T1 | **Opus** | Nine stages, VM + hardware validated |
+| 8 | ✅ First hardware run | T1 | **Opus** | Two real bugs; R1 §10.3 decided |
+| 9 | ✅ Scope reset + doc consolidation | — | **Opus** | ISO target, Omarchy 4.0, DeckShift dropped |
 
-Blocks 1–9 are Quattro-independent — run them before stable lands.
-Block 19 onward requires Quattro stable.
+### Remaining
+
+| # | Block | Task | Model | Notes |
+|---|---|---|---|---|
+| 10 | **Wi-Fi in the live ISO** | `PROGRESS.md` §5.1 | Sonnet | ⚠️ **Do first.** Cheap, and a "no" reshapes T5. **Hardware.** |
+| 11 | Gamepad mapper + OSK spike | T2 §1–4 | **Opus** | Design-heavy. Must work in the *live ISO* |
+| 12 | Write the T2 finding | T2 §5 | Sonnet | Decides T4's scope |
+| 13 | Close the VM substrate gap + `stage-default-entry` | T1 §7–8 | **Opus** | Boot-critical. Both are QEMU-only |
+| 14 | Remove DeckShift, prove both switch directions | T3 §2–3 | Sonnet | **Hardware. Ask first.** |
+| 15 | Input mapper in the desktop session | T3 §4 | Sonnet | Shares T2's implementation |
+| 16 | Hardware parity batch 1 | T3 §5 | Sonnet | Wi-Fi, BT, audio, input. **Hardware.** |
+| 17 | Hardware parity batch 2 | T3 §5 | **Opus** | TDP/fan/thermal. **Hardware. Ask first.** |
+| 18–19 | Installer screens | T4 | Sonnet | 8 screens; screen 7 needs controller text entry |
+| 20 | Full flow in QEMU | T4 | Sonnet | No keyboard attached |
+| 21–22 | Fork ISO builder + payload | T5 | Opus (repo plumbing), Sonnet (rest) | |
+| 23 | Rebase onto Omarchy 4.0 stable | T6 §1 | **Opus** | T3's shell hooks most at risk |
+| 24 | Hardware matrix + release | T6 §2–7 | **Opus** | **Hardware.** All nine steps in one run. |
+
+Blocks 10–22 are 4.0-stable-independent — run them before stable lands.
+Block 23 onward requires Omarchy 4.0 stable.
+
+⚠️ **Two of these are ordering traps.** Block 10 is tiny and ranks first
+because a bad answer changes T5's design. Block 13 is listed after T2 only
+because T2 is on the critical path to the ISO — if a window is short, block
+13 is the better fit, since both halves are QEMU-only and need no hardware.
 
 ## Session open / close ritual
 

@@ -1,5 +1,8 @@
 # R1 — Research questions (de-risking)
 
+> **Status: ✅ done.** All six resolved; see `FINDING-R1-*.md` and
+> `PROGRESS.md` §3. §10.6's drafts are staged and held by operator choice.
+
 **Model: Opus, plan mode**
 Can run in parallel with T0/T1. Findings can reshape T5, so do it early.
 

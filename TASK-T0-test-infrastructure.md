@@ -1,5 +1,8 @@
 # T0 — Test infrastructure
 
+> **Status: ✅ done.** Two gaps remain — Ventoy setup never executed, and
+> `deck-sync.sh` never run against real hardware (`PROGRESS.md` §5.7).
+
 **Model: Sonnet** (Haiku for the CI YAML itself)
 **Do this first. Everything else is slower without it.**
 

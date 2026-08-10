@@ -1,5 +1,10 @@
 # T6 — Integration, hardware QA, and release
 
+> **Status: not started, gated on Omarchy 4.0 stable.** Note §6's "submit the
+> `28allday` outreach" is now optional — this project no longer depends on
+> DeckShift (`PROGRESS.md` §2.4). §4's recovery documentation is still
+> required and still unwritten (`PROGRESS.md` §5.8).
+
 **Model: Opus.** Final verification; a miss here ships broken.
 
 ## Objective
