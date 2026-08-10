@@ -57,11 +57,11 @@ acceptable). There is no unrecoverable state on this path.
 
 | # | Item | Where | Task ref |
 |---|---|---|---|
-| P1.1 | Close the VM substrate blind spot (snapper snapshot), implement `stage-default-entry` + verify Limine's entry-path form via `LoaderEntrySelected`, run the deliberate-failure test | QEMU | T1 §7–8, `PROGRESS.md` §5.2, §5.3, §5.5 |
+| P1.1 ✅ | Close the VM substrate blind spot (snapper snapshot), implement `stage-default-entry` + verify Limine's entry-path form via `LoaderEntrySelected`, run the deliberate-failure test | QEMU | T1 §7–8, `PROGRESS.md` §5.2, §5.3, §5.5 |
 | P1.2 | T2 spike: `uinput` mapper prototype; drive `archinstall` and `gum` with virtual gamepad only | QEMU | `TASK-T2` |
 | P1.3 | T2 spike: `squeekboard` OSK — does focus-triggered text entry work, and can it run in a live-ISO-like environment? Write `FINDING-T2-gamepad-spike.md`; size T4 | QEMU | `TASK-T2` §4–5 |
-| P1.4 | **Operator:** Ventoy on the test USB; obtain or build the stock Omarchy 4.0 beta ISO (a local `omarchy-iso` build already works on the dev machine — use `--network host`); copy it on | Hardware prep | `FINDING-testing-usb.md` |
-| P1.5 | **Deck session (ask first, USB keyboard attached):** boot stock ISO → record Wi-Fi/rotation/input recon → wipe + install Omarchy 4.0 → enable `sshd`, fix host resolution for `deck-sync.sh` → run full `omarchy-deck-kernel.sh` (conversion path, for real this time) → reboot onto Neptune → `deck-session.sh` → prove **both** switch directions | Deck | `TASK-T3` §3 |
+| P1.4 | **Operator:** Ventoy on the test USB; obtain or build the stock Omarchy 4.0 beta ISO; recovery USB; comms setup | Hardware prep | **`TASK-P15-deck-rebuild-runbook.md`** §1–2 |
+| P1.5 | **Deck session (ask first):** recon → wipe → 4.0 → Neptune conversion → session switching, driven over SSH with camera backup | Deck | **`TASK-P15-deck-rebuild-runbook.md`** §3 |
 
 P1.1–P1.3 need no hardware and can proceed immediately; P1.4–P1.5 need the
 operator. P1.5 should run *after* P1.1 so the fresh install gets the complete

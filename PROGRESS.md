@@ -19,9 +19,9 @@ may use Wi-Fi (§2.2).
 
 | Task | Status | Notes |
 |---|---|---|
-| **T0** Test infrastructure | ✅ done | QEMU install harness, CI green, SSH loop, unit tests. Two gaps — §5.7 |
+| **T0** Test infrastructure | ✅ done | QEMU install harness, CI green, SSH loop, unit tests. Two gaps — §5.4 |
 | **R1** Six research questions | ✅ done | All six resolved. Several overturned the plan — §3 |
-| **T1** Kernel / firmware / boot | ✅ done, hardware-validated | One real gap: `stage-default-entry` — §5.3 |
+| **T1** Kernel / firmware / boot | ✅ done | Ten stages. Last gap: conversion path on hardware — §5.2, closes in P1.5 |
 | **T2** Gamepad input spike | ⬜ **not started — next block** | Sizes T4. Back on the critical path |
 | **T3** Gaming Mode + switching | 🟡 **in progress** | Gaming Mode boots. Session layer being rewritten in-repo — §4 |
 | **T4** Controller-only installer | ⬜ not started | Blocked on T2 |
@@ -32,9 +32,10 @@ may use Wi-Fi (§2.2).
 the test bed (1), build the product (2), prove it from a factory reset and
 release (3).
 
-**Next action:** Phase 1 — P1.1 (T1 loose ends in QEMU) and the T2 spike can
-start immediately; the Deck recon/rebuild session (P1.4–P1.5) needs the
-operator.
+**Next action:** Phase 1 — P1.1 is ✅ done (2026-08-10, all four suites green).
+Next: the T2 spike (P1.2–P1.3), and the Deck recon/rebuild session
+(P1.4–P1.5) whenever the operator is ready — runbook:
+`TASK-P15-deck-rebuild-runbook.md`.
 
 ---
 
@@ -266,12 +267,24 @@ six VM suites was real in QEMU and silently false on any real machine with a
 snapshot. **Fixed** — the count is now anchored to real `path:` lines under the
 ESP's `/EFI/Linux/`.
 
+*The blind spot that hid it is closed (2026-08-10):* `vm-neptune-image.sh` now
+builds a btrfs root with snapper + `limine-snapper-sync` and **one real
+snapshot**, so every suite runs against a config with a genuine Snapshots
+submenu. Closing it immediately caught the same substring miscount in
+`vm-kernel-hook-test.sh`'s own probe — the test harness carried the bug it
+existed to catch, invisible until the substrate could show it.
+
 **Bug 2 — nothing sets the default boot entry.** The Deck defaulted to the
 *stock Arch kernel*; the operator had been selecting Neptune by hand without
 that being visible anywhere. Nothing in the toolchain owns `default_entry`.
 On a fresh install an end user would silently boot the wrong kernel with
-degraded hardware support and no error. **Fixed by hand on the operator's Deck;
-still not in the script** — §5.2.
+degraded hardware support and no error. **Fixed (2026-08-10):**
+`stage-default-entry` writes the entry-*path* form, `reconcile` re-asserts it
+on every kernel change, and `vm-default-entry-test.sh` proved the path form is
+genuinely honoured — a **non-first** entry planted as default is the entry
+Limine actually selected (`LoaderEntrySelected`) and booted (`uname -r`), so
+the observed behaviour cannot be an index-1 fallback. The operator's Deck
+still carries the hand-applied fix; the script's version runs on it at P1.5.
 
 ### 3.7 Prior art does not duplicate this project
 
@@ -414,41 +427,10 @@ If Wi-Fi fails and cannot be fixed in the live image, the offline mirror
 becomes load-bearing again and §2.2 has to be partially reconsidered. That is
 why it ranks first.
 
-### 5.2 The VM test substrate has a blind spot
+### 5.2 T1's stock→Neptune conversion is unvalidated on hardware
 
-`vm-neptune-image.sh` creates **no snapper snapshot**, so `limine-snapper-sync`
-never writes the Snapshots submenu, so the second UKI reference that caused
-§3.6's Bug 1 never existed. Three test suites could not have caught it.
-
-**Any future "idempotency proven" claim inherits this blind spot until the
-substrate creates a snapshot.** Small fix, restores trust in every idempotency
-claim the project makes. Do it before T3 adds more to test.
-
-### 5.3 `stage-default-entry` does not exist
-
-`default_entry` appears **zero times** in `omarchy-deck-kernel.sh`. The
-operator's Deck is fixed by hand only.
-
-Needs a stage that asserts the default resolves to the pinned Neptune kernel and
-repairs it when it does not — writing the **entry path** (`Omarchy/linux-neptune-611`),
-not a numeric index, since `limine-snapper-sync` inserts and removes a Snapshots
-submenu and can renumber indices. Must also run inside `reconcile`, so the
-pacman hook re-asserts it whenever kernels change.
-
-**⚠️ Not yet proven that the entry-path form is what did the work.** The target
-is also entry #1, so a silent fallback to index 1 would look identical. A fix
-that works by accident is worse than none.
-
-**Settle it in QEMU, not on hardware:** set `default_entry` to a *non-first*
-entry on the `vm-neptune-image.sh` substrate, boot, and assert
-`LoaderEntrySelected`. Limine implements the Boot Loader Interface, so
-`bootctl status` reports the selected entry as a path from userspace — a
-ready-made assertion target, no screen-scraping.
-
-### 5.4 T1's stock→Neptune conversion is unvalidated on hardware
-
-The operator's Deck was converted by hand months earlier, so **seven of nine
-stages only ever ran their no-op path**. The actual conversion — removing Arch's
+The operator's Deck was converted by hand months earlier, so **seven of the ten
+stages have only ever run their no-op path**. The actual conversion — removing Arch's
 split `linux-firmware-*` and swapping in Valve's, and cycling the ESP mount on a
 live system — remains VM-only evidence. Biggest remaining hardware gap for T1.
 
@@ -460,18 +442,12 @@ Related: bumping the Neptune pin (`NEPTUNE_SERIES_DEFAULT=611`; `618` is the
 newest non-RC series) is a one-line change but should not ship without a
 hardware boot test.
 
-### 5.5 T1's deliberate-failure test was never run
-
-`TASK-T1`'s done-criteria include "corrupt the Limine config, confirm the script
-fails loudly rather than continuing." There is no evidence anywhere that this was
-done. T1 is otherwise complete; this is an unticked box being carried as ticked.
-
-### 5.6 The test Deck is not running the target OS
+### 5.3 The test Deck is not running the target OS
 
 **Resolved by plan:** §2.5's phase-1 rebuild puts a fresh, package-based
 Omarchy 4.0 on it (`ROADMAP.md` P1.5). Open only until that session runs.
 
-### 5.7 T0's two remaining gaps
+### 5.4 T0's two remaining gaps
 
 - **Ventoy USB setup has never been executed** (documented in
   `FINDING-testing-usb.md`, not done). Now on the critical path — it is
@@ -481,7 +457,7 @@ Omarchy 4.0 on it (`ROADMAP.md` P1.5). Open only until that session runs.
   machine a resolvable host (the `steamdeck` hostname currently does not
   resolve; needs an IP or an `/etc/hosts` entry).
 
-### 5.8 Untouched risk items from the original plan
+### 5.5 Untouched risk items from the original plan
 
 - **LCD Steam Decks are entirely untested.** Only OLED hardware exists. Gate
   LCD-divergent paths on model detection and ship "OLED-verified, LCD-untested"
@@ -494,7 +470,7 @@ Omarchy 4.0 on it (`ROADMAP.md` P1.5). Open only until that session runs.
   scheduled:** `ROADMAP.md` P3.1 produces it as a byproduct of the phase-3
   factory reset.
 
-### 5.9 One upstream draft staged and held
+### 5.6 One upstream draft staged and held
 
 `DRAFT-upstream-esp-permissions-omarchy.md` (against `basecamp/omarchy`) is
 fully drafted, reviewed, and **deliberately unsent** by operator choice. It is
@@ -523,7 +499,7 @@ DeckShift drop (§2.4). Nothing has ever been posted anywhere.
 - **Anything touching TDP, fan curves, or charge limits** — every time, no
   exceptions. Genuine hardware-damage risk.
 - **Any public action** — repos, upstream issues, outreach. One draft staged
-  (§5.9).
+  (§5.6).
 
 Retired from this list 2026-08-10: "do not wipe the Deck" (superseded by
 §2.5's planned-rebuild posture), the DeckShift manual removal and its `/tmp`
@@ -569,6 +545,16 @@ backup rescue (the rebuild wipes both).
 - The `cs35l41-dsp1-*` firmware warnings previously recorded as "expected on
   OLED" **do not occur** on current firmware. Treat their reappearance as worth
   investigating, not as background noise.
+- **Limine honours the entry-path form of `default_entry`** — proven by boot,
+  not inference (`vm-default-entry-test.sh`): a planted *non-first* path was
+  both selected and booted. Limine implements the systemd Boot Loader
+  Interface, so the selected entry is readable at
+  `/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-…` (UTF-16LE,
+  4-byte attribute prefix) — assert on that, never screen-scrape a menu.
+- `snapper --no-dbus` makes create-config/create/list work in a chroot, and
+  `limine-snapper-sync` runs chrooted too — but only after
+  `systemd-machine-id-setup`, because it namespaces its ESP history dir by
+  machine-id.
 - Docker containers get a tmpfs `/dev` with no udev, so `losetup -P` publishes
   partitions under `/sys/block` but creates no `/dev/loopNpM` nodes — `mknod`
   them from sysfs. Relatedly, `genfstab -U` silently emits `/dev/loop0p1` when
@@ -593,3 +579,4 @@ One line each. Detail lives in git history and in the `FINDING-*.md` files.
 | 7 | First physical hardware run; two real bugs found; R1 §10.3 resolved; Steam/gamescope installed; prior-art check done |
 | 8 | First Gaming Mode boot, via a DeckShift hybrid splice (since reversed — §2.3) |
 | 9 | Scope reset: ISO is the deliverable, target Omarchy 4.0, DeckShift dropped. Docs consolidated; `ROADMAP.md` written (three phases); Deck rebuild + factory-reset strategy adopted; dead drafts removed |
+| 10 | P1.1 done: `stage-default-entry` (path form proven by boot), substrate rebuilt with real snapper snapshots (immediately caught the hook test's own substring miscount), three deliberate-failure tests; all four suites green |

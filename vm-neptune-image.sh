@@ -26,7 +26,7 @@
 # kernel -- not an Omarchy install. So this builds exactly that, in minutes,
 # reproducibly, from packages.
 #
-# It is deliberately NOT a claim to be an Omarchy Quattro system. The four
+# It is deliberately NOT a claim to be an Omarchy Quattro system. The
 # properties it does reproduce, because they are the ones the boot chain
 # depends on, are:
 #   1. limine + limine-mkinitcpio-hook (same version stream as Quattro's,
@@ -38,6 +38,24 @@
 #      UKI hardening, i.e. PLAN.md 8.5's precondition.
 #   4. The Valve repos and a real linux-neptune-* kernel installed through
 #      them, including the linux-firmware-neptune swap.
+#   5. A btrfs root with snapper + limine-snapper-sync and ONE REAL SNAPSHOT,
+#      so limine.conf carries the Snapshots submenu whose limine_history/
+#      path lines embed the same UKI basenames as the real entries.
+#
+#      Property 5 exists because its absence hid a real bug. The first
+#      physical hardware run (session 7) failed on limine_entry_count()
+#      counting a snapshot entry as a duplicate boot entry -- and no VM suite
+#      could have caught it, because this image had no snapper, no snapshot,
+#      and therefore no second reference to any UKI basename anywhere in the
+#      config. Every idempotency claim made on the old substrate silently
+#      excluded the one config shape every real machine has (the task docs
+#      mandate a safety snapshot before touching hardware, so ANY machine
+#      following the documented procedure has one). PROGRESS.md 5.2.
+#   6. `default_entry: 2` -- a positional index, the way real installs ship
+#      it. Deliberately the fragile form: stage-default-entry's job is to
+#      convert exactly this to the durable entry-path form, so the image must
+#      start from the state the stage exists to repair (same reasoning as the
+#      fmask=0077 in property 3).
 #
 # HOW IT IS BUILT WITHOUT ROOT ON THE HOST
 #
@@ -116,7 +134,7 @@ Server = ${OMARCHY_SERVER}
 EOF
 
 pacman -Sy --noconfirm --needed \
-  arch-install-scripts dosfstools e2fsprogs util-linux gptfdisk parted >/dev/null ||
+  arch-install-scripts dosfstools e2fsprogs btrfs-progs util-linux gptfdisk parted >/dev/null ||
   die "could not install container build tools"
 
 step "creating ${SIZE_GB}G image and partitioning it"
@@ -150,7 +168,10 @@ done
 
 step "making filesystems"
 mkfs.vfat -F32 -n ESP "${loop}p1" >/dev/null || die "mkfs.vfat failed"
-mkfs.ext4 -q -L root "${loop}p2" || die "mkfs.ext4 failed"
+# btrfs, not ext4: snapper (substrate property 5) requires it. Plain btrfs
+# root, no subvolume layout -- snapper's create-config makes its own
+# .snapshots subvolume, which is all limine-snapper-sync needs.
+mkfs.btrfs -q -L root "${loop}p2" || die "mkfs.btrfs failed"
 
 # fmask/dmask 0077 on purpose: that is archinstall's UKI hardening and the
 # precondition for PLAN.md 8.5. The script under test is supposed to find and
@@ -163,8 +184,15 @@ mount -o fmask=0077,dmask=0077 "${loop}p1" /mnt/boot || die "could not mount ESP
 step "pacstrap base system"
 pacstrap -c /mnt \
   base linux mkinitcpio limine limine-mkinitcpio-hook efibootmgr \
+  btrfs-progs snapper limine-snapper-sync \
   sudo which findutils psmisc dosfstools e2fsprogs less vim ||
   die "pacstrap failed"
+
+# A stable machine-id: normally generated on first boot, but
+# limine-snapper-sync namespaces its ESP history directory by machine-id at
+# sync time, which happens in this chroot before any boot.
+systemd-machine-id-setup --root=/mnt || die "systemd-machine-id-setup failed"
+[[ -s /mnt/etc/machine-id ]] || die "machine-id is empty after setup"
 
 root_uuid=$(blkid -s UUID -o value "${loop}p2") || die "could not read root UUID"
 esp_uuid=$(blkid -s UUID -o value "${loop}p1") || die "could not read ESP UUID"
@@ -181,7 +209,7 @@ step "configuring the guest"
 # The options string is copied from a real Omarchy Quattro /etc/fstab so the
 # ESP is mounted the way PLAN.md 8.5 describes, down to the flags.
 cat >/mnt/etc/fstab <<EOF
-UUID=${root_uuid}	/	ext4	rw,relatime	0 1
+UUID=${root_uuid}	/	btrfs	rw,relatime	0 0
 UUID=${esp_uuid}	/boot	vfat	rw,relatime,fmask=0077,dmask=0077,codepage=437,iocharset=ascii,shortname=mixed,utf8,errors=remount-ro	0 2
 EOF
 grep -q 'fmask=0077' /mnt/etc/fstab ||
@@ -244,7 +272,10 @@ CUSTOM_UKI_NAME="omarchy"
 
 ENABLE_LIMINE_FALLBACK=yes
 FIND_BOOTLOADERS=no
-BOOT_ORDER="*, *fallback"
+# Same order the operator's real Deck ships: the Snapshots submenu sorts
+# last. Matters for entry *indices*, which is exactly what
+# stage-default-entry exists to stop depending on.
+BOOT_ORDER="*, *fallback, Snapshots"
 EOF
 
 # Write the guest's pacman.conf outright rather than appending to whatever
@@ -325,6 +356,37 @@ arch-chroot /mnt pacman -S --needed --noconfirm --ask=4 \
   die "installed ${KERNEL_PKG} but no omarchy_${KERNEL_PKG}.efi on the ESP -- upstream's install hook did not build it"
 grep -qF "omarchy_${KERNEL_PKG}.efi" /mnt/boot/limine.conf ||
   die "the Neptune UKI exists but is not referenced in /boot/limine.conf"
+
+step "snapper config + one real snapshot + limine-snapper-sync (substrate property 5)"
+# --no-dbus: there is no snapperd/dbus in a chroot. create-config makes the
+# .snapshots subvolume and /etc/snapper/configs/root.
+arch-chroot /mnt snapper --no-dbus -c root create-config / ||
+  die "snapper create-config failed"
+arch-chroot /mnt snapper --no-dbus -c root create --description "substrate baseline" ||
+  die "snapper create (snapshot) failed"
+snap_count=$(arch-chroot /mnt snapper --no-dbus -c root list --columns number 2>/dev/null | grep -cE '^[0-9]+' || true)
+[[ ${snap_count} -ge 1 ]] || die "snapper reports no snapshots after create (got: ${snap_count})"
+
+# The sync is the point: it writes the Snapshots submenu into limine.conf,
+# with path lines under <machine-id>/limine_history/ that embed the SAME UKI
+# basenames as the real entries -- the config shape that broke the first
+# hardware run and that no suite could previously see.
+arch-chroot /mnt limine-snapper-sync || die "limine-snapper-sync failed"
+
+# Verify the artifact, not the exit code: the submenu must reference the
+# Neptune UKI's basename under limine_history/.
+grep -E "limine_history.*omarchy_${KERNEL_PKG}" /mnt/boot/limine.conf >/dev/null ||
+  die "limine-snapper-sync exited 0 but /boot/limine.conf has no limine_history reference to omarchy_${KERNEL_PKG}.efi -- the Snapshots submenu the substrate exists to provide is missing. Config follows:
+$(cat /mnt/boot/limine.conf)"
+
+step "default_entry: 2 (substrate property 6 -- the fragile index form)"
+if grep -qE '^[[:space:]]*default_entry:' /mnt/boot/limine.conf; then
+  sed -i -E 's/^[[:space:]]*default_entry:.*/default_entry: 2/' /mnt/boot/limine.conf
+else
+  sed -i '1i default_entry: 2' /mnt/boot/limine.conf
+fi
+grep -qE '^default_entry: 2$' /mnt/boot/limine.conf ||
+  die "could not plant 'default_entry: 2' in /boot/limine.conf"
 
 step "keeping the package cache so the guest can reinstall offline"
 # The hook test reinstalls the kernel package; leaving the cache populated

@@ -3,17 +3,16 @@
 **Model: Opus.** This is the highest-density bug area in the project and the
 one that cost the most time to debug by hand. Worth the upgrade.
 
-> **Status: steps 1–6 done and hardware-validated. Three items remain open** —
-> they are steps 7–8 below plus one unticked done-criterion.
+> **Status: steps 1–8 done. One item remains open:** the stock→Neptune
+> conversion path is hardware-unvalidated — seven of ten stages have only ever
+> run their no-op path on the real Deck (`PROGRESS.md` §5.2). Closes by design
+> in `ROADMAP.md` P1.5.
 >
-> - **Step 7 — `stage-default-entry` does not exist.** `default_entry` appears
->   zero times in the script. Highest-value remaining T1 work (`PROGRESS.md` §5.3).
-> - **Step 8 — the deliberate-failure test was never run** (`PROGRESS.md` §5.5).
-> - **The stock→Neptune conversion path is hardware-unvalidated** — seven of
->   nine stages only ever ran their no-op path (`PROGRESS.md` §5.4).
+> Steps 7–8 were completed 2026-08-10 (`vm-default-entry-test.sh`, all four
+> suites green against the snapshot-bearing substrate).
 >
 > Also note **step 6's five stage names are not the ones that shipped.** The
-> script has nine, and `stage-bootloader` / `stage-permissions` were
+> script has ten, and `stage-bootloader` / `stage-permissions` were
 > deliberately rejected as aliases because both would be lies (this script does
 > not write boot entries — `limine-entry-tool` does — and it is specifically the
 > ESP's *mount options*). Use `./omarchy-deck-kernel.sh list-stages`.
@@ -149,11 +148,15 @@ the property the whole project exists to preserve.
       verified in VM
 - [x] Runs unattended in T0's QEMU harness with meaningful exit codes
 - [x] Each stage runnable independently
-- [ ] **Deliberate-failure test: corrupt the Limine config, confirm the script
-      fails loudly rather than continuing** — step 8, not done
+- [x] **Deliberate-failure test** — three of them, in `vm-default-entry-test.sh`:
+      missing config, duplicate UKI, missing menu entry — each exits 1 with the
+      right message, config restored byte-identical after
 - [x] §8.5 reproduction attempted and documented either way
-- [ ] **`stage-default-entry` exists, path-form verified in QEMU** — step 7
-- [ ] **Stock→Neptune conversion validated on hardware** (`PROGRESS.md` §5.4)
+- [x] **`stage-default-entry` exists, path-form proven in QEMU** — a non-first
+      entry planted as default was the entry Limine actually booted
+      (`LoaderEntrySelected` + `uname -r` as independent witnesses)
+- [ ] **Stock→Neptune conversion validated on hardware** (`PROGRESS.md` §5.2,
+      `ROADMAP.md` P1.5)
 
 ## Failure modes to watch for
 
