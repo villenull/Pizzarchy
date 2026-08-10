@@ -552,4 +552,73 @@ run_pw /sys/class/backlight/amdgpu_bl0/brightness 0
   fail_test "a zero value is accepted" "got ${pw_rc}; 0 is a legal brightness and must not be conflated with the empty string"
 pass "a zero value is accepted -- not conflated with the empty string that Steam sends for other paths"
 
+# ===========================================================================
+# 5. restart-sddm -- the transient unit's body (PROGRESS.md 5.16)
+# ===========================================================================
+#
+# This one cannot be run for real here: it stops and starts a display manager.
+# What IS checkable without hardware is its shape, and the shape is where the
+# recorded bug lived -- the original code said `systemctl restart sddm`, which
+# issues the start as soon as the stop job completes, 3ms after a SIGKILL in
+# the failure that was measured. So: stop and start must be SEPARATE commands,
+# in that order, with a bounded wait between them.
+
+rs_helper="$work/restart-sddm"
+render_restart_helper >"$rs_helper"
+chmod +x "$rs_helper"
+
+bash -n "$rs_helper" 2>"$work/stderr" ||
+  fail_test "render_restart_helper emits syntactically valid bash" "$(cat "$work/stderr")"
+pass "render_restart_helper emits syntactically valid bash (checked nowhere else -- it is generated)"
+
+grep -qF -- "$INSTALL_MARKER" "$rs_helper" ||
+  fail_test "the rendered restart helper carries the '#'-commented marker" "expected: $INSTALL_MARKER"
+pass "the rendered restart helper carries '${INSTALL_MARKER}'"
+
+# The regression this file exists to prevent. `systemctl restart sddm` is
+# exactly what left the Deck with no session.
+grep -qE '^\s*(if !\s*)?systemctl restart sddm' "$rs_helper" &&
+  fail_test "the helper must NOT use 'systemctl restart sddm'" "that issues the start as soon as the stop job finishes -- 3ms after a SIGKILL when the teardown times out, which is the measured failure in PROGRESS.md 5.16"
+pass "the helper does not use 'systemctl restart sddm' -- the exact call that latched sddm into permanent failure"
+
+grep -q "systemctl stop sddm" "$rs_helper" ||
+  fail_test "the helper stops sddm explicitly"
+grep -q "systemctl start sddm" "$rs_helper" ||
+  fail_test "the helper starts sddm explicitly"
+stop_ln=$(grep -n "systemctl stop sddm"  "$rs_helper" | head -1 | cut -d: -f1)
+start_ln=$(grep -n "systemctl start sddm" "$rs_helper" | head -1 | cut -d: -f1)
+[[ $stop_ln -lt $start_ln ]] ||
+  fail_test "the stop must precede the start" "stop at line ${stop_ln}, start at line ${start_ln}"
+pass "stop and start are separate commands in that order, so a settle step can sit between them"
+
+# The settle wait has to be BETWEEN them to do anything, and it has to key on
+# logind rather than fuser: systemd-logind holds /dev/tty1 permanently, so a
+# fuser-based check would report the VT busy forever and the loop would always
+# run to its bound.
+seat_ln=$(grep -n "loginctl show-seat seat0" "$rs_helper" | head -1 | cut -d: -f1)
+[[ -n $seat_ln ]] ||
+  fail_test "the helper waits on logind's view of seat0" "without a wait between stop and start this is just a slower 'restart'"
+[[ $stop_ln -lt $seat_ln && $seat_ln -lt $start_ln ]] ||
+  fail_test "the settle wait sits between the stop and the start" "stop ${stop_ln}, seat check ${seat_ln}, start ${start_ln}"
+pass "the seat0 settle wait sits between the stop and the start, where it can actually delay the start"
+
+# Comment lines stripped first: the helper's own comment names fuser to explain
+# why it is not used, and matching that would fail on the documentation rather
+# than the code.
+grep -vE '^\s*#' "$rs_helper" | grep -q "fuser" &&
+  fail_test "the helper must not CALL fuser to decide the VT is free" "systemd-logind holds /dev/tty1 permanently, so fuser always reports it busy -- measured on hardware"
+pass "no fuser call in the code -- logind holds /dev/tty1 permanently, so fuser can never report the VT free"
+
+# Bounded, always. An unbounded wait for a stuck seat means sddm is never
+# started again, which is the same black screen by a different route.
+grep -qE "while \[\[ \\\$i -lt [0-9]+ \]\]" "$rs_helper" ||
+  fail_test "the settle loop is bounded by a numeric limit" "an unbounded wait on a stuck seat never starts sddm again -- the same black screen this file exists to prevent"
+pass "the settle loop is bounded by a literal count, so a stuck seat cannot mean sddm is never restarted"
+
+# And the bound must not be a silent give-up: reaching it still starts sddm,
+# and says so.
+awk -v s="$start_ln" 'NR<s && /settled -eq 1/{f=1} END{exit !f}' "$rs_helper" ||
+  fail_test "the helper distinguishes 'settled' from 'gave up waiting'" "both paths must reach the start, but only one of them is normal"
+pass "the helper reports whether the seat settled or the bound was hit, and starts sddm either way"
+
 echo "all deck-session.sh tests passed"

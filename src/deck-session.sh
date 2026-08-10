@@ -214,6 +214,22 @@ readonly SDDM_GREETER_DROPIN=/etc/sddm.conf.d/zy-deck-greeter.conf
 # policy, not about SDDM's own settings.
 readonly SDDM_UNIT_DROPIN=/etc/systemd/system/sddm.service.d/50-deck-switch-resilience.conf
 
+# The restart is handed to a transient unit rather than run inline. See
+# render_restart_helper for the three measured reasons.
+readonly RESTART_HELPER=/usr/local/lib/deck-session/restart-sddm
+readonly SWITCH_UNIT=deck-session-switch
+
+# sddm ships TimeoutStopSec=5, and a Gaming Mode teardown does not fit in it --
+# measured at 5.008s, i.e. systemd SIGKILLed sddm mid-teardown and then started
+# the replacement 3ms later, against a VT the killed compositor still held.
+# 30s is generous rather than tuned: the cost of it being too long is a slow
+# switch, and the cost of it being too short is a device with no session.
+readonly SDDM_STOP_TIMEOUT=30
+
+# Bound on the post-stop settle loop, in 0.1s units. Never unbounded: a stuck
+# seat must not mean sddm is never started again.
+readonly VT_SETTLE_MAX=50
+
 # Our greeter config is a self-contained MIRROR of upstream's settings plus the
 # monitor transform -- not an include, because Hyprland's Lua parser offers no
 # documented way to source another file and a greeter that fails to parse is a
@@ -494,10 +510,29 @@ grep -q "^User=${invoking_user}\$" "\$SDDM_DROPIN" ||
 printf 'deck-session-select: next session is %s (%s)\n' "\$target" "\$found"
 
 if [[ \$restart -eq 1 ]]; then
-  printf 'deck-session-select: restarting sddm\n'
-  # Restart, not stop+start: a single atomic transaction avoids the window
-  # where no display manager is running.
-  systemctl restart sddm
+  printf 'deck-session-select: handing the sddm restart to ${SWITCH_UNIT}.service\n'
+  # NOT \`systemctl restart sddm\` from here. That is what PROGRESS.md 5.16 is
+  # about, and the reason is measured, not theoretical -- see
+  # render_restart_helper. Two things make running it inline wrong:
+  #
+  #   1. sddm's KillMode=control-group means this process is inside the cgroup
+  #      the stop is about to kill. The caller dies mid-restart.
+  #   2. \`restart\` issues the start as soon as the stop job finishes -- 3ms
+  #      after a SIGKILL, in the failure that was recorded -- so the new sddm
+  #      races a VT the killed compositor has not released.
+  #
+  # A transient unit lives in system.slice, so it survives the teardown and can
+  # sequence stop -> settle -> start properly.
+
+  # Clear any stale unit from a previous switch so --unit= cannot collide.
+  # --collect should already have removed it; this is belt and braces.
+  systemctl reset-failed ${SWITCH_UNIT}.service 2>/dev/null || true
+
+  systemd-run --collect --quiet \\
+    --unit=${SWITCH_UNIT} \\
+    --description='deck-session-select: sddm restart for a session switch' \\
+    ${RESTART_HELPER} ||
+      die "could not launch ${SWITCH_UNIT}.service; the session was NOT switched. The next-session state is already written, so a reboot will land in \$target."
 fi
 EOF
 
@@ -505,6 +540,24 @@ EOF
     fail "could not install ${SELECT_BIN}"
   rm -f "$tmp"
   $SUDO test -x "$SELECT_BIN" || fail "${SELECT_BIN} is not executable after install"
+
+  # --- the restart helper the transient unit runs ---
+  assert_ours_or_absent "$RESTART_HELPER" "something else"
+  log "installing ${RESTART_HELPER}"
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$RESTART_HELPER")" ||
+    fail "could not create $(dirname "$RESTART_HELPER")"
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_restart_helper >"$tmp" ||
+    fail "could not render the sddm restart helper"
+  $SUDO install -m 0755 -o root -g root "$tmp" "$RESTART_HELPER" ||
+    fail "could not install ${RESTART_HELPER}"
+  rm -f "$tmp"
+  $SUDO test -x "$RESTART_HELPER" || fail "${RESTART_HELPER} is not executable after install"
+
+  # systemd-run is how the restart escapes sddm's cgroup. Without it the switch
+  # silently falls back to nothing at all, so check now rather than at 2am.
+  command -v systemd-run >/dev/null 2>&1 ||
+    fail "systemd-run not found; ${SELECT_BIN} needs it to restart sddm outside the session being torn down"
 
   # --- sudoers drop-in, validated before installation ---
   # invoking_user is resolved and guarded at the top of this stage, where the
@@ -532,6 +585,97 @@ EOF
   verify_nopasswd "$SELECT_BIN" "$invoking_user"
 
   log "stage-session-select: ok"
+}
+
+# ---------------------------------------------------------------------------
+
+# The body of the transient unit that actually restarts sddm. Written to
+# stdout; split out so test/unit/test-deck-session.sh can check its shape with
+# no Deck, no root and no VM, the same way render_update_stub is.
+#
+# WHY THIS EXISTS AT ALL -- measured on hardware, PROGRESS.md 5.16 / R-26:
+#
+#   13:11:02.815  sddm: Signal received: SIGTERM
+#   13:11:07.822  sddm: sddm-helper (start-gamescope-session) crashed (exit code 1)
+#   13:11:07.823  systemd: sddm.service: State 'stop-sigterm' timed out. Killing.
+#   13:11:07.823  systemd: Killing process 939 (sddm) with signal SIGKILL
+#   13:11:07.826  systemd: sddm.service: Failed with result 'timeout'
+#   13:11:07.830  systemd: Started Simple Desktop Display Manager      <- +3ms
+#   13:11:11      systemd: Start request repeated too quickly -> start-limit-hit
+#
+# The teardown did not fit in sddm's TimeoutStopSec=5, so systemd killed it and
+# started the replacement three milliseconds later, against a VT the killed
+# compositor still held. The greeter crashed, Restart=always retried, and
+# StartLimitBurst=2 latched the unit to failed -- no graphical session, and on
+# the product no way back.
+#
+# NOTE this corrects R-26's own account of the fix. It called RestartSec=3 "the
+# more important half", reasoning that at 100ms every retry lands before the VT
+# is free. RestartSec does not gate this at all: the fatal start came from an
+# explicit `systemctl restart` transaction, and RestartSec only spaces
+# Restart=always auto-restarts. That is why the gap was 3ms and not 100ms. The
+# shipped drop-in helps the retry path; it never touched the cause.
+render_restart_helper() {
+  cat <<EOF
+#!/usr/bin/env bash
+#
+# restart-sddm -- stop sddm, wait for the seat to be free, start it again.
+${INSTALL_MARKER}
+#
+# Run as a transient systemd unit (${SWITCH_UNIT}.service) launched by
+# deck-session-select, NOT inline. sddm's KillMode=control-group would
+# otherwise kill the caller mid-restart, because a session switch is issued
+# from inside the session being torn down.
+#
+# The sequence is stop -> settle -> start rather than \`systemctl restart\`
+# precisely so the start cannot be issued while the previous compositor still
+# holds the VT. See deck-session.sh's render_restart_helper for the journal
+# extract this is built from.
+#
+set -uo pipefail
+
+note() {
+  printf 'restart-sddm: %s\n' "\$1" >&2
+  command -v logger >/dev/null 2>&1 && logger -t restart-sddm -- "\$1"
+  return 0
+}
+
+# Blocking: systemd does not return until the stop job is done, including the
+# SIGKILL fallback. With TimeoutStopSec raised to ${SDDM_STOP_TIMEOUT}s in the
+# drop-in, this is normally a clean teardown rather than a kill.
+if ! systemctl stop sddm; then
+  note "'systemctl stop sddm' reported failure; continuing to the start anyway, because leaving the device with no display manager is the worse outcome"
+fi
+
+# The stop job is complete, but a compositor that had to be killed can still
+# hold the VT briefly. logind dropping the seat's sessions is the signal that
+# it is really free -- fuser is not, because systemd-logind holds /dev/tty1
+# permanently and would always report it busy.
+settled=0
+i=0
+while [[ \$i -lt ${VT_SETTLE_MAX} ]]; do
+  if [[ -z \$(loginctl show-seat seat0 -p Sessions --value 2>/dev/null) ]]; then
+    settled=1
+    break
+  fi
+  i=\$((i + 1))
+  sleep 0.1
+done
+
+if [[ \$settled -eq 1 ]]; then
+  note "seat0 free after \$((i / 10)).\$((i % 10))s; starting sddm"
+else
+  # Loud, and then proceed anyway. A stuck seat is still better answered by
+  # starting sddm than by leaving the device with nothing -- this whole file
+  # exists because the device was left with nothing.
+  note "seat0 still had sessions after ${VT_SETTLE_MAX} tenths of a second; starting sddm anyway. If the switch misbehaves, this is the first thing to look at."
+fi
+
+if ! systemctl start sddm; then
+  note "'systemctl start sddm' FAILED -- the device may have no graphical session. Recover with: systemctl reset-failed sddm && systemctl start sddm"
+  exit 1
+fi
+EOF
 }
 
 # ---------------------------------------------------------------------------
@@ -1262,18 +1406,22 @@ stage_sddm_resilience() {
   #
   # The mechanism, from sddm's shipped unit:
   #
-  #   StartLimitIntervalSec=30    StartLimitBurst=2    RestartSec=100ms
+  #   TimeoutStopSec=5   StartLimitIntervalSec=30   StartLimitBurst=2   RestartSec=100ms
   #
-  # Switching restarts SDDM while gamescope still holds VT1. SDDM's first
-  # display attempt raced that teardown and died with HELPER_TTY_ERROR; systemd
-  # retried 100ms later, far too soon for the VT to have settled, so that failed
-  # too; two failures inside 30s exhausted the burst and the unit latched to
-  # `failed` permanently. A transient, self-healing condition was converted into
-  # a black screen by a rate limit.
+  # The FIRST domino is the stop timing out, which R-26 did not record. A
+  # Gaming Mode teardown does not fit in 5s (Steam is slow to exit), so systemd
+  # SIGKILLs sddm and then runs the restart's start job 3ms later, against a VT
+  # the killed compositor still holds. The greeter dies, Restart=always retries,
+  # and StartLimitBurst=2 latches the unit to `failed` -- no graphical session,
+  # and on the product no way back.
   #
-  # RestartSec is the more important half: at 100ms the retry is guaranteed to
-  # land before the VT is free, so the limit gets spent on attempts that could
-  # never have worked.
+  # ⚠️ R-26 called RestartSec=3 "the more important half", reasoning that at
+  # 100ms every retry lands before the VT is free. RestartSec does not gate the
+  # fatal start at all -- that one comes from an explicit `systemctl restart`
+  # transaction, and RestartSec only spaces Restart=always auto-restarts. Hence
+  # the measured 3ms. Both directives below still earn their place on the RETRY
+  # path, but the cause is addressed by TimeoutStopSec here plus the stop ->
+  # settle -> start sequencing in render_restart_helper.
   #
   # TRADEOFF, deliberate: disabling the rate limit means a genuinely broken SDDM
   # config retries forever instead of stopping. On a device with no keyboard,
@@ -1291,16 +1439,24 @@ stage_sddm_resilience() {
 ${INSTALL_MARKER}
 #
 # Session switching restarts SDDM while the outgoing compositor still holds
-# VT1. Upstream's StartLimitIntervalSec=30 / StartLimitBurst=2 / RestartSec=100ms
-# turns that transient race into a PERMANENT failure: the Deck ends up with no
-# graphical session and needs 'systemctl reset-failed sddm' from a shell.
+# VT1. Upstream's TimeoutStopSec=5 / StartLimitIntervalSec=30 /
+# StartLimitBurst=2 / RestartSec=100ms turns that transient race into a
+# PERMANENT failure: the Deck ends up with no graphical session and needs
+# 'systemctl reset-failed sddm' from a shell.
 [Unit]
 # 0 disables rate limiting. See the tradeoff note in stage-sddm-resilience.
 StartLimitIntervalSec=0
 
 [Service]
-# Give the outgoing session time to release the VT before retrying. 100ms did
-# not, and every retry inside that window is wasted.
+# THE CAUSE. Upstream's 5s does not fit a Gaming Mode teardown -- measured at
+# 5.008s, i.e. systemd SIGKILLed sddm mid-teardown and started the replacement
+# 3ms later against a VT that was still held. Letting the stop finish is what
+# stops the race happening, rather than surviving it.
+TimeoutStopSec=${SDDM_STOP_TIMEOUT}
+
+# Give the outgoing session time to release the VT before RETRYING. 100ms did
+# not, and every retry inside that window is wasted. This governs the
+# Restart=always path only; it does not affect an explicit restart.
 RestartSec=3
 EOF
   $SUDO install -m 0644 -o root -g root "$tmp" "$SDDM_UNIT_DROPIN" ||
@@ -1312,15 +1468,22 @@ EOF
   # Verify the values systemd ACTUALLY resolved. A drop-in in the right place
   # with a typo'd directive is silently ignored, so reading the file back would
   # prove nothing.
-  local limit restart_usec
+  local limit restart_usec stop_usec
   limit=$(systemctl show sddm -p StartLimitIntervalUSec --value 2>/dev/null)
   restart_usec=$(systemctl show sddm -p RestartUSec --value 2>/dev/null)
+  stop_usec=$(systemctl show sddm -p TimeoutStopUSec --value 2>/dev/null)
   [[ $limit == "0" || $limit == "infinity" ]] ||
     fail "installed ${SDDM_UNIT_DROPIN} but systemd still reports StartLimitIntervalUSec=${limit}. The drop-in was not applied; a failed switch would still leave the Deck with no session."
+
+  # This one is a fail, not a warn: it is the directive that addresses the
+  # cause. At upstream's 5s the teardown is SIGKILLed and the race is back.
+  [[ $stop_usec == "${SDDM_STOP_TIMEOUT}s" || $stop_usec == "${SDDM_STOP_TIMEOUT}"* ]] ||
+    fail "TimeoutStopSec resolved to '${stop_usec}', not ${SDDM_STOP_TIMEOUT}s. That is the directive that keeps sddm's teardown from being SIGKILLed at 5s, which is what puts the VT race back."
+
   [[ $restart_usec == "3s" ]] ||
     warn "RestartSec resolved to '${restart_usec}', not 3s. The rate limit is lifted so a switch can still recover, but retries may again land before the VT is free."
 
-  log "verified: StartLimitIntervalUSec=${limit}, RestartUSec=${restart_usec}"
+  log "verified: StartLimitIntervalUSec=${limit}, TimeoutStopUSec=${stop_usec}, RestartUSec=${restart_usec}"
   log "stage-sddm-resilience: ok"
 }
 
