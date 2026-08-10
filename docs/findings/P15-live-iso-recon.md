@@ -346,3 +346,73 @@ it present in the payload, because it cannot be fetched at install time.
 Alternatively, write that component against raw `struct`-parsed evdev with no
 third-party dependency — which is exactly what this session's `evmon.py`
 proved is practical (R-8).
+
+## R-11. ⚠️ The 4.0 installer enables FULL-DISK ENCRYPTION by default
+
+Discovered by inspecting the first (discarded) install before rebooting it.
+
+`/root/user_encrypt_installation.txt` came out of the TUI as `true`, and the
+resulting disk was:
+
+```
+nvme0n1p1     2G  vfat          <- ESP
+nvme0n1p2 474.9G  crypto_LUKS   <- LUKS2
+  └─root  474.9G  btrfs
+```
+
+with `cryptdevice=PARTUUID=…:root` on the Limine cmdline, **no TPM2 token
+enrolled** (`luksDump` → `Tokens:` empty), and an empty
+`/etc/crypttab.initramfs`.
+
+**Consequence: the machine stops at a passphrase prompt on every boot and
+cannot proceed without a physical keyboard.**
+
+### Why this is a project-level finding, not an install mishap
+
+It directly contradicts the product's central promise — *"behaves like stock
+SteamOS: boots to Gaming Mode"*, controller-only, no keyboard (`CLAUDE.md`).
+If the fork inherits upstream's default, **the shipped ISO produces a device
+its own user cannot boot.** Nothing in `docs/PLAN.md` §6.1a's screen list
+covers a pre-boot passphrase, because until now nobody knew one would exist.
+
+It also breaks P1.5's own **checkpoint β**, which is specifically a *hands-off*
+reboot test.
+
+### The options, for T4/T5 to decide
+
+1. **Default encryption OFF in our ISO.** Simplest, matches stock SteamOS
+   behavior (which is also unencrypted). Costs at-rest security.
+2. **Keep encryption, enroll TPM2 auto-unlock** via `systemd-cryptenroll`
+   (the Deck has an fTPM; the live image already carries `tpm2-tss`). This is
+   probably the *right* answer for a shipped product — encrypted at rest,
+   unattended at boot — but it is unproven on this hardware and needs its own
+   spike.
+3. **Controller-driven passphrase entry in the initramfs.** Rejected on sight:
+   pre-boot, pre-userspace, no compositor, and R-8 shows the gamepad node is
+   silent without help. Enormous effort for a worse UX.
+
+**Recommendation:** ship option 1 by default, and treat option 2 as a
+follow-on feature rather than a release blocker.
+
+### How the test bed was corrected
+
+Rather than re-drive the TUI, the installer was re-run **non-interactively**
+against its own saved config with `user_encrypt_installation.txt` flipped to
+`false` and `encryption_password` dropped from `user_credentials.json`:
+
+```
+/usr/local/bin/omarchy-iso-install --config /root/user_configuration.json \
+  --creds /root/user_credentials.json --encrypt-file /root/user_encrypt_installation.txt \
+  --authorized-keys-file /root/authorized_keys ...
+```
+
+**This is a reusable capability worth keeping:** upstream's installer is fully
+driveable from a config file with no TUI at all, and it accepts
+`--authorized-keys-file` (SSH keys injected at install time) and
+`--tailscale-authkey-file`. For T5, that is a far cleaner integration point
+than post-install scripting — and it makes automated install testing in QEMU
+straightforward.
+
+Teardown needed before re-running: `swapoff -a` (the installer creates a
+hibernation swapfile at `/mnt/swap/swapfile` that holds the mount), then
+`umount -R /mnt`, then `cryptsetup close root`.
