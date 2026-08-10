@@ -1103,9 +1103,21 @@ DeckShift hand-edits) and installed package-based Omarchy 4.0
 - **LCD Steam Decks are entirely untested.** Only OLED hardware exists. Gate
   LCD-divergent paths on model detection and ship "OLED-verified, LCD-untested"
   rather than claim support.
-- **Trademark / redistribution** — "Steam Deck" and Valve iconography usage
-  (`docs/PLAN.md` §6.1's button glyphs), and whether the ISO may redistribute Valve's
-  kernel and firmware. Flagged as cheap-to-check-early; **not checked.**
+- **Trademark / redistribution** — ✅ **checked 2026-08-10**,
+  `docs/findings/P16-redistribution-and-trademark.md`. Two results:
+  **(a) `steamdeck-dsp` is `Proprietary` and ships no licence text**, and
+  `omarchy-deck-kernel.sh` installs it — so an ISO that *bundles* Valve packages
+  would redistribute a proprietary blob. It is the Deck's speaker tuning, so
+  dropping it is not free. **The question is contingent on a T5 decision:
+  bundle (→ blocked) vs fetch from Valve's mirror at install time (→ nothing is
+  redistributed). §2.2 retired the offline constraint, so fetch is now
+  available and is the recommendation.**
+  **(b) The Steam Deck logo is unambiguously out**; Valve's guidelines scope
+  themselves to partners under contract and forbid combining the logo with
+  other words or graphics. Draw our own button glyphs for T4 rather than using
+  Valve's. Descriptive use of the words is an operator judgement call; keeping
+  "Steam Deck" out of the project *name* is recommended, and the project is
+  already "Omarchy Deck". A README affiliation disclaimer is the cheap fix.
 - **Recovery path documentation** — how a user returns to stock SteamOS. An
   ethical baseline for a wipe-the-device project. **Not written — and now
   scheduled:** `docs/ROADMAP.md` P3.1 produces it as a byproduct of the phase-3
