@@ -53,9 +53,12 @@ work without waiting for further instruction.**
 > ```
 >
 > `test/unit/test-deck-session.sh` pins the `steamos-update` stub's exit-code
-> protocol and the install-marker contract. ⚠️ **`src/deck-session.sh` is
-> source-safe, and the test sources it** — so anything you add at TOP LEVEL below
-> the constants runs at source time inside the test. Keep new work in functions.
+> protocol and the install-marker contract. It has teeth — **mutation-tested,
+> 15/15 introduced faults caught**, including the apply-path drift that rebooted
+> the Deck; see `docs/findings/P2-session-summary.md` §6a for what it does and
+> does not cover. ⚠️ **`src/deck-session.sh` is source-safe, and the test sources
+> it** — so anything you add at TOP LEVEL below the constants runs at source time
+> inside the test. Keep new work in functions.
 >
 > ### ⚠️ Session 15 corrected four recorded "facts". Trust the findings, not memory.
 >

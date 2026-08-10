@@ -28,7 +28,7 @@
 | **§5.14** false "check your network" first-run error | R-21 — Steam logs `check … returned: 7` → `up to date` |
 | **§5.11** greeter + desktop rotation | R-24 — both seen upright on hardware |
 | **R-18a** does the Steam runtime narrow `SYSTEM_PATH`? | R-22 — yes, `PATH=/usr/bin:/bin` |
-| First unit coverage for `src/deck-session.sh` | `test/unit/test-deck-session.sh`, 17 assertions |
+| First unit coverage for `src/deck-session.sh` | `test/unit/test-deck-session.sh`, 17 assertions — §6a on how far to trust it |
 
 ## 3. Opened — and as with P1.5, this matters more than the closures
 
@@ -90,6 +90,36 @@ move by byte-comparing its output against the artifact installed on the Deck.
 `tools/deck-sync.sh` — header no longer claims it has never run against
 hardware. `.github/workflows/ci.yml` — header no longer understates its own
 unit-suite glob.
+
+## 6a. How far to trust the new unit suite
+
+Recorded because "17 assertions pass" says nothing about whether they would
+catch a regression, and a suite that cannot fail is worse than no suite — it
+buys false confidence in exactly the file that reboots the Deck when it is wrong.
+
+`test/unit/test-deck-session.sh` was **mutation-tested: 15 of 15 introduced
+faults were caught.** Specifically:
+
+- On the apply path, drift to **0** *and* drift to **1** are both detected. 0 is
+  the fault that actually rebooted the Deck, and asserting merely "non-zero"
+  would have let it pass — so the test pins **exactly 7**.
+- Reverting `assert_ours_or_absent()` to match the prefixed `INSTALL_MARKER`
+  instead of the bare `INSTALL_MARKER_TEXT` is caught by the Lua-marker case and
+  **by nothing else**. That case is what keeps the greeter config parseable.
+- `note()`'s `return 0` is load-bearing under `set -e`; removing it is caught.
+
+Independently verified before it landed: rendering the stub through the
+extracted `render_update_stub()` reproduces the artifact installed on the Deck
+**byte for byte** (3772 B), so the extraction provably did not alter what Steam
+executes.
+
+What it does **not** cover, deliberately: `stage-sddm-resilience`, whose contract
+is "the values systemd resolved" and is meaningless without systemd. Two gaps
+that *are* unit-testable and remain open — `stage-greeter-rotation`'s `luac -p`
+refusal (it guards the exact silent-fallback failure described in §5) and the
+"ours is the last `CompositorCommand`" resolution. The latter needs the lookup
+factored into a function taking a directory rather than a path override, so no
+new way exists to write config somewhere real SDDM never reads.
 
 ## 7. Deliberately not done
 
