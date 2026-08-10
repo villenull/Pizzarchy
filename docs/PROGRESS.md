@@ -627,7 +627,7 @@ project ships corrects the panel and the fix is per-surface, in userspace.
 
 | Surface | Status | Fix |
 |---|---|---|
-| Limine menu | ❌ rotated | **no known fix yet** — and it is the first thing a user sees. **T5** |
+| Limine menu | 🟡 **fix identified, NOT applied** | `interface_rotation: 270` — Limine ≥ v10; Deck runs **12.5.2**. Boot-chain change, held for approval. See below |
 | Console / TTY | ❌ rotated | `fbcon=rotate:1` on the cmdline — boot-chain change, **held for operator approval** |
 | SDDM greeter | ✅ **fixed, seen** | `stage-greeter-rotation` in `src/deck-session.sh` |
 | Omarchy / Hyprland | ✅ **fixed, seen** | `~/.config/hypr/monitors.lua` |
@@ -646,6 +646,39 @@ project ships corrects the panel and the fix is per-surface, in userspace.
   on this panel, leaving a **640×400 logical desktop**. Now **1.25** (1024×640,
   divides 1280×800 evenly). `GDK_SCALE` went 2 → 1 to match, or GTK apps render
   ~2.5× and clip.
+
+### The Limine menu CAN be rotated — `interface_rotation` (session 16)
+
+§5.11 recorded "no known fix yet". There is one. Limine has a global
+**`interface_rotation`** taking `0`, `90`, `180`, `270`, default `0`, which
+rotates the menu/editor/console **only** — it does not affect the booted OS.
+It needs **Limine ≥ v10**; the Deck runs **12.5.2**, and other `interface_*`
+globals are already in its config, so the option is available today.
+
+```
+interface_rotation: 270
+```
+
+`270` to match the desktop's `transform 3`. ⚠️ **Unverified against a screen** —
+§5.11's whole history is a recorded transform value that turned out upside down,
+so treat the number as a hypothesis until someone looks at the panel.
+
+**⚠️ NOT APPLIED.** Editing `/boot/limine.conf` is a boot-chain change, and this
+project holds those for operator approval (same rule as `fbcon=rotate:1`).
+
+**Where it has to go, which is the non-obvious part.** Three things write that
+file:
+
+| Writer | Behaviour |
+|---|---|
+| `limine-entry-tool` (binary) | manages **entries** and `default_entry`; leaves other globals alone |
+| Omarchy theming | writes `interface_*` / `term_*` globals |
+| **`omarchy refresh limine`** | **`mv`s `/boot/limine.conf` aside and copies `/usr/share/omarchy/default/limine/limine.conf` over it** — a hand edit is destroyed |
+
+So a hand edit to `/boot/limine.conf` survives kernel updates but **not**
+`omarchy refresh limine`. For the product, **T5 must bake `interface_rotation`
+into the image**, exactly as it must for the desktop's `monitors.lua` below —
+same class of problem, same fix.
 
 ⚠️ **The desktop half is per-user config** (`~/.config/hypr/monitors.lua`), so it
 is currently fixed only for `deck` on the test Deck. **T5 must bake it into the

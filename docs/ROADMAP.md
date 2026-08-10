@@ -163,7 +163,7 @@ exactly what we did.
 | Risk | Phase | Mitigation |
 |---|---|---|
 | ~~Live ISO can't drive the OLED radio~~ | 1 | **RETIRED** — works on hardware (R-0). No firmware needs baking into the live image |
-| ~~Live ISO renders rotated / unusable~~ | 1 | **NARROWED TWICE.** Greeter and desktop are fixed and seen (§5.11, transform **3**). What remains is the **Limine menu** — no known fix, and the first thing a user sees — plus the TTY (`fbcon=rotate:1`, boot-chain, awaiting approval) |
+| ~~Live ISO renders rotated / unusable~~ | 1 | **NARROWED TWICE.** Greeter and desktop are fixed and seen (§5.11, transform **3**). What remains is the **Limine menu** — **fix found** (`interface_rotation: 270`, Limine ≥v10; Deck has 12.5.2) but not applied, boot-chain — plus the TTY (`fbcon=rotate:1`, same). Both await approval, and **T5 must bake both into the image** |
 | Steam's system integration is absent, not just its updater | 2 | **NARROWED** — §5.15's two user-visible helpers (brightness, timezone) now ship; the six `jupiter-*` are skipped by decision. Residual: Steam **falls back** to blanket `sudo` when a helper is missing, so absence looks like health on a test rig |
 | The test Deck is more privileged than the product, hiding defects | 2 | §5.17 — `99-deck-testing` grants the desktop user blanket NOPASSWD and sorts last, overriding every narrow grant. Anything privilege-dependent verified here is suspect until re-checked without it |
 | ~~A session switch bricks the display manager~~ | 2 | **RETIRED** — §5.16 resolved: cause was sddm's stop timing out, now `TimeoutStopSec=30` + stop→settle→start in a transient unit. 20/20 soak clean |
