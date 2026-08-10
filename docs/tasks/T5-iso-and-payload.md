@@ -162,3 +162,47 @@ turned out upside down, so verify before shipping it.
 
 The TTY is a third surface (`fbcon=rotate:1` on the kernel cmdline) and is still
 awaiting operator approval as a boot-chain change.
+
+## The other three constraints, gathered here so this file is self-contained
+
+`docs/START-HERE.md` tells a new session that T5 carries five constraints. Two
+are written above; these are the other three, which until now lived only in
+`docs/PROGRESS.md` and the ROADMAP row.
+
+### 1. Offline-only pacman during install (PROGRESS.md 3.10, 2.2)
+
+The build needs the Deck package set reachable without a network at install
+time *or* a deliberate decision that the install may use Wi-Fi. **2.2 retired the
+fully-offline constraint**, so network-at-install is now permitted -- which is
+also what makes "fetch, not bundle" viable below. Do not re-derive 2.2's
+reversal; it was a scope decision, not an oversight.
+
+### 2. The upstream installer defaults to FULL-DISK ENCRYPTION (PROGRESS.md 5.12)
+
+Inherited unchanged, our fork ships a device that **stops at a passphrase prompt
+with no keyboard** -- unbootable for its intended user, and a direct violation of
+`CLAUDE.md`'s controller-only rule. **Default it OFF.** TPM2 auto-unlock is a
+follow-on, not a release blocker.
+
+Upstream's installer is driveable from a config file and accepts
+`--authorized-keys-file` / `--tailscale-authkey-file`, which is a better
+integration point than post-install scripting and makes automated QEMU install
+testing tractable.
+
+### 3. Repo precedence -- qualify the package, do NOT reorder (PROGRESS.md 5.13)
+
+`pacman -S <name>` resolves by **repo order, not version**, and Arch's repos come
+first by design. Session 16 measured the alternative and rejected it: 101 package
+names overlap and **Valve's is older in 50**, including `filesystem`
+2021.12.07 (vs 2025.10.12), `linux-lts` 5.15.74 (vs 6.18.43) and the whole
+mesa/vulkan stack. The Deck runs **Arch's** mesa and Gaming Mode works.
+
+The entire practical surface is one package:
+
+```bash
+pacman -S jupiter-staging/gamescope     # NOT: pacman -S gamescope
+```
+
+Arch's `gamescope` is the bare compositor; Valve's ships the SteamOS session.
+Both are `3.16.25`, so no version check can tell them apart -- test for the
+session *file*. Full data: `docs/findings/P16-repo-overlap-audit.md`.
