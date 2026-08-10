@@ -1,0 +1,23 @@
+[   14.214982] ath11k_pci 0000:03:00.0: BAR 0 [mem 0x80000000-0x801fffff 64bit]: assigned
+[   14.215013] ath11k_pci 0000:03:00.0: enabling device (0000 -> 0002)
+[   14.215186] ath11k_pci 0000:03:00.0: MSI vectors: 1
+[   14.215196] ath11k_pci 0000:03:00.0: qca2066 hw2.1
+[   15.341688] ath11k_pci 0000:03:00.0: chip_id 0x12 chip_family 0xb board_id 0x309 soc_id 0x400c1211
+[   15.341709] ath11k_pci 0000:03:00.0: fw_version 0x11087fff fw_build_timestamp 2025-07-16 10:33 fw_build_id WLAN.HSP.1.1-03926.13-QCAHSPSWPL_V2_SILICONZ_CE-2.52297.9
+[   15.488783] ath11k_pci 0000:03:00.0: leaving PCI ASPM disabled to avoid MHI M2 problems
+[  336.819640] wlan0: authenticate with <AP-BSSID-redacted> (local address=<deck-wlan-mac-redacted>)
+[  336.819656] wlan0: send auth to <AP-BSSID-redacted> (try 1/3)
+[  336.928463] wlan0: send auth to <AP-BSSID-redacted> (try 2/3)
+[  336.931118] wlan0: authenticated
+[  336.931446] wlan0: associate with <AP-BSSID-redacted> (try 1/3)
+[  336.936156] wlan0: RX AssocResp from <AP-BSSID-redacted> (capab=0x1411 status=0 aid=1)
+[  336.958427] wlan0: associated
+[  336.991747] wlan0: Limiting TX power to 30 (30 - 0) dBm as advertised by <AP-BSSID-redacted>
+[  341.884238] wlan0: disconnect from AP <AP-BSSID-redacted> for new auth to <AP-BSSID-redacted>
+[  342.151981] wlan0: authenticate with <AP-BSSID-redacted> (local address=<deck-wlan-mac-redacted>)
+[  342.151993] wlan0: send auth to <AP-BSSID-redacted> (try 1/3)
+[  342.159994] wlan0: authenticated
+[  342.160443] wlan0: associate with <AP-BSSID-redacted> (try 1/3)
+[  342.163735] wlan0: RX ReassocResp from <AP-BSSID-redacted> (capab=0x1131 status=0 aid=5)
+[  342.186072] wlan0: associated
+[  342.213551] wlan0: Limiting TX power to 30 (30 - 0) dBm as advertised by <AP-BSSID-redacted>

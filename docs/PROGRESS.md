@@ -32,11 +32,16 @@ may use Wi-Fi (§2.2).
 the test bed (1), build the product (2), prove it from a factory reset and
 release (3).
 
-**Next action: P1.5, the Deck recon/rebuild session.** Everything in phase 1
-that can be done without hardware is finished (P1.1 ✅, P1.2–P1.3 ✅, and
-P1.4's software half ✅ — the ISO is built, see §1.1). What remains needs the
-operator and the physical Deck. Runbook, phase by phase with expect/abort
-lines: `docs/tasks/P15-deck-rebuild-runbook.md`.
+**Next action: P1.5 phase C onward — the wipe + install.** P1.4 is ✅ done
+(Ventoy stick built, ISO verified on it) and **P1.5 phase B is ✅ complete**:
+the live-ISO recon ran 2026-08-10 and closed §5.1 plus every recon item, with
+the Deck still untouched at checkpoint α. Findings:
+`docs/findings/P15-live-iso-recon.md`. Runbook:
+`docs/tasks/P15-deck-rebuild-runbook.md`.
+
+Two deviations from that runbook, agreed with the operator: a **single USB
+stick** (no pre-staged recovery stick — reflash on demand instead) and
+**Wi-Fi rather than Ethernet** for SSH, which worked.
 
 ### 1.1 Artifacts that live OUTSIDE this repo
 
@@ -455,7 +460,27 @@ starts on this hardware* — not evidence about this project's own switch layer.
 
 Ranked by what they would cost to discover late.
 
-### 5.1 Wi-Fi in the live ISO — strong evidence, hardware confirmation pending
+### 5.1 Wi-Fi in the live ISO — ✅ **RESOLVED 2026-08-10, confirmed on hardware**
+
+**Answer: YES.** On the OLED Deck (Galileo), the 4.0 beta ISO's live
+environment drives the radio end to end — driver binds, scan, WPA2
+association, DHCP. Evidence and full recon: `docs/findings/P15-live-iso-recon.md`
+(§R-0), raw logs in `docs/findings/P15-recon-raw/`.
+
+⚠️ **The conclusion was right but the reasoning below was wrong.** The Deck's
+chip is **QCA2066 hw2.1**, not QCNFA765; the firmware that served it lives at
+`ath11k/QCA2066/`, *not* the `WCN6855/.../nfa765/` path this section watched.
+Anything that prunes firmware must keep `ath11k/QCA2066/` — pruning on the
+old reasoning would have broken the radio. See the finding's §R-6.
+
+Retired by this result: T5's "bake firmware into the live image" mitigation,
+and the ROADMAP's "live ISO can't drive the OLED radio" standing risk.
+
+**Still open:** this was association from a shell with a keyboard. It does
+not prove a *controller-only* user can join Wi-Fi — that needs T4's text
+entry, and §R-8 changed what that has to be built on.
+
+<details><summary>Superseded pre-hardware reasoning (kept for the audit trail)</summary>
 
 Introduced by §2.2: the install now depends on the Deck reaching Wi-Fi *from
 the ISO*, whose live environment runs its own kernel and firmware, not
@@ -495,6 +520,38 @@ While in the live environment, still record for T4/T5:
   render rotated 90°.
 - **Input enumeration** — what the controller looks like to the live kernel
   (`/proc/bus/input/devices`), which the T2 mapper's tables need (§3.9).
+
+</details>
+
+*(Both recon items above are now answered — see §5.9.)*
+
+### 5.9 ⚠️ NEW, and it re-scopes T4: the gamepad node is silent in the live ISO
+
+Measured 2026-08-10 (`docs/findings/P15-live-iso-recon.md` §R-8). With Steam not
+running, the Deck's controller firmware is in **lizard mode**, and lizard mode
+is **exclusive, not additive**:
+
+- Buttons emit **only** on the keyboard-emulation node (`event5`): A → `KEY_ENTER`,
+  D-pad Up → `KEY_UP`. Trackpads emit mouse motion on `event4`. Touchscreen works.
+- The real gamepad node (`event11`, the one carrying `BTN_SOUTH`) emits
+  **nothing at all** — zero events across a 90-second capture with six button presses.
+
+**Why this matters:** `src/deck-input-mapper.py` selects its device by testing
+for `BTN_SOUTH` (`src/deck-input-mapper.py:177`), i.e. exactly the dead node. In the
+live ISO it would open a pad and then block forever on a device that never
+sends an event — succeeding silently while doing nothing, the failure mode
+`CLAUDE.md` explicitly forbids. The T2 spike could not have caught this: it
+drove a virtual uinput pad, with no Valve firmware in the loop to divert the
+events.
+
+**Upside:** the live ISO is *already* controller-navigable for free — mouse,
+Enter, arrows, touchscreen — so T4's installer may not need a mapper to be
+operable at all. Text entry (the Wi-Fi passphrase) remains the real gap.
+
+**Decide before writing T4 code:** use lizard mode and map only what it
+cannot express, or suppress it (via `hid-steam`'s hidraw behavior —
+unverified) and lose the free mouse/keyboard. Recommendation in the finding:
+use it.
 
 ### 5.2 T1's stock→Neptune conversion is unvalidated on hardware
 
@@ -638,6 +695,24 @@ backup rescue (the rebuild wipes both).
 - `shellcheck` resolves `# shellcheck source=` relative to its *working
   directory*, not the script. `.shellcheckrc` sets `source-path=SCRIPTDIR`
   so `../lib/foo.sh` means what it looks like it means.
+- **The Deck's Wi-Fi chip is QCA2066 hw2.1**, firmware at
+  `ath11k/QCA2066/`. It is *not* QCNFA765/`nfa765` — an earlier inference
+  that happened to reach the right conclusion for the wrong reason.
+- **Lizard mode is exclusive.** With Steam not running, Deck buttons emit on
+  the keyboard-emulation node only; the `BTN_SOUTH` gamepad node emits
+  nothing. Any code selecting the pad by `BTN_SOUTH` gets a dead device.
+- **The upstream Omarchy ISO's pacman is offline-only** — a single
+  `[offline]` repo at `file:///var/cache/omarchy/mirror/offline/`, no network
+  mirrors. `pacman -Sy <anything not baked in>` fails even with working
+  internet. Whatever the live environment needs must be *in the payload*.
+- The Deck's DMI is `product_name=Galileo` (OLED). `amdgpu`'s ATOM BIOS
+  string says `AMDSphJupiter` — that is a display-controller name, **not** a
+  model indicator; do not read it as LCD.
+- The live ISO has no `sof-firmware`, so `snd_sof_amd_vangogh` fails to load
+  and there is likely no audio in the live environment.
+- A `pgrep -f <pattern>` inside a shell whose own command line contains
+  `<pattern>` matches itself and loops forever. Bit this session; use a
+  pidfile or match more narrowly.
 
 ---
 

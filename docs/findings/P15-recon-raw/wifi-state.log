@@ -1,0 +1,38 @@
+0: hci0: Bluetooth
+	Soft blocked: no
+	Hard blocked: no
+1: phy0: Wireless LAN
+	Soft blocked: no
+	Hard blocked: no
+=== ip link ===
+lo               UNKNOWN        00:00:00:00:00:00 <LOOPBACK,UP,LOWER_UP> 
+wlan0            UP             <deck-wlan-mac-redacted> <BROADCAST,MULTICAST,UP,LOWER_UP> 
+=== ip addr ===
+lo               UNKNOWN        127.0.0.1/8 ::1/128 
+wlan0            UP             192.168.100.25/24 metric 600 <ipv6-redacted>/64 <ipv6-redacted>/64 <link-local-redacted>/64 
+=== iwctl ===
+                                 Station: wlan0[1;90m                                [0m
+[90m--------------------------------------------------------------------------------
+[0m[1;90m  Settable  Property              Value                                          
+[0m[90m--------------------------------------------------------------------------------
+[0m            Scanning              no                                               
+            State                 connected                                        
+            Connected network     <SSID-redacted>                                     
+            IPv4 address          192.168.100.25                                   
+            IPv6 address          <ipv6-redacted>           
+            IPv6 address          <ipv6-redacted>           
+            ConnectedBss          <AP-BSSID-redacted>                                
+            Frequency             5240                                             
+            Channel               48                                               
+            Security              WPA2-Personal                                    
+            RSSI                  -49 dBm                                          
+            AverageRSSI           -48 dBm                                          
+            RxMode                802.11ax                                         
+            RxMCS                 11                                               
+            TxMode                802.11ax                                         
+            TxMCS                 6                                                
+            TxBitrate             1297100 Kbit/s                                   
+            RxBitrate             2401900 Kbit/s                                   
+            InactiveTime          2 ms                                             
+            ConnectedTime         158 s                                            
+
