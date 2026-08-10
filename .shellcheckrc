@@ -1,0 +1,5 @@
+# Resolve `# shellcheck source=` directives relative to each script's own
+# directory rather than shellcheck's working directory. Needed since the repo
+# grew subdirectories: test/vm/*.sh source ../lib/*.sh, and without this the
+# paths would only resolve when shellcheck happened to run from test/vm/.
+source-path=SCRIPTDIR
