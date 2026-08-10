@@ -842,7 +842,7 @@ it needs a narrower replacement grant first. `deck` has a password set
 is recoverable rather than a lockout. Decide before P2.7 bakes anything into
 the image.
 
-### 5.18 🟡 A failed session start drops the user at a PASSWORD GREETER — safety net in, cause open
+### 5.18 ✅ A failed session start dropped the user at a PASSWORD GREETER — RESOLVED 2026-08-10
 
 Found by session 16's soak test, cycle 4 of 20. This is §5.16's failure in the
 form a user actually meets, and it is worse than "no session": it is a login
@@ -880,29 +880,30 @@ chose `Relogin=true` — the same posture already taken in
 `stage-sddm-resilience`, a loop that can still recover beating a dead end that
 cannot, with Ctrl+Alt+F2 as the dev escape.
 
-**Status: (b) works. (a) is improved and not solved.** Two 20/20 soaks, and the
-greeter never blocked a switch in either. The retry count is the metric that
-matters, since `Relogin=true` hides the failure from every other signal:
+**Status: RESOLVED.** Three 20-cycle soaks, measured by autologin attempts —
+the only metric that shows the failure, since `Relogin=true` hides it from
+everything else:
 
-| | total autologin attempts / 20 switches |
-|---|---|
-| before the comm-name fix | **600** |
-| after | **283** |
+| | attempts / 20 switches | |
+|---|---|---|
+| original | **600** | thrash on 5 of 20 cycles |
+| after the comm-name fix | **283** | bimodal: 16 clean, 2 thrashing (104, 155) |
+| **after R-28's user-manager gate** | **20** | **every cycle at exactly 1 — the ideal** |
 
-The distribution after the fix is the real finding — it is **bimodal**, not a
-spread:
+The middle row was the diagnostic clue: bimodal, not a spread, so a switch
+either landed first time or fell into a distinct ~30 s state — a failure *mode*,
+which is what led to R-28.
 
-| attempts in a cycle | cycles |
-|---|---|
-| 1 (ideal) | **16** |
-| 3 | 1 |
-| 5 | 1 |
-| 104 | 1 |
-| 155 | 1 |
+**What a switch costs now.** Settle times observed: **0.0 s on 17 of 20**, and
+**52.7 / 52.8 / 53.3 s** on the three where Steam was genuinely still shutting
+down. None reached the 60 s bound, so every wait was real rather than a timeout.
+That is the deliberate trade: up to ~53 s of *waiting* instead of ~30 s of
+*flickering*, and it is dominated by Valve's `steam-launcher.service`
+`TimeoutStopSec=60`, not by anything this project controls.
 
-So a switch either lands first time (18/20) or falls into a distinct state that
-retries ~3×/s for 30–40 s before clearing. That is a failure *mode*, not a
-timing gradient, and it is the thing left to explain.
+⚠️ **A switch away from Gaming Mode can therefore take ~1 minute.** It is
+correct and flicker-free, but it is not fast, and the cause is Steam's own
+shutdown time. Worth revisiting in P2.4 if the shell can show progress.
 
 ⚠️ **The gate had a defect of its own, now fixed.** It listed `gamescope` as a
 process name. The kernel truncates `comm` to 15 chars and `pgrep -x` matches
@@ -954,9 +955,9 @@ systemd does would hand the problem straight back to the autologin retry loop.
 that time to shut down cleanly, and cutting it trades a slow switch for possible
 state corruption.
 
-**What this costs today:** a switch always recovers unattended, which is the
-product-critical property, and 18 of 20 are clean. The other 2 visibly flicker
-for 30–40 s. Acceptable for now; not shippable as a finished experience.
+Both halves are now closed: (b) `Relogin=true` means a dead session can never
+strand a controller-only user at a password prompt, and (a) the incoming session
+no longer starts into a teardown.
 
 ⚠️ **This is why "it worked once" was never enough.** P1.5's R-18 and session
 15's R-23 both took this switch successfully; the defect needed 4 cycles to

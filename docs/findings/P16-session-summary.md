@@ -46,9 +46,10 @@ P2.3, which needs per-item approval anyway.
   installs. Must never ship. It is also what made §5.15 look healthy. Removing
   it permanently needs a narrower replacement first, because
   `tools/deck-sync.sh` runs whole install stages through `sudo -n`.
-- **§5.18(a) — the session-start retry thrash.** `Relogin=true` absorbs it, so
-  the device always recovers unattended, but a switch can visibly flicker.
-  Improved substantially by the comm-name fix below; **not solved**.
+- ~~§5.18(a)~~ — **closed the same session.** Root cause was
+  `steam-launcher.service` taking up to ~53 s to stop (R-28); the settle gate
+  now waits on the user manager. Autologin attempts across 20 switches:
+  **600 → 283 → 20 (ideal)**.
 
 ## 4. Two defects this session introduced, and how they were caught
 
@@ -81,11 +82,10 @@ Both would have shipped on a "the code looks right" review.
 
 ## 5. Honest limits
 
-- **§5.18(a) is improved, not fixed.** Autologin attempts across 20 switches
-  went **600 → 283**, and the distribution is bimodal: **16 of 20 cycles at the
-  ideal 1 attempt**, two at 3–5, and two that thrash (104 and 155) for 30–40 s.
-  A distinct failure mode, not a timing gradient. Root cause — what makes
-  `uwsm start … Hyprland` exit in ~1 ms — is **not** identified.
+- **§5.18(a) is fixed** (R-28), but the residual cost is real: a switch *away
+  from* Gaming Mode can take **~1 minute**, dominated by Valve's
+  `steam-launcher.service` `TimeoutStopSec=60`. Correct and flicker-free, but
+  not fast, and not something this project controls.
 - **Two settle signals were measured and ruled out**, so the next attempt need
   not retry them: `graphical-session.target` **flaps** across a switch
   (active → inactive → active in ~1.6 s), and "no session for the user" can
@@ -115,6 +115,6 @@ Both would have shipped on a "the code looks right" review.
 
 - **P2.0d (§5.17)** — the blanket sudo grant. Everything privilege-shaped is
   untrustworthy until it goes.
-- **P2.0e (§5.18(a))** — find why the incoming session dies. The gate made it
-  rarer; it did not explain it.
+- **P2.4** — shell integration on Quickshell, which could show progress during
+  the ~1 min Gaming Mode teardown (§5.18's residual cost).
 - **P2.1 / P2.2** — input mapper as a `--user` service, hardware parity matrix.
