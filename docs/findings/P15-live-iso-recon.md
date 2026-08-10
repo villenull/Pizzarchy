@@ -625,3 +625,97 @@ Deliberately left unfixed in this session: `stage-repos` is boot-chain code,
 the choice has consequences beyond gamescope, and picking one under time
 pressure at the end of a long hardware session is how bad defaults get
 baked in.
+
+## R-16. 🐞 BUG in `deck-session.sh`: the autologin drop-in omitted `User=` — FIXED
+
+**Found and fixed in Phase F.** `deck-session-select` wrote:
+
+```
+[Autologin]
+Session=gamescope-wayland
+```
+
+**SDDM applies `[Autologin]` only when BOTH `User=` and `Session=` are
+present.** With `Session=` alone the block is ignored entirely, so every
+session switch restarted SDDM straight back to the **greeter**. Observed
+live: the switch to Gaming Mode logged the desktop out and then sat asking
+for a password.
+
+The script's own comment explains how it happened — it assumed the drop-in
+merely had to *override* "Omarchy's own autologin.conf", i.e. that Omarchy
+supplied `User=`. **Omarchy 4.0 ships no autologin config at all**
+(`/etc/sddm.conf.d/` holds only `10-theme`, `10-wayland`, `99-omarchy-login`),
+so nothing supplied it and autologin never fired.
+
+Proven by adding `User=deck` by hand and restarting SDDM: gamescope and Steam
+came straight up in `-gamepadui` mode.
+
+**Fix applied to `src/deck-session.sh`:**
+
+- `invoking_user` is resolved **at install time**, at the top of
+  `stage_session_select`, and baked into the generated shim. Resolving it at
+  *switch* time from `$SUDO_USER` would write `User=root` whenever the shim
+  is reached from a root context — a **root graphical autologin**, a worse
+  bug than the one being fixed.
+- The existing non-root guard now covers this use too.
+- The post-write verification greps for **both** keys; a drop-in missing
+  `User=` is now a hard failure, since that is precisely the silent failure
+  this stage exists to prevent.
+- The stale "Omarchy's own autologin.conf" reasoning is corrected in place so
+  it cannot mislead again.
+
+Re-deployed and re-verified on hardware: the shim now writes `User=deck` plus
+`Session=`, and both verification greps pass.
+
+*This bug is also why `R-14b`'s autologin requirement matters — the fix
+delivers it as a side effect, since Gaming Mode now logs in unattended.*
+
+## R-17. Steam's Gaming Mode update check fails: `steamos-update` does not exist
+
+On Steam's first run in Gaming Mode it reports *"unable to download the
+required updates — please check your network connection (2)"*.
+
+**The network is not the problem.** Measured from the Deck at that moment:
+
+```
+DNS               resolves (akamai, google)
+https://store.steampowered.com    http=200 in 1.4s
+ufw DEFAULT_OUTPUT_POLICY         ACCEPT
+```
+
+The real error, from `~/.local/share/Steam/logs/`:
+
+```
+SteamUI: ERROR: Updater apply error: 2: null
+```
+
+Steam is failing to **apply** an update, not to download one. `steam-jupiter-stable`
+is Valve's SteamOS build, and its Gaming Mode update path expects SteamOS's
+own update tooling, which is absent and **not obtainable**:
+
+| Binary | Status |
+|---|---|
+| `steamos-update` | **MISSING — provided by no configured repo** (`pacman -F` finds nothing) |
+| `steamos-select-branch` | MISSING |
+| `jupiter-biosupdate` | MISSING |
+| `steamos-session-select` | present, but only because it is *our* shim in `/usr/local/bin` |
+
+`steamos-customizations-jupiter` was deliberately **not** installed: it ships
+`/etc/grub.d/` files, and injecting GRUB machinery violates the Limine-only
+hard constraint. `jupiter-hw-support` does not supply `steamos-update` either
+(and also carries a grub file).
+
+**Product impact — this is a first-impression defect.** A user reaching Gaming
+Mode for the first time meets a scary, *wrong* error blaming their network.
+
+**Options for T3/T6, none chosen yet:**
+
+1. **Ship a stub `steamos-update`** that exits reporting "up to date". Small,
+   honest about what it is, keeps Gaming Mode quiet. Needs care not to
+   masquerade as a real updater.
+2. **Suppress the check** via Steam client config, if a supported setting exists.
+3. **Accept it** and document it as a known issue for release (`ROADMAP.md` P3.5).
+
+Option 1 looks best, but it is a decision, not a detail: the device genuinely
+*cannot* self-update its OS the way SteamOS does, and whatever we ship should
+not imply otherwise.

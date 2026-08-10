@@ -233,6 +233,17 @@ verify_nopasswd() {
 stage_session_select() {
   log "installing ${SELECT_BIN}"
 
+  # Resolved here, not at switch time, and baked into the generated shim.
+  # SDDM's [Autologin] needs BOTH User= and Session=; with Session= alone it
+  # ignores the block entirely and shows the greeter (found on hardware,
+  # P1.5 phase F -- docs/findings/P15-live-iso-recon.md R-16). Deriving the
+  # user inside the shim from $SUDO_USER would write User=root whenever the
+  # shim is reached from a root context, i.e. a root graphical autologin.
+  # The autologin user is a property of the machine, so decide it at install.
+  local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
+  [[ -n $invoking_user && $invoking_user != root ]] ||
+    fail "cannot determine the unprivileged user to autologin (got '${invoking_user}'). Re-run as that user with sudo, not as root directly."
+
   local tmp
   tmp=$(mktemp) || fail "mktemp failed"
 
@@ -279,20 +290,31 @@ install -d -m 0755 "\$(dirname "\$STATE_FILE")"
 printf '%s\n' "\$target" >"\$STATE_FILE"
 
 # Autologin Session= is the switch. The drop-in is named to sort LAST in
-# /etc/sddm.conf.d, so it wins over Omarchy's own autologin.conf without
+# /etc/sddm.conf.d, so it wins over any other autologin config without
 # editing a file we do not own. See the SDDM_DROPIN comment in ${PROG}.sh --
 # an earlier name sorted *before* autologin.conf and silently never applied.
+#
+# User= is required, not optional: SDDM applies [Autologin] only when BOTH
+# User= and Session= are present. An earlier version wrote Session= alone on
+# the assumption that Omarchy supplied User= from its own autologin.conf --
+# Omarchy 4.0 ships no such file, so autologin never fired and every switch
+# landed on the greeter instead (P1.5 phase F, R-16).
 install -d -m 0755 "\$(dirname "\$SDDM_DROPIN")"
 cat >"\$SDDM_DROPIN" <<INNER
 # Written by deck-session-select. Do not edit by hand -- rewritten on every
 # session switch. Named to sort last in /etc/sddm.conf.d so Session= wins.
 [Autologin]
+User=${invoking_user}
 Session=\${target}
 INNER
 
-# Verify the write landed rather than trusting the redirect.
+# Verify the write landed rather than trusting the redirect. Both keys are
+# checked: Session= alone is the exact silent failure this stage exists to
+# avoid, so a drop-in missing User= must be treated as a failed write.
 grep -q "^Session=\${target}\$" "\$SDDM_DROPIN" ||
   die "wrote \$SDDM_DROPIN but Session=\${target} is not there on re-read"
+grep -q "^User=${invoking_user}\$" "\$SDDM_DROPIN" ||
+  die "wrote \$SDDM_DROPIN but User=${invoking_user} is not there on re-read -- SDDM ignores [Autologin] without it"
 
 printf 'deck-session-select: next session is %s (%s)\n' "\$target" "\$found"
 
@@ -310,10 +332,8 @@ EOF
   $SUDO test -x "$SELECT_BIN" || fail "${SELECT_BIN} is not executable after install"
 
   # --- sudoers drop-in, validated before installation ---
-  local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
-  [[ -n $invoking_user && $invoking_user != root ]] ||
-    fail "cannot determine the unprivileged user to grant the switch to (got '${invoking_user}'). Re-run as that user with sudo, not as root directly."
-
+  # invoking_user is resolved and guarded at the top of this stage, where the
+  # autologin drop-in needs it too.
   log "granting ${invoking_user} NOPASSWD on ${SELECT_BIN} only"
   tmp=$(mktemp) || fail "mktemp failed"
   cat >"$tmp" <<EOF
