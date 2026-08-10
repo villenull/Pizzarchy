@@ -19,12 +19,10 @@ work without waiting for further instruction.**
 > It was left **on the desktop** —
 > `stage-default-session` (boot straight to Gaming Mode) is deliberately not run.
 >
-> **Git:** phase 1 and P2.0 are on **`main`** and **pushed** —
-> `origin/main...main` was `0 0` at the start of session 16. (This block used to
-> say nothing was pushed and that a second worktree needed removing; both were
-> stale by then.) Session 16's work is on **`p16-polkit-helpers`**. Check state
-> with `git rev-list --left-right --count origin/main...main` and
-> `git worktree list` rather than trusting numbers written here.
+> **Git:** everything through **session 16** is merged into **`main`** and
+> **pushed** to `origin`. Check state with
+> `git rev-list --left-right --count origin/main...main` rather than trusting a
+> number written here — this block has been stale twice before.
 >
 > **Start with the session summaries, newest first** —
 > `docs/findings/P16-session-summary.md`, then

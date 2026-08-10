@@ -121,7 +121,7 @@ Both would have shipped on a "the code looks right" review.
 |---|---|
 | Deck | Omarchy desktop, Hyprland up, `ssh steamdeck` working |
 | Snapshots | #1–#3 P1.5 · #4 pre-15 · #5 P2.0 · **#6** pre-polkit-helpers · **#7** pre-sddm-decouple |
-| Branch | **`p16-polkit-helpers`**, unpushed and unmerged — `main` is the operator's call |
+| Branch | **merged into `main` and pushed** at the operator's instruction, end of session 16 |
 | Backlight node | deliberately left **0644**, not the 666 found. If it is 666 again, Steam fell back, which means a helper broke |
 | ⚠️ Temporary | **display always-on is ENABLED** for testing — idle/screensaver/lock off, sleep targets masked. Revert: `sudo /usr/local/sbin/deck-always-on-revert.sh`. This is an **OLED** panel; burn-in is the reason not to leave it |
 
@@ -146,6 +146,15 @@ problem in the unit suite three times.
 
 - **P2.0d (§5.17)** — the blanket sudo grant. Everything privilege-shaped is
   untrustworthy until it goes.
-- **P2.4** — shell integration on Quickshell, which could show progress during
-  the ~1 min Gaming Mode teardown (§5.18's residual cost).
+- **P2.5 / P2.6 — T4's installer screens in QEMU.** The largest remaining
+  phase-2 chunk and fully autonomous; needs no Deck.
+- **P2.7 / P2.8 — T5's ISO fork.** Now carries **five** recorded constraints:
+  offline pacman, the encryption default (§5.12), repo precedence (§5.13),
+  baking in rotation (desktop `monitors.lua` **and** Limine
+  `interface_rotation`), and excluding `99-deck-testing` (§5.17).
+- **P2.4** — add the menu row; mechanism is known
+  (`omarchy-menu.jsonc`, Nerd Font glyph).
+- **Anything needing eyes or hands** — OSK on focus, button mapping, audible
+  sound, haptics, gyro, and every rotation surface. None of session 16 was seen
+  on a screen.
 - **P2.1 / P2.2** — input mapper as a `--user` service, hardware parity matrix.
