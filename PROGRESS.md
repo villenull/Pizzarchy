@@ -22,9 +22,9 @@ may use Wi-Fi (§2.2).
 | **T0** Test infrastructure | ✅ done | QEMU install harness, CI green, SSH loop, unit tests. Two gaps — §5.4 |
 | **R1** Six research questions | ✅ done | All six resolved. Several overturned the plan — §3 |
 | **T1** Kernel / firmware / boot | ✅ done | Ten stages. Last gap: conversion path on hardware — §5.2, closes in P1.5 |
-| **T2** Gamepad input spike | ⬜ **not started — next block** | Sizes T4. Back on the critical path |
+| **T2** Gamepad input spike | ✅ done | Navigation confirmed; T4 is days not weeks. Text entry open — §3.9 |
 | **T3** Gaming Mode + switching | 🟡 **in progress** | Gaming Mode boots. Session layer being rewritten in-repo — §4 |
-| **T4** Controller-only installer | ⬜ not started | Blocked on T2 |
+| **T4** Controller-only installer | ⬜ not started | Unblocked — scope known (§3.9) |
 | **T5** ISO + package payload | ⬜ not started | Unblocked by R1 and simplified by §2.2; needs T2/T3/T4 for the package list |
 | **T6** Integration + release | ⬜ not started | Gated on Omarchy 4.0 stable |
 
@@ -32,10 +32,9 @@ may use Wi-Fi (§2.2).
 the test bed (1), build the product (2), prove it from a factory reset and
 release (3).
 
-**Next action:** Phase 1 — P1.1 is ✅ done (2026-08-10, all four suites green).
-Next: the T2 spike (P1.2–P1.3), and the Deck recon/rebuild session
-(P1.4–P1.5) whenever the operator is ready — runbook:
-`TASK-P15-deck-rebuild-runbook.md`.
+**Next action:** Phase 1 — P1.1 ✅ and P1.2–P1.3 (T2 spike) ✅ both done
+2026-08-10. **Remaining in phase 1: P1.4–P1.5, the Deck recon/rebuild
+session** — needs the operator. Runbook: `TASK-P15-deck-rebuild-runbook.md`.
 
 ---
 
@@ -316,6 +315,55 @@ mirror, on AMD-only hardware.
 
 ---
 
+### 3.9 A gamepad can drive the installer — T4 is days, not weeks
+
+`FINDING-T2-gamepad-spike.md`. A ~200-line `uinput`/`evdev` mapper
+(`deck-input-mapper.py`) drives `gum` prompts and `archinstall`'s curses menu
+with **no cooperation from either** — proven in QEMU through the real
+delivery path (virtual pad → mapper → virtual keyboard → **kernel VT** →
+tmux client → pty → TUI), asserting on rendered text *and* outcome.
+
+**This is the good branch of `TASK-T2`'s fork:** T4 becomes configuration
+(reduce prompts, set defaults, map buttons, glyphs) rather than bespoke
+gamescope-hosted Quickshell screens. The same mapper also serves T3's Desktop
+Mode (R1 §10.3 design (b)) — one artifact, two consumers.
+
+**The open gap is text entry**, and only two screens need it: the Wi-Fi
+password (§2.2 put it on the critical path) and account credentials.
+Preference order: `squeekboard` if the live ISO runs a compositor (already
+chosen for Desktop Mode, no AUR) → a mapper-drawn OSK that needs no
+compositor → PIN-pad, which can supplement but cannot serve a Wi-Fi
+password. **Settle this against the real 4.0 ISO before writing OSK code.**
+
+⚠️ **The real Deck controller's event codes are not yet known** — the spike
+used a virtual pad modelling the Linux gamepad ABI. P1.5's recon captures
+them. Expect mapping-table entries to change; the mechanism will not.
+
+### 3.10 Building the Omarchy 4.0 ISO — three gotchas for T5
+
+Found while producing a 4.0 beta ISO for P1.4 (`omarchy-iso` @ `a12bfea`).
+T5 forks this builder, so these are its inheritance:
+
+1. **`OMARCHY_ISO_REF` and `OMARCHY_MIRROR` must agree, and the defaults do
+   not.** A bare `omarchy-iso-make` uses ref `quattro` (which selects the
+   `omarchy-dev` runtime package) with mirror `stable` — whose `omarchy-dev`
+   predates `install/provisioning/setup-form.sh`. Build with
+   `OMARCHY_MIRROR=edge` (what the `--quattro` flag sets) or the two channels
+   disagree.
+2. **Upstream's guard is a model worth copying.** Rather than shipping an ISO
+   whose configurator has no prompts, the build **fails loudly**: *"this ISO
+   would boot into an installer with no questions to ask."* That is exactly
+   the discipline `PLAN.md` §8.1 wishes more tooling had — T5's fork must not
+   weaken it.
+3. **⚠️ The build bind-mounts the HOST's `/var/cache/pacman/pkg` read-write
+   into a privileged container, and `omarchy-iso-make` `sudo rm -rf`s it
+   before every build.** On this dev machine that cache holds 2700+ packages.
+   A truncated `omarchy-keyring` download did land in it once (pacman
+   self-healed on the next run by deleting it). **Local builds here point the
+   container at a scratch cache dir instead** — same rebuild speed, no blast
+   radius on the developer's system. T5's fork should do the same rather than
+   inherit the `rm -rf`.
+
 ## 4. T3 — the session layer
 
 ### 4.1 Valve already ships the entire Gaming Mode session
@@ -580,3 +628,4 @@ One line each. Detail lives in git history and in the `FINDING-*.md` files.
 | 8 | First Gaming Mode boot, via a DeckShift hybrid splice (since reversed — §2.3) |
 | 9 | Scope reset: ISO is the deliverable, target Omarchy 4.0, DeckShift dropped. Docs consolidated; `ROADMAP.md` written (three phases); Deck rebuild + factory-reset strategy adopted; dead drafts removed |
 | 10 | P1.1 done: `stage-default-entry` (path form proven by boot), substrate rebuilt with real snapper snapshots (immediately caught the hook test's own substring miscount), three deliberate-failure tests; all four suites green |
+| 11 | P1.2–P1.3 done: T2 spike resolved — gamepad drives `gum` + `archinstall` at the kernel input layer; T4 is days not weeks; text entry is the one open gap |

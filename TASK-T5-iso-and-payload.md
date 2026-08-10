@@ -47,6 +47,10 @@ in-tree precedents (`install/hardware/pacman.sh`, `intel/ptl-kernel.sh`):
 Also: an ALPM pre-transaction guard aborts a bare `pacman -Syu` unless
 `OMARCHY_UPDATE_PACMAN=1` is set.
 
+Three build-time gotchas are recorded in `PROGRESS.md` §3.10 — channel/ref
+agreement, the questionless-installer guard (keep it), and the host pacman
+cache the build `rm -rf`s (don't inherit that).
+
 Two `.automated_script.sh` patches from session 2 need porting into the fork:
 the completion-detection poweroff, and the debug-log capture drive. The host
 side of the latter is already permanent in `vm-install-test.sh`.

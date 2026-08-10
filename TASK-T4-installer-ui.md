@@ -14,8 +14,11 @@ trackpads, that produces a correctly configured Omarchy 4.0 system.
 
 ## Prerequisites
 
-- **T2 complete.** Its finding determines whether this is days or weeks of
-  work. Do not start before reading `FINDING-T2-gamepad-spike.md`.
+- **T2 complete ✅** — `FINDING-T2-gamepad-spike.md`. **The answer is "days,
+  not weeks":** build on `gum`/`archinstall` primitives, which the mapper
+  makes controller-navigable; write no custom TUI widgets. Budget the
+  **text-entry** piece explicitly (finding §4) — it is the only part of this
+  task the spike does not de-risk.
 - T0 done (QEMU interactive testing — tier T2 in `PLAN.md` §9.2)
 
 ## The screens

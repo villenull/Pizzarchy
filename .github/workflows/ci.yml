@@ -35,7 +35,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck parted dosfstools mtools btrfs-progs jq openssl qemu-utils
+          sudo apt-get install -y shellcheck parted dosfstools mtools btrfs-progs jq openssl qemu-utils python3-evdev
 
       - name: shellcheck
         run: |
@@ -44,6 +44,14 @@ jobs:
           [[ ${#files[@]} -gt 0 ]] || { echo "no *.sh files found"; exit 1; }
           shellcheck "${files[@]}"
 
+      - name: python syntax check
+        run: |
+          shopt -s nullglob
+          for f in *.py; do
+            echo "checking $f"
+            python3 -m py_compile "$f"
+          done
+
       - name: bash -n syntax check
         run: |
           shopt -s nullglob
@@ -51,6 +59,16 @@ jobs:
             echo "checking $f"
             bash -n "$f"
           done
+
+      - name: Python unit tests
+        run: |
+          shopt -s nullglob
+          status=0
+          for t in test-*.py; do
+            echo "=== $t ==="
+            python3 "$t" || status=1
+          done
+          exit $status
 
       - name: Unit tests
         run: |
