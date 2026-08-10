@@ -719,3 +719,51 @@ Mode for the first time meets a scary, *wrong* error blaming their network.
 Option 1 looks best, but it is a decision, not a detail: the device genuinely
 *cannot* self-update its OS the way SteamOS does, and whatever we ship should
 not imply otherwise.
+
+## R-18. ✅ Phase F — both session-switch directions work, without DeckShift
+
+The commitment `docs/PROGRESS.md` §2.4 made when DeckShift was dropped
+(unlicensed, therefore unshippable) is now demonstrated on hardware.
+
+| Direction | Mechanism | Result |
+|---|---|---|
+| Desktop → Gaming Mode | `deck-session-select gamescope` → SDDM drop-in + restart | ✅ gamescope at 1280×800 on `eDP-1`, Steam in `-gamepadui -steamos3 -steamdeck` |
+| Gaming Mode → Desktop | `steamos-session-select desktop` (our shim, invoked as Steam invokes it) | ✅ gamescope gone, Hyprland up |
+| Autologin, both ways | `[Autologin] User=deck` + `Session=` | ✅ lands in the session with no password prompt |
+
+Everything gaming-side comes from **Valve's own packages** — `gamescope`
+3.16.25-3 ships `gamescope-wayland.desktop`, `start-gamescope-session` and
+`/usr/lib/steamos/{gamescope-session,steam-launcher}`. This project supplies
+only the switching mechanism, exactly as `src/deck-session.sh`'s header claims.
+
+Also confirmed incidentally: **Wi-Fi credentials carry across sessions.**
+Gaming Mode picked up the desktop's NetworkManager connection with no
+re-entry, which is the product flow (join once during install, Gaming Mode
+inherits it).
+
+### ⚠️ R-18a. NOT proven: Steam's own "Switch to Desktop" menu item
+
+**The return path was exercised through our shim directly, not through
+Steam's UI.** Steam's Power menu offered only Sleep / Shutdown / Restart /
+Cancel — no "Switch to Desktop".
+
+Most likely because Steam never got past first-run setup: it is not signed
+in and is stuck behind R-17's bogus update error, and its Power menu is
+reduced during OOBE. **This is a hypothesis, not a finding** — it was not
+confirmed, because confirming it needs a real Steam login.
+
+What *is* established: Steam invokes the binary through `PATH`, not an
+absolute path (from `steamui.so`):
+
+```
+PATH="${SYSTEM_PATH-${PATH}}" steamos-session-select %s
+```
+
+so `/usr/local/bin` should be reachable — **unless** the Steam runtime
+narrows `SYSTEM_PATH`. That is worth checking when the menu item is next
+testable; if it does, the shim must move to `/usr/bin`.
+
+**Do not treat the controller-only exit from Gaming Mode as done.** It is the
+product's core promise ("a Desktop Mode button... and a way back"), and the
+half that a *user* would actually touch remains untested. Next session:
+sign into Steam, resolve or stub R-17, then re-check the Power menu.
