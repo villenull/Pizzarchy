@@ -54,10 +54,15 @@
 # steamos-priv-write, timezone, fan control -- are a larger open question, not
 # a detail. See PROGRESS.md 5.15.
 #
-# Note the two families resolve DIFFERENTLY, and conflating them would install
-# a working-looking file somewhere Steam never looks:
-#   steamos-session-select        via PATH        -> /usr/local/bin is fine
-#   steamos-polkit-helpers/*      absolute path   -> must be /usr/bin/...
+# Note the two families resolve DIFFERENTLY, but BOTH land in /usr/bin:
+#   steamos-session-select        via PATH, and that PATH is only
+#                                 "/usr/bin:/bin" inside Steam's runtime
+#   steamos-polkit-helpers/*      by absolute path, /usr/bin/steamos-polkit-helpers/
+#
+# So /usr/local/bin -- the conventional home for exactly this kind of local
+# shim -- is unreachable for anything Steam invokes. Both stages verify
+# reachability, not just existence, because the difference is invisible from a
+# shell where /usr/local/bin is on PATH.
 #
 # ===========================================================================
 # SECURITY TRADEOFF -- read before extending
@@ -90,7 +95,18 @@ readonly GAMING_SESSION=gamescope-wayland
 DESKTOP_SESSION=""   # resolved at runtime; Omarchy's own entry
 
 readonly SELECT_BIN=/usr/local/bin/deck-session-select
-readonly STEAM_SHIM=/usr/local/bin/steamos-session-select
+
+# /usr/bin, NOT /usr/local/bin. Steam's runtime narrows PATH to exactly
+# "/usr/bin:/bin" -- read from the running Steam process's own environ, with
+# SYSTEM_PATH unset so the ${PATH} fallback in its command template applies.
+# The shim spent P1.5 in /usr/local/bin, where it existed, worked when invoked
+# by hand, and was invisible to the one caller that matters.
+readonly STEAM_SHIM=/usr/bin/steamos-session-select
+readonly STEAM_SHIM_LEGACY=/usr/local/bin/steamos-session-select
+
+# What Steam's runtime actually offers. Used to prove the shim is reachable
+# rather than merely present.
+readonly STEAM_RUNTIME_PATH=/usr/bin:/bin
 readonly SUDOERS_FILE=/etc/sudoers.d/99-deck-session-select
 readonly RETURN_DESKTOP_FILE=/usr/share/applications/deck-return-to-gaming.desktop
 readonly STATE_FILE=/var/lib/deck-session/next-session
@@ -481,6 +497,28 @@ EOF
     fail "could not install ${STEAM_SHIM}"
   rm -f "$wrapper"
 
+  # MIGRATION. The shim used to live in /usr/local/bin, where Steam cannot see
+  # it. Remove our old copy so exactly one exists and nobody debugging this
+  # later has to work out which is live.
+  if $SUDO test -e "$STEAM_SHIM_LEGACY"; then
+    if $SUDO grep -qF -- "$INSTALL_MARKER_TEXT" "$STEAM_SHIM_LEGACY" 2>/dev/null; then
+      log "removing our old, Steam-unreachable copy: ${STEAM_SHIM_LEGACY}"
+      $SUDO rm -f "$STEAM_SHIM_LEGACY" ||
+        fail "could not remove ${STEAM_SHIM_LEGACY}"
+    else
+      warn "${STEAM_SHIM_LEGACY} exists and is not ours, so it is left alone. Be aware Steam cannot reach /usr/local/bin at all (its runtime PATH is ${STEAM_RUNTIME_PATH}), so whichever tool installed that file is probably broken in the same way this project was."
+    fi
+  fi
+
+  # Verify Steam could FIND it, which is a different question from whether it
+  # exists. Resolved against Steam's own PATH with a scrubbed environment, so a
+  # /usr/local/bin on the operator's interactive PATH cannot make this pass.
+  local resolved
+  resolved=$(env -i PATH="$STEAM_RUNTIME_PATH" sh -c 'command -v steamos-session-select' 2>/dev/null) || resolved=""
+  [[ -n $resolved ]] ||
+    fail "installed ${STEAM_SHIM} but 'steamos-session-select' does not resolve on Steam's runtime PATH (${STEAM_RUNTIME_PATH}). Steam's Switch to Desktop would silently do nothing."
+  log "verified: Steam can resolve it on PATH=${STEAM_RUNTIME_PATH} -> ${resolved}"
+
   log "stage-steam-hook: ok"
 }
 
@@ -568,9 +606,22 @@ case \${1-} in
     exit 1
     ;;
   ""|apply)
-    # The apply path. \`check\` above should stop Steam ever reaching this.
+    # The apply path -- 7 here too, and emphatically NOT 0.
+    #
+    # Exit 0 means "an update was applied", and Steam responds by REBOOTING to
+    # finish it. Measured on hardware, not guessed:
+    #
+    #   YieldingApplyUpdateOS: applying OS update
+    #   steamos-update returned: 0
+    #   YieldingApplyUpdateOS: OS update result: 1
+    #
+    # followed straight away by systemd-reboot. During first-run setup Steam
+    # calls apply DIRECTLY without checking first, so exit 0 rebooted the Deck
+    # on every OOBE pass: a boot loop, caused by the stub meant to quiet a
+    # cosmetic error. 7 says "nothing to apply", which leaves Steam with
+    # nothing to finish and no reason to reboot.
     note "nothing to apply; this OS is updated with '${REAL_UPDATE_HINT}'"
-    exit 0
+    exit 7
     ;;
   -h|--help|help)
     cat <<'USAGE'
@@ -582,7 +633,8 @@ Omarchy; its OS does not update the way SteamOS's does.
 
   check                            exit 7 (already up to date)
   --supports-duplicate-detection   exit 1 (not supported)
-  (no argument) | apply            no-op, exit 0
+  (no argument) | apply            exit 7 (nothing to apply). NOT 0 -- Steam
+                                   reads 0 as "applied" and reboots.
 
 To really update this system, from Desktop Mode:  ${REAL_UPDATE_HINT}
 USAGE
@@ -613,7 +665,16 @@ EOF
   [[ $rc -ne 0 ]] ||
     fail "${UPDATE_STUB} claims duplicate-detection support (exit 0). It does not implement it; that would make Steam depend on behaviour that is not there."
 
-  log "verified: 'check' exits 7 (up to date), capability probe declines"
+  # The apply path must NOT exit 0. This assertion is the whole reason it is
+  # here: an earlier version of this stub exited 0, Steam read that as "update
+  # applied", and rebooted the Deck to finish it -- once per OOBE pass.
+  rc=0
+  "$UPDATE_STUB" >/dev/null 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] ||
+    fail "${UPDATE_STUB} exits 0 on the apply path. Steam reads 0 as 'an OS update was applied' and REBOOTS the device to complete it, on every first-run pass. It must report 'nothing to apply' (7) instead."
+
+  log "verified: 'check' exits 7 (up to date), capability probe declines,"
+  log "          apply exits ${rc} (non-zero, so Steam will not reboot)"
   log "stage-update-stub: ok"
   log "NOTE: this stub updates nothing. Real updates: ${REAL_UPDATE_HINT}"
 }
