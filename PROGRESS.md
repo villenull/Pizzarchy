@@ -339,6 +339,31 @@ password. **Settle this against the real 4.0 ISO before writing OSK code.**
 used a virtual pad modelling the Linux gamepad ABI. P1.5's recon captures
 them. Expect mapping-table entries to change; the mechanism will not.
 
+### 3.10 Building the Omarchy 4.0 ISO — three gotchas for T5
+
+Found while producing a 4.0 beta ISO for P1.4 (`omarchy-iso` @ `a12bfea`).
+T5 forks this builder, so these are its inheritance:
+
+1. **`OMARCHY_ISO_REF` and `OMARCHY_MIRROR` must agree, and the defaults do
+   not.** A bare `omarchy-iso-make` uses ref `quattro` (which selects the
+   `omarchy-dev` runtime package) with mirror `stable` — whose `omarchy-dev`
+   predates `install/provisioning/setup-form.sh`. Build with
+   `OMARCHY_MIRROR=edge` (what the `--quattro` flag sets) or the two channels
+   disagree.
+2. **Upstream's guard is a model worth copying.** Rather than shipping an ISO
+   whose configurator has no prompts, the build **fails loudly**: *"this ISO
+   would boot into an installer with no questions to ask."* That is exactly
+   the discipline `PLAN.md` §8.1 wishes more tooling had — T5's fork must not
+   weaken it.
+3. **⚠️ The build bind-mounts the HOST's `/var/cache/pacman/pkg` read-write
+   into a privileged container, and `omarchy-iso-make` `sudo rm -rf`s it
+   before every build.** On this dev machine that cache holds 2700+ packages.
+   A truncated `omarchy-keyring` download did land in it once (pacman
+   self-healed on the next run by deleting it). **Local builds here point the
+   container at a scratch cache dir instead** — same rebuild speed, no blast
+   radius on the developer's system. T5's fork should do the same rather than
+   inherit the `rm -rf`.
+
 ## 4. T3 — the session layer
 
 ### 4.1 Valve already ships the entire Gaming Mode session
