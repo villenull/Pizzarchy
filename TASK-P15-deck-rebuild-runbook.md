@@ -25,17 +25,41 @@ every command itself: recon, the installer prep, `omarchy-deck-kernel.sh`,
 `deck-session.sh`, journal reads, reboots. The operator watches.
 
 - **Wired beats wireless here.** The whole point of the live-ISO phase is
-  that Wi-Fi may NOT work (stock kernel, stock firmware). A USB-C dock or
-  USB-C→Ethernet adapter gives the live environment a network that works
-  regardless of the Wi-Fi answer — USB Ethernet drivers are in every stock
-  kernel. Plug Deck and dev machine into the same router/switch.
-- **Direct Deck↔PC cable (no router), fallback:** dev machine has a wired
-  NIC (`enp8s0`). Static-IP both ends:
-  `ip addr add 10.42.0.1/24 dev enp8s0` (dev, needs sudo) and
-  `ip addr add 10.42.0.2/24 dev <ethX>` (Deck). Then `ssh 10.42.0.2`.
+  that Wi-Fi may NOT work (stock kernel, stock firmware). A USB-C→Ethernet
+  adapter gives the live environment a network that works regardless of the
+  Wi-Fi answer — USB Ethernet drivers are in every stock kernel.
+
+- **Topology: put the Deck on the router, NOT directly into the PC.**
+  Confirmed on this dev machine (2026-08-10):
+
+  ```
+  enp8s0   UP    192.168.100.14/24   <- the PC's ONLY working NIC, and its
+                                        default route via 192.168.100.1
+  wlan0    DOWN  (no carrier)
+  ```
+
+  A direct Deck→PC cable would occupy that single NIC, so **the PC loses
+  internet and so does the Deck**. That breaks phase E outright: `stage-repos`
+  and `stage-kernel` pull several hundred MB (`linux-neptune-*`, headers,
+  `linux-firmware-neptune`, `steamdeck-dsp`) from Valve's mirror.
+
+  Instead: plug the Deck's USB-Ethernet adapter into a free port on the same
+  router/switch. Both land on `192.168.100.0/24` with DHCP, the PC keeps its
+  internet, the Deck gets one, and SSH is zero-config. **This is a known-good
+  configuration, not a guess** — the Deck previously ran at
+  `192.168.100.26` on `enp4s0f3u1u3` (a USB-Ethernet adapter) on this exact
+  network. A cheap 5-port switch covers a router with no free port.
+
+- **Fallback, only if a second port is impossible:** bring `wlan0` up on the
+  PC for internet, static-IP the direct link (`ip addr add 10.42.0.1/24 dev
+  enp8s0` / `10.42.0.2/24` on the Deck), and NAT the Deck through the PC
+  (`iptables -t nat -A POSTROUTING -o wlan0 -j MASQUERADE`; `ip_forward` is
+  already 1 here). Works, but three moving parts instead of zero.
+
 - **USB-C device-mode networking (Deck as USB gadget): not supported
-  reliably — don't burn session time on it.** The adapter/dock path is
-  cheap and certain.
+  reliably — don't burn session time on it.** The adapter path is cheap and
+  certain.
+
 - The dev machine's public key is at `~/.ssh/id_ed25519.pub`; the agent
   stages an `authorized_keys` line so password entry happens at most once.
 
@@ -88,9 +112,11 @@ Hardware to have on hand:
 
 - [ ] **USB keyboard** (US layout if possible — a mismatched layout silently
       corrupted commands during the original manual install, `-O` → `-0`)
-- [ ] **USB-C dock** (power + USB-A + Ethernet ideal) or USB-C→Ethernet
-      adapter + a USB-C splitter/hub for the keyboard
-- [ ] **Ethernet cable** to the router/switch the dev machine is on
+- [ ] **USB-C→Ethernet adapter** (already owned — the Deck ran on one at
+      `192.168.100.26`) plus a USB-C hub/dock so the keyboard fits too
+- [ ] **A free port on the router/switch** that `enp8s0` uses, or a cheap
+      5-port switch. ⚠️ Do **not** cable the Deck straight into the PC —
+      see §1A
 - [ ] **USB stick #1 (8 GB+): Ventoy** — becomes the ISO carrier
 - [ ] **USB stick #2 (8 GB+): Valve recovery image** — the safety floor.
       Prepared BEFORE anything is wiped, not after something goes wrong.
