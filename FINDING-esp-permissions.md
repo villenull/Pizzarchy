@@ -81,10 +81,10 @@ permissions failure, instead of masquerading as a missing file.
 `DRAFT-upstream-esp-permissions-omarchy.md` — full title, reproduction
 steps, expected/actual behavior, and suggested scope for a report against
 `basecamp/omarchy`. **Staged only — not filed, not sent, requires explicit
-operator approval**, same convention as this project's other `DRAFT-*.md`
-files. It supersedes `DRAFT-upstream-bugs-deckarchy.md`'s "Bug 5 of 5",
-which drafted the same bug against the wrong candidate repo before the
-isolation reproduction had run.
+operator approval.** It superseded an earlier draft of the same bug filed
+against the wrong candidate repo (`DRAFT-upstream-bugs-deckarchy.md` Bug 5,
+removed from the tree 2026-08-10, in git history) before the isolation
+reproduction had run.
 
 ## What to do if/when upstream fixes this
 

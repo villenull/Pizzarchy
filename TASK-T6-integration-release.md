@@ -1,5 +1,15 @@
 # T6 — Integration, hardware QA, and release
 
+> **Status: not started. This is `ROADMAP.md` phase 3.** Only the rebase
+> (§1 / P3.6) gates on Omarchy 4.0 stable; everything else runs on beta.
+>
+> Two updates: the phase-3 run **starts from a factory reset** (P3.1) — the
+> release test begins where a real user does, and §4's recovery documentation
+> gets written while performing it. And §6's upstream submissions are now
+> optional: the deckarchy/outreach drafts were removed from the tree
+> 2026-08-10 (`PROGRESS.md` §5.9); only the ESP-permissions report remains
+> staged.
+
 **Model: Opus.** Final verification; a miss here ships broken.
 
 ## Objective

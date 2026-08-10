@@ -1,1403 +1,595 @@
 # Progress
 
-> Claude Code: keep this current as you work, not just at session end.
-> This is the first thing the next session reads.
+> The single living state document. Keep it current as you work, not just at
+> session end. Read it at the start of every session.
+>
+> **Structure:** current state → scope → findings that changed the plan →
+> open issues → blocked on human → don't re-derive → session log.
+> Chronological narrative belongs in git history, not here. When a finding is
+> superseded, **replace it** — this file is state, not a log.
 
-## Status summary
+---
 
-Bootstrapped. `PLAN.md` and `SESSIONS.md` read in full (session 1). Git
-repo initialized, planning docs committed as baseline (`3c44891`). Local
-toolchain checked (see below). Block 1 (T0 §1, QEMU install harness):
-harness + libraries + unit tests written and passing.
+## 1. Current state
 
-**Session 2: T0 §1's "done when" criterion is now met.** `vm-install-test.sh`
-ran end-to-end against a real, unmodified-upstream `omarchy-iso` build and
-got a clean **PASS** — partition table, package set (5/5 expected
-packages), and enabled systemd units all verified against a real,
-successful, fully-offline install (942/943 packages, all 12 install
-phases `ok`). Getting there surfaced and fixed two real bugs in this
-project's own harness code (not upstream bugs) — see "Findings" below:
-`vm-cidata.sh` was missing a JSON key archinstall requires (`obj_id`,
-`KeyError` at install time), and the package/unit assertion path used
-`btrfs restore` in a way that silently stopped mid-tree-walk on
-zstd-compressed extents, so it could report "package not found" against
-partitions that actually installed fine — replaced with a real rootless
-kernel mount (`udisksctl loop-setup` + `mount`), which is also just a
-better approach generally. Task #4 ("verify harness can actually fail")
-is done: it caught two real bugs before this ever touches hardware.
-
-**Session 4: T1 steps 1–2 done** (review/harden `omarchy-deck-kernel.sh` +
-generalize the kernel version). The draft script had never run anywhere; it
-does now, and it took a near-total rewrite to get there — four of its design
-premises were false against the packages Valve ships today and against a real
-Omarchy Quattro install. `shellcheck` clean; **idempotency proven, not
-asserted**: two consecutive runs in a QEMU VM, both exit 0, byte-identical
-end state, via a new `vm-kernel-idempotency-test.sh`. Six VM iterations were
-needed and each of the first five failed on a *different* real bug — see
-"T1 — omarchy-deck-kernel.sh review" under Findings. Steps 3–6 (pacman hook,
-CI flags, §8.5 upstream repro, stage split) are untouched.
-
-**Session 5: T1 step 3 done** (the pacman hook). The headline is what the
-investigation found *before* anything was written: upstream's
-`limine-mkinitcpio-hook` already covers UKI generation on install/upgrade
-**and** entry+file cleanup on remove, so most of what step 3 was scoped to
-build already exists and works. The hook that shipped is therefore a
-*verifier*, not a generator, closing three narrower gaps upstream really
-does have — all three of them silent-failure gaps. Verified in a VM: 33
-assertions, all passing, including forced reinstalls, a fabricated missing
-UKI, a fabricated stale entry, and a package removal. Needed a new substrate
-image builder (`vm-neptune-image.sh`) because the session-2 installed disk
-no longer exists on this machine. See "T1 step 3 — the pacman hook" under
-Findings. Steps 4–6 still untouched.
-
-**Session 6: T1 steps 4 + 6 done — T1 is now complete.**
-`omarchy-deck-kernel.sh` runs one stage at a time
-(`./omarchy-deck-kernel.sh stage-uki`), lists them for CI
-(`list-stages`), and cannot stop and wait for a human. The whole thing is
-one CLI change rather than two features: once a stage is individually
-invokable, "CI-testable" is mostly "that invocation never prompts and its
-exit code means something". Verified in QEMU by a new
-`vm-kernel-stage-test.sh` — **45 assertions, all passing**, including every
-stage run alone twice with the end state byte-identical, a no-argument full
-run on top of that changing nothing, and the one genuinely hang-prone code
-path (sudo asking for a password) proven to fail in 0s instead of blocking.
-Both existing suites re-run green as regressions. See "T1 steps 4 + 6"
-under Findings.
-
-**Session 7: T1 ran on the physical Deck for the first time — and the first
-hardware run found a bug six VM suites could not.** All nine stages plus
-`reconcile` now exit 0 on the operator's OLED Deck (Valve Galileo), but
-`stage-uki` failed on the first attempt: `limine_entry_count()` counted the
-UKI basename as a *substring* of the whole Limine config, so
-`limine-snapper-sync`'s snapshot-rollback entries — whose paths embed the
-same basename under `limine_history/` — were miscounted as duplicate boot
-entries. The trigger is **the safety snapshot that `TASK-hardware-validation.md`
-step 2 mandates**: before it there were zero snapshot entries and the check
-passed. Fixed by anchoring the count to real `path:` lines under the ESP's
-`/EFI/Linux/`. See "T1 — first physical hardware run" under Findings.
-**Rebooted and verified** — the Deck boots the Neptune kernel cleanly with the
-new Snapshots submenu present, and `reconcile` still writes nothing after a
-real boot.
-
-**Session 7 also resolved R1 §10.3**, the other item blocked on hardware all
-project: **ship design (b)**, the `uinput`/`evdev` mapper as a systemd
-`--user` service. Design (a) (background Steam) is ruled out on a circular
-dependency — it sources the OSK from a signed-in Steam client, and §6.1a's
-pre-Steam Wi-Fi screen would need that OSK to type the password Steam is
-waiting on. Design (b)'s preconditions all verified on hardware, and two
-concrete errors in the prepared design were found by running it (a systemd
-target that does not exist, and `uaccess` not covering `/dev/uinput`). See
-"R1 §10.3 — gamepad mapping decided on hardware" under Findings.
-
-### T0 §1 deliverables (session 1)
-
-Flat files (per `CLAUDE.md`'s no-subdirectories rule — the task file's
-`./test/vm-install-test.sh` example path was not followed literally;
-everything lives at the repo root with a `vm-`/`test-vm-` prefix instead):
-
-- `vm-disk-image.sh` — rootless GPT partition-table reading and partition
-  extraction from a raw disk image file (`sfdisk --json` + `dd`, no loop
-  device/root needed — verified interactively before relying on it).
-- `vm-assertions.sh` — the actual done-when checks: partition table, UKI
-  files present, Limine config contains expected entries (probes the same
-  5 candidate paths as Omarchy's own `limine-snapper.sh`, PLAN.md §8.2),
-  package set installed, systemd units enabled. Deliberately split into an
-  "extraction" half (reads the disk) and a "checking" half (pure logic),
-  so checking logic is unit-testable without a real install.
-- `vm-cidata.sh` — builds the `cidata` autoinstall drive (FAT-labeled, not
-  ISO9660 — no `xorriso`/`genisoimage`/`mkisofs` on this machine) from the
-  archinstall-schema JSON found by session-1 research.
-- `vm-install-test.sh` — orchestrates all three: boot ISO headless in
-  QEMU with the cidata drive attached, wait for guest poweroff (bounded by
-  `VM_INSTALL_TIMEOUT_SEC`), convert the qcow2 disk to raw, run the
-  assertions, exit non-zero with a preserved work dir on any failure.
-- `test-vm-disk-image.sh`, `test-vm-assertions.sh`, `test-vm-cidata.sh` —
-  31 assertions total, all passing, all against real hand-built fixture
-  images (GPT+FAT32+btrfs via `parted`/`mkfs.vfat`/`mkfs.btrfs` directly on
-  regular files — no loop device, no root). Every check has a confirmed-
-  failing negative case (e.g. missing ESP, wrong UKI name, unmet package,
-  disabled unit) — satisfies the "verify a test can fail" failure mode at
-  the unit level. Caught one real bug while writing these (ESP fixture
-  needed an actual `mkfs.vfat` before mtools could write to it — parted
-  alone only writes the partition table entry).
-
-**Known gap — not yet run end-to-end against a real ISO.** See the
-"KNOWN GAP" comment at the top of `vm-install-test.sh` for the full
-detail. Two independent blockers:
-1. This dev machine has no Docker (upstream's ISO build needs it), no
-   `kvm` group membership, and no passwordless sudo — see "Local
-   dev-machine limitations" below. Can't build or KVM-accelerate a real
-   install here to test against.
-2. Even with an ISO: unmodified upstream `omarchy-iso` doesn't
-   auto-poweroff after a non-interactive cidata install (only
-   `OMARCHY_UI_INTERACTIVE=no` is automatic; `OMARCHY_UI_AUTO_REBOOT` /
-   `OMARCHY_UI_FAILURE_ACTION` aren't, so `omarchy-install-dashboard`
-   leaves an interactive confirm-and-reboot prompt at the end). This
-   harness's completion signal (QEMU process exit) needs T5's eventual
-   Deck ISO fork to add one line to `.automated_script.sh`'s cidata
-   branch (`export OMARCHY_UI_AUTO_REBOOT=no OMARCHY_UI_FAILURE_ACTION=exit`
-   + `systemctl poweroff` after the dashboard returns, non-interactive
-   only). Until then, running this against stock upstream will correctly
-   time out rather than hang or false-pass — that's honest behavior, not
-   a bug, but it means the "exits non-zero on a deliberately broken
-   build" done-when criterion is unverified end-to-end, only at the unit
-   level.
-Note: at the time this was written, `shellcheck` was not installed via
-pacman locally — a rootless static v0.11.0 binary was fetched from
-GitHub releases directly into the job's scratch dir to unblock T0 §6
-(see below) rather than waiting. That binary isn't on `PATH` outside this
-session; the operator should still get `shellcheck` installed properly
-(`sudo pacman -S shellcheck`) for normal day-to-day use — CI installs its
-own copy via `apt-get` regardless.
-
-### T0 §2–6 deliverables (session 1, continued — operator granted
-permission to install missing packages themselves rather than blocking on
-them; proceeded without waiting since none of §2–6 turned out to need
-them)
-
-- **§2 `FINDING-testing-usb.md`** — Ventoy one-time-setup + day-to-day
-  workflow, written from `PLAN.md` §9.3's reasoning. Not executed (no
-  physical USB access from this environment) — flagged as such in the doc
-  itself.
-- **§3 `vm-script-loader.sh` + `test-vm-script-loader.sh`** — script-
-  override resolution (prefer an override copy of an installer script over
-  the ISO's baked-in one, if present). The ISO's real mount layout isn't
-  decided yet (T5), so the override-root search path is a parameter
-  (`OMARCHY_DECK_OVERRIDE_ROOT` env var + a `/run/media/*/omarchy-deck`
-  glob default), not a hardcoded assumption — expect to revise once T5
-  lands. 8 unit tests, all passing, each failure mode covered (missing
-  override, override missing this one script, override entry is a
-  directory not a file, script missing everywhere → fails loudly).
-- **§4 `deck-sync.sh`, `deck-snapshot.sh`, `deck-rollback.sh`** — SSH
-  iterate-in-place loop + btrfs snapshot/rollback, all parameterized via
-  `DECK_HOST`/`DECK_USER`/`DECK_SSH_PORT` env vars (defaults:
-  `deck@steamdeck`). **Not run against real hardware** — no Deck reachable
-  from this environment, and the task file explicitly allows this
-  ("untested against real hardware is OK here — flag it for the
-  operator"). Only local, SSH-independent argument-validation was
-  exercised (missing args, bad snapshot number, missing stage file — all
-  fail fast with the right exit code before attempting a connection).
-  **Confirmed before writing these** (per PLAN.md §9.4's own suggestion
-  to check first): Omarchy's installer already sets up a Snapper config
-  at `/etc/snapper/configs/root` with Limine-sync integration (found in
-  `omarchy-iso`'s `orchestrator/phases_impl.py` — it hard-fails the
-  install if that path is missing). So `deck-snapshot.sh`/
-  `deck-rollback.sh` wrap `snapper create`/`snapper rollback` rather than
-  hand-rolling raw btrfs subvolume management. Note `snapper rollback`
-  doesn't take effect until reboot — `deck-rollback.sh` prints that
-  instruction rather than auto-rebooting the physical Deck, unless
-  `DECK_ROLLBACK_AUTO_REBOOT=1` is explicitly set (rebooting physical
-  hardware unprompted isn't something to default to).
-- **§5 `.github/workflows/ci.yml`** — the one exception to the
-  no-subdirectories rule (GitHub-mandated path). Two jobs: `lint-and-
-  unit-test` (every push — shellcheck + `bash -n` + all `test-vm-*.sh`
-  suites, all of which are rootless and need no special CI privileges)
-  and `iso-install-test` (tags only — build the ISO, run
-  `vm-install-test.sh`). The ISO-build step is a documented placeholder
-  (`exit 1` with a TODO(T5) message) since no build entry point exists
-  yet. **Not verified against a real GitHub Actions run** — no remote
-  configured for this repo (see "Blocked on human"), so only YAML
-  validity (via `js-yaml`) and the job logic by inspection were checked,
-  not an actual green run.
-  - Fixed while writing this: GitHub-hosted runners have no `/dev/kvm`
-    (confirmed absent from upstream `omarchy-iso`'s own CI for the same
-    reason). `vm-install-test.sh` now detects `/dev/kvm` and falls back
-    to TCG software emulation with a loud warning instead of hard-
-    requiring KVM.
-  - Also fixed: `vm-install-test.sh` had hardcoded Arch's OVMF firmware
-    path (`/usr/share/edk2/x64/...`), which doesn't exist on Debian/
-    Ubuntu CI runners. Now probes several known distro paths, overridable
-    via `VM_OVMF_CODE`/`VM_OVMF_VARS`.
-- **§6 shellcheck baseline** — ran the fetched shellcheck v0.11.0 against
-  every `*.sh` in the repo, including `omarchy-deck-kernel.sh` (T1's
-  draft, never executed — came back clean with zero findings on the first
-  run). Found and fixed 7 real findings across the new files (one
-  genuine variable-name collision across sourced files, a couple of
-  QEMU-arg/glob patterns shellcheck couldn't distinguish from mistakes —
-  quoted or suppressed with an inline justification comment rather than
-  silently ignored). **Repo is now shellcheck-clean** (verified: `shellcheck
-  *.sh` exits 0, no output).
-
-### Local toolchain check (2026-08-07)
-
-| Tool | Status |
-|---|---|
-| `qemu-system-x86_64` | present, 11.0.2 |
-| `edk2-ovmf` (UEFI firmware for QEMU) | present, 202605-1 |
-| `git` | present, 2.55.0 |
-| `archiso` (`mkarchiso`) | **missing** |
-| `shellcheck` | **missing** |
-| `ventoy-bin` | **missing** |
-
-`archiso` and `shellcheck` are needed for T0 §1/§6; `ventoy-bin` is needed
-for the human-executed USB setup (T0 §2, already slated for
-"Blocked on human"). Not installed per `CLAUDE.md` — added to "Blocked on
-human" below instead.
-
-## Task status
+**Target: a single bootable ISO that installs Arch + Omarchy 4.0 on a Steam
+Deck, controller-only, and boots to Gaming Mode with a full Omarchy desktop
+behind a Desktop Mode button.** `PLAN.md` §1, with one amendment: the install
+may use Wi-Fi (§2.2).
 
 | Task | Status | Notes |
 |---|---|---|
-| T0 Test infrastructure | **§1–6 all built; two verification gaps remain** | §1 harness unit-tested (31 assertions) but not run end-to-end against a real ISO; §2–6 done (Ventoy doc, override loader + 8 tests, deck-sync/snapshot/rollback untested against hardware, CI workflow untested against a real Actions run, shellcheck clean repo-wide). See T0 §1/§2–6 deliverables above for exact gaps. |
-| R1 Research questions | **all six resolved** | §10.1/§10.2/§10.4/§10.5 resolved session 3; §10.3 resolved session 7 on hardware (ship design (b) — see `FINDING-R1-10.3.md`); §10.6 answered but held indefinitely by operator choice. |
-| T1 Kernel and boot | **all six steps done** | Script rewritten and now actually executes: shellcheck clean, idempotency proven in a VM (`vm-kernel-idempotency-test.sh`, run twice, byte-identical end state), kernel version reduced to one documented constant (`NEPTUNE_SERIES_DEFAULT=611`) with glob-keyed entry regeneration. Pacman hook done and VM-verified (`vm-kernel-hook-test.sh`, 33 assertions): fires on install/upgrade/remove of `linux-neptune-*`, verifies rather than duplicates upstream's UKI machinery, repairs a missing UKI, prunes stale entries, and does not duplicate entries on repeat reinstalls. §8.5 reproduced and documented (`FINDING-esp-permissions.md` + upstream issue draft). Steps 4+6 done and VM-verified (`vm-kernel-stage-test.sh`, 45 assertions): nine independently runnable stages, each idempotent alone, exit codes 0/1/2, and no invocation can block on a prompt. **Session 7: run on the physical Deck for the first time** — all nine stages plus `reconcile` exit 0 on Valve Galileo (OLED), after the run exposed and fixed a real bug (`limine_entry_count` miscounting `limine-snapper-sync` snapshot entries, which both failed `stage-uki` and silently defeated idempotency inside the pacman hook). Rebooted and verified: boots `neptune-611` cleanly, `reconcile` writes nothing post-boot, ESP byte-identical, and audio/Wi-Fi/BT/trackpads/gyro/GPU all spot-check clean. Remaining hardware gap: the stock→Neptune *conversion* path — the Deck was already converted by hand, so `stage-firmware-swap` and `stage-esp-permissions` ran only as no-ops. |
-| T2 Gamepad input spike | not started | Opus. Determines T4's entire scope |
-| T3 Gaming Mode | not started | Needs T0's deck-sync.sh to be efficient |
-| T4 Installer UI | not started | Blocked on T2's finding |
-| T5 ISO and payload | not started | Blocked on R1 10.1 and 10.4 |
-| T6 Integration and release | not started | Blocked on Quattro stable |
-
-## Findings
-
-Nothing confirmed yet. `PLAN.md` §8 and §10 contain **hypotheses**, not
-findings — as each is confirmed or killed, record it here with evidence.
-
-### ⚠️ Foundational assumption in PLAN.md §4/§5/§10.2 is wrong
-
-`OMARCHY_INSTALLER_REPO` / `OMARCHY_INSTALLER_REF` — the env-var hook pair
-PLAN.md's architecture diagram (§4) and repo plan (§5) assume connects
-`omarchy-deck-iso` to a forked installer repo — **does not exist** in
-`omacom-io/omarchy-iso`. Confirmed by full-repo grep (session 1, subagent
-research): zero occurrences of `OMARCHY_INSTALLER_REPO`;
-`OMARCHY_INSTALLER_REF` appears exactly once (in a `--quattro` flag
-handler) and is never read — looks vestigial.
-
-What the repo actually does: Omarchy installs as a **pacman package**
-(`omarchy`/`omarchy-dev`) pulled from a custom repo baked into the ISO's
-offline mirror — not a git-cloned installer repo chain-launched at
-install time. The real extension points are:
-- The `[omarchy]` repo `Server=` URL in `configs/pacman-online-*.conf`
-  (or the offline equivalent) — point it at a Deck-specific package repo.
-- `bin/omarchy-iso-make --local-source <omarchy-checkout> <pkgs-checkout>`
-  — mounts a local checkout into the build container and builds
-  `omarchy*` packages from source instead of pulling published ones.
-- In-target, `omarchy-setup-system`/`omarchy-finalize-user` (run via
-  `arch-chroot` after pacstrap) ship **inside** the `omarchy`/`omarchy-dev`
-  package itself — they're basecamp/omarchy's own scripts, not something
-  omarchy-iso separately clones.
-
-**This changes the shape of the three/four-repo architecture in PLAN.md
-§4–§5** — there's no clean "fork omarchy-iso, point it at a forked
-installer repo via env var" path. The Deck-specific installer logic likely
-needs to become its own pacman package (built via `--local-source`) or a
-pacman-repo-server-swap, not a git-repo swap. **This needs operator input
-before T5 locks in an approach** — flagging per `START-HERE.md` §3's
-"foundational assumption is wrong" escalation rule, not silently working
-around it. R1 10.2 should be re-scoped around this finding rather than the
-original hypothesis.
-
-### Useful finding: `cidata` autoinstall mechanism (for T0 §1)
-
-`omacom-io/omarchy-iso` already ships an unattended-install path that's a
-better fit for T0's QEMU harness than upstream's own OCR-based
-`bin/omarchy-iso-test`: a second virtio drive labeled `cidata` (cloud-init
-NoCloud convention) carrying `user_configuration.json` +
-`user_credentials.json` (required pair; optional: `user_full_name.txt`,
-`user_email_address.txt`, `user_encrypt_installation.txt`,
-`authorized_keys`, `tailscale_authkey`). `omarchy-cidata-load` copies these
-to `/root` and the orchestrator (`orchestrator/main.py`) skips the `gum`
-wizard entirely. Building `test/vm-install-test.sh` around this instead of
-keystroke/OCR injection. Exact JSON schema for the two required files is
-being confirmed against `archinstall_adapter.py` before hand-authoring a
-fixture (session 1, in progress) — do not guess the schema; a wrong guess
-here reproduces the exact "prints success, does nothing" failure class
-this project exists to prevent (§8.1).
-
-### Local dev-machine limitations affecting T0 §1
-
-**Update (session 2): Docker, `kvm`, and `disk` group membership are now
-confirmed working** (`docker run hello-world` succeeds, `/dev/kvm` is
-accessible, `groups` shows `kvm disk docker` alongside the existing `video
-input wheel`). Passwordless `sudo` is still not set up, but turned out to
-only matter for one non-essential line in upstream's build script (see
-below) — not a real blocker.
-
-**Network bottleneck (session 2) — root-caused and fixed.** Building the
-real `omarchy-iso` ISO from this environment first looked bandwidth-
-starved: four build attempts via unmodified upstream `bin/omarchy-iso-make`
-(cloned to session scratch space, not this repo) failed — three on mirror
-timeouts ("Operation too slow. Less than 1 bytes/sec" from
-`stable-mirror.omarchy.org`, worsening across `ParallelDownloads=5` → `1`),
-the fourth crawling at ~2 KB/s even to an unrelated host (nodejs.org). The
-user's own speed test showed 600 Mbps, which didn't match. Root cause,
-confirmed by direct comparison: **Docker's default bridge network on this
-host silently throttles throughput** (`docker run --network host` measured
-62 MB/s against the same URL that crawled at 2 KB/s through the bridge —
-matches both the host's own 54 MB/s direct-curl result and the ISP speed
-test). MTU and IPv6 were checked and ruled out first. Fix: add
-`--network host` to the build's `docker run` invocation (scratch clone
-only — see below). This is worth remembering for *any* Docker-based
-tooling on this host, not just ISO builds.
-
-Three deviations made in the scratch clone only (never touched this
-repo's own files): `--network host` added to `DOCKER_ARGS` in
-`bin/omarchy-iso-make` (the actual fix); `sudo rm -rf
-/var/cache/pacman/pkg/*` commented out (host-side cache tidy, not required
-for a correct build, needs sudo this non-tty background session can't
-provide); `ParallelDownloads` in `configs/pacman-online-stable.conf` was
-dropped to `1` then restored to the stock `5` once `--network host`
-proved to be the real fix.
-
-Also applied — and this one **is** relevant to T5 later, not just this
-scratch test — two patches to `configs/airootfs/root/.automated_script.sh`:
-
-1. The completion-detection fix `vm-install-test.sh`'s "KNOWN GAP" comment
-   already anticipated, corrected on closer reading of the actual
-   dashboard source (`omarchy-install-dashboard`): non-interactive installs
-   never actually hang on a prompt (reboot confirm and failure menu both
-   already short-circuit on `OMARCHY_UI_INTERACTIVE=no`) — the real gap is
-   narrower: on success the dashboard calls an in-guest `reboot` (into the
-   freshly-installed disk) rather than powering off, so QEMU's process
-   never exits either way. Fix: export `OMARCHY_UI_AUTO_REBOOT=no
-   OMARCHY_UI_FAILURE_ACTION=exit` in the cidata branch, capture the
-   dashboard's exit status without tripping `set -e`, then explicitly
-   `poweroff` when non-interactive regardless of outcome.
-2. A debug-log capture: the real install log
-   (`/var/log/omarchy-install.log`) only ever exists in the guest's tmpfs,
-   and tty1's actual text can be hidden behind plymouth's splash for the
-   guest's *entire* lifetime (confirmed — a QMP screendump loop sampling
-   every ~15s for 90s+ showed a frozen "OMARCHY" splash the whole time;
-   pressing Esc, plymouth's own "show details" toggle, revealed unrelated
-   systemd boot-log text, not the real tty1 content). Fix, now a permanent
-   part of `vm-install-test.sh` itself (not scratch-only — see below): an
-   extra small virtio-blk drive (`serial=vmdebuglog`,
-   `/dev/disk/by-id/virtio-vmdebuglog` in-guest), which the ISO fork writes
-   the install log + orchestrator `state.json` onto right before its
-   poweroff. `vm-install-test.sh` dumps its content to
-   `$WORK/install-debug.log` after every run. This is what made the two
-   real bugs below findable at all.
-
-**Two real bugs in this project's own harness, found via the first actual
-end-to-end run — this is exactly what task #4 ("verify harness can
-actually fail") was for:**
-
-1. `vm-cidata.sh`'s `cidata::render_config` didn't include an `obj_id` key
-   per partition. archinstall's `DiskLayoutConfiguration.parse_arg`
-   (`archinstall/lib/models/device.py:185`) does `partition['obj_id']`
-   unconditionally — no default, straight `KeyError` — so every install
-   attempt failed after 0.1s, before ever touching the disk
-   ("Preparing live environment" phase). Fixed: generate a UUID
-   (`/proc/sys/kernel/random/uuid`) per partition. Added a regression test
-   in `test-vm-cidata.sh` (existing tests didn't check for this key at
-   all, so this could have silently regressed indefinitely without one).
-2. `vm-assertions.sh`'s `disk_image::root_restore_matching` used `btrfs
-   restore` (the userspace recovery tool) to inspect the installed root
-   partition without a real mount. It looked correct in unit tests against
-   small hand-built fixtures, but on a real install it errors on
-   zstd-compressed extents ("zstd frame incomplete") — and, worse, **stops
-   walking the rest of the tree after that error instead of failing
-   loudly**, so it never reached `/etc` or `/var/lib/pacman/local` at all.
-   This is PLAN.md §8.1's exact failure class (a tool that looks like it
-   worked while doing nothing) — reproduced in this project's own tooling,
-   not just upstream's. Fixed: replaced with a real rootless kernel mount
-   (`udisksctl loop-setup` + `mount` — confirmed working with no sudo/
-   polkit prompt on this dev machine, same technique already used
-   elsewhere this session for read-only ISO/squashfs inspection). New
-   `disk_image::root_mount`/`disk_image::root_unmount` in
-   `vm-disk-image.sh`; `vm-install-test.sh` updated to use them.
-
-**Net result: T0 §1's "done when" criterion is met.** `vm-install-test.sh`
-run against a real, unmodified-upstream `omarchy-iso` build, with both
-fixes applied, produced a clean PASS: partition table valid, all 5
-expected packages present, both spot-checked systemd units
-(`NetworkManager.service`, `limine-snapper-sync.service`) enabled — against
-a real install that put 942/943 packages on disk across all 12 phases,
-fully offline (`network_config.type: iso`, confirmed via
-`offline downloading...` in the captured log — no network device was even
-attached to the test VM, `-nic none`, matching CLAUDE.md's offline
-constraint).
-
-Carried over from the operator's manual install session (already validated
-on real hardware, treat as fact):
-
-- Neptune kernel installs and boots on OLED Deck via jupiter-staging /
-  holo-staging repos
-- Limine + UKI works; the neptune kernel needs a manually added boot entry
-- `mount -o remount` does NOT re-apply fmask/dmask on vfat
-- Omarchy's installer aborts on a `yay` / `yay-bin` conflict
-- Omarchy's `limine-snapper.sh` fails when `/boot` is mounted 0077
-- `cs35l41-dsp1-*` firmware warnings appear on OLED; audio impact unverified
-
-### R1 — six research questions resolved (session 3)
-
-Full detail in `FINDING-R1-10.1.md` through `FINDING-R1-10.6.md`, worked by
-three parallel agents. Headline results (full hypotheses/results now also in
-`PLAN.md` §10 inline):
-
-- **§10.1 offline mirror — CONFIRMED, signing caveat KILLED.** No re-sign
-  step needed; `omarchy-iso` already carries an unsigned third-party repo the
-  same way Valve's would work. New risk: ISO size grows ~1:1 with the mirror
-  (stored uncompressed by design), and the build's package-count self-check
-  (600–2000) will need its upper bound widened.
-- **§10.2 hooks vs. fork — PARTIAL, right conclusion via a different
-  mechanism.** `post-update.d/` hooks are real in Quattro but unprivileged
-  and silently swallow failures — wrong tool. Found upstream's actual
-  sanctioned pattern instead: `install/hardware/pacman.sh` +
-  `intel/ptl-kernel.sh`, a working in-tree template for exactly this
-  hardware-gated kernel-swap-plus-repo problem, usable as-is for T1.
-  Recommended architecture: fork `omarchy-iso` (build-time) + a
-  Deck-specific pacman package (install-time) + one `pre-refresh-pacman.d/`
-  hook (durability, since `omarchy refresh pacman` silently wipes
-  `/etc/pacman.conf`).
-- **§10.3 gamepad mapping — PARTIAL.** Both designs prepared concretely;
-  genuinely needs a hardware session to decide, not attempted here.
-- **§10.4 Steam offline — CONFIRMED. ⚠️ Contradicted a CLAUDE.md hard
-  constraint; operator decision made.** Tested for real in a network-isolated
-  QEMU VM: cold launch with no network fails fatally in under a second; even
-  with the 2.5 GB client pre-populated (also tested), Steam reaches its login
-  screen but then requires network to actually log in — the offline
-  limitation is over-determined, not a single fixable gap. Operator chose to
-  accept the reframing: **`CLAUDE.md`'s offline constraint is now worded**
-  "fully offline install through first boot into Gaming Mode; Steam signs in
-  on first launch like a factory-reset Deck," `PLAN.md` §6.1a item 7 (Wi-Fi
-  screen) is promoted, and T5 gains a required item (detect no-network/
-  no-client and show a Wi-Fi screen before Steam gets the display).
-  **Decided: no pre-populated client** — ship only the plain launcher, rely
-  on the Wi-Fi screen. See below.
-- **§10.5 Secure Boot/BIOS — CONFIRMED (resolved session 3).** Operator
-  verified on their own Deck: boot order already defaults to Limine, Secure
-  Boot was never touched during their original install and it worked, and
-  the BIOS exposes no Secure Boot toggle at all. No pre-install BIOS step
-  needed.
-- **§10.6 upstream collaboration — PARTIAL, staged, on hold.** Outreach
-  message to `28allday` and five `deckarchy` bug reports drafted
-  (`DRAFT-outreach-28allday.md`, `DRAFT-upstream-bugs-deckarchy.md`);
-  operator has decided to hold entirely — nothing sent or posted, no
-  timeline to revisit.
-
-### T1 — `omarchy-deck-kernel.sh` review (session 4)
-
-The draft encoded a manual install done on an older package set. Verified
-against a real Omarchy Quattro disk image (session 2's `vm-test-work6`) and
-against `jupiter-staging`'s current packages. **Four of its premises were
-false**, each a hard failure or a wrong boot entry:
-
-- **PLAN.md §8.3's preset bug is now moot — CONFIRMED OBSOLETE.** Valve's
-  kernel packages ship no `/etc/mkinitcpio.d/*.preset` and no
-  `/boot/vmlinuz-*` at all. Unpacked `linux-neptune-611-6.11.11.valve29-1`
-  and `linux-neptune-618-6.18.39.valve1-1`: each contains exactly
-  `usr/lib/modules/<kver>/{pkgbase,vmlinuz}`. There is no preset left to be
-  wrong, so the draft's `[[ -f $KERNEL_PRESET ]]` check and its whole
-  `default_uki` patching stage were dead ends.
-- **Omarchy Quattro builds UKIs with `limine-mkinitcpio-hook`, not presets.**
-  Its pacman hook enumerates `/usr/lib/modules/*/pkgbase` and produces
-  `$ESP/EFI/Linux/<prefix>_<pkgbase>.efi`, then registers it with
-  `limine-entry-tool --add-uki`. Installing the kernel is most of the job;
-  the script's real work is *verifying that machinery ran* and failing loudly
-  when it did not.
-- **The stock Limine config has no `/Arch Linux (linux)` entry.** It is a
-  nested tree written by `limine-entry-tool` (`/+Omarchy` → `//linux`) and
-  the `path:` line carries a blake2b hash of the UKI. The draft's `awk`
-  cmdline extraction matched nothing, and its `tee -a` would have appended a
-  flat, hash-less entry outside the OS branch that `limine-entry-tool` would
-  later clobber. Both are gone.
-- **The UKI filename prefix is not the machine-id.**
-  `limine-mkinitcpio-install` uses `CUSTOM_UKI_NAME` from
-  `/etc/default/limine` when set; Quattro sets it to `omarchy`, so the real
-  files are `omarchy_linux.efi` / `omarchy_linux-neptune-611.efi`. The script
-  now *discovers* the UKI path instead of constructing it.
-
-**PLAN.md §8.2 — CONFIRMED, with a correction.** The config is at
-`$ESP/limine.conf` (the fifth of the five candidates, so the five-way probe
-was right to exist). `limine-common-functions` hardcodes
-`LIMINE_CONFIG_PATH="${ESP_PATH}/limine.conf"`.
-
-**PLAN.md §8.5 — REPRODUCED on a stock Omarchy Quattro install.** Its
-`/etc/fstab` mounts `/boot` `fmask=0077,dmask=0077` with no Deck packages
-involved, which is the evidence T1 step 5 needs to argue this is a generic
-Omarchy-on-archinstall problem rather than Deck-specific.
-
-**Two new upstream bugs, found by running it (not by reading it):**
-
-1. **`linux-firmware-neptune` collides with Arch's split `linux-firmware`.**
-   Arch split `linux-firmware` into per-vendor subpackages with the old name
-   kept as a metapackage. Valve's package still declares
-   `conflicts`/`replaces` against only `linux-firmware` and
-   `linux-firmware-whence`, so pacman removes those two and then dies in the
-   file-conflict check against the other ten
-   (`/usr/lib/firmware/... exists in filesystem (owned by
-   linux-firmware-other)`). The script now removes the ten explicitly rather
-   than using `--overwrite`, because overwriting would leave the Arch
-   packages owning those paths and the next `pacman -Syu` would silently
-   restore Arch's firmware over Valve's.
-2. **`pacman --noconfirm` answers *No* to a conflict question.** The prompt
-   is `Remove linux-firmware? [y/N]`, so plain `--noconfirm` aborts the whole
-   transaction with "unresolvable package conflicts". Fixed with `--ask=4`
-   (`ALPM_QUESTION_CONFLICT_PKG` only — not a blanket yes). Same shape as
-   PLAN.md §8.4's yay/yay-bin conflict.
-
-**Also learned:** `limine-snapper-sync.service` holds the ESP open, so the
-§8.5 `umount`/`mount` cycle needs it stopped and restarted (the script does,
-with restart guaranteed on every exit path). And the first "target is busy"
-turned out to be the *test harness's own probe script* running out of
-`/boot` — bash holds an open fd on the script it is executing. The holder
-diagnostic added to `stage_esp_permissions` is what identified both.
-
-**Kernel-version churn, measured (PLAN.md §11).** `jupiter-staging` ships
-series `60, 61, 65, 68, 611, 615, 616, 618, 72`. **The suffix is not
-orderable** — as integers `618 > 72`, as text `"68" > "618"`, and neither is
-right because 72 is 7.2.x and newest. "Latest" is also currently
-`7.2.0.rc3.valve.beta1`, a release candidate. That kills "track latest" on
-evidence and is why the script pins, via a single documented
-`NEPTUNE_SERIES_DEFAULT=611` constant (override:
-`OMARCHY_DECK_NEPTUNE_SERIES`), validates the pin against the live repos, and
-keys every regeneration/prune path on the `linux-neptune-*` glob.
-
-**Idempotency evidence.** `vm-kernel-idempotency-test.sh` boots session 2's
-installed disk image, runs the script twice, and diffs snapshots of the ESP
-tree (with per-file sha256), the Limine config, `/etc/fstab`,
-`/etc/pacman.conf`, the live mount options and the full package set. Result:
-`run1_exit=0 run2_exit=0 state_diff_exit=0`. The before/after diff is
-substantive — new `omarchy_linux-neptune-611.efi` (38.5 MB), new
-`//linux-neptune-611` Limine entry, `/boot` options `0077` → `0133/0022` —
-so the pass is not vacuous. The harness injects rootlessly (mtools onto the
-ESP + SMBIOS type-11 systemd credentials); it never needs sudo on the host,
-so it can run in CI.
-
-### T1 step 3 — the pacman hook (session 5)
-
-**The finding that mattered most: upstream already does most of this.**
-`limine-mkinitcpio-hook` 1.36.0-1 (read directly — it is installed on this
-dev machine and on the operator's Deck) ships three ALPM hooks, and between
-them they cover both directions:
-
-- **Install/Upgrade** — `/etc/pacman.d/hooks/90-mkinitcpio-install.hook`.
-  Note the path: the package drops it into `/etc`, where it *shadows*
-  mkinitcpio's own same-named hook in `/usr/share/libalpm/hooks` (pacman
-  de-duplicates hooks by filename, `/etc` wins). Triggers `Type=Path`,
-  `Operation=Install|Upgrade`, `Target=usr/lib/modules/*/pkgbase`, plus a
-  second trigger on `usr/lib/firmware/*` and friends that forces a rebuild of
-  *every* installed kernel. It runs `limine-mkinitcpio-install`, which builds
-  `$ESP/EFI/Linux/<prefix>_<pkgbase>.efi` and calls
-  `limine-entry-tool --add-uki`. A plain `pacman -S linux-neptune-611`
-  reinstall counts as an Upgrade (libalpm classifies a reinstall as an
-  upgrade because the package is already in the local db) — **confirmed in
-  the VM**, the hook fires on a reinstall.
-- **Remove** — `60-limine-mkinitcpio-remove-pre.hook` (PreTransaction,
-  records the pkgbase names into `/var/lib/limine/removed_kernels.list`) and
-  `90-limine-mkinitcpio-remove-post.hook` (PostTransaction, runs
-  `limine-mkinitcpio-remove post`). It deregisters the entry **and deletes
-  the UKI file** — `limine-entry-tool --remove-all` removes files unless
-  `--keep-files` is passed. So the suspected gap ("does anything clean up
-  after `pacman -Rns linux-neptune-611`?") **does not exist**. Confirmed in
-  the VM: the removal test shows `Removed unused Limine boot entry:
-  linux-neptune-611` coming from upstream's hook, before this project's hook
-  runs at all.
-
-**So the hook that shipped verifies rather than generates.** It closes three
-real gaps, all of the same shape — upstream can fail while reporting success:
-
-1. `limine-mkinitcpio-install`'s per-kernel error paths are all
-   `error_msg …; continue`, and the guard before them is a bare
-   `pacman -Qqo … || continue`. It can build nothing and still exit 0, while
-   the Limine entry keeps pointing at the previous UKI whose modules
-   directory the upgrade just deleted. **This was hit for real while building
-   the test harness** (a broken `pacman.conf` in the chroot made every
-   `pacman -Q` fail; the script skipped the only kernel and exited 0 having
-   built nothing) — it is not a theoretical concern.
-2. Its whole-run failure (`initialize_header || exit 1`, e.g. the ESP not
-   mounted) happens PostTransaction, so it cannot roll back: the kernel lands
-   with no UKI behind one terse pacman error line.
-3. `limine-mkinitcpio-remove`'s `post_remove` never checks whether
-   `limine-entry-tool` succeeded and then deletes `removed_kernels.list`
-   unconditionally, so a failed removal is forgotten permanently.
-
-**The firmware conflict cannot be hooked at all.** `--ask=4` exists because
-libalpm asks `Remove linux-firmware? [y/N]` during transaction *preparation*,
-before any hook — including PreTransaction hooks — runs. Nothing catches it
-and nothing can. In practice it only bites on the first swap (which
-`stage_kernel` owns); afterwards there is nothing left to conflict with. It
-recurs only if something drags Arch's `linux-firmware` back in as a
-dependency, and the fix for that is a `conflicts` entry on the Deck pacman
-package (T5), not a hook. Recorded here so T5 does not rediscover it.
-
-**Shape of the hook.** `/etc/pacman.d/hooks/95-omarchy-deck-kernel.hook`
-(`95-` so it sorts after every upstream hook, both the `90-` install one and
-the `90-` remove-post one), `Type=Package`,
-`Operation=Install|Upgrade|Remove`, `Target=linux-neptune-*` and
-`linux-firmware-neptune`, `When=PostTransaction`,
-`Exec=/usr/local/bin/omarchy-deck-kernel reconcile`. `stage_hook` installs
-both files with a content compare so a re-run writes nothing. The same
-basename under `/usr/share/libalpm/hooks` will supersede it cleanly when the
-Deck logic becomes its own package. The whole rationale is written into the
-hook file itself, not just here — the person asking "why does this exist" is
-reading the hook.
-
-**VM evidence.** `vm-kernel-hook-test.sh`, 33 assertions, all passing:
-install run leaves a working hook; a forced reinstall fires upstream's hook
-*and* this one, really regenerates the UKI, and leaves exactly one Limine
-entry; a second reinstall still leaves exactly one (the "must not duplicate"
-requirement, tested rather than argued); deleting the UKI behind Limine's
-back and running the hook's own command repairs it; a fabricated stale
-`linux-neptune-999` entry is pruned; `pacman -Rdd` leaves no UKI and no
-entry. Also asserted: on a healthy reinstall this project's hook does **not**
-rebuild — it only verifies — which is the evidence that it is not duplicating
-upstream's work. `vm-kernel-idempotency-test.sh` was re-run after adding
-`stage_hook` to `main()` and still passes (`hook: … already current` on run 2).
-
-**New harness: `vm-neptune-image.sh`.** Session 2's installed Quattro disk
-image is gone from this machine (`/var/tmp` was cleared), and rebuilding it
-means an ISO build plus a full unattended install. This builds a purpose-made
-substrate instead — limine + limine-mkinitcpio-hook from Omarchy's own repo,
-`ENABLE_UKI=yes` + `CUSTOM_UKI_NAME="omarchy"`, a vfat ESP mounted
-`fmask=0077,dmask=0077`, and a real `linux-neptune-611` from the Valve repos —
-in a privileged `archlinux/archlinux` container, in about six minutes,
-without root on the host. It is explicitly **not** a claim to be a Quattro
-install; it reproduces the four properties the boot chain depends on. Two
-things it cost to get right, both worth not rediscovering:
-
-- **Docker gives the container a tmpfs `/dev` with no udev**, so `losetup -P`
-  publishes partitions under `/sys/block` but nothing creates `/dev/loopNpM`.
-  The nodes have to be `mknod`'d from sysfs by hand.
-- **`genfstab -U` silently emitted `/dev/loop0p1` for the ESP**, because it
-  resolves UUIDs through `/dev/disk/by-uuid`, which udev never populated. The
-  guest then booted (root comes from the kernel cmdline, not fstab), waited
-  90 s for a device that cannot exist in a VM, failed `/boot`, and dropped to
-  an emergency shell — which from the outside looked exactly like a hung
-  test: disk churn, then silence, for two full runs. fstab is now written by
-  hand from `blkid`, and the builder refuses to ship an fstab containing a
-  `/dev/` path. Also: put `console=ttyS0` **last** in the kernel cmdline, or
-  systemd's boot output goes to a VGA framebuffer no harness is capturing. A
-  QEMU monitor `screendump` is what finally showed the emergency shell.
-
-**Correction to a session-4 claim: mkinitcpio's UKI output IS
-byte-reproducible.** `omarchy-deck-kernel.sh` and
-`vm-kernel-idempotency-test.sh` both asserted the opposite in comments, and
-the hook test's first run failed on an assertion built on it — a reinstall
-that demonstrably rebuilt the UKI (`mkinitcpio` ran, `UKI stored in …`,
-`Updated: /boot/limine.conf`) produced a byte-identical file, same sha256.
-Consequences: the idempotency test's sha256 snapshot does *not* catch a
-needless rebuild (it does catch one whose inputs changed), and the "skip when
-current" rule in `reconcile_uki` is justified by cost and boot-chain blast
-radius, not by reproducibility. Both comments corrected in place; proving a
-regeneration happened now uses an mtime sentinel.
-
-### T1 steps 4 + 6 — CI-testable, one stage at a time (session 6)
-
-Done together because they are one CLI design, not two features: once a stage
-can be invoked on its own, "CI-testable" is mostly "that invocation never
-prompts and its exit code means something".
-
-**The interface, and why this one.** A positional subcommand selects a stage,
-which is the convention the rest of this repo already uses — `deck-sync.sh`,
-`deck-snapshot.sh` and `deck-rollback.sh` all take positional arguments and
-take *configuration* from environment variables, and the script already had
-`install` / `reconcile` positionally from step 3. So:
-
-```
-omarchy-deck-kernel.sh                  full run (unchanged)
-omarchy-deck-kernel.sh stage-kernel     one stage
-omarchy-deck-kernel.sh list-stages      the nine names, for harnesses
-omarchy-deck-kernel.sh reconcile        what the pacman hook runs (unchanged)
-```
-
-Both existing callers keep working untouched: `deck-sync.sh`'s loop and the
-hook's `Exec=` line both use the no-argument and `reconcile` forms. `deck-sync.sh`
-gained an optional `DECK_STAGE_ARGS` env var (not a third positional, so no
-existing invocation changes) so the iterate-in-place loop can reach one stage:
-`DECK_STAGE_ARGS=stage-uki ./deck-sync.sh omarchy-deck-kernel.sh`. Verified
-against a stubbed `ssh`/`rsync` on `PATH` — still no Deck reachable from this
-dev environment — and the remote command string with `DECK_STAGE_ARGS` unset
-is byte-identical to the one it built before, which is the property that
-mattered.
-
-**The stage names are not the task file's.** `TASK-T1` step 6 named five
-(`stage-repos`, `stage-kernel`, `stage-uki`, `stage-bootloader`,
-`stage-permissions`); the script has evolved to nine. The two that no longer
-map are deliberately **not** accepted as aliases, because both would be lies:
-`stage-bootloader` (this script does not write boot entries — `limine-entry-tool`
-does, from `stage-uki`) and `stage-permissions` (it is specifically the ESP's
-mount options, `stage-esp-permissions`). An unknown name is a usage error that
-lists the real ones.
-
-**`INSTALL_STAGES` is the single source of truth** — the full run iterates it,
-`list-stages` prints it, single-stage dispatch validates against it, and the
-function name is derived from the stage name rather than tabulated. A stage
-cannot be individually runnable but missing from the full run, or vice versa.
-
-**Prerequisites, and the honest way to handle them.** Two stages
-(`stage-preconditions`, `stage-esp-detect`) set the `SUDO` / `ESP_PATH` /
-`LIMINE_CONFIG` every other stage reads. They are pure probes — they install
-nothing, write nothing, unmount nothing — so a single-stage run executes them
-first. The alternative is a stage that guesses where the ESP is, which is
-`PLAN.md` §8.3 again. Prerequisites a probe *cannot* satisfy now fail loudly
-and name the stage to run:
-
-- `stage-kernel` / `stage-firmware-swap` check the Valve repos are configured
-  and have a usable db. Previously an unconfigured repo made `pacman -Sl`
-  print nothing and the script reported *"the Valve repos returned no
-  linux-neptune-\* packages at all — the mirror layout may have changed"*,
-  sending the reader to Valve's mirror to debug a missing line in their own
-  `pacman.conf`.
-- `stage-uki` checked this already but called it an "internal error", which it
-  no longer is — it is now a reachable user path.
-- `stage-firmware-swap` checks the repos **before** removing anything, because
-  its whole job is to leave the system with no firmware for the few seconds
-  until `stage-kernel` installs Valve's; discovering *then* that the
-  replacement's repo was never configured would be the worst possible moment.
-  Run alone it now says so out loud.
-
-**Exit codes: 0 success, 1 stage failure, 2 usage error.** The 2-means-usage
-split is what `deck-sync.sh` and `deck-rollback.sh` already do, and it is the
-one a CI caller needs — "you invoked me wrong" must be distinguishable from
-"the boot chain is broken" without parsing output.
-
-**Non-interactivity: one real hazard, found by auditing rather than assuming.**
-Every `pacman` call was already `--noconfirm` (plus the `--ask=4` conflict
-fix from steps 1–2), there is no `read` anywhere, and `limine-entry-tool` /
-`limine-mkinitcpio` were read directly — they prompt nowhere and their only
-lock is a `flock` with a 10s timeout. The one genuine hang was **this
-script's own sudo check**: `$SUDO -n true || $SUDO true`. The fallback reads
-its password from `/dev/tty`, so redirecting stdin does not disarm it, and a
-CI job holding a controlling terminal would sit at the prompt until it timed
-out with no clue why. It is now reached only in interactive mode; otherwise
-the missing credential is a fast, specific failure naming the two fixes.
-
-Interactivity is **auto-detected** (stdin not a terminal ⇒ non-interactive)
-rather than opt-in, deliberately: a harness that forgets a flag would silently
-get the prompting build, which is the exact class of defect this project
-exists to avoid. `--non-interactive` / `--interactive` /
-`OMARCHY_DECK_NONINTERACTIVE` override it. In non-interactive mode stdin is
-redirected from `/dev/null` for the whole run, so any child that tries to read
-a prompt sees EOF immediately instead of blocking on an inherited pipe.
-
-**VM evidence — `vm-kernel-stage-test.sh`, 45 assertions, all passing** (45s
-of guest time on the `vm-neptune-image.sh` substrate). Every stage invoked
-alone, in order, each under `setsid --wait timeout … </dev/null` — no
-controlling terminal, no stdin, a hard time limit, so a stage that blocks
-gets killed and reports 124 rather than hanging the suite. Then every stage
-alone *again*, with the two end states byte-identical (per-stage idempotency,
-which full-run idempotency does not imply: a stage only ever reached after its
-predecessors can be idempotent in that sequence and not on its own). Then the
-no-argument full run on top, exiting 0 and changing nothing — the regression
-check that stage-by-stage and the full run converge on the same state. The
-pass is not vacuous: the before/after diff shows `/boot` going
-`fmask=0077,dmask=0077` → `0133/0022`, `/etc/fstab` rewritten, and
-`steamdeck-dsp` plus its dependency tree installed.
-
-**Regression evidence.** Both existing suites re-run green against the same
-substrate after the CLI change: `vm-kernel-hook-test.sh` 33/33 (the hook still
-fires on install/upgrade/remove, still only verifies on a healthy reinstall,
-still repairs a missing UKI and prunes a stale entry) and
-`vm-kernel-idempotency-test.sh` PASS (`run1_exit=0 run2_exit=0
-state_diff_exit=0`). Nothing in step 3's hook logic or step 5's ESP
-permissions work was touched — the hook's `Exec=` line is unchanged and still
-calls `reconcile`, which is why `hook_script_matches=1` still holds.
-
-The non-interactive assertions are the ones worth having built: a user with
-password-required sudo is created in the guest, the test **first proves
-`sudo -n` genuinely fails for them** (otherwise the section would be vacuous),
-and then runs a stage as that user with no tty and no stdin under a 60s limit.
-It returns in **0s** with the non-interactive message — 124 would have meant it
-sat at the prompt. Two more stdin shapes pass too: stdin closed outright
-(`0<&-`), and stdin on a fifo whose writer never writes, which is the shape
-that makes a stray read hang forever rather than see EOF.
-
-### T1 — first physical hardware run (session 7)
-
-The first time any of this project's code touched the real Deck. Nine stages
-plus `reconcile`, run one at a time, against a snapper snapshot taken first
-(`root`, snapshot **1**). Hardware: `Valve` / `Galileo` — OLED, the only
-verified model.
-
-**The environment is not what the task file assumed, and that is itself a
-finding.** The operator's Deck runs **Omarchy 3.8.4 installed from git**
-(`~/.local/share/omarchy`, `omarchy-version-branch` → `master`), **not**
-Quattro: no `/usr/share/omarchy`, no `/etc/omarchy.conf`, and neither
-`omarchy` nor `omarchy-dev` is an installed package. That resolves the
-session-4 open item ("confirming `omarchy` vs `omarchy-dev` — likely just
-the wrong package name"): it was neither. There is no Omarchy package at
-all on a 3.x git install.
-
-**It ran anyway, and the reason matters for T5.** `omarchy-deck-kernel.sh`
-gates on *mechanism*, never on version — `stage_preconditions` checks tools,
-sudo, Deck DMI and `command -v limine-entry-tool`, and no executable line in
-the script references `/usr/share/omarchy`, `/etc/omarchy.conf` or the
-`omarchy` package. The UKI prefix is *discovered* from `/etc/default/limine`
-rather than assumed. On this machine that file already carries the
-Quattro-shaped values the script was written for (`ENABLE_UKI=yes`,
-`CUSTOM_UKI_NAME="omarchy"`, `ESP_PATH="/boot"`). **So the boot-chain work
-requires Quattro's *mechanism* (`limine-mkinitcpio-hook`), not Quattro's
-*packaging*.** A 3.x install that has had `omarchy update` pull in the
-boot-chain machinery is a supported substrate.
-
-**The bug this found — `limine_entry_count()` substring miscount.**
-`reconcile_uki` asserts each UKI is referenced exactly once in the Limine
-config. The counter behind it was `grep -cF` on the bare basename.
-`limine-snapper-sync` writes a Snapshots submenu whose entries boot a
-snapshot's copy of the same UKI, at a path that *contains* that basename:
-
-```
-path: boot():/EFI/Linux/omarchy_linux-neptune-611.efi#<hash>                              ← the real entry
-path: boot():/<machine-id>/limine_history/omarchy_linux-neptune-611.efi_sha256_<h>#<hash>  ← a snapshot entry
-```
-
-Count 2, not 1 → `stage-uki` exits 1 with "expected exactly 1 Limine entry
-… found 2". The boot chain was *correct*; the check was wrong.
-
-**The second-order bug is the worse one.** `reconcile_uki`'s up-to-date test
-also requires the count to be exactly 1. With any snapshot present that is
-never true, so the UKI is **rebuilt on every run** — and this code is what
-the pacman hook executes, meaning a pointless boot-chain write on every
-kernel transaction. The idempotency proven in session 4 (`run1_exit=0
-run2_exit=0 state_diff_exit=0`) was real in the VM and silently false on any
-real machine with a snapshot. Observed directly: the failing run rebuilt
-*both* UKIs; after the fix the same stage logs "UKI up to date … registered
-once" and writes nothing.
-
-**Why six VM suites missed it.** `vm-neptune-image.sh` builds a substrate
-with limine + `limine-mkinitcpio-hook`, but nothing in
-`vm-kernel-idempotency-test.sh`, `vm-kernel-hook-test.sh` or
-`vm-kernel-stage-test.sh` ever creates a snapper snapshot, so
-`limine-snapper-sync` never generated a Snapshots submenu and the second
-reference never existed. The gap is in the *substrate*, not the assertions —
-worth closing before trusting the next idempotency claim.
-
-**The fix.** `limine_entry_count()` now counts only `path:` lines pointing
-into the ESP's own `/EFI/Linux/`, with the basename terminated by the
-`#<hash>` suffix, whitespace, or end of line; `limine_history/` paths fail
-that anchor. Verified against the real config: old counter 2, new counter 1,
-for both `omarchy_linux-neptune-611.efi` and `omarchy_linux.efi`.
-`shellcheck` clean.
-
-**Results — all nine stages, plus the hook's own entry point:**
-
-| Stage | Exit | Effect on this machine |
-|---|---|---|
-| `stage-preconditions` | 0 | no-op; detected `Valve Galileo` |
-| `stage-repos` | 0 | **added** `jupiter-staging` + `holo-staging` (they were absent) |
-| `stage-esp-detect` | 0 | no-op; `/boot` on `/dev/nvme0n1p1` |
-| `stage-firmware-swap` | 0 | no-op — "no Arch linux-firmware packages left to displace" |
-| `stage-kernel` | 0 | no-op; all four packages already current |
-| `stage-uki` | **1 → 0** | failed on the bug above; after the fix, skips cleanly |
-| `stage-prune` | 0 | no-op; 1 Neptune UKI, 1 installed Neptune kernel |
-| `stage-hook` | 0 | **installed** the hook + `/usr/local/bin/omarchy-deck-kernel` |
-| `stage-esp-permissions` | 0 | no-op; already `fmask=0133,dmask=0022`, fstab untouched |
-
-`/usr/local/bin/omarchy-deck-kernel reconcile` (what the pacman hook runs)
-also exits 0 and **writes nothing** — `md5sum` of all four UKIs and
-`limine.conf` identical before and after. The "idempotent by construction,
-the healthy path writes nothing" claim now holds on hardware, not only in
-QEMU.
-
-**⚠️ Scope limit — this was a reconcile run, not a conversion run.** The
-Deck was already in most of T1's end state before the script ran: per
-`/var/log/pacman.log`, `linux-neptune-611`, `-headers`,
-`linux-firmware-neptune` and `steamdeck-dsp` were installed **by hand on
-2026-08-03**, Arch's `linux-firmware` removed the same day, and `/boot` was
-already mounted `0133/0022`. So seven of nine stages were exercised only on
-their no-op path. **Still unvalidated on hardware: the stock→Neptune
-conversion itself** — in particular `stage-firmware-swap` actually removing
-Arch's split `linux-firmware-*` and `stage-esp-permissions` actually doing
-the `umount`/`mount` cycle on a live ESP. Those remain VM-only evidence.
-
-**Reboot verified (step 5).** The Deck rebooted and came back on
-`6.11.11-valve29-1-neptune-611-g2dcfaf4df7ac`. What this does and does not
-prove is worth stating precisely: every boot artifact was byte-identical to
-the bytes the machine was already running, so this is **not** evidence that
-the script *produced* a working boot chain. What it does prove is that the
-Limine menu still boots cleanly with `limine-snapper-sync`'s new Snapshots
-submenu present — the only thing about the boot menu that changed this
-session — and that the `limine_entry_count` fix holds across a real boot.
-
-Post-boot checks, all clean:
-
-- `reconcile` exits 0 and **writes nothing** — "UKI up to date … registered
-  once", prune finds nothing stale. The fix survives a reboot.
-- ESP **byte-identical** to the pre-reboot capture: all four UKIs and
-  `limine.conf` match on `md5sum`.
-- Boot time 39.5s (5.3s firmware + 7.2s loader + 9.8s kernel + 17.3s
-  userspace) against a 27.6s pre-reboot baseline. Slower, but the loader
-  segment is unchanged (7.2s vs 7.4s) — the growth is in kernel/userspace,
-  consistent with first-boot-after-change cache rebuilds rather than
-  anything in the boot chain. Not investigated further.
-- Hardware spot-check (the physical-only tier in `CLAUDE.md`): audio devices
-  all present (Speaker, Headphones, HDMI, Internal Microphone), `wlan0`
-  connected, `bluetooth.service` active, both `Valve Software Steam
-  Controller` nodes plus `Steam Deck` and `Steam Deck Motion Sensors`
-  enumerated, two `iio` devices for the IMU, `amdgpu` loaded, Wayland
-  session up.
-- **Correction to a carried-over note:** `cs35l41-dsp1-*` firmware warnings
-  did **not** appear — zero occurrences in the boot journal. `PROGRESS.md`
-  had these recorded as "known/expected on OLED" from the operator's manual
-  install session; on `linux-firmware-neptune` jupiter.20260712.1-2 with
-  `steamdeck-dsp` 0.99-2 they are absent. Treat their reappearance as worth
-  a second look rather than as expected background noise.
-
-### ⚠️ New gap found at reboot: nothing sets the default boot entry
-
-The Deck booted Neptune only because the operator **selected it by hand** at
-the Limine menu. `/boot/limine.conf` has `default_entry: 2`, and counting
-bootable entries in the pre-session config (`limine.conf.old`) resolves that
-to the **stock Arch kernel**:
-
-```
-1.  //linux-neptune-611
-2.  //linux              ← default_entry: 2
-3.  /EFI fallback
-```
-
-It was already 2 before this session, so this is pre-existing, not caused by
-T1 — but it is squarely T1's problem.
-
-**Nothing in the toolchain owns this value.** `omarchy-deck-kernel.sh` never
-mentions `default_entry` (grep: no matches), and neither do
-`limine-entry-tool`, `limine-update`, or `limine-snapper-sync`. It is a static
-number written once at install time and never reconciled against which
-kernels actually exist.
-
-**Why this matters more than it looks.** The script installs, verifies and
-prunes the Neptune boot entry with real care — and then leaves the machine
-defaulting to a different kernel. On a fresh install following this project's
-flow, an end user boots stock Arch on Deck hardware, gets degraded or missing
-Valve hardware support, and has no way to know why. `CLAUDE.md`'s
-controller-only constraint makes it worse: the fallback ("just pick the right
-entry") assumes a user who knows to interrupt a boot menu.
-
-**And the mechanism is fragile.** `default_entry` is a *positional index*,
-while `limine-snapper-sync` inserts and removes a Snapshots submenu as
-snapshots come and go. Today the submenu sorts last (`BOOT_ORDER="*,
-*fallback, Snapshots"` in `/etc/default/limine`) so indices 1–2 are stable,
-but pinning boot selection to an integer another daemon can renumber is the
-wrong mechanism regardless of current ordering.
-
-**The durable form exists — confirmed, not assumed.** Limine 12.5.1's
-`CONFIG.md` (`/usr/share/doc/limine/CONFIG.md`, line 92) documents:
-
-> `default_entry` — Entry which will be automatically selected at startup.
-> Can be a 1-based entry index (e.g. `1`), or an entry path (e.g.
-> `OSes/Arch Linux`). Entry paths use `/` as a directory separator […]
-
-So the default can be keyed on the **entry name**, which
-`limine-snapper-sync` cannot renumber out from under it. For this machine's
-config (`/+Omarchy` → `//linux-neptune-611`) that is:
-
-```
-default_entry: Omarchy/linux-neptune-611
-```
-
-**Applied to the operator's Deck and confirmed working (session 7).**
-`/boot/limine.conf` now reads `default_entry: Omarchy/linux-neptune-611`
-(backup at `~/limine.conf.before-default-entry-fix`; one-line diff, verified
-on re-read, `limine-list` still parses, `reconcile` still exits 0). The
-operator rebooted and **let the menu time out with no key pressed** — it
-booted the Neptune kernel unattended.
-
-The entry name was taken from `limine-list`, which is authoritative rather
-than inferred from config syntax:
-
-```
-Omarchy
-├─ linux-neptune-611
-├─ linux
-└─ Snapshots
-EFI fallback
-```
-
-**Useful discovery: Limine implements the Boot Loader Interface**, so the
-selected entry is readable from userspace after boot, as a *path*:
-
-```
-$ bootctl status          # Product: Limine 12.5.1
-                          # ✓ Default entry control, ✓ One-shot entry control
-LoaderEntrySelected  ->  Omarchy/linux-neptune-611
-```
-
-`LoaderEntrySelected` (EFI var, UTF-16LE, 4-byte attribute prefix) is a
-ready-made assertion target for any future test of boot-entry selection —
-no screen-scraping the menu.
-
-**⚠️ Not yet proven: that the entry-*path* form is what did the work.**
-Entry 1 is also `linux-neptune-611`, so the observed result is equally
-consistent with Limine parsing the path correctly *or* with it failing to
-parse and silently falling back to index 1. A fix that works by accident is
-worse than none, so this must be settled before `stage-default-entry` ships.
-
-**Settle it in QEMU, not on hardware.** This is bootloader config parsing,
-not hardware behavior, so per `CLAUDE.md`'s testing tiers it belongs on the
-`vm-neptune-image.sh` substrate: set `default_entry` to a **non-first** entry
-(e.g. `Omarchy/linux`), boot, and assert `LoaderEntrySelected` matches. If it
-does, the path form is genuinely honoured. Repeatable in CI, and no physical
-reboot needed.
-
-**Still to implement:** a `stage-default-entry` — or an extension of
-`stage-uki` — that asserts the default resolves to the pinned Neptune kernel
-and repairs it when it does not, writing the *entry path* rather than an
-index and keying on the `linux-neptune-*` glob like every other reconcile
-path. It belongs in `reconcile` too, so the pacman hook re-asserts it
-whenever kernels change.
-
-**Incidental.** `shellcheck` is now installed via pacman on the Deck,
-retiring the session-1 scratch-binary workaround noted above. Also: this
-session drove `sudo` through a `pinentry` `SUDO_ASKPASS` helper, because the
-harness has no TTY and `sudo` reads passwords from `/dev/tty` — the same
-constraint session 6 hardened the script against. Worth knowing for any
-future on-Deck agent session.
-
-### R1 §10.3 — gamepad mapping decided on hardware (session 7)
-
-`FINDING-R1-10.3.md` rewritten from scaffolding into a resolved finding:
-**ship design (b)**, the `uinput`/`evdev` mapper as a systemd `--user`
-service. Detail lives there; the parts worth surfacing here:
-
-**Design (a) is ruled out by a circular dependency, not by a measurement.**
-It sources controller-as-mouse *and* the OSK from a signed-in Steam client;
-§10.4 confirmed Steam needs network to sign in; §6.1a item 7 needs a
-controller-navigable Wi-Fi screen *before* Steam gets the display. You would
-need the OSK to type the Wi-Fi password that the OSK depends on. The
-first-boot path therefore needs a non-Steam mapper regardless, so (a) could
-only ever be a second input layer on top of (b).
-
-**Two concrete errors in the prepared design, both found by running it:**
-
-1. **The draft unit's `WantedBy=hyprland-session.target` does not exist**
-   (`LoadState=not-found`). Under `uwsm` 0.26.6 the real target is
+| **T0** Test infrastructure | ✅ done | QEMU install harness, CI green, SSH loop, unit tests. Two gaps — §5.7 |
+| **R1** Six research questions | ✅ done | All six resolved. Several overturned the plan — §3 |
+| **T1** Kernel / firmware / boot | ✅ done, hardware-validated | One real gap: `stage-default-entry` — §5.3 |
+| **T2** Gamepad input spike | ⬜ **not started — next block** | Sizes T4. Back on the critical path |
+| **T3** Gaming Mode + switching | 🟡 **in progress** | Gaming Mode boots. Session layer being rewritten in-repo — §4 |
+| **T4** Controller-only installer | ⬜ not started | Blocked on T2 |
+| **T5** ISO + package payload | ⬜ not started | Unblocked by R1 and simplified by §2.2; needs T2/T3/T4 for the package list |
+| **T6** Integration + release | ⬜ not started | Gated on Omarchy 4.0 stable |
+
+**The plan is `ROADMAP.md`** — three phases: answer the unknowns and rebuild
+the test bed (1), build the product (2), prove it from a factory reset and
+release (3).
+
+**Next action:** Phase 1 — P1.1 (T1 loose ends in QEMU) and the T2 spike can
+start immediately; the Deck recon/rebuild session (P1.4–P1.5) needs the
+operator.
+
+---
+
+## 2. Scope — decided 2026-08-09/10
+
+Five decisions taken together. They interlock; read them as one.
+
+### 2.1 The ISO is the deliverable
+
+An earlier session deferred T4/T5 to a "v1" and scoped a post-install-script
+"v0" (`PLAN.md` §3.1). **That is reversed.** The project is the ISO, per
+`PLAN.md` §1 and goals 1–8.
+
+**T2 is back on the critical path.** Its only job is sizing T4, and T4 ships.
+
+### 2.2 Network during installation is acceptable — the offline constraint is retired
+
+`CLAUDE.md`'s "fully offline install" hard constraint is **withdrawn by
+operator decision.** The Deck may connect to Wi-Fi during ISO installation.
+The reasoning: Steam needs network to sign in regardless (§3.2), so an
+offline install buys a device that still cannot reach Gaming Mode usefully.
+Paying a large engineering cost to avoid a network dependency that reappears
+one screen later was not worth it.
+
+**What this removes:**
+
+- The offline mirror stops being load-bearing. ISO size pressure drops
+  sharply — no need to bake every package in uncompressed (§3.3's two risks
+  largely evaporate).
+- "No AUR anywhere in the install path" stops being a hard rule. *(The
+  separate rule against **auto-installing an AUR helper** still stands — it
+  caused a real upstream failure. And §2.4's decision does not depend on
+  this; it rests on licensing and redundancy.)*
+- The pre-Steam Wi-Fi screen stops being an exotic first-boot recovery
+  mechanism and becomes a normal install screen, as in SteamOS's own wizard.
+
+**What this makes critical instead — and it is a genuinely new requirement:**
+
+> ⚠️ **Wi-Fi must work in the live ISO environment**, which boots Arch's
+> stock kernel and stock `linux-firmware` — *not* Neptune and *not*
+> `linux-firmware-neptune`. Every existing piece of evidence that Deck Wi-Fi
+> works (session 7's `wlan0` check) was gathered on an installed system
+> already running Valve's kernel and firmware. **Nothing yet confirms the
+> live ISO can drive the OLED Deck's radio at all.** This is now the single
+> highest-value unverified assumption in the project — see §5.1.
+
+The install flow also now depends on the user being able to **type a Wi-Fi
+password with a controller**, before anything is installed. That pulls the
+gamepad mapper and on-screen keyboard (§3.4) into the *live ISO*, not just
+the installed desktop — a dependency T2 must size.
+
+### 2.3 Target Omarchy 4.0 (Quattro), currently in beta
+
+This closes the "which Omarchy does this target" question that had been open
+since the first session. **4.0, not 3.x.**
+
+⚠️ **The test Deck runs Omarchy 3.8.4, installed from git** — no `omarchy`
+pacman package at all. So the target and the only test asset now disagree.
+T1 is immune (it gates on the Limine UKI *mechanism*, never on Omarchy's
+packaging — proven on this exact machine). **T3's shell integration is not
+immune:** the Desktop Mode icon and the Quick Access Menu hook land differently
+on Quickshell than on the 3.x waybar shell.
+
+**Resolved by §2.5:** the Deck is rebuilt onto a fresh, package-based
+Omarchy 4.0 in phase 1 (`ROADMAP.md` P1.5) — no in-place upgrade of the git
+install, no second device needed.
+
+### 2.4 DeckShift is out — this project ships its own session layer
+
+An earlier session adopted `28allday/deckshift` for session switching. **That is
+reversed.** Reasons, in order of weight:
+
+1. **It is unlicensed.** Default copyright: no permission to fork, modify or
+   redistribute. An ISO cannot carry it, and §2.1 makes the ISO the product.
+   *This reason is independent of §2.2 — retiring the offline constraint does
+   not make an unlicensed dependency shippable.*
+2. **It pulls `gamescope-session-git` / `gamescope-session-steam-git` from the
+   AUR** via `yay`/`paru`, which needs an AUR helper this project will not
+   auto-install (it caused a real upstream failure).
+3. **Its reason to exist does not apply here.** DeckShift targets generic PCs,
+   which have no access to Valve's repos. On Deck hardware, Valve's
+   `jupiter-staging/gamescope` already ships the entire SteamOS session (§4.1),
+   so DeckShift's core value — sourcing a session — is redundant.
+4. **We were already bypassing its core.** The hybrid splice tried on the Deck
+   replaced ChimeraOS's session with Valve's, leaving DeckShift supplying only
+   glue. Documented in `FINDING-deckshift-hybrid.md`.
+
+`deck-session.sh` — written and hardware-tested before DeckShift was adopted,
+then retired — **is restored** as the session layer, with its two known bugs
+fixed (§4.2).
+
+### 2.5 Wiping / factory-resetting the Deck is acceptable — decided 2026-08-10
+
+The operator explicitly approved fully restoring the Deck to factory settings
+if needed. This retires the "protect the precious install at all costs"
+posture and lets the plan *use* rebuilds deliberately:
+
+- **Phase 1** (`ROADMAP.md`): wipe the 3.8.4-from-git install and put a
+  fresh, package-based **Omarchy 4.0** on the Deck via the stock ISO — one
+  session that answers §5.1, recons the live environment, validates the
+  stock→Neptune conversion for real, and clears the DeckShift hand-edits.
+- **Phase 3**: factory-reset via Valve's recovery image, then run the full
+  release matrix from the exact state a real user starts from — and write
+  the recovery documentation while doing it.
+
+**What survives:** every write to the Deck still requires asking first;
+snapshots still precede destructive iteration; "never *reinstall to test*"
+still holds for day-to-day work — planned rebuilds in `ROADMAP.md` are the
+deliberate exception, not a shortcut.
+
+**What this de-urgents:** the `/tmp` backups of the six DeckShift-era
+hand-edited files only mattered for restoring the current install's state.
+Since that state is scheduled to be wiped, losing them costs nothing.
+
+---
+
+## 3. Findings that changed the plan
+
+These matter more than the code. Each cost real time; a session that does not
+know them will waste it again.
+
+### 3.1 `PLAN.md`'s §4/§5 architecture is wrong
+
+`OMARCHY_INSTALLER_REPO` / `OMARCHY_INSTALLER_REF` — the env-var pair §4's
+diagram and §5's repo plan are built on — **do not exist** in
+`omacom-io/omarchy-iso`. Confirmed by full-repo grep: zero occurrences of the
+first; the second appears once, in a `--quattro` flag handler, and is never
+read.
+
+Omarchy installs as a **pacman package** pulled from a repo baked into the
+ISO's offline mirror, not a git-cloned installer chain.
+
+**Replacement architecture** (from upstream's own in-tree precedents,
+`install/hardware/pacman.sh` + `intel/ptl-kernel.sh`):
+
+- fork `omarchy-iso` for build-time changes
+- ship the Deck logic as **its own pacman package** for install-time work
+- plus one `pre-refresh-pacman.d/` hook for durability — load-bearing, because
+  `omarchy-refresh-pacman` **silently overwrites `/etc/pacman.conf` wholesale**
+  and would delete the Valve repo entries without it
+
+Also found: an ALPM pre-transaction guard aborts bare `pacman -Syu` unless
+`OMARCHY_UPDATE_PACMAN=1` is set. Affects T1 and T3.
+
+### 3.2 Steam cannot work offline — the headline claim is reframed, not dropped
+
+Tested for real in a network-isolated VM. Cold, no client, no network: Steam
+fails fatally in under a second and exits. Pre-populating the 2.5 GB client was
+**also tested** and does not rescue it — Steam reaches a login screen and then
+cannot log in. Login requires network under any packaging strategy.
+
+Redistributing a pre-populated client was checked separately and is not clearly
+authorized by Steam's Subscriber Agreement. Every Linux distro ships only the
+20 MB launcher.
+
+**Decided:** ship only the launcher, no pre-populated client.
+
+This finding is what ultimately retired the offline constraint (§2.2): if
+Steam needs network one screen after install regardless, an offline installer
+buys very little for a lot of engineering. The honest claim is now simply
+*"connects to Wi-Fi during setup, exactly like a factory-reset Deck."*
+
+### 3.3 The offline mirror can carry Valve packages — no signing step needed
+
+`omarchy-iso` already ships an out-of-tree kernel from an unsigned third-party
+repo (`linux-t2` / `[arch-mact2]`, `SigLevel = Never`) into its offline mirror
+and boots it. Adding Valve's repos is a structurally identical, already-exercised
+edit. **The signing caveat in the original hypothesis does not exist.**
+
+Two *new* risks were identified at the time:
+
+- the mirror is stored **uncompressed**, so every byte adds ~1:1 to ISO size
+- the build has a hard package-count self-check (600–2000) whose upper bound
+  will need widening
+
+**Both are largely defused by §2.2.** With network available at install time,
+the mirror only needs to carry what genuinely must be present before the
+network is up — the Deck's own Wi-Fi firmware above all (§5.1). Everything
+else can be pulled. Keep the mechanism; shrink the payload.
+
+### 3.4 Gamepad mapping in Desktop Mode — resolved on hardware
+
+**Ship design (b):** a custom `uinput`/`evdev` mapper as a systemd `--user`
+service. Design (a) (background Steam) is ruled out by a **circular dependency**,
+not a measurement: it sources the on-screen keyboard from a signed-in Steam
+client, Steam needs network to sign in, and the pre-Steam Wi-Fi screen needs an
+OSK to type the Wi-Fi password. You would need the keyboard to get the network
+that provides the keyboard.
+
+Verified on hardware:
+
+- unprivileged `/dev/uinput` creation works with a udev rule — **no privileged
+  helper needed**
+- controller evdev *read* access already works via seat ACLs
+- Hyprland implements the protocols an OSK needs
+
+Two errors in the prepared design were found only by running it:
+
+1. `hyprland-session.target` **does not exist**. Under `uwsm` the real target is
    `wayland-session@hyprland.desktop.target`. A unit wanted by a nonexistent
    target **enables without error and never starts** — it would have shipped,
-   reported success, and silently done nothing. Corrected and verified live.
-2. **`TAG+="uaccess"` does not grant access to `/dev/uinput`.** It carries the
-   `uaccess` tag but not the `seat` tag (`CURRENT_TAGS=:uaccess:`, versus
-   `:uaccess:seat:` on a real input device), and systemd's uaccess builtin
-   only ACLs seat-assigned devices. **T4/T5 action item: add the desktop user
-   to the `input` group at install time** — and note `SupplementaryGroups=` is
-   not permitted in a `--user` unit, so it cannot be done per-service.
+   reported success, and done nothing.
+2. `uaccess` does **not** cover `/dev/uinput` (virtual device, no seat tag).
+   **T4/T5 action item: the installer must add the desktop user to the `input`
+   group.** `SupplementaryGroups=` is not permitted in a `--user` unit, so this
+   cannot be done per-service.
 
-**Verified working:** unprivileged `/dev/uinput` device creation end-to-end
-(open → capability bits → `UI_DEV_CREATE` → visible in
-`/proc/bus/input/devices`) via a udev rule, so design (b) needs **no
-privileged helper** — the risk the finding called potentially disqualifying.
-Controller evdev *read* access already works with no change, via the seat ACL
-these nodes do get. Hyprland 0.56 implements both `zwp_input_method_manager_v2`
-and `zwp_virtual_keyboard_manager_v1` + `zwlr_layer_shell_v1`, so the OSK is
-protocol-feasible. **Use `squeekboard`** (Arch `extra`) — the doc's first
-suggestion, `wvkbd`, is AUR-only and `CLAUDE.md` forbids auto-installing an
-AUR helper.
+**Use `squeekboard`** (Arch `extra`). The originally-suggested `wvkbd` is
+AUR-only.
 
-**Untestable on this Deck, permanently:** anything involving Gaming Mode. The
-operator's Deck has no `steam` and no `gamescope` — only Hyprland sessions —
-so "does it conflict with Gaming Mode's Steam instance" and "does it stay out
-of the gamescope session" cannot be answered here by any amount of setup.
-That needs a machine with both sessions; realistically a T3/T5-era test.
+### 3.5 Secure Boot is a non-issue
 
-### T3 prep — Steam/gamescope installed, and the prior-art check done (session 7)
+Operator-verified on their own Deck: boot order already defaults to Limine, and
+the BIOS exposes no Secure Boot toggle at all. No pre-install BIOS step, no
+photo documentation needed.
 
-**Steam and gamescope are now installed on the Deck** (snapshot 2 taken
-first), unblocking T3's session work. Installed: `multilib/steam` 1.0.0.87-1,
-`jupiter-staging/gamescope` 3.16.25-3 (Valve's own build — packager is
-`ci-package-builder-1@steamos.cloud`, not Arch's 3.16.24-1), plus
-`lib32-vulkan-radeon`. 91 packages total.
+### 3.6 Two real bugs found by the first hardware run of T1
 
-**⚠️ A bare `pacman -S steam` installs NVIDIA drivers on a Steam Deck.**
-`steam` depends on the *virtual* `lib32-vulkan-driver`. `vulkan-radeon` is
-installed for 64-bit but nothing 32-bit provided it, so pacman selected a
-provider on its own and picked the NVIDIA stack — `nvidia-utils`,
+**Bug 1 — snapshot entries miscounted as duplicate boot entries.** The script
+counted a UKI basename as a *substring* of the Limine config. `limine-snapper-sync`'s
+rollback entries embed the same basename under `limine_history/`, so the count
+came back 2 instead of 1 and a correct boot chain was declared broken.
+
+The trigger was **the safety snapshot the hardware task's own procedure
+mandates** — anyone following the documented steps hits it. Worse, the same
+faulty count defeated the "already up to date" check, so the kernel was
+**rebuilt on every run**, inside a pacman hook. The idempotency proven across
+six VM suites was real in QEMU and silently false on any real machine with a
+snapshot. **Fixed** — the count is now anchored to real `path:` lines under the
+ESP's `/EFI/Linux/`.
+
+**Bug 2 — nothing sets the default boot entry.** The Deck defaulted to the
+*stock Arch kernel*; the operator had been selecting Neptune by hand without
+that being visible anywhere. Nothing in the toolchain owns `default_entry`.
+On a fresh install an end user would silently boot the wrong kernel with
+degraded hardware support and no error. **Fixed by hand on the operator's Deck;
+still not in the script** — §5.2.
+
+### 3.7 Prior art does not duplicate this project
+
+`28allday` (a.k.a. no-signal.uk) ships `deckshift` (unlicensed),
+`omarchy-deck-iso` (**MIT**), `omasteam` (MIT), and the superseded
+`Super-Shift-S-Omarchy-Deck-Mode` (unlicensed) that `PLAN.md` §5/§6.4 names as
+the fork base. **None of them target Steam Deck hardware** — all are
+"Deck-*style* gaming mode on a generic PC", no Neptune kernel, no Valve
+firmware, no Jupiter/Galileo detection, and DeckShift explicitly handles NVIDIA.
+Bazzite and ChimeraOS solve Deck hardware but not Omarchy.
+
+**So this project's differentiator — real Deck hardware plus Omarchy — is not
+duplicated.** That is the answer to the prior-art check `PLAN.md` §2 demanded.
+
+**Still worth reusing:** `omarchy-deck-iso` is MIT and is structurally already
+T5's architecture — a thin Omarchy fork, an offline mirror, post-install steps.
+A legitimate base even though it has no Deck hardware support.
+
+### 3.8 A bare `pacman -S steam` installs NVIDIA drivers on a Steam Deck
+
+`steam` depends on the *virtual* `lib32-vulkan-driver`. With no 32-bit AMD
+provider installed, pacman picks the NVIDIA stack on its own — `nvidia-utils`,
 `egl-wayland`, `egl-gbm`, `egl-x11`. Naming `lib32-vulkan-radeon` explicitly
-drops nvidia/EGL packages from the transaction to **zero**.
+drops them to zero. **Nothing errors.**
 
-**T5 must pin `lib32-vulkan-radeon` in the package list.** Otherwise an
-unattended offline install silently puts NVIDIA drivers on AMD-only hardware
-— directly against `PLAN.md`'s AMD-only non-goal — and bakes several hundred
-MB of unused driver into an ISO whose offline mirror is stored
-**uncompressed** (§10.1). Caught by reading a dry run, not by the install
-failing; nothing would have errored.
+**T5 must pin `lib32-vulkan-radeon` in the package list**, or every offline
+install ships several hundred MB of unused NVIDIA driver in an uncompressed
+mirror, on AMD-only hardware.
 
-**Also confirmed: no `gamescope-session*` package exists in `jupiter-staging`
-or `holo-staging`.** The Gaming Mode session wrapper is not obtainable from
-Valve's repos. That is consistent with `PLAN.md` §6.4 (this project builds
-the session layer itself), but see the AUR problem below.
+---
 
-### ⚠️ Prior-art check — `PLAN.md` §2 asked for this in "week one"; done now
+## 4. T3 — the session layer
 
-`PLAN.md` §2 warned: know the prior art before investing weeks, and if
-someone has moved closer to this, reconsider the approach. The operator
-raised "the deck mode Omarchy project by no-signal.uk". Result:
+### 4.1 Valve already ships the entire Gaming Mode session
 
-**no-signal.uk is `28allday`** — the same author `PLAN.md` §2/§5/§6.4 already
-names as T3's starting point. They have shipped more since the plan was
-written:
+`jupiter-staging/gamescope` 3.16.25-3 (Valve's own build, packager
+`ci-package-builder-1@steamos.cloud`) provides:
 
-| Repo | What it is | License | Activity |
-|---|---|---|---|
-| `28allday/deckshift` | **Current** session-switcher. v0.1.15, has Omarchy 4 fixes | **NONE** | pushed 2026-07-27, 6★ |
-| `28allday/omarchy-deck-iso` | Omarchy ISO + offline mirror + deck-mode flip | **MIT** | pushed 2026-06-27, 3★ |
-| `28allday/Super-Shift-S-Omarchy-Deck-Mode` | The repo `PLAN.md` names — **superseded** | **NONE** | pushed 2026-03-28, 8★ |
-| `28allday/omasteam` | Omarchy-*flavoured* desktop running **on SteamOS** in userland | MIT | pushed 2026-08-03 |
+```
+/usr/share/wayland-sessions/gamescope-wayland.desktop   the session entry
+/usr/bin/start-gamescope-session                        the entry point
+/usr/lib/steamos/gamescope-session                      the real launcher
+/usr/lib/systemd/user/gamescope-session.target          the unit graph
+  + gamescope-session.service, steam-launcher.service, ibus-gamescope.service,
+    steam-notif-daemon.service, gamescope-mangoapp.service,
+    galileo-mura-setup.service  (OLED mura correction — Deck-specific)
+```
 
-**Correction to `PLAN.md` §5/§6.4:** the repo the plan says to fork was
-renamed twice (`Super-Shift-S` → `Omarchy Deck` → **DeckShift**) and is four
-months stale. T3's reference is **DeckShift**, not the name in the plan.
+All verified present on the Deck. `/usr/lib/steamos/gamescope-session` also
+handles HDR, VRR, fan control, dynamic backlight and mangoapp.
 
-**None of them target Steam Deck hardware.** All are "Steam Deck-*style*
-gaming mode on a generic PC" — no Neptune kernel, no Valve firmware, no
-Jupiter/Galileo detection, and DeckShift explicitly handles NVIDIA. So this
-project's actual differentiator — real Deck hardware support — is **not
-duplicated by the closest prior art**, which is the reassuring answer to the
-question §2 raised. `omasteam` runs *on top of* SteamOS, the opposite
-direction from this project.
+**This is why `PLAN.md` §6.4's "fork Super-Shift-S, it solves the hard part" is
+obsolete.** It was true when written. Valve supplies the session; this project
+supplies only the *switch*. `mangohud`/`lib32-mangohud` are needed for
+`mangoapp`, which the session references but the package does not pull.
 
-**🚫 Blocker: DeckShift and Super-Shift-S are both unlicensed.** Under default
-copyright that means no permission to fork, modify, or redistribute.
-**`PLAN.md` §5's instruction to "fork `28allday/Super-Shift-S...`" is not
-legally executable as written.** `omarchy-deck-iso` and `omasteam` *are* MIT.
-Until a license exists, DeckShift can be **read as a reference design** but
-not forked or vendored.
+**Withdrawn:** the earlier "T5 must build pre-built `gamescope-session*`
+packages for the offline mirror" requirement. T5 just needs
+`jupiter-staging/gamescope` in the mirror, which §3.3 already established is
+straightforward.
 
-**🚫 Second blocker: DeckShift gets `gamescope-session-git` /
-`gamescope-session-steam-git` from the AUR via `yay`/`paru`** (ChimeraOS's
-session framework). That collides with two project constraints at once:
-`CLAUDE.md` forbids auto-installing an AUR helper (it caused a real upstream
-installer failure), and **AUR packages cannot be part of a fully offline
-install** — they need network plus a build step. T5's offline mirror would
-have to carry pre-built `gamescope-session*` packages, built by this
-project's own CI. **This is a new, previously unidentified T5 requirement.**
+### 4.2 Exactly one piece is missing: `steamos-session-select`
 
-**Worth reusing:** `omarchy-deck-iso` is MIT and is structurally already
-T5's architecture — a thin Omarchy fork plus an offline mirror plus
-post-install steps. It is a legitimate base to build on even though it has no
-Deck hardware support.
+Checked with `pacman -F` across core, extra, multilib, omarchy,
+jupiter-staging and holo-staging: **`steamos-session-select` is in no configured
+repo.** It lives in SteamOS's `steamos-customizations`.
 
-**Recommended position** (operator decision, not taken): read DeckShift as the
-reference for session switching rather than forking it; consider
-`omarchy-deck-iso` (MIT) as T5's base; and **send the already-drafted R1 §10.6
-outreach to 28allday**, which now has a concrete ask — a license on DeckShift
-— on top of the collaboration question. That outreach has been held
-indefinitely by operator choice; this finding is a reason to revisit.
+Steam's "Power → Switch to Desktop" shells out to it *by name*. Without it,
+Steam's own affordance **silently does nothing** — `PLAN.md` §8.1's failure mode,
+in the one place a controller-only user cannot work around it.
 
-### Scope decision: v0 first (session 7)
+`deck-session.sh` supplies it, plus the path back. Two bugs from its first
+version are fixed:
 
-The operator chose `PLAN.md` §3.1's recommendation. **v0 = T0 + T1 + T3 as a
-post-install script**, run on a Deck that already has Omarchy installed the
-normal way. T4 (controller-only installer UI) and T5 (ISO + offline payload)
-become **v1**. This had been open since session 1 and gated T4.
+1. **The SDDM drop-in never won, on any machine.** The file's own comment
+   claimed `95-deck-session.conf` "sorts after Omarchy's `autologin.conf`". It
+   does not — `9` < `a`, so `autologin.conf` always overrode it. Undetected
+   because Gaming Mode had never been booted. **The bug was in a comment
+   asserting an ordering nobody checked.** Fixed by sorting last (`zz-`).
+2. **The NOPASSWD verification passed on a warm sudo credential cache**, so it
+   proved nothing. Fixed: clear the cache before probing, and detect the case
+   where the user has blanket NOPASSWD (which makes the probe vacuous) and say
+   so rather than claim verification.
 
-**Status against v0's own scope: two-thirds done.**
+Neither was caught by the file being shellcheck-clean, idempotent, and passing
+its own tests.
 
-| v0 component | State |
+### 4.3 What is confirmed on hardware, and what is not
+
+**Confirmed:** Gaming Mode has been entered on the Deck once, and a
+return-to-desktop button was present. That is the first gamescope session ever
+started on this machine.
+
+**Not confirmed, and must not be recorded as passing:** whether controller input
+works in Gaming Mode, whether audio works there, and whether the return button
+*functions* as opposed to merely appearing. The last is the one that exercises
+the `steamos-session-select` shim and is the controller-only path out.
+
+**Note:** that confirmation was obtained with the DeckShift hybrid in place.
+Under §2.3 that hybrid is being removed, so it is evidence that *Valve's session
+starts on this hardware* — not evidence about this project's own switch layer.
+
+---
+
+## 5. Open issues
+
+Ranked by what they would cost to discover late.
+
+### 5.1 ⚠️ Wi-Fi in the live ISO is unverified — highest priority
+
+Introduced by §2.2. The install now depends on the Deck reaching Wi-Fi *from
+the ISO*, and the ISO boots **Arch's stock kernel and stock `linux-firmware`**,
+not Neptune and not `linux-firmware-neptune`.
+
+All existing evidence that Deck Wi-Fi works comes from an installed system
+already running Valve's kernel and firmware. That evidence says nothing about
+the live environment. The OLED Deck also uses a **different radio from the
+LCD model** (`PLAN.md` §9.6), so even generic "Steam Deck Wi-Fi works on Linux"
+reports are not transferable without checking the model.
+
+**Cheap to settle, and it should be settled before T4 designs a Wi-Fi screen
+around an assumption:**
+
+1. Boot the *stock, unmodified* Omarchy 4.0 ISO on the Deck from the Ventoy
+   USB and see whether a wireless interface enumerates and can associate.
+   This is `ROADMAP.md` P1.5's first act, before the wipe.
+2. If it does not, the ISO fork must carry `linux-firmware-neptune` (or the
+   specific firmware blob) **in the live environment's own filesystem**, not
+   just in the package payload — a different and less obvious change than
+   adding a package to the mirror.
+
+While in the live environment, also record two more things T4/T5 need
+(one boot answers all three):
+
+- **Display rotation.** The Deck panel is portrait-native; the live ISO may
+  render rotated 90°. T4's screens must know.
+- **Input enumeration** — what the controller looks like to the live kernel.
+
+If Wi-Fi fails and cannot be fixed in the live image, the offline mirror
+becomes load-bearing again and §2.2 has to be partially reconsidered. That is
+why it ranks first.
+
+### 5.2 The VM test substrate has a blind spot
+
+`vm-neptune-image.sh` creates **no snapper snapshot**, so `limine-snapper-sync`
+never writes the Snapshots submenu, so the second UKI reference that caused
+§3.6's Bug 1 never existed. Three test suites could not have caught it.
+
+**Any future "idempotency proven" claim inherits this blind spot until the
+substrate creates a snapshot.** Small fix, restores trust in every idempotency
+claim the project makes. Do it before T3 adds more to test.
+
+### 5.3 `stage-default-entry` does not exist
+
+`default_entry` appears **zero times** in `omarchy-deck-kernel.sh`. The
+operator's Deck is fixed by hand only.
+
+Needs a stage that asserts the default resolves to the pinned Neptune kernel and
+repairs it when it does not — writing the **entry path** (`Omarchy/linux-neptune-611`),
+not a numeric index, since `limine-snapper-sync` inserts and removes a Snapshots
+submenu and can renumber indices. Must also run inside `reconcile`, so the
+pacman hook re-asserts it whenever kernels change.
+
+**⚠️ Not yet proven that the entry-path form is what did the work.** The target
+is also entry #1, so a silent fallback to index 1 would look identical. A fix
+that works by accident is worse than none.
+
+**Settle it in QEMU, not on hardware:** set `default_entry` to a *non-first*
+entry on the `vm-neptune-image.sh` substrate, boot, and assert
+`LoaderEntrySelected`. Limine implements the Boot Loader Interface, so
+`bootctl status` reports the selected entry as a path from userspace — a
+ready-made assertion target, no screen-scraping.
+
+### 5.4 T1's stock→Neptune conversion is unvalidated on hardware
+
+The operator's Deck was converted by hand months earlier, so **seven of nine
+stages only ever ran their no-op path**. The actual conversion — removing Arch's
+split `linux-firmware-*` and swapping in Valve's, and cycling the ESP mount on a
+live system — remains VM-only evidence. Biggest remaining hardware gap for T1.
+
+**Closes by design in `ROADMAP.md` P1.5:** the fresh Omarchy 4.0 install is a
+stock-kernel system, so running `omarchy-deck-kernel.sh` on it exercises the
+real conversion path end to end.
+
+Related: bumping the Neptune pin (`NEPTUNE_SERIES_DEFAULT=611`; `618` is the
+newest non-RC series) is a one-line change but should not ship without a
+hardware boot test.
+
+### 5.5 T1's deliberate-failure test was never run
+
+`TASK-T1`'s done-criteria include "corrupt the Limine config, confirm the script
+fails loudly rather than continuing." There is no evidence anywhere that this was
+done. T1 is otherwise complete; this is an unticked box being carried as ticked.
+
+### 5.6 The test Deck is not running the target OS
+
+**Resolved by plan:** §2.5's phase-1 rebuild puts a fresh, package-based
+Omarchy 4.0 on it (`ROADMAP.md` P1.5). Open only until that session runs.
+
+### 5.7 T0's two remaining gaps
+
+- **Ventoy USB setup has never been executed** (documented in
+  `FINDING-testing-usb.md`, not done). Now on the critical path — it is
+  `ROADMAP.md` P1.4.
+- **`deck-sync.sh` has never run against real hardware.** Fold into P1.5's
+  post-install setup: enable `sshd` on the fresh install and give the dev
+  machine a resolvable host (the `steamdeck` hostname currently does not
+  resolve; needs an IP or an `/etc/hosts` entry).
+
+### 5.8 Untouched risk items from the original plan
+
+- **LCD Steam Decks are entirely untested.** Only OLED hardware exists. Gate
+  LCD-divergent paths on model detection and ship "OLED-verified, LCD-untested"
+  rather than claim support.
+- **Trademark / redistribution** — "Steam Deck" and Valve iconography usage
+  (`PLAN.md` §6.1's button glyphs), and whether the ISO may redistribute Valve's
+  kernel and firmware. Flagged as cheap-to-check-early; **not checked.**
+- **Recovery path documentation** — how a user returns to stock SteamOS. An
+  ethical baseline for a wipe-the-device project. **Not written — and now
+  scheduled:** `ROADMAP.md` P3.1 produces it as a byproduct of the phase-3
+  factory reset.
+
+### 5.9 One upstream draft staged and held
+
+`DRAFT-upstream-esp-permissions-omarchy.md` (against `basecamp/omarchy`) is
+fully drafted, reviewed, and **deliberately unsent** by operator choice. It is
+kept because its bug is one this project actively works around — when upstream
+fixes it, `stage_esp_permissions`'s loosening can be revisited.
+
+The five `deckarchy` bug reports and the `28allday` outreach draft were
+**removed from the tree 2026-08-10** (recoverable from git history): the
+project moved fully past deckarchy, and the outreach's premise died with the
+DeckShift drop (§2.4). Nothing has ever been posted anywhere.
+
+---
+
+## 6. Blocked on human
+
+- **`ROADMAP.md` P1.4 — Ventoy on the test USB + the stock Omarchy 4.0 beta
+  ISO.** `ventoy-bin` is not installed on the dev machine. The ISO can be
+  downloaded, or built locally (a real build already succeeded in session 2 —
+  remember `--network host`).
+- **`ROADMAP.md` P1.5 — the Deck recon + rebuild session.** Needs the
+  operator present, a USB keyboard for the dev-time install, the Valve
+  recovery image on a second USB as the floor, and anything personal copied
+  off the Deck first. Approved in principle by §2.5; still confirm before
+  executing.
+- **Any write to the physical Deck.** Prepare, describe, wait. Batch requests.
+- **Anything touching TDP, fan curves, or charge limits** — every time, no
+  exceptions. Genuine hardware-damage risk.
+- **Any public action** — repos, upstream issues, outreach. One draft staged
+  (§5.9).
+
+Retired from this list 2026-08-10: "do not wipe the Deck" (superseded by
+§2.5's planned-rebuild posture), the DeckShift manual removal and its `/tmp`
+backup rescue (the rebuild wipes both).
+
+---
+
+## 7. Don't re-derive — each of these cost real time
+
+- Docker's default bridge network is throttled to ~2 KB/s on the operator's dev
+  machine. Use `--network host` for any Docker-based tooling there.
+- `mount -o remount` does **not** re-apply `fmask`/`dmask` on vfat. A full
+  `umount`/`mount` cycle is required.
+- `pacman --noconfirm` answers **No** to conflict questions. The firmware swap
+  needs `--ask=4` (`ALPM_QUESTION_CONFLICT_PKG` only, not a blanket yes).
+- Valve's kernel packages ship **no mkinitcpio preset and no `/boot/vmlinuz-*`**
+  at all — only `usr/lib/modules/<kver>/{pkgbase,vmlinuz}`. `PLAN.md` §8.3's
+  preset bug is therefore moot, and an entire class of preset-patching work in
+  the original plan does not exist.
+- Omarchy builds UKIs with `limine-mkinitcpio-hook`, not presets. Upstream's
+  hooks already cover install/upgrade **and** removal, including deleting the
+  UKI. This project's hook **verifies**; it does not generate.
+- The UKI filename prefix is **not** the machine-id — it is `CUSTOM_UKI_NAME`
+  from `/etc/default/limine` (`omarchy` on this Deck). Discover it, never
+  construct it.
+- The Limine config is at `$ESP/limine.conf` — the fifth of the five candidate
+  paths, so the five-way probe was right to exist.
+- Kernel series suffixes are **not orderable** (`618` vs `72` — neither integer
+  nor string comparison is right). This is why the version is pinned to one
+  documented constant.
+- `linux-firmware-neptune` collides with Arch's *split* `linux-firmware`. Valve's
+  package declares `conflicts`/`replaces` against only two of the twelve
+  subpackages. Remove the other ten explicitly — `--overwrite` would leave Arch
+  owning those paths and the next `-Syu` would silently restore Arch's firmware
+  over Valve's.
+- `limine-snapper-sync.service` holds the ESP open; the `umount`/`mount` cycle
+  needs it stopped and restarted.
+- mkinitcpio's UKI output **is** byte-reproducible. An earlier claim to the
+  contrary was wrong. Consequence: a sha256 snapshot does not catch a needless
+  rebuild; prove regeneration with an mtime sentinel.
+- On the Deck, `sudo` cannot prompt without a TTY. Agent sessions need a
+  `SUDO_ASKPASS` helper; one is saved at `~/pizzarchy-askpass.sh`.
+- The `cs35l41-dsp1-*` firmware warnings previously recorded as "expected on
+  OLED" **do not occur** on current firmware. Treat their reappearance as worth
+  investigating, not as background noise.
+- Docker containers get a tmpfs `/dev` with no udev, so `losetup -P` publishes
+  partitions under `/sys/block` but creates no `/dev/loopNpM` nodes — `mknod`
+  them from sysfs. Relatedly, `genfstab -U` silently emits `/dev/loop0p1` when
+  udev never populated `/dev/disk/by-uuid`.
+- Put `console=ttyS0` **last** in a QEMU kernel cmdline, or systemd's boot
+  output goes to a VGA framebuffer no harness is capturing.
+
+---
+
+## 8. Session log
+
+One line each. Detail lives in git history and in the `FINDING-*.md` files.
+
+| # | What happened |
 |---|---|
-| T0 test infrastructure | ✅ done |
-| T1 kernel / firmware / boot chain | ✅ done and hardware-validated (minus the default-entry stage) |
-| T3 Gaming Mode + session switching | ⬜ **not started — this is now the whole remaining project** |
-
-**What v0 delivers:** a Deck that boots to Gaming Mode, has working Deck
-hardware, and switches to an Omarchy desktop and back by controller alone.
-That is goals 4–7 of the original plan — the part users actually feel.
-
-**What v0 explicitly does not include:** the ISO, the offline package mirror,
-the eight guided installer screens, the pre-Steam Wi-Fi screen. Those are v1.
-
-### What v0 changes beyond ordering
-
-Three consequences that are easy to miss, and each removes real risk:
-
-**1. The "fully offline" hard constraint does not apply to v0.** That
-constraint governs *installation from the ISO*. A post-install script runs on
-an already-installed, networked system. Concretely, this **defuses the AUR
-blocker** found earlier the same session: DeckShift sources
-`gamescope-session-git` / `gamescope-session-steam-git` from the AUR, which
-cannot exist in an offline mirror — but is perfectly fine for v0. Building
-and shipping `gamescope-session*` in a mirror reverts to being a **T5/v1
-problem**, not a blocker on the next thing we build. (`CLAUDE.md`'s separate
-rule still stands: do not *auto-install an AUR helper*. v0 should require a
-helper to be present, or build with `makepkg` directly, rather than
-installing one.)
-
-**2. T2 leaves the critical path.** T2's entire purpose is sizing T4 — can a
-gamepad drive `archinstall` and `gum` prompts at the kernel input layer? With
-T4 deferred, **that question is deferred with it.** T2 was formally the next
-block in the 20-block schedule; under v0 it should be skipped for now.
-
-  ⚠️ Do not confuse this with the *desktop-mode* input mapper. R1 §10.3's
-  design (b) — the `uinput`/`evdev` mapper as a systemd user service, plus
-  `squeekboard` — **is squarely in v0 scope**, because Desktop Mode has to be
-  usable by controller. It belongs to T3, not T2. The session-7 hardware work
-  already proved its preconditions (unprivileged `/dev/uinput`, the correct
-  `wayland-session@hyprland.desktop.target` scoping, protocol support).
-
-**3. Several v1-only risks stop mattering for now:** ISO size against the
-uncompressed mirror, the package-count self-check bound, the pre-Steam Wi-Fi
-screen, and Steam's offline behaviour. All remain recorded and all become
-live again at v1.
-
-### ⚠️ The decision v0 now forces: which Omarchy does v0 target?
-
-v0 runs on "a Deck that already has Omarchy". **Which Omarchy is now the
-sharpest open question**, because it directly shapes T3:
-
-- The operator's Deck runs **Omarchy 3.8.4** (git install, waybar-era shell).
-- The project targets **Quattro / 4.x**, whose shell is a from-scratch
-  Quickshell rewrite.
-
-T3's two most visible deliverables — the Desktop Mode icon inside Omarchy and
-the Gaming Mode → Desktop trigger — are **shell integration points**, and they
-land in different places on 3.x versus 4.x. T1 was immune to this (it gates on
-the Limine UKI mechanism, not Omarchy's packaging); T3 is not.
-
-Three options, none obviously right:
-
-1. **Target 4.x, upgrade the test Deck to Quattro.** Matches the project's
-   stated target and Quattro's stable release is the eventual goal anyway.
-   Costs a risky upgrade on the single most valuable test asset.
-2. **Target 3.x first, port to 4.x later.** Ships against hardware that
-   exists today with no upgrade risk, and 3.x is what most Omarchy-on-Deck
-   users are actually running right now. Costs a port later, in exactly the
-   shell layer most likely to churn.
-3. **Build T3's session switching first (shell-agnostic), decide later.**
-   SDDM session switching, the gamescope session, the input mapper and the
-   hardware-parity work are all independent of which shell is running. Only
-   the icon and the QAM hook are version-sensitive. This defers the decision
-   without blocking work.
-
-**Option 3 is the recommendation** — it is the only one that does not require
-choosing before there is evidence, and it front-loads the parts of T3 that
-are large, valuable, and shell-independent.
-
-## Blocked on human
-
-- Ventoy setup on the test USB (T0 step 2)
-- **Resolved (session 2): operator confirmed `docker`, `kvm`, `disk`
-  group membership** (`docker run hello-world` succeeds, `/dev/kvm`
-  accessible, `groups` includes `kvm disk docker`). Not yet confirmed:
-  `ventoy-bin` from the AUR, and shellcheck still uses the session-scratch
-  static-binary workaround (not blocking, just not switched over) — though
-  shellcheck itself appeared on `$PATH` partway through session 2, so it
-  may already be installed; re-check with `which shellcheck` next session.
-- **Resolved (session 2): T0 §1's real end-to-end run.** Was blocked on a
-  Docker bridge-network throughput issue (root-caused and fixed with
-  `--network host`, see "Local dev-machine limitations" above), then on
-  two real bugs in this project's own harness (`obj_id` missing from
-  `vm-cidata.sh`'s JSON, `btrfs restore` silently truncating its tree walk
-  in `vm-assertions.sh`), both now fixed and covered. `vm-install-test.sh`
-  now passes cleanly against a real ISO end to end.
-- **Resolved (R1, session 3): PLAN.md §4/§5 architecture.** R1 §10.1/§10.2
-  found the concrete replacement — fork `omarchy-iso` for build-time changes,
-  ship Deck logic as its own pacman package for install-time work (modeled on
-  upstream's own `install/hardware/pacman.sh` + `intel/ptl-kernel.sh`
-  precedents), plus one `pre-refresh-pacman.d/` hook for durability. See
-  `FINDING-R1-10.1.md` and `FINDING-R1-10.2.md`. No longer blocked; ready to
-  inform T5.
-- **New (T1, session 4): moving the Neptune kernel pin needs a hardware
-  session.** The script pins `linux-neptune-611` because that is what was
-  validated live on the operator's OLED Deck; `618` (6.18.39.valve1) is the
-  newest non-RC series. Bumping is a one-line change to
-  `NEPTUNE_SERIES_DEFAULT`, but it should not ship without a boot test on
-  hardware. **Still open after session 7:** replacing Arch's split
-  `linux-firmware-*` with Valve's `linux-firmware-neptune` remains
-  unvalidated *by the script* on hardware — the operator had already done
-  that swap by hand on 2026-08-03, so `stage-firmware-swap` was only ever
-  exercised on its no-op path. Wi-Fi/BT/audio do work on the resulting
-  system, which is real evidence for the end state but not for the
-  transition. Same for `stage-esp-permissions`' `umount`/`mount` cycle: the
-  ESP was already `0133/0022`, so the stage early-returned.
-- **Resolved (session 4): T1's scope-decision precondition, checked against
-  the operator's real Deck.** The rewritten `omarchy-deck-kernel.sh` only
-  supports systems where `limine-entry-tool` is present (provided by the
-  `limine-mkinitcpio-hook` package) — the agent flagged this as needing
-  revisiting if the operator's Deck (installed via archinstall + Omarchy
-  manually, not the Quattro ISO) predates that mechanism. Operator ran
-  read-only checks on the real Deck (`pacman -Qi limine-mkinitcpio-hook`,
-  `ls /etc/mkinitcpio.d/`, `ls /usr/lib/modules/*/pkgbase`): the package
-  **is** installed (v1.36.0-1, explicitly installed 2026-08-03 — likely via
-  a recent `omarchy update` pulling in Quattro's boot-chain machinery even
-  though the original install predates it), so the script's actual gate
-  (`command -v limine-entry-tool`) passes. Two `.preset` files
-  (`linux-neptune-611.preset`, `linux.preset`) are still present in
-  `/etc/mkinitcpio.d/` as leftover cruft from before the hook existed — the
-  script never reads that path, so they're harmless. `pkgbase` for
-  `6.11.11-valve29-1-neptune-611-...` confirms the operator's Deck is
-  already on the same `linux-neptune-611` series the script pinned to.
-  **Resolved (session 7):** the script has now been run on the physical
-  Deck — all nine stages exit 0 (after fixing a bug the run exposed), see
-  "T1 — first physical hardware run" under Findings. The `omarchy` vs
-  `omarchy-dev` question is also answered, and the answer was neither: the
-  Deck runs **Omarchy 3.8.4 installed from git**, so no Omarchy pacman
-  package exists at all. The script does not care — it gates on
-  `limine-entry-tool`, not on Omarchy's packaging.
-- Any write to the physical Deck
-- Any public action (repos, upstream issues, outreach) — **now includes two
-  concrete staged drafts awaiting approval**: `DRAFT-outreach-28allday.md`
-  and `DRAFT-upstream-bugs-deckarchy.md` (five bug reports), from R1 §10.6.
-  Nothing has been sent; sending each is a separate explicit action.
-- **Resolved (session 7): scope decision made — v0 first.** The operator chose
-  `PLAN.md` §3.1's recommendation: **v0 = T0 + T1 + T3, shipped as a
-  post-install script** for Decks that already have Omarchy installed
-  normally. The ISO, the offline mirror, and the controller-navigable
-  installer (T4, T5) are **deferred to v1**. See "Scope decision: v0 first"
-  under Findings for what this changes — it is more than a reordering.
-- **Do not wipe the operator's existing Deck install.** It is a working
-  Omarchy + Neptune + Limine system and is the single most valuable test
-  asset in the project — it's the known-good baseline for T3's
-  iterate-in-place loop. Snapshot it before any destructive test.
-- **Resolved (session 7): R1 §10.3 gamepad-mapping design — decided in favour
-  of design (b).** The hardware session happened; `FINDING-R1-10.3.md` is now
-  a resolved finding, not scaffolding. Design (a) (background Steam) is ruled
-  out on a circular dependency between confirmed project facts: it sources the
-  OSK from a signed-in Steam client, §10.4 confirmed Steam needs network to
-  sign in, and `PLAN.md` §6.1a item 7 needs a controller-navigable Wi-Fi
-  screen *before* Steam — so you would need the OSK to type the Wi-Fi password
-  that the OSK depends on. Design (b)'s preconditions all verified on
-  hardware. **New T4/T5 action item:** the installer must add the desktop user
-  to the `input` group — `uaccess` does not cover `/dev/uinput`.
-- **Resolved (session 3): Secure Boot / BIOS state.** Operator checked their
-  own Deck: boot order already defaults to Limine, and Secure Boot was never
-  touched during the original Omarchy install (direct evidence of factory
-  state) — the BIOS's `Security` tab exposes no Secure Boot toggle at all.
-  No pre-install BIOS step needed. See `FINDING-R1-10.5.md`. Photos taken
-  during verification were reviewed and deleted locally at operator's
-  request, not committed.
-- **On hold, indefinitely: R1 §10.6 drafts.** Operator has decided to hold
-  entirely on sending/filing the `28allday` outreach message and the five
-  `deckarchy` bug reports — not now, not with edits, just holding. Drafts
-  remain staged (`DRAFT-outreach-28allday.md`,
-  `DRAFT-upstream-bugs-deckarchy.md`) for if/when this changes.
-- **Resolved (session 3): pre-populated Steam client — decided against.**
-  Operator confirmed: don't bundle it. Ship only the plain 20 MB `steam`
-  launcher package in the offline mirror (legitimate, distro-standard
-  redistribution); rely entirely on T5's pre-Steam network-check/Wi-Fi
-  screen to handle the offline case. This makes that Wi-Fi screen a
-  **required, load-bearing T5 item**, not optional polish — with no
-  pre-populated client, it's the only thing between a Wi-Fi-less first boot
-  and a bare Steam crash dialog with no keyboard to dismiss it. See
-  `FINDING-R1-10.4.md` and `PLAN.md` §6.1a item 7 / §10.4.
-
-## Open questions
-
-`PLAN.md` §10's six questions are now all resolved by R1 (session 3) — see
-`FINDING-R1-10.1.md` through `FINDING-R1-10.6.md`, and the "Findings" section
-above for the headline results. **§10.3 (gamepad mapping) is now resolved too
-(session 7, on hardware): ship design (b).** Everything under §10.4/§10.5 was
-already fully decided. Only §10.6 remains open, and only because the operator
-has chosen to hold it indefinitely.
-
-## Next session should start with
-
-T0 §1–6 are all built and **T0 §1's real end-to-end run is now verified**
-(session 2 — see "Status summary" and "Findings" above). Before starting
-block 3 (R1 research, per `SESSIONS.md`'s block table):
-
-1. Push/verify the CI workflow (`.github/workflows/ci.yml`) on an actual
-   GitHub Actions run once a remote exists — not yet done, no remote is
-   configured for this repo. Worth noting: the CI runner's Docker networking
-   should be checked for the same bridge-throughput issue found this
-   session if T5's ISO build ever runs there (see "Local dev-machine
-   limitations" above) — GitHub-hosted runners may or may not have the
-   same problem; hasn't been tested.
-2. If T5 (ISO build) work starts: the two `.automated_script.sh` patches
-   from session 2 (completion-detection poweroff, debug-log capture drive)
-   need to land in this project's own fork, not just the scratch clone
-   they were verified against. The debug-log drive's host side
-   (`vm-install-test.sh`) is already permanent; only the guest-side
-   `.automated_script.sh` write needs porting.
-3. Otherwise, proceed to block 3 (R1 research questions) — T0 isn't fully
-   hardware/CI-verified but isn't blocking further work either.
-
-**Added after session 7 (hardware run):**
-
-4. **Close the VM substrate gap that hid the `limine_entry_count` bug.**
-   `vm-neptune-image.sh` produces a system with no snapper snapshot, so
-   `limine-snapper-sync` never writes the Snapshots submenu, so no test
-   could ever see a second reference to a UKI basename. Create a snapshot in
-   the substrate (or in the idempotency/hook/stage suites) and re-run all
-   three — otherwise the next "idempotency proven" claim carries the same
-   blind spot. This is the highest-value follow-up from session 7.
-5. ~~The reboot verification~~ — **done**, see above. The Deck boots Neptune
-   cleanly and `reconcile` writes nothing post-boot.
+| 1 | Bootstrap; T0 §1 harness + libraries + unit tests; T0 §2–6 (Ventoy doc, override loader, `deck-sync.sh`, CI, shellcheck baseline) |
+| 2 | T0 §1 verified end-to-end against a real ISO build; found two real bugs in this project's own harness |
+| 3 | R1 §10.1/10.2/10.4/10.5 resolved; §10.6 drafted and held |
+| 4 | T1 steps 1–2 — near-total rewrite of `omarchy-deck-kernel.sh`; four design premises were false |
+| 5 | T1 step 3 — the pacman hook; found upstream already covers most of it, so ours verifies rather than generates |
+| 6 | T1 steps 4+6 — nine independently runnable stages, provably non-interactive |
+| 7 | First physical hardware run; two real bugs found; R1 §10.3 resolved; Steam/gamescope installed; prior-art check done |
+| 8 | First Gaming Mode boot, via a DeckShift hybrid splice (since reversed — §2.3) |
+| 9 | Scope reset: ISO is the deliverable, target Omarchy 4.0, DeckShift dropped. Docs consolidated; `ROADMAP.md` written (three phases); Deck rebuild + factory-reset strategy adopted; dead drafts removed |

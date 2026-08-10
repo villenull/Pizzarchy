@@ -1,5 +1,37 @@
 # Project: Omarchy Deck — a Steam Deck–native Omarchy Quattro installer
 
+> ## ⚠️ FROZEN — historical spec, partly superseded
+>
+> Written before any code existed. **The goal in §1 still stands.** Much of
+> the architecture and several grounding facts do not — they were written from
+> reasonable assumptions that later testing killed.
+>
+> **`PROGRESS.md` is authoritative wherever the two disagree.** Do not edit
+> this file to "fix" it; record the correction in `PROGRESS.md` instead. The
+> value here is the reasoning and the bug hypotheses, which are still good.
+>
+> **Known-wrong sections — do not build from these:**
+>
+> | Section | What is wrong | Correct version |
+> |---|---|---|
+> | §2 grounding facts | `OMARCHY_INSTALLER_REPO`/`_REF` "is the intended extension point" — the vars do not exist | `PROGRESS.md` §3.1 |
+> | §2, §5, §6.4 | "Fork `28allday/Super-Shift-S-Omarchy-Deck-Mode`" — renamed twice, superseded by DeckShift, and **unlicensed** (no right to fork) | `PROGRESS.md` §2.4, §3.7 |
+> | §3 goal 3, §6.2 | "Installer works fully offline" — **constraint retired**; the install may use Wi-Fi | `PROGRESS.md` §2.2 |
+> | §3.1 | "Ship a v0 before the ISO" — **reversed**; the ISO is the deliverable | `PROGRESS.md` §2.1 |
+> | §4 architecture diagram | Three-layer design hinges on the nonexistent env vars | `PROGRESS.md` §3.1 |
+> | §5 repo plan | Four-repo layout; never created, and its fork bases are wrong | `PROGRESS.md` §3.1 |
+> | §6.2 | Lists `gamescope-session-*` as packages to source | **Valve's `gamescope` already ships the entire session** — `PROGRESS.md` §4.1 |
+> | §6.3 | Preset-patching automation | Valve ships no preset; UKIs come from `limine-mkinitcpio-hook` — `PROGRESS.md` §7 |
+> | §6.4 | "Fork and Deck-ize Super-Shift-S" | This project ships its own switch layer — `PROGRESS.md` §4 |
+> | §7 timeline | Week estimates predate all findings | `PROGRESS.md` §1 |
+> | §8.3 | The preset bug | **Obsolete** — no preset exists to be wrong |
+> | §10.1–§10.6 | Hypotheses | All six resolved; results are inline below and in `FINDING-R1-*.md` |
+>
+> Sections that held up well and are still worth reading as written: **§6.1 /
+> §6.1a** (the installer screen spec), **§8.1/§8.2/§8.4/§8.5** (bug
+> hypotheses, all confirmed), **§9** (the testing-tier strategy), and **§11**
+> (maintenance risks).
+
 ## 1. One-paragraph pitch
 
 A single bootable USB ISO that, when booted on a Steam Deck (LCD or OLED), installs

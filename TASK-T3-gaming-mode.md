@@ -1,7 +1,11 @@
 # T3 — Gaming Mode, Desktop Mode, and hardware parity
 
-**Model: Sonnet for fork/rewrite mechanics. Opus for TDP/fan/sysfs logic
-specifically** — bad hardware-control code risks the operator's only device.
+**Model: Sonnet for the session/switch mechanics. Opus for TDP/fan/sysfs
+logic specifically** — bad hardware-control code risks the operator's only
+device.
+
+**Status: in progress.** The session layer exists (`deck-session.sh`); Gaming
+Mode has booted once on the Deck. Hardware parity is untouched.
 
 ## Objective
 
@@ -11,96 +15,153 @@ reachable by controller alone.
 
 ## Prerequisites
 
-- T0 done — you need `deck-sync.sh`, because this task is where the SSH
-  iterate-in-place loop pays for itself
+- T0 done — `deck-sync.sh` is where this task's iteration speed comes from
 - T1 done — Neptune kernel booting
 
-## Starting point
+## ⚠️ The starting point in `PLAN.md` §6.4 is obsolete — read this instead
 
-Fork `28allday/Super-Shift-S-Omarchy-Deck-Mode`. It solves the hard part
-(SDDM session switching, NetworkManager/iwd handoff, drive auto-mount,
-performance tuning scaffolding) but is built for generic AMD/NVIDIA
-desktops and knows nothing about Deck hardware. See `PLAN.md` §6.4.
+`PLAN.md` §6.4 and §5 say to fork `28allday/Super-Shift-S-Omarchy-Deck-Mode`
+because "it solves the hard part." **Three things changed:**
+
+1. **That repo was renamed twice and is superseded** by `28allday/deckshift`.
+2. **Both are unlicensed** — no right to fork, modify or redistribute. The
+   instruction is not legally executable as written.
+3. **The hard part is already solved by Valve.** `jupiter-staging/gamescope`
+   ships the *entire* SteamOS Gaming Mode session — `gamescope-session.target`
+   and its whole unit graph, `start-gamescope-session`,
+   `/usr/lib/steamos/gamescope-session`, the `gamescope-wayland.desktop`
+   session entry, plus `steam-launcher`, `ibus-gamescope`,
+   `steam-notif-daemon`, `gamescope-mangoapp` and **`galileo-mura-setup`**
+   (OLED mura correction — Deck-specific and not obtainable elsewhere).
+
+**So this project does not build a session and does not fork one.** It builds
+the *switch*. See `PROGRESS.md` §4 and `FINDING-deckshift-hybrid.md`.
+
+Read DeckShift as a reference design if useful. Do not vendor it.
 
 ## Steps
 
-### 1. Fork and strip
+### 1. ✅ The switch layer — `deck-session.sh`
 
-- Remove the GPU/monitor detection entirely — the Deck is fixed hardware.
-  Hardcode APU and display parameters, gated on LCD vs OLED model detection
-  from the start (`PLAN.md` §9.6) so LCD support is a table fill-in later.
-- Remove the NVIDIA code paths. All of them.
-- Remove the Intel-detection bail-out.
+Done, with two bugs from its first version fixed (`PROGRESS.md` §4.2). Four
+stages, idempotent, independently runnable:
 
-### 2. Flip the default session ⚠️ core requirement
+| Stage | What it does |
+|---|---|
+| `stage-preconditions` | Deck DMI gate, SDDM present, Valve's session present, desktop session discovered |
+| `stage-session-select` | `/usr/local/bin/deck-session-select` + a narrowly-scoped sudoers grant |
+| `stage-steam-hook` | `/usr/local/bin/steamos-session-select` — **the one piece in no configured repo** |
+| `stage-return-icon` | `/usr/share/applications/deck-return-to-gaming.desktop` |
 
-Upstream boots to the desktop and switches to Gaming Mode on a keybind.
-**This project needs the opposite.** First boot after install lands in
-Gaming Mode; the desktop is the thing you switch *to*. Change the SDDM
-default session config accordingly.
+`stage-default-session` exists but is **deliberately outside** the default run:
+flipping the default is the one step that, if Gaming Mode fails to start, leaves
+no graphical way back under autologin. Run it only once both directions are
+proven.
 
-### 3. Desktop Mode entry point (from Gaming Mode)
+**Why `steamos-session-select` matters:** Steam's "Power → Switch to Desktop"
+shells out to it *by name*. It lives in SteamOS's `steamos-customizations`,
+which is in no repo configured here (verified with `pacman -F` across all six).
+Without it, Steam's own affordance **silently does nothing** — `PLAN.md` §8.1's
+failure mode, in the one place a controller-only user cannot work around it.
 
-- Steam's own "Exit to Desktop" under Power is the SteamOS-native affordance.
-  Upstream already hooks this via `/usr/lib/os-session-select`.
-- Verify it fires correctly and lands in Omarchy, not a black screen.
-- This must work with **controller only** — no keyboard fallback.
+### 2. ~~Remove DeckShift from the test Deck~~ — superseded by the rebuild
 
-### 4. Return to Gaming Mode (from Omarchy)
+The Deck currently runs a DeckShift hybrid (hand-edit at
+`/usr/local/bin/gamescope-session-nm-wrapper:163`, plus five other modified
+files — inventory in `FINDING-deckshift-hybrid.md`). **The phase-1 rebuild
+(`ROADMAP.md` P1.5) wipes all of it** — no manual unwind, and the `/tmp`
+backups stop mattering (`PROGRESS.md` §2.5).
 
-- A `.desktop` file calling `switch-to-gaming`, pinned wherever Quattro's
-  Quickshell shell puts pinned/launcher items. **Verify against Quattro
-  specifically** — the shell is a full rewrite and 3.x guidance won't hold.
-- Keep the `Super+Shift+S` keybind as a fallback, but the icon is the
-  requirement.
+Until that session runs, treat the Deck's current session config as
+known-contaminated: findings gathered on it about session switching do not
+transfer to the clean install.
+
+### 3. Prove both directions on hardware — the actual gate
+
+Only one of these has any evidence, and that evidence was gathered with the
+DeckShift hybrid in place, so it does not transfer.
+
+- [ ] `steamos-session-select gamescope` reaches Gaming Mode
+- [ ] Controller input works **in** Gaming Mode
+- [ ] Audio works in Gaming Mode
+- [ ] Steam's Power menu lists "Switch to Desktop" **and it functions** —
+      this is the controller-only path out, and the one that exercises the shim
+- [ ] The desktop-side return icon works
+- [ ] Both directions survive a reboot in each state
+
+**Do not record "the button was present" as "the button works."** That
+distinction already cost this project a false pass once.
+
+### 4. Desktop-mode input mapper (R1 §10.3 design (b))
+
+Ship the `uinput`/`evdev` mapper as a systemd `--user` service. All
+preconditions are hardware-proven (`FINDING-R1-10.3.md`). Two traps already
+found and corrected there:
+
+- `WantedBy=` must be `wayland-session@hyprland.desktop.target`. The obvious
+  `hyprland-session.target` **does not exist**, and a unit wanted by a
+  nonexistent target enables without error and never starts.
+- **The install must add the user to the `input` group.** `uaccess` does not
+  cover `/dev/uinput`, and `SupplementaryGroups=` is not permitted in a
+  `--user` unit.
+
+Use `squeekboard` (Arch `extra`) for the OSK, not `wvkbd` (AUR-only).
+
+Shares an implementation with T2's mapper — build once, scope twice.
 
 ### 5. Deck hardware tuning — Opus, and hardware-safety-sensitive
 
-Work through `PLAN.md` §6.5's parity table. Per item, use `deck-sync.sh` to
-iterate — **never reinstall to test these**:
+Work `PLAN.md` §6.5's parity table. Iterate with `deck-sync.sh` — **never
+reinstall to test these**.
 
 | Item | Notes |
 |---|---|
-| TDP / CPU governor | Via jupiter-staging sysfs, as `steamos-polkit-helpers` does. **Ask before running on hardware.** |
+| TDP / CPU governor | Via jupiter-staging sysfs. **Ask before running on hardware.** |
 | Fan curve | Same caution. A bad fan curve is a thermal risk. |
 | GPU (RDNA2) | Confirm gamescope build flags, RADV working |
-| Wi-Fi | Confirm Neptune firmware covers the OLED radio (it differs from LCD) |
+| Wi-Fi | OLED radio differs from LCD. See also `PROGRESS.md` §5.1 — the *live ISO* case is separate and unverified |
 | Bluetooth | Controller + audio pairing with no manual setup |
-| Speakers / haptics | The `cs35l41-dsp1-*` firmware warnings seen during manual install are unresolved — confirm audio actually works, don't just suppress the warning |
-| Trackpads / gyro | Both sessions. Test gyro-as-mouse in desktop specifically. |
+| Speakers / haptics | `cs35l41-dsp1-*` warnings **no longer appear** on current firmware — treat a reappearance as a real finding |
+| Trackpads / gyro | Both sessions. Gyro-as-mouse in desktop specifically. |
 | Battery | Accurate %, charge limit option |
-| Display | Refresh rate, HDR (OLED) |
+| Display | Refresh rate, HDR (OLED). Valve's session already handles HDR/VRR |
 | Buttons | Steam/QAM/Power in both sessions |
 
-For each: record pass/fail plus the fix in `FINDING-hardware-parity.md`. This
-doc is the LCD-support roadmap later.
+Record pass/fail plus the fix in `FINDING-hardware-parity.md`. That doc is the
+LCD-support roadmap later.
 
-### 6. Resolve `PLAN.md` §10.3 on hardware
+### 6. Shell integration — Omarchy 4.0
 
-Test both candidate designs for Desktop Mode gamepad input head-to-head in
-a single hardware session (Steam-in-background vs. custom mapper). Cheap
-experiment, large design consequence.
+Deferred until there is a 4.0 test target (`PROGRESS.md` §2.3, §6). Two items,
+and only these two are version-sensitive:
+
+- Pinning the return icon to Quattro's Quickshell bar/dock
+- The Gaming Mode → Desktop trigger's placement in Steam's Quick Access Menu
+
+Everything above is shell-agnostic by design — the return icon is a plain
+`.desktop` file, which every launcher on every shell reads.
 
 ## Done when
 
 - [ ] Fresh boot lands in Gaming Mode without intervention
-- [ ] Steam → Power → Exit to Desktop reaches Omarchy, controller only
+- [ ] Steam → Power → Switch to Desktop reaches Omarchy, controller only
 - [ ] An icon in Omarchy returns to Gaming Mode, controller only
 - [ ] Both directions survive a reboot in each state
+- [ ] DeckShift is gone from the test Deck and nothing regressed
+- [ ] Input mapper running in the desktop session, OSK popping on focus
 - [ ] Every row in the parity table has a recorded result
 - [ ] `FINDING-hardware-parity.md` complete for OLED, LCD rows marked untested
-- [ ] §10.3 decided with evidence
 
 ## Failure modes to watch for
 
-- **Testing by reinstalling.** All of this is post-install config. If you
-  find yourself proposing a reinstall, re-read `PLAN.md` §9.4.
+- **Testing by reinstalling.** All of this is post-install config.
 - **Claiming LCD support.** You have no LCD to test on. Say so.
-- **Session-switch black screens.** Common failure; check
-  `journalctl --user -u gamescope-session` first.
+- **Session-switch black screens.** Check `journalctl --user -u 'gamescope-session*'`
+  and `journalctl -b -1` first. `Ctrl+Alt+F2` reaches a TTY.
+- **Recording "present" as "works."** See step 3.
 
 ## Escalate if
 
 - Anything requires writing to the Deck (most of this does — batch the
-  requests rather than asking per-item, and describe exactly what will run)
+  requests and describe exactly what will run)
 - TDP/fan work is about to touch hardware — always ask, every time

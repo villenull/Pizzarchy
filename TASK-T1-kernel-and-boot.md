@@ -3,6 +3,21 @@
 **Model: Opus.** This is the highest-density bug area in the project and the
 one that cost the most time to debug by hand. Worth the upgrade.
 
+> **Status: steps 1–6 done and hardware-validated. Three items remain open** —
+> they are steps 7–8 below plus one unticked done-criterion.
+>
+> - **Step 7 — `stage-default-entry` does not exist.** `default_entry` appears
+>   zero times in the script. Highest-value remaining T1 work (`PROGRESS.md` §5.3).
+> - **Step 8 — the deliberate-failure test was never run** (`PROGRESS.md` §5.5).
+> - **The stock→Neptune conversion path is hardware-unvalidated** — seven of
+>   nine stages only ever ran their no-op path (`PROGRESS.md` §5.4).
+>
+> Also note **step 6's five stage names are not the ones that shipped.** The
+> script has nine, and `stage-bootloader` / `stage-permissions` were
+> deliberately rejected as aliases because both would be lies (this script does
+> not write boot entries — `limine-entry-tool` does — and it is specifically the
+> ESP's *mount options*). Use `./omarchy-deck-kernel.sh list-stages`.
+
 ## Objective
 
 Fully automated, idempotent, version-resilient Neptune kernel + Limine boot
@@ -94,19 +109,51 @@ runnable:
 
 Each idempotent, each with its own exit code, each callable individually.
 
+### 7. `stage-default-entry` — the last real gap
+
+Nothing in the toolchain owns Limine's `default_entry`. On a fresh install
+following this project's flow, an end user boots the **stock Arch kernel** on
+Deck hardware, gets degraded hardware support, and has no way to know why.
+The controller-only constraint makes it worse: "just pick the right entry"
+assumes a user who knows to interrupt a boot menu.
+
+- Write the **entry path** (`Omarchy/linux-neptune-611`), not a numeric index.
+  `limine-snapper-sync` inserts and removes a Snapshots submenu and can
+  renumber indices out from under a static integer.
+- Key on the `linux-neptune-*` glob, like every other reconcile path.
+- Put it in `reconcile` too, so the pacman hook re-asserts it on kernel change.
+
+**⚠️ First, prove the entry-path form actually works.** It was applied to the
+operator's Deck and the machine booted Neptune unattended — but the target is
+*also* entry #1, so a silent fallback to index 1 looks identical. A fix that
+works by accident is worse than none.
+
+Settle it on the `vm-neptune-image.sh` substrate, not on hardware: set
+`default_entry` to a **non-first** entry, boot, and assert `LoaderEntrySelected`.
+Limine implements the Boot Loader Interface, so `bootctl status` reports the
+selected entry as a path from userspace — no screen-scraping.
+
+### 8. The deliberate-failure test
+
+Never run. Corrupt the Limine config and confirm the script fails loudly
+rather than continuing. This is the one done-criterion that directly tests
+the property the whole project exists to preserve.
+
 ## Done when
 
-- [ ] `shellcheck` clean
-- [ ] Runs twice in a row in a VM with identical end state (idempotency
+- [x] `shellcheck` clean
+- [x] Runs twice in a row in a VM with identical end state (idempotency
       proven, not asserted)
-- [ ] Kernel version is a single, documented constant — not scattered
-- [ ] Pacman hook regenerates UKI + Limine entry on kernel reinstall,
+- [x] Kernel version is a single, documented constant — not scattered
+- [x] Pacman hook regenerates UKI + Limine entry on kernel reinstall,
       verified in VM
-- [ ] Runs unattended in T0's QEMU harness with meaningful exit codes
-- [ ] Each stage runnable independently
-- [ ] Deliberate-failure test: corrupt the Limine config, confirm the script
-      fails loudly rather than continuing
-- [ ] §8.5 reproduction attempted and documented either way
+- [x] Runs unattended in T0's QEMU harness with meaningful exit codes
+- [x] Each stage runnable independently
+- [ ] **Deliberate-failure test: corrupt the Limine config, confirm the script
+      fails loudly rather than continuing** — step 8, not done
+- [x] §8.5 reproduction attempted and documented either way
+- [ ] **`stage-default-entry` exists, path-form verified in QEMU** — step 7
+- [ ] **Stock→Neptune conversion validated on hardware** (`PROGRESS.md` §5.4)
 
 ## Failure modes to watch for
 

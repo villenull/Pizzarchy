@@ -1,7 +1,15 @@
-# Omarchy Deck — planning and handoff package
+# Omarchy Deck — planning and build repo
 
-Everything needed to build a Steam Deck–native Omarchy Quattro installer.
-**All files are flat in one directory. No subfolders needed.**
+A Steam Deck–native installer ISO for **Omarchy 4.0 (Quattro)**: one bootable
+USB that installs a fully hardware-optimized Arch + Omarchy system, navigable
+with only the Deck's buttons and trackpads. After install the device behaves
+like stock SteamOS — boots to Gaming Mode, all hardware works — except
+"Desktop Mode" drops into a full Omarchy desktop, with a button to return.
+
+**Status: in development. Nothing is releasable yet.** OLED hardware only;
+LCD is untested and not claimed.
+
+**All files are flat in one directory. No subfolders.**
 
 ## For Claude Code
 
@@ -16,13 +24,18 @@ Read START-HERE.md and begin.
 | File | What it is |
 |---|---|
 | `START-HERE.md` | **Entry point.** Work queue, autonomy rules, model routing. |
+| `ROADMAP.md` | **The plan** — three phases from here to a released ISO. |
 | `CLAUDE.md` | Hard constraints. Auto-loaded every session. |
-| `SESSIONS.md` | Usage-limit budgeting and a 20-block schedule for Max 5x. |
-| `PLAN.md` | Full plan: architecture, diagnosed bugs, test strategy, timeline. |
-| `PROGRESS.md` | Living state. Updated continuously by each session. |
-| `WHERE-WE-ARE.md` | **Self-contained state summary.** Readable without the repo — for catching up, or for a chat session with no file access. |
+| `PROGRESS.md` | **Authoritative state.** Scope decisions, findings, open issues, and the facts not to re-derive. |
+| `SESSIONS.md` | Usage-limit budgeting and the block schedule. |
+| `PLAN.md` | The original plan. **Frozen and partly superseded** — read its banner first. |
 | `TASK-*.md` | Eight work specs: objective, steps, done-criteria, escalation. |
-| `omarchy-deck-kernel.sh` | Kernel/boot automation. Nine idempotent stages, shellcheck-clean, VM-tested and **validated on physical hardware** (session 7). |
+| `FINDING-*.md` | Research outputs — the evidence behind each decision. |
+| `DRAFT-*.md` | One staged upstream bug report. Nothing sent. |
+| `omarchy-deck-kernel.sh` | Kernel/boot automation. Nine idempotent stages, shellcheck-clean, VM-tested and **validated on physical hardware**. |
+| `deck-session.sh` | Gaming Mode ↔ Desktop Mode session switching. |
+| `vm-*.sh`, `test-vm-*.sh` | QEMU test harness and unit suites. |
+| `deck-sync.sh`, `deck-snapshot.sh`, `deck-rollback.sh` | SSH iterate-in-place loop for the physical Deck. |
 
 ## Where this came from
 
@@ -34,12 +47,15 @@ installer, and a keyboard layout mismatch that corrupted typed commands.
 Each is diagnosed in `PLAN.md` §8 with a root-cause hypothesis, so the build
 doesn't rediscover them.
 
-## Order
+## Prior art
 
-1. `T0` — test infrastructure (collapses a ~30 min loop to seconds)
-2. `R1` + `T1` in parallel — research and the boot chain
-3. `T2` — the gamepad spike that sizes `T4`
-4. `T3`, `T4`, `T5`
-5. `T6` — after Omarchy Quattro goes stable
+`28allday/deckshift`, `omarchy-deck-iso` and `omasteam` are the closest
+neighbours, and **none of them target Steam Deck hardware** — they run
+Deck-*style* gaming mode on generic PCs. Bazzite and ChimeraOS solve Deck
+hardware but not Omarchy. See `PROGRESS.md` §3.7.
 
-See `SESSIONS.md` for how this maps onto 5-hour usage windows.
+## Recovery
+
+This is a wipe-and-replace install. **Returning to stock SteamOS via Valve's
+official recovery image will be documented before any release** — see
+`PROGRESS.md` §5.8.

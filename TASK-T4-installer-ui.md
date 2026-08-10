@@ -6,7 +6,11 @@ finding before planning this task.
 ## Objective
 
 An 8-screen guided install flow, navigable with only Deck buttons and
-trackpads, that produces a correctly configured system offline.
+trackpads, that produces a correctly configured Omarchy 4.0 system.
+
+> **Two changes since this was written:** the install may use Wi-Fi
+> (`PROGRESS.md` §2.2), which promotes screen 7 and makes controller text
+> entry load-bearing; and the target is **Omarchy 4.0**, not 3.x.
 
 ## Prerequisites
 
@@ -35,9 +39,16 @@ Full specification in `PLAN.md` §6.1a. Summary — 6 blocking, 1 skippable,
    text-entry finding.
 6. **Encryption** — two options, one-line tradeoff explanation, cursor
    defaults to off (matches stock SteamOS).
-7. **Wi-Fi** — clearly skippable. Install must not depend on it. If R1's
-   10.4 finding confirms Steam needs network, make this screen more
-   prominent and reword accordingly.
+7. **Wi-Fi** — ⚠️ **no longer skippable-by-default.** `PROGRESS.md` §2.2
+   retired the offline constraint: the install may use the network, and Steam
+   needs it regardless (`FINDING-R1-10.4.md`). This is now a normal, expected
+   setup screen, as in SteamOS's own wizard.
+   - It needs **text entry with a controller** — the Wi-Fi password. That is
+     the hardest input problem in the flow and it happens in the *live ISO*,
+     before anything is installed. T2 sizes it.
+   - Still allow "skip" for a user on a wired/tethered setup or one who
+     genuinely wants a bare install, but tell them plainly that Steam will
+     need network before Gaming Mode is usable.
 8. **Summary** — recap 1–7, single Install confirm.
 
 ### Not prompted, ever

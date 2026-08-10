@@ -1,7 +1,29 @@
 # T2 — Gamepad → input event spike
 
 **Model: Opus, plan mode.** This is a design spike, not implementation.
-Can run in parallel with T0/T1.
+
+> **This is the next block.** T4 is on the critical path to the ISO and this
+> sizes it.
+>
+> **Scope grew:** the install may now use Wi-Fi (`PROGRESS.md` §2.2), so the
+> user must **type a Wi-Fi password with a controller, in the live ISO,
+> before anything is installed.** The mapper and an on-screen keyboard
+> therefore have to work in the live environment — not just in the installed
+> desktop. Treat that as a first-class requirement of this spike, not a
+> footnote: it is a harsher environment than a running Omarchy session
+> (no user session, no `uwsm`, possibly no seat ACLs yet).
+>
+> **Head start from R1 §10.3, all hardware-verified** (`FINDING-R1-10.3.md`) —
+> do not re-derive:
+> - unprivileged `/dev/uinput` works with a udev rule; **no privileged helper
+>   needed**. The rule needs `GROUP="input"`, because `uaccess` does *not*
+>   cover `/dev/uinput` (virtual device, no seat tag).
+> - the module is not autoloaded — needs `/etc/modules-load.d/`
+> - controller evdev **read** access already works via seat ACLs
+> - use **`squeekboard`** (Arch `extra`). `wvkbd` is AUR-only.
+> - in a user session the systemd target is
+>   `wayland-session@hyprland.desktop.target`; `hyprland-session.target` does
+>   not exist and a unit wanting it enables without error and never starts.
 
 ## Objective
 
@@ -58,14 +80,21 @@ A single input-mapping layer that works for all three is the win condition.
 - **Record specifically what fails**, not just whether it works overall — a
   90% answer with one unreachable screen is still actionable.
 
-### 4. Text entry
+### 4. Text entry ⚠️ now load-bearing, not a nice-to-have
 
-Username and password (`PLAN.md` §6.1a item 5) need real text input. Options:
-- An on-screen keyboard driven by the mapper
-- Reuse an existing OSK (`wvkbd`, `squeekboard`) if one runs this early
-- A PIN-pad-only path for the low-friction case
+Two screens need real text input, and one of them gates the install:
 
-Prototype one; note the others.
+- **Wi-Fi password** (`PLAN.md` §6.1a item 7). Under `PROGRESS.md` §2.2 the
+  install uses the network, so this is on the critical path.
+- **Username and password** (`PLAN.md` §6.1a item 5).
+
+Use `squeekboard` — already chosen, and the AUR rules out `wvkbd`. The open
+question is not *which* OSK but **whether it runs in the live ISO at all**:
+focus-triggered popup was confirmed at the *protocol* level on an installed
+Hyprland session, never demonstrated, and never in a live environment.
+
+A PIN-pad-only path is still worth noting as a fallback for the account
+screen — but it cannot serve a Wi-Fi password.
 
 ### 5. Write the recommendation
 

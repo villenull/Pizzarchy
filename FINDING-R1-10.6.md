@@ -1,5 +1,12 @@
 # FINDING R1 §10.6 — Upstream collaboration
 
+> **Update 2026-08-10:** the two draft files described below were **removed
+> from the working tree** during repo cleanup (recoverable from git history).
+> The outreach draft's premise — building on 28allday's session switcher —
+> died when DeckShift was dropped (`PROGRESS.md` §2.4), and the project has
+> moved fully past deckarchy. Only `DRAFT-upstream-esp-permissions-omarchy.md`
+> remains staged, because its bug is one this project actively works around.
+
 **Result: PARTIAL.** Drafted and staged only — nothing sent, posted, or
 published. No `gh` commands were run and no network calls were made to any
 forum/GitHub/Discord API, per the hard project rule requiring explicit

@@ -9,17 +9,20 @@ All project files are in this one directory. There are no subfolders.
 
 ## 1. What you are building
 
-A Steam Deck–native installer for Omarchy Quattro. One bootable USB, fully
-offline install, navigable with only the Deck's physical buttons and
-trackpads. After install the device behaves like stock SteamOS — boots to
-Gaming Mode, all hardware works — except "Desktop Mode" drops into a full
-Omarchy desktop, with a button/icon to return to Gaming Mode.
+A **single bootable ISO** that installs Arch + **Omarchy 4.0 (Quattro)** on a
+Steam Deck, navigable start to finish with only the Deck's buttons and
+trackpads — no keyboard, no terminal. After install the device behaves like
+stock SteamOS: boots to Gaming Mode, all hardware works, and a **Desktop Mode**
+button drops into a full Omarchy desktop with a way back.
+
+The install **may use Wi-Fi** — see `PROGRESS.md` §2.2. That is a deliberate
+reversal of an earlier "fully offline" constraint, not an oversight.
 
 The operator owns one **OLED Steam Deck** and is on **Claude Max 5x**. They
-have already done a full manual Omarchy install on that Deck by hand, hit
-roughly a dozen distinct bugs doing it, and wrote the findings into
-`PLAN.md`. **Your job is to turn that validated manual process into
-automation** — not to rediscover it.
+already did a full manual Omarchy install on that Deck by hand, hit roughly a
+dozen distinct bugs doing it, and wrote the findings into `PLAN.md`. **Your job
+is to turn that validated manual process into automation** — not to rediscover
+it.
 
 ---
 
@@ -28,16 +31,18 @@ automation** — not to rediscover it.
 | File | Read it when |
 |---|---|
 | `CLAUDE.md` | Auto-loaded every session. Hard constraints. |
-| `SESSIONS.md` | **Before your first block.** Usage-limit budgeting and the 20-block schedule. |
-| `PROGRESS.md` | Every session start. Current state. |
-| `WHERE-WE-ARE.md` | When you want the whole picture fast, or are working outside the repo. Self-contained; no other file needed to follow it. |
-| `PLAN.md` | **Once, in session 1.** Large. After that, read only the specific sections task files cite. |
+| `ROADMAP.md` | **The plan — three phases.** Where the current block fits and what gates what. |
+| `PROGRESS.md` | **Every session start. This is the authoritative state.** Scope, findings, open issues, and ~20 facts not to re-derive. |
+| `SESSIONS.md` | Usage-limit budgeting and the block schedule. |
+| `PLAN.md` | **Frozen and partly superseded.** Read the banner at the top first. Good for §6.1a (installer screens), §8 (bug hypotheses), §9 (test tiers), §11 (maintenance risks). |
 | `TASK-*.md` | One per work block. |
-| `omarchy-deck-kernel.sh` | T1's deliverable — done. Nine idempotent stages, VM-tested and hardware-validated. |
+| `FINDING-*.md` | Research outputs. Evidence behind the decisions in `PROGRESS.md`. |
+| `DRAFT-*.md` | Staged upstream report. **Nothing sent. Do not send.** |
+| `omarchy-deck-kernel.sh` | T1's deliverable. Nine idempotent stages, VM-tested and hardware-validated. |
+| `deck-session.sh` | T3's session-switch layer. |
 
-Files you'll create follow the same flat pattern: `FINDING-*.md` for
-research outputs, `deck-sync.sh` and similar for scripts. **Keep everything
-flat — no subdirectories.**
+New files follow the same flat pattern. **Keep everything flat — no
+subdirectories.**
 
 ---
 
@@ -66,9 +71,9 @@ flat — no subdirectories.**
   issues/PRs, posting to forums or Discord.
 - Spending real money.
 - Any decision contradicting a hard constraint in `CLAUDE.md`.
-- Discovering a foundational assumption in `PLAN.md` is wrong — especially
-  §10.4 (Steam needing network on first launch would undercut the headline
-  "fully offline" claim). Surface it; don't quietly work around it.
+- Discovering a foundational assumption is wrong. Surface it; don't quietly
+  work around it. This has already happened four times and each time it
+  changed the plan for the better.
 
 ### Never
 
@@ -78,48 +83,31 @@ flat — no subdirectories.**
 - Never propose "reinstall on the Deck to test this" for anything not on
   the physical-hardware-only list (`PLAN.md` §9.5). There is almost always
   a faster tier.
+- Never depend on something unlicensed or AUR-only. The ISO redistributes
+  what it carries.
 
 ---
 
 ## 4. The work queue
 
-Eight tasks, split across ~20 sessions. **`SESSIONS.md` has the block
-schedule — follow that, not just the task order.**
+**The ordering lives in `ROADMAP.md` — three phases.** Task-to-phase mapping:
 
-| Task | File | Model | Notes |
+| Task | File | Model | State |
 |---|---|---|---|
-| T0 | `TASK-T0-test-infrastructure.md` | Sonnet | **Do first.** Collapses a ~30 min loop to seconds. |
-| R1 | `TASK-R1-research-questions.md` | Opus/Sonnet | Parallel-safe. 10.4 is highest stakes. |
-| T1 | `TASK-T1-kernel-and-boot.md` | **Opus** | Highest bug density in the project. |
-| T2 | `TASK-T2-gamepad-input-spike.md` | **Opus** | Determines T4's entire scope. |
-| T3 | `TASK-T3-gaming-mode.md` | Sonnet/Opus | Largest task. Needs `deck-sync.sh` from T0. |
-| T4 | `TASK-T4-installer-ui.md` | Sonnet | Blocked on T2's finding. |
-| T5 | `TASK-T5-iso-and-payload.md` | Sonnet/Opus | Blocked on R1 10.1 and 10.4. |
-| T6 | `TASK-T6-integration-release.md` | **Opus** | Blocked on Quattro stable. |
+| T0 | `TASK-T0-test-infrastructure.md` | Sonnet | ✅ done (Ventoy gap → P1.4) |
+| R1 | `TASK-R1-research-questions.md` | Opus/Sonnet | ✅ done |
+| T1 | `TASK-T1-kernel-and-boot.md` | **Opus** | 🟡 loose ends → P1.1 |
+| T2 | `TASK-T2-gamepad-input-spike.md` | **Opus** | ⬜ **next** → P1.2–P1.3 |
+| T3 | `TASK-T3-gaming-mode.md` | Sonnet/Opus | 🟡 P1.5 + P2.1–P2.4 |
+| T4 | `TASK-T4-installer-ui.md` | Sonnet | ⬜ P2.5–P2.6, blocked on T2 |
+| T5 | `TASK-T5-iso-and-payload.md` | Sonnet/Opus | ⬜ P2.7–P2.8 |
+| T6 | `TASK-T6-integration-release.md` | **Opus** | ⬜ phase 3 |
 
-**Start with T0.** It is small and unglamorous and it collapses the
-edit-test loop for everything after it. Skipping it to "get to the real
-work faster" is the easiest way to lose a week.
-
-### ✅ v0 vs v1 — decided (session 7): **v0 first**
-
-The operator chose `PLAN.md` §3.1's recommendation. **v0 = T0 + T1 + T3**, as
-a post-install script for Decks that already have Omarchy installed normally.
-**T4 and T5 are deferred to v1 — do not start them.**
-
-T0 and T1 are done, so **T3 is the entire remaining v0 scope.**
-
-Two consequences worth knowing before you pick up a task file:
-
-- **Skip T2.** Its only purpose is sizing T4, which is deferred. This does
-  *not* defer the desktop-mode input mapper (R1 §10.3 design (b)) — that is
-  v0 scope and belongs to T3.
-- **The "fully offline" constraint does not bind v0.** It governs installing
-  from the ISO; v0 runs on an installed, networked system. The rule against
-  auto-installing an AUR helper still applies.
-
-Full reasoning and the open "which Omarchy version does v0 target" question
-are in `PROGRESS.md` under "Scope decision: v0 first".
+**Start with phase 1's parallel-safe work:** P1.1 (T1 loose ends, QEMU-only)
+and the T2 spike. The Deck recon/rebuild session (P1.4–P1.5) needs the
+operator — it wipes the Deck onto a fresh Omarchy 4.0 and answers the live-ISO
+Wi-Fi question, both approved in principle (`PROGRESS.md` §2.5) but confirmed
+per-session.
 
 ---
 
@@ -153,35 +141,19 @@ Four habits carry most of the benefit:
 - **One task per block, then `/clear`.** Don't carry finished context
   forward.
 - **Default Sonnet**; escalate to Opus only where the table above says.
-- **Never re-read `PLAN.md` whole** after session 1 — read cited sections.
+- **Never read `PLAN.md` whole.** It is frozen and partly wrong; read the
+  banner and the specific sections a task cites.
 - **Use subagents for repo exploration** — they return a summary instead of
   filling your context with source files.
 
 ---
 
-## 7. First session: bootstrap
-
-If `PROGRESS.md` still says "not yet started":
-
-1. Read `PLAN.md` in full — this is the one time you should.
-2. Read `SESSIONS.md`.
-3. `git init` here if needed; commit the planning docs as a baseline.
-4. **Do not create the multi-repo layout in `PLAN.md` §5 yet.** Start as one
-   flat working directory. Splitting later is cheap; coordinating four empty
-   repos is overhead.
-5. Verify local toolchain: `qemu`, `archiso` deps, `shellcheck`, `git`.
-   Note anything missing under "Blocked on human" in `PROGRESS.md` rather
-   than installing system packages on the operator's machine unprompted.
-6. Begin block 1 (T0 §1).
-
----
-
-## 8. What "done" looks like for the whole project
+## 7. What "done" looks like for the whole project
 
 A single ISO the operator copies onto a Ventoy USB, boots on their OLED
-Deck with no network connected, clicks through using only the Deck's
-buttons, and lands at a Gaming Mode home screen where controller, Wi-Fi,
-Bluetooth, audio, and haptics all work — with a Desktop Mode button that
-opens Omarchy and a way back.
+Deck, clicks through using only the Deck's buttons — including joining
+Wi-Fi — and lands at a Gaming Mode home screen where controller, Bluetooth,
+audio, and haptics all work, with a Desktop Mode button that opens Omarchy
+4.0 and a way back.
 
 Everything here exists to get there without reflashing a USB forty times.
