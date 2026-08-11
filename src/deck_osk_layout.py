@@ -3,10 +3,10 @@
 
 WHAT THIS IS
     The pure half of `docs/tasks/T8-onscreen-keyboard.md`: a split keyboard
-    layout, hit-testing in normalised coordinates, shift/layer state, and the
-    keystroke sequences to emit. No rendering, no device access, no evdev
-    device -- the same discipline as `Mapper.translate()`, so all of it is
-    testable without a screen or a human.
+    layout, hit-testing in normalised coordinates, shift/layer state, the
+    keystroke sequences to emit, and the two cursors that drive it. No
+    rendering, no device access, no evdev device -- the same discipline as
+    `Mapper.translate()`, so all of it is testable without a screen or a human.
 
 WHY IT IS A SEPARATE FILE, AND WHY THE NAME HAS UNDERSCORES
     T8 ships TWO renderers over one core: a bare-TTY one for the installer
@@ -309,6 +309,103 @@ class OnScreenKeyboard:
     def press_at(self, half: str, x: float, y: float) -> list[tuple[int, int]]:
         """Hit-test and press in one call -- what a renderer's click does."""
         return self.press(self.key_at(half, x, y))
+
+
+# --- two cursors, one per trackpad (T8 step 3) -------------------------------
+#
+# Both pads report ABSOLUTE position over the full range (measured 2026-08-10,
+# R-29..R-31), so a cursor is a direct mapping and not an accumulated delta.
+# That is why the OSK can have two of them while a Wayland seat has one pointer:
+# nothing outside this process needs to know either exists.
+#
+# ⚠️ `ABS_HAT0X/Y` IS THE LEFT TRACKPAD. It is called a hat, advertised as a
+# hat, and is not one -- the d-pad is `BTN_DPAD_*`. `deck-input-mapper.py`
+# separately reuses those two codes as internal names for "horizontal" and
+# "vertical" direction; that reuse stops at its own module boundary and has
+# nothing to do with these. Read DEVICE_AXES in the mapper before touching this.
+
+PAD_RANGE = (-32768, 32767)
+
+PAD_AXES: dict[int, tuple[str, str]] = {
+    e.ABS_HAT0X: ("left", "x"),
+    e.ABS_HAT0Y: ("left", "y"),
+    e.ABS_HAT1X: ("right", "x"),
+    e.ABS_HAT1Y: ("right", "y"),
+}
+
+# Each trigger clicks its OWN side. Matching lizard mode's convention would put
+# right=left-click, but there are two cursors here and no single pointer to
+# left- or right-click: the side is the meaning.
+TRIGGER_HALF: dict[int, str] = {
+    e.BTN_TL2: "left",
+    e.BTN_TR2: "right",
+}
+
+
+class Cursors:
+    """Both trackpads -> two cursor positions, each in 0..1 within its half.
+
+    Feed it raw EV_ABS events; ask it where each cursor is. Pure: no device, no
+    screen, no compositor.
+    """
+
+    def __init__(self, ranges: dict[int, tuple[int, int]] | None = None) -> None:
+        # Ranges come from the device's own absinfo where available. The default
+        # is what the Deck measured, so a caller with no device still gets the
+        # right geometry.
+        self.ranges = dict(ranges or {})
+        # Start both cursors centred: visible, neutral, and on no key in
+        # particular. Nothing has been touched yet, so any other guess is a lie.
+        self.pos: dict[str, list[float]] = {"left": [0.5, 0.5], "right": [0.5, 0.5]}
+
+    def position(self, half: str) -> tuple[float, float]:
+        if half not in self.pos:
+            raise ValueError(f"half must be 'left' or 'right', got {half!r}")
+        return (self.pos[half][0], self.pos[half][1])
+
+    def update(self, code: int, value: int) -> str | None:
+        """Apply one EV_ABS event. Returns the half that moved, or None.
+
+        ⚠️ A reading of EXACTLY 0 is treated as no reading at all, and that axis
+        holds its previous position. This is the lift.
+
+        The pads report 0 (centre) when a finger leaves, which under an absolute
+        mapping would snap the cursor to the middle of its half on every
+        release -- and put the next trigger click on whatever key sits there.
+        Holding instead of snapping costs exactly one position, the pad's dead
+        centre, which no finger can hit deliberately and which is half a key
+        away from any hit-test boundary. A stroke that passes through the centre
+        line loses one 4 ms sample on that axis (the pads run at 250 Hz), which
+        is not perceivable.
+
+        This deliberately does NOT depend on both zeros arriving in the same
+        report. Whether `hid-steam` sends them together is unmeasured, and a
+        rule that needed them together would fail differently depending on the
+        answer.
+        """
+        axis = PAD_AXES.get(code)
+        if axis is None:
+            return None
+        half, which = axis
+        if value == 0:
+            return None
+
+        low, high = self.ranges.get(code, PAD_RANGE)
+        span = high - low
+        if span <= 0:
+            return None  # a degenerate range would divide by zero; report nothing
+
+        fraction = (value - low) / span
+        fraction = min(1.0, max(0.0, fraction))  # the device may exceed absinfo
+        if which == "y":
+            # The pad's Y grows UPWARD and every screen coordinate grows
+            # downward. The relative pointer in deck-input-mapper.py negates the
+            # same axis for the same reason; if one of them is ever wrong, they
+            # are wrong together and the cursor moves the wrong way vertically.
+            fraction = 1.0 - fraction
+
+        self.pos[half][0 if which == "x" else 1] = fraction
+        return half
 
 
 # --- typing text directly, without a renderer --------------------------------

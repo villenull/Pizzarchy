@@ -22,6 +22,15 @@ import sys
 
 from evdev import ecodes as e
 
+# ⚠️ Before loading anything. Python validates a cached .pyc against the
+# source's (mtime, size), both at one-second granularity -- so an edit that
+# keeps the byte count and lands in the same second as the last run silently
+# executes the PREVIOUS version. This bit during session 18's mutation testing:
+# restoring the original file left the mutant's bytecode in place and the suite
+# reported four failures against correct source. Any same-size edit can do it,
+# and mutation testing makes same-size edits on purpose.
+sys.dont_write_bytecode = True
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
     "deck_osk_layout", REPO_ROOT / "src" / "deck_osk_layout.py"
@@ -416,6 +425,158 @@ check("find_face prefers the unshifted face", osk.find_face(","), (e.KEY_COMMA, 
 check("find_face returns the shifted face when that is the only one",
       osk.find_face("<"), (e.KEY_COMMA, True))
 check("find_face misses cleanly", osk.find_face("€"), None)
+
+# --- two cursors, one per trackpad (step 3) ----------------------------------
+#
+# ⚠️ T8's first named failure mode, and the one that actually happened: session
+# 17's pointer emitted NOTHING on diagonal movement while every single-axis test
+# passed, because each axis wiped the other's state. Every gesture below that
+# can move two axes moves them TOGETHER.
+
+cur = osk.Cursors()
+check("both cursors start centred",
+      (cur.position("left"), cur.position("right")), ((0.5, 0.5), (0.5, 0.5)))
+check("an unknown half is rejected", raises(lambda: cur.position("middle")), True)
+
+MIN, MAX = osk.PAD_RANGE
+
+# X maps left-to-right; Y is INVERTED, because the pad's Y grows upward and
+# every screen coordinate grows downward.
+cur = osk.Cursors()
+check("left pad at min X puts the left cursor at the left edge",
+      (cur.update(e.ABS_HAT0X, MIN), cur.position("left")[0]), ("left", 0.0))
+check("left pad at max X puts it at the right edge",
+      (cur.update(e.ABS_HAT0X, MAX), cur.position("left")[0]), ("left", 1.0))
+check("left pad at max Y puts it at the TOP (y is inverted)",
+      (cur.update(e.ABS_HAT0Y, MAX), cur.position("left")[1]), ("left", 0.0))
+check("left pad at min Y puts it at the BOTTOM",
+      (cur.update(e.ABS_HAT0Y, MIN), cur.position("left")[1]), ("left", 1.0))
+
+# --- the two cursors are INDEPENDENT ------------------------------------------
+#
+# This is the claim T8 exists for: Wayland gives one pointer per seat, so if
+# these ever share state there is no dual-cursor keyboard.
+
+cur = osk.Cursors()
+cur.update(e.ABS_HAT0X, MIN)
+cur.update(e.ABS_HAT0Y, MIN)
+check("driving the LEFT pad leaves the right cursor untouched",
+      cur.position("right"), (0.5, 0.5))
+check("and the left cursor moved", cur.position("left"), (0.0, 1.0))
+cur.update(e.ABS_HAT1X, MAX)
+cur.update(e.ABS_HAT1Y, MAX)
+check("driving the RIGHT pad leaves the left cursor where it was",
+      cur.position("left"), (0.0, 1.0))
+check("and the right cursor moved to the opposite corner",
+      cur.position("right"), (1.0, 0.0))
+check("the right pad reports as the right half", cur.update(e.ABS_HAT1X, 100), "right")
+check("an axis that is not a pad moves nothing", cur.update(e.ABS_X, 30000), None)
+
+# --- DIAGONAL: both axes moving together --------------------------------------
+
+cur = osk.Cursors()
+diagonal = []
+for step in range(1, 5):
+    vx = MIN + (MAX - MIN) * step // 5
+    vy = MIN + (MAX - MIN) * step // 5
+    cur.update(e.ABS_HAT1X, vx)
+    cur.update(e.ABS_HAT1Y, vy)
+    diagonal.append(cur.position("right"))
+check("a diagonal stroke moves BOTH axes on every sample",
+      all(a[0] != b[0] and a[1] != b[1] for a, b in zip(diagonal, diagonal[1:])), True)
+check("x increases along the stroke",
+      [round(p[0], 3) for p in diagonal] == sorted(round(p[0], 3) for p in diagonal), True)
+check("y decreases along the stroke (inverted axis)",
+      [round(p[1], 3) for p in diagonal] == sorted((round(p[1], 3) for p in diagonal),
+                                                   reverse=True), True)
+
+# --- the lift: exactly 0 is NO READING, not the centre ------------------------
+#
+# Measured: the pads report 0 (centre) when a finger leaves. Under an absolute
+# mapping, honouring that snaps the cursor to the middle of its half on every
+# release and puts the next trigger click on whatever key is there.
+
+cur = osk.Cursors()
+cur.update(e.ABS_HAT1X, MAX)
+cur.update(e.ABS_HAT1Y, MAX)
+before = cur.position("right")
+check("a lift reports no movement on X", cur.update(e.ABS_HAT1X, 0), None)
+check("a lift reports no movement on Y", cur.update(e.ABS_HAT1Y, 0), None)
+check("and the cursor HOLDS instead of snapping to the centre",
+      cur.position("right"), before)
+check("the lift did not disturb the other cursor either",
+      cur.position("left"), (0.5, 0.5))
+
+# A zero on ONE axis holds only that axis -- a horizontal stroke crossing the
+# centre line must not freeze horizontally too.
+cur = osk.Cursors()
+cur.update(e.ABS_HAT0X, MIN)
+cur.update(e.ABS_HAT0Y, MAX)
+cur.update(e.ABS_HAT0Y, 0)      # crossed the centre line vertically
+cur.update(e.ABS_HAT0X, MAX)    # ...while still moving horizontally
+check("a zero on one axis holds only that axis, and the other keeps moving",
+      cur.position("left"), (1.0, 0.0))
+
+# --- ranges: the device's own absinfo wins, and the edges are safe ------------
+
+cur = osk.Cursors(ranges={e.ABS_HAT0X: (0, 1000)})
+cur.update(e.ABS_HAT0X, 250)
+check("a device-supplied range is used instead of the default",
+      cur.position("left")[0], 0.25)
+cur.update(e.ABS_HAT0X, 5000)
+check("a value beyond the advertised range clamps rather than escaping the half",
+      cur.position("left")[0], 1.0)
+cur.update(e.ABS_HAT0X, -5000)
+check("and clamps at the low end too", cur.position("left")[0], 0.0)
+
+cur = osk.Cursors(ranges={e.ABS_HAT1X: (7, 7)})
+check("a degenerate range reports nothing rather than dividing by zero",
+      cur.update(e.ABS_HAT1X, 7), None)
+check("and leaves the cursor alone", cur.position("right"), (0.5, 0.5))
+
+# --- triggers click their own side --------------------------------------------
+
+check("the left trigger belongs to the left half", osk.TRIGGER_HALF[e.BTN_TL2], "left")
+check("the right trigger belongs to the right half", osk.TRIGGER_HALF[e.BTN_TR2], "right")
+check("exactly two triggers are mapped", len(osk.TRIGGER_HALF), 2)
+
+# --- the whole chain: pad -> cursor -> hit test -> keystroke ------------------
+#
+# Each piece above is tested alone; this is the one assertion that fails if the
+# SEAMS are wrong -- an inverted axis, a half swapped, a range misread.
+
+kb = osk.OnScreenKeyboard()
+cur = osk.Cursors()
+cur.update(e.ABS_HAT1X, MIN)   # right pad, far left...
+cur.update(e.ABS_HAT1Y, MAX)   # ...and top: the "6" key of the right half
+x, y = cur.position("right")
+check("top-left of the right pad lands on the right half's first digit",
+      kb.key_at("right", x, y).label, "6")
+
+cur.update(e.ABS_HAT1X, MAX)   # far right, still top: "0"
+x, y = cur.position("right")
+check("top-right of the right pad lands on the last digit",
+      kb.key_at("right", x, y).label, "0")
+
+cur.update(e.ABS_HAT0X, MIN)   # left pad, bottom-left: the shift key
+cur.update(e.ABS_HAT0Y, MIN)
+x, y = cur.position("left")
+check("bottom-left of the left pad lands on shift",
+      kb.key_at("left", x, y).label, "shift")
+check("and pressing there arms one-shot shift rather than typing",
+      (kb.press_at("left", x, y), kb.shift), ([], "once"))
+
+cur.update(e.ABS_HAT1X, -1)  # right pad, a hair off centre (0 would be a lift)
+cur.update(e.ABS_HAT1Y, -1)
+x, y = cur.position("right")
+# ⚠️ Read the face BEFORE pressing. The shift armed just above is a ONE-SHOT:
+# pressing spends it, so a face read afterwards describes the next press, not
+# the one that just happened. This assertion failed exactly that way when
+# written in the other order -- which is the property working, not breaking.
+expected_face = kb.face(kb.key_at("right", x, y))
+check("a press at the centre of the right pad types the key drawn there",
+      decode(kb.press_at("right", x, y)), expected_face)
+check("and the one-shot shift is spent by it", kb.shift, "off")
 
 print()
 print(f"{'PASS' if FAILURES == 0 else 'FAIL'} — {FAILURES} failure(s)")

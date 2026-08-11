@@ -121,12 +121,21 @@ claims went with it (see the §2.6 note and `docs/findings/P17-input-and-osk.md`
 and **§5.21 is new**: `lizard_mode=N` persists nowhere, so a reboot silently
 removes STEAM+X and Space.
 
-Then **T8 steps 1 and 2**: `src/deck_osk_layout.py` (two layers, split halves,
-hit-testing, three shift states, `strokes_for_text()`), the mapper declaring
-`OSK_KEYCODES` on its uinput device, `deck-input-mapper --type TEXT`, and
-`stage-input-mapper` installing and **verifying** the core by running it.
+Then **T8 steps 1–3**: `src/deck_osk_layout.py` (two layers, split halves,
+hit-testing, three shift states, `strokes_for_text()`, and **two absolute
+cursors** — one per trackpad), the mapper declaring `OSK_KEYCODES` on its uinput
+device, `deck-input-mapper --type TEXT`, and `stage-input-mapper` installing and
+**verifying** the core by running it. **23/23 mutations caught.**
 ⚠️ **None of that has run on the Deck** — the stage now installs a second file
 and that has never executed on hardware.
+
+⚠️ **A stale `__pycache__` made one mutation run report failures against correct
+source.** Python validates cached bytecode against the source's (mtime, size) at
+**one-second granularity**, so a same-size edit inside the same second executes
+the PREVIOUS version — and mutation testing makes same-size edits deliberately.
+Both Python suites now set `sys.dont_write_bytecode = True` before loading
+anything. **If a test result ever looks impossible, check for a `__pycache__`
+before believing it.**
 
 ### 1.1 Artifacts that live OUTSIDE this repo
 

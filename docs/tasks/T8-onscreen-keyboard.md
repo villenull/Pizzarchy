@@ -1,7 +1,7 @@
 # T8 — the on-screen keyboard we draw ourselves
 
 **Model: Sonnet for the renderers, Opus for the input/layout core.**
-**Status: specified session 17. STEPS 1 AND 2 DONE (session 18, 2026-08-10).**
+**Status: specified session 17. STEPS 1–3 DONE (session 18, 2026-08-10).**
 
 > ## Where this stands
 >
@@ -9,8 +9,8 @@
 > |---|---|
 > | 1. Layout core + hit-testing + shift layers | ✅ `src/deck_osk_layout.py` |
 > | 2. Character emission in the mapper | ✅ keycodes declared, `--type` types |
-> | 3. Absolute dual-cursor mapping from both pads | ⬜ next, and needs no hardware |
-> | 4. TTY renderer (installer) | ⬜ |
+> | 3. Absolute dual-cursor mapping from both pads | ✅ `Cursors`, same module |
+> | 4. TTY renderer (installer) | ⬜ **next.** Needs QEMU, not the Deck |
 > | 5. Layer-shell renderer (Desktop Mode) | ⬜ |
 > | 6. Pointer suppression while the OSK is up | ⬜ |
 > | 7. Retire squeekboard from Desktop Mode | ⬜ gated on 5 being proven on hardware |
@@ -32,9 +32,35 @@
 > way to test it otherwise, and this project has been burned three times by
 > paths that were present, enumerated and silent.
 >
+> **`Cursors`** (step 3) maps both pads to two independent positions in 0..1
+> within each half, with the device's own absinfo where available. Two decisions
+> worth not re-deriving:
+>
+> - **Y is inverted.** The pad's Y grows upward, every screen coordinate grows
+>   downward. `deck-input-mapper.py` negates the same axis for the same reason —
+>   if one is ever wrong, they are wrong together.
+> - **A reading of exactly 0 is treated as NO reading, and that axis holds.**
+>   The pads report 0 (centre) on lift, which under an absolute mapping would
+>   snap the cursor to the middle of its half on every release and put the next
+>   trigger click on whatever key sits there. The cost is the pad's dead centre,
+>   which is half a key from any hit-test boundary, and one 4 ms sample when a
+>   stroke crosses the centre line. **This deliberately does not depend on both
+>   zeros arriving in the same report** — whether `hid-steam` sends them together
+>   is unmeasured, and a rule needing them together would fail differently
+>   depending on the answer.
+>
 > **`test/unit/test-osk-install-layout.sh`** (12 assertions) pins the thing
 > nothing else could see: the install directory is derived **twice**, literally
 > in `deck-session.sh` and computed in the mapper, and nothing makes them agree.
+>
+> **Totals: 134 + 89 + 12 assertions, 23/23 mutations caught.**
+>
+> ⚠️ **A stale `__pycache__` invalidated one mutation run.** Python validates
+> cached bytecode against the source's (mtime, size) at one-second granularity,
+> so a same-size edit landing in the same second runs the PREVIOUS version —
+> and mutation testing makes same-size edits on purpose. Both Python suites now
+> set `sys.dont_write_bytecode = True` before loading anything. If a mutation
+> result ever looks impossible, check for a `__pycache__` first.
 >
 > ⚠️ **NOT YET RUN ON THE DECK.** `stage-input-mapper` now installs a second
 > file and verifies it by running the mapper. That has never executed on
@@ -145,10 +171,9 @@ keyboard knows a controller exists — the property that makes one layer drive
 
 1. ✅ Layout core + hit-testing + shift layers, with unit tests. No device.
 2. ✅ Character emission in the mapper (keycodes + modifiers), unit-tested.
-3. Absolute dual-cursor mapping from both pads, unit-tested against the
-   measured ranges. **Start here.** The core takes 0..1 within a half already,
-   so this is the mapping from ±32767 to that — and it is the step where T8's
-   first failure mode bites: test both axes moving together.
+3. ✅ Absolute dual-cursor mapping from both pads, unit-tested against the
+   measured ranges — including diagonals, which is where T8's first failure
+   mode bites.
 4. TTY renderer; drive `iwctl`/`gum` in QEMU with a virtual pad only.
 5. Layer-shell renderer for Desktop Mode; STEAM+X opens **this**, not
    squeekboard.

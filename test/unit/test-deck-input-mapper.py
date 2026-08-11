@@ -15,6 +15,13 @@ import sys
 
 from evdev import ecodes as e
 
+# ⚠️ Before loading anything -- see test-deck-osk-layout.py for the full story.
+# A cached .pyc is validated against the source's (mtime, size) at one-second
+# granularity, so a same-size edit within the same second runs the OLD code.
+# The mapper imports deck_osk_layout at module load, so this suite can be hit
+# through that import as well as directly.
+sys.dont_write_bytecode = True
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
     "deck_input_mapper", REPO_ROOT / "src" / "deck-input-mapper.py"
