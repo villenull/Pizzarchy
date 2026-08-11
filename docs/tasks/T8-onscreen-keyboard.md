@@ -1,7 +1,7 @@
 # T8 — the on-screen keyboard we draw ourselves
 
 **Model: Sonnet for the renderers, Opus for the input/layout core.**
-**Status: specified session 17. STEPS 1–3 DONE (session 18, 2026-08-10).**
+**Status: specified session 17. STEPS 1–4 DONE (session 18, 2026-08-10).**
 
 > ## Where this stands
 >
@@ -10,21 +10,21 @@
 > | 1. Layout core + hit-testing + shift layers | ✅ `src/deck_osk_layout.py` |
 > | 2. Character emission in the mapper | ✅ keycodes declared, `--type` types |
 > | 3. Absolute dual-cursor mapping from both pads | ✅ `Cursors`, same module |
-> | 4. TTY renderer (installer) | ⬜ **next.** Needs QEMU, not the Deck |
-> | 5. Layer-shell renderer (Desktop Mode) | ⬜ |
-> | 6. Pointer suppression while the OSK is up | ⬜ |
+> | 4. TTY renderer (installer) | ✅ `src/deck_osk_tty.py` + `--osk-backend=tty` |
+> | 5. Layer-shell renderer (Desktop Mode) | ⬜ **next.** The remaining bulk |
+> | 6. Pointer suppression while the OSK is up | 🟡 answered for the **tty** backend |
 > | 7. Retire squeekboard from Desktop Mode | ⬜ gated on 5 being proven on hardware |
 >
 > **`src/deck_osk_layout.py`** — two layers (letters, symbols), split into two
 > halves, hit-testing in normalised 0..1 coordinates within a half, three shift
 > states, and `strokes_for_text()`. Every printable ASCII character is reachable
 > and round-trips, asserted against a US-layout table the test owns rather than
-> the module's own. **100 assertions, 12/12 mutations caught.**
+> the module's own. **134 assertions** (with step 3's cursors).
 >
 > **The mapper** now folds `OSK_KEYCODES` into `EMITTED_KEYS`. That is the
 > load-bearing half of step 2: a uinput device emits only the codes it declared
 > at creation, so every character key had to be declared before any renderer
-> draws it or they would all be silently dead. Its suite is **89 assertions**.
+> draws it or they would all be silently dead. Its suite is **106 assertions**.
 >
 > **`deck-input-mapper --type TEXT`** types a string through the layout with no
 > pad, no cursor and no renderer. It exists so a human can point the emission
@@ -49,11 +49,50 @@
 >   is unmeasured, and a rule needing them together would fail differently
 >   depending on the answer.
 >
-> **`test/unit/test-osk-install-layout.sh`** (12 assertions) pins the thing
+> **`test/unit/test-osk-install-layout.sh`** (16 assertions) pins the thing
 > nothing else could see: the install directory is derived **twice**, literally
 > in `deck-session.sh` and computed in the mapper, and nothing makes them agree.
 >
-> **Totals: 134 + 89 + 12 assertions, 23/23 mutations caught.**
+> **`src/deck_osk_tty.py`** (step 4) draws the keyboard in **text**, not on the
+> framebuffer. A framebuffer OSK would be a true overlay and also invisible to
+> every tool that can observe a console — `tmux capture-pane`, a serial log,
+> `test/vm/vm-gamepad-spike-test.sh`. Text costs polish and buys a keyboard that
+> can be **asserted on, in CI, with no screen and no human**. It also removes
+> font rendering, and a console font is not guaranteed to carry box-drawing
+> glyphs, so everything is ASCII.
+>
+> Each cursor **highlights the key it is over** rather than floating between
+> them — for a keyboard, "which key am I on" is the question, and snapping
+> answers it exactly. The highlight is **brackets as well as reverse video**:
+> reverse video alone is invisible to `capture-pane` without `-e`, unreadable on
+> some console fonts, and gone in a plain log.
+>
+> ⚠️ **`KEY_CELL` is 7 and a test found out why.** At 5 the two brackets left
+> three columns, so `enter` drew as `[ent]` and `right` as `[rig]` — *only while
+> the cursor was on them*, which is the one moment the label has to be legible.
+> There is now an invariant asserting no label is ever truncated, at any span,
+> in any shift state.
+>
+> **Mapper wiring:** `--osk-backend {dbus,tty,none}`, defaulting to `dbus` so the
+> Deck's user service keeps toggling squeekboard exactly as today. With the tty
+> backend up: both pads become cursors, each trigger presses the key under its
+> **own** cursor, and everything else is swallowed (A must not also send Enter).
+> The chord is checked **before** that branch — it is how a user dismisses a
+> keyboard opened by accident.
+>
+> **Step 6 is half-answered.** The right pad is no longer fed to the pointer
+> while the keyboard is up, so for the tty backend there is no system pointer to
+> suppress — the motion is never generated. The layer-shell renderer will have
+> to answer it again, under a compositor that has its own pointer.
+>
+> **`test/osk-tty-e2e.py`** drives the whole chain — virtual pad → mapper →
+> cursors → rendered console → keystrokes — through the real script with nothing
+> stubbed. 19 assertions. ⚠️ **Not in CI and not in the `test/unit/` glob, on
+> purpose:** it needs a writable `/dev/uinput`, and a test that skips itself
+> when a device is missing reports green while asserting nothing.
+>
+> **Totals: 134 + 106 + 49 + 16 unit assertions, plus 19 end-to-end.
+> 46/46 mutations caught.**
 >
 > ⚠️ **A stale `__pycache__` invalidated one mutation run.** Python validates
 > cached bytecode against the source's (mtime, size) at one-second granularity,
@@ -62,8 +101,8 @@
 > set `sys.dont_write_bytecode = True` before loading anything. If a mutation
 > result ever looks impossible, check for a `__pycache__` first.
 >
-> ⚠️ **NOT YET RUN ON THE DECK.** `stage-input-mapper` now installs a second
-> file and verifies it by running the mapper. That has never executed on
+> ⚠️ **NOT YET RUN ON THE DECK.** `stage-input-mapper` now installs **two extra
+> modules** and verifies both by running them. That has never executed on
 > hardware. Until it does, the claim is "green on a dev machine".
 
 ## Objective
@@ -174,10 +213,16 @@ keyboard knows a controller exists — the property that makes one layer drive
 3. ✅ Absolute dual-cursor mapping from both pads, unit-tested against the
    measured ranges — including diagonals, which is where T8's first failure
    mode bites.
-4. TTY renderer; drive `iwctl`/`gum` in QEMU with a virtual pad only.
+4. ✅ TTY renderer, driven end to end by a virtual pad (`test/osk-tty-e2e.py`).
+   ⚠️ **Still owed: `iwctl`/`gum` in QEMU.** The keyboard is proven to draw and
+   to type; what is NOT proven is the two of them sharing one console. The
+   intended mechanism is shrinking the TUI's reported window (TIOCSWINSZ) so it
+   stays above the keyboard — see `deck_osk_tty.write_at`. Nothing has tested it.
 5. Layer-shell renderer for Desktop Mode; STEAM+X opens **this**, not
    squeekboard.
 6. Decide and implement pointer suppression while the OSK is visible.
+   🟡 Answered for the tty backend by never generating the motion; the
+   compositor case is still open.
 7. Retire squeekboard from Desktop Mode **only once step 5 is proven on
    hardware** — it is the working fallback until then.
 

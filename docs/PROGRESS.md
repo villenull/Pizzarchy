@@ -108,10 +108,13 @@ grep patterns, an intentional `A && B || C`) and now carry narrow
 mapfile -t files < <(git ls-files '*.sh'); shellcheck -x "${files[@]}"
 ```
 
-Now: **8 suites and that command exit 0** — six shell (`test-deck-session.sh` 70, `test-osk-install-layout.sh`
-12, four VM-helper suites) and two Python (`test-deck-input-mapper.py` 89,
-`test-deck-osk-layout.py` 100). ⚠️ The Python ones are not in the `test-*.sh`
-glob; run both globs.
+Now: **9 suites and that command exit 0** — six shell (`test-deck-session.sh` 70,
+`test-osk-install-layout.sh` 16, four VM-helper suites) and three Python
+(`test-deck-input-mapper.py` 106, `test-deck-osk-layout.py` 134,
+`test-deck-osk-tty.py` 49). ⚠️ The Python ones are not in the `test-*.sh` glob;
+run both globs. A tenth, `test/osk-tty-e2e.py`, is in **neither** — it needs
+`/dev/uinput` and is run by hand, because a suite that skips itself when a
+device is missing reports green while asserting nothing.
 
 **Session 18 (2026-08-10) corrected §2.6 and built T8's core.** It found the
 installer row of §2.6 assigning squeekboard to a live ISO that has no Wayland
@@ -121,13 +124,18 @@ claims went with it (see the §2.6 note and `docs/findings/P17-input-and-osk.md`
 and **§5.21 is new**: `lizard_mode=N` persists nowhere, so a reboot silently
 removes STEAM+X and Space.
 
-Then **T8 steps 1–3**: `src/deck_osk_layout.py` (two layers, split halves,
+Then **T8 steps 1–4**: `src/deck_osk_layout.py` (two layers, split halves,
 hit-testing, three shift states, `strokes_for_text()`, and **two absolute
-cursors** — one per trackpad), the mapper declaring `OSK_KEYCODES` on its uinput
-device, `deck-input-mapper --type TEXT`, and `stage-input-mapper` installing and
-**verifying** the core by running it. **23/23 mutations caught.**
-⚠️ **None of that has run on the Deck** — the stage now installs a second file
-and that has never executed on hardware.
+cursors** — one per trackpad), `src/deck_osk_tty.py` (**the installer's
+keyboard, drawn in text on a bare console**), the mapper declaring
+`OSK_KEYCODES` on its uinput device plus `--type` and `--osk-backend=tty`, and
+`stage-input-mapper` installing and **verifying** both modules by running them.
+**46/46 mutations caught**, and the whole chain driven end to end by a virtual
+pad (`test/osk-tty-e2e.py`).
+⚠️ **None of that has run on the Deck** — the stage now installs two extra
+modules and that has never executed on hardware. Also unproven: the keyboard
+and a TUI (`gum`, `archinstall`) sharing one console, which is what
+`deck_osk_tty.write_at`'s TIOCSWINSZ note is about.
 
 ⚠️ **A stale `__pycache__` made one mutation run report failures against correct
 source.** Python validates cached bytecode against the source's (mtime, size) at

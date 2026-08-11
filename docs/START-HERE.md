@@ -231,17 +231,25 @@ work without waiting for further instruction.**
 > for f in test/unit/test-*.sh; do ./"$f"; done; for f in test/unit/test-*.py; do python3 "$f"; done
 > ```
 >
-> **8 suites, seconds, no VM.** ⚠️ That is *two* globs — the shell one alone
-> misses both Python suites, which is where the input layer's coverage lives.
-> Six shell suites (`test-deck-session.sh` at **70 assertions**,
-> `test-osk-install-layout.sh` at **12**, four VM-helper suites) and two Python
-> ones: `test-deck-input-mapper.py` at **89** and `test-deck-osk-layout.py` at
-> **100**.
+> **9 suites, seconds, no VM.** ⚠️ That is *two* globs — the shell one alone
+> misses all three Python suites, which is where the input layer's coverage
+> lives. Six shell (`test-deck-session.sh` **70**, `test-osk-install-layout.sh`
+> **16**, four VM-helper suites) and three Python (`test-deck-input-mapper.py`
+> **106**, `test-deck-osk-layout.py` **134**, `test-deck-osk-tty.py` **49**).
+>
+> ⚠️ **A tenth suite is NOT in either glob, on purpose.**
+> `test/osk-tty-e2e.py` drives the on-screen keyboard end to end — virtual pad →
+> mapper → cursors → rendered console → keystrokes — and needs a writable
+> `/dev/uinput`. It is excluded from CI because a test that skips itself when a
+> device is missing reports green while asserting nothing. Run it by hand:
+>
+> ```bash
+> python3 test/osk-tty-e2e.py
+> ```
 >
 > Session 17 rewrote a chunk of the mapper suite (the old d-pad tests asserted a
-> device model this hardware does not have). Session 18 added the OSK layout
-> core's suite, **mutation-tested 12/12**, plus five more mutations across the
-> mapper and the install path — **two of which survived the first attempt** and
+> device model this hardware does not have). Session 18 added T8's three suites,
+> **46/46 mutations caught** — **three of which survived a first attempt** and
 > were real coverage gaps, not test-writing noise.
 >
 > `test/unit/test-deck-session.sh` is now **70 assertions** covering all five
