@@ -287,6 +287,63 @@ check("the reason is named, not just the fact",
       any(word in fb_err for word in ("exited with status", "could not start",
                                       "went away")), True)
 
+# --- a console that stops accepting writes (QEMU finding, session 18) -------
+#
+# ⚠️ Found in the VM suite, not here: `OSError: [Errno 5] Input/output error`
+# out of `write_at`'s flush KILLED the whole mapper mid-run. A tty can start
+# refusing writes for reasons that have nothing to do with us -- the VT was
+# switched away, the console reconfigured -- and drawing a keyboard is optional
+# while this process is the only input path. Closing the master end of a pty
+# makes writes to the slave fail exactly that way.
+
+pad3 = UInput(PAD_CAPS, name="Deck OSK eio pad", version=1)
+time.sleep(0.6)
+m3, s3 = os.openpty()
+fcntl.ioctl(s3, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+eio = subprocess.Popen(
+    [sys.executable, MAPPER, "--device", "Deck OSK eio pad", "--osk-backend", "tty",
+     "--osk-tty", os.ttyname(s3), "--osk-top-row", "19", "--dry-run"],
+    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+)
+time.sleep(1.2)
+try:
+    for code, value in ((e.BTN_MODE, 1), (e.BTN_NORTH, 1), (e.BTN_NORTH, 0), (e.BTN_MODE, 0)):
+        pad3.write(e.EV_KEY, code, value)
+        pad3.syn()
+        time.sleep(0.05)
+    time.sleep(0.8)
+    check("the keyboard is up before the console breaks", eio.poll(), None)
+
+    os.close(m3)          # the console stops accepting writes, mid-keyboard
+    os.close(s3)
+    time.sleep(0.4)
+    for _ in range(4):    # every one of these tries to redraw
+        pad3.write(e.EV_ABS, e.ABS_HAT1X, 20000)
+        pad3.syn()
+        time.sleep(0.25)
+    time.sleep(1.0)
+    check("the mapper SURVIVES a console that stops accepting writes",
+          eio.poll(), None)
+    # Navigation must outlive the keyboard: a button still maps to a key.
+    pad3.write(e.EV_KEY, e.BTN_SOUTH, 1)
+    pad3.syn()
+    time.sleep(0.4)
+finally:
+    eio.terminate()
+    try:
+        _, eio_err = eio.communicate(timeout=6)
+    except subprocess.TimeoutExpired:
+        eio.kill()
+        _, eio_err = eio.communicate()
+    pad3.close()
+
+check("it says the tty keyboard is disabled, rather than dying",
+      "DISABLED" in eio_err, True)
+check("and names the reason", "could not draw" in eio_err or "could not clear" in eio_err, True)
+check("no traceback escaped", "Traceback" in eio_err, False)
+check("navigation still works afterwards -- A still sends Enter",
+      "KEY_ENTER 1" in eio_err.split("DISABLED", 1)[-1], True)
+
 print()
 print(f"{'PASS' if FAILURES == 0 else 'FAIL'} — {FAILURES} failure(s)")
 sys.exit(1 if FAILURES else 0)

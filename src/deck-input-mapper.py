@@ -811,6 +811,28 @@ def main() -> None:
             })
 
     def osk_draw() -> None:
+        try:
+            _osk_draw()
+        except OSError as exc:
+            # ⚠️ A CONSOLE WRITE THAT FAILS MUST NOT TAKE THE INPUT LAYER DOWN.
+            #
+            # Measured in QEMU (session 18): `OSError: [Errno 5] Input/output
+            # error` out of `stream.flush()` in write_at killed the whole
+            # mapper mid-run. A tty can start refusing writes for reasons that
+            # have nothing to do with us -- the VT was switched away, the
+            # console was reconfigured, the device went away -- and DRAWING A
+            # KEYBOARD IS OPTIONAL while this process is the only input path
+            # (docs/PROGRESS.md §5.9). Same lesson as the ENODEV crash: the
+            # mapper degrades, it does not die.
+            osk_fall_back(f"could not draw on {args.osk_tty}: {exc}")
+
+    def osk_erase() -> None:
+        try:
+            _osk_erase()
+        except OSError as exc:
+            osk_fall_back(f"could not clear {args.osk_tty}: {exc}")
+
+    def _osk_draw() -> None:
         rows = osk_tty.render(mapper.osk, mapper.cursors)
         top = args.osk_top_row
         if top <= 0:
@@ -823,7 +845,7 @@ def main() -> None:
             top = max(1, height - len(rows) + 1)
         osk_tty.write_at(osk_stream, rows, top)
 
-    def osk_erase() -> None:
+    def _osk_erase() -> None:
         rows = osk_tty.render(mapper.osk, mapper.cursors)
         top = args.osk_top_row
         if top <= 0:
@@ -906,8 +928,18 @@ def main() -> None:
         So squeekboard is retired as the DEFAULT, not removed as the fallback.
         The worst case is the behaviour that shipped before this step.
         """
-        nonlocal osk_backend
+        nonlocal osk_backend, osk_tty
         if osk_backend == "dbus":
+            return
+        if osk_backend == "tty":
+            # Nothing to hand over to: the installer has no squeekboard and no
+            # session bus. Stop drawing, keep navigating, say why.
+            print(f"deck-input-mapper: the tty keyboard failed ({reason}); "
+                  "it is DISABLED for the rest of this session, navigation "
+                  "still works", file=sys.stderr, flush=True)
+            osk_backend = "none"
+            osk_tty = None
+            mapper.osk_active = False
             return
         print(f"deck-input-mapper: the {osk_backend} keyboard failed ({reason}); "
               "falling back to squeekboard over DBus for the rest of this session",

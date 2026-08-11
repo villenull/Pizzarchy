@@ -147,3 +147,85 @@ bracket: `pkill -f "deck_osk_[w]ayland"`.
   was not separately confirmed beyond "it works".
 - The **installer's** TTY keyboard sharing a console with `gum`/`archinstall`
   (TIOCSWINSZ). Designed, untested, and not part of this pass.
+
+---
+
+# The installer half, answered in QEMU (R-47…R-49)
+
+**Session 18, same day. `test/vm/vm-osk-tty-test.sh`.** T8 step 4 shipped with
+one thing designed and never tested: the keyboard and an installer TUI sharing
+a single console. This settles it.
+
+## R-47 — ✅ they DO share one console, and the typing lands
+
+The mechanism `deck_osk_tty.write_at` documents works. The TUI is told, via
+`stty rows`, that the console is shorter than it is; it lays out inside that and
+never draws below it; the keyboard takes the rows underneath.
+
+Measured in the guest, with **gum** as the TUI:
+
+```
+console.rows = 50        gum drew at row 1        keyboard below it
+osk.shown = 1            gum.survived = 1         (both on screen at once)
+gum.received = hlH1      ← typed with the TRACKPADS, nothing else attached
+```
+
+**`gum.received` is the assertion that matters** and it is not read off the
+screen — it is what gum itself wrote to a file on submit. Lower case, upper
+case via the shift key, and a digit, entered by moving two trackpad cursors and
+pulling triggers, delivered through `uinput` → the active VT → gum's stdin.
+Nothing under the keyboard knew a controller existed.
+
+⚠️ **Observed through `/dev/vcs2`, the kernel's own copy of the console.** The
+T2 spike used `tmux capture-pane`, which *cannot* answer this question: tmux
+would own the screen and redraw over anything the mapper painted, which is
+precisely the collision under test. A prototype that reconstructed the screen
+from a pty byte stream mis-read a correct render twice before being abandoned.
+When the question is "what is on the console", ask the kernel.
+
+## R-48 — 🐞 DEFECT: a failed console write killed the whole mapper
+
+Found by this suite, on the first run that got far enough.
+
+```
+File "deck_osk_tty.py", line 163, in write_at
+    stream.flush()
+OSError: [Errno 5] Input/output error
+```
+
+**Why it happens is normal, not exotic.** `openvt` deallocates the VT when the
+program on it exits, so the moment gum submitted and quit, `/dev/tty2` stopped
+accepting writes and the next redraw killed the mapper. **The installer is a
+sequence of screens that start and exit** — archinstall runs several — so this
+would fire in ordinary use, not just in a test.
+
+**Fixed.** `osk_draw`/`osk_erase` catch `OSError` and disable the tty keyboard
+for the session, loudly, keeping navigation:
+
+```
+deck-input-mapper: the tty keyboard failed (could not draw on /dev/tty2:
+[Errno 5] Input/output error); it is DISABLED for the rest of this session,
+navigation still works
+```
+
+Same lesson as R-44's `ENODEV`, from a different direction: **drawing a keyboard
+is optional; being the only input path is not.** `test/osk-tty-e2e.py` now
+closes a pty's master end under a live keyboard to reproduce it, and was
+verified to fail 4 assertions with the fix reverted.
+
+## R-49 — ⚠️ OPEN: `--osk-top-row` is not being honoured, by five rows
+
+The keyboard lands with its last row at **45** on a 50-row console when
+`--osk-top-row 46` was passed — i.e. at `stty rows` − 4, which is where the
+*automatic* "as low as it fits" placement would put it, not where the explicit
+argument asked.
+
+It does not overlap the TUI and it is inside the console, so the product
+requirement holds and the suite asserts that. **But the requested position is
+being ignored and that is unexplained.** Two candidates, neither checked:
+the argument not reaching `osk_draw`'s `top`, or `os.get_terminal_size()`
+winning because the explicit value is being read as 0 somewhere.
+
+Left open deliberately rather than asserted away. It matters for the Deck, whose
+console geometry differs again, and for any screen that wants the keyboard
+somewhere other than the bottom.
