@@ -31,16 +31,10 @@
 #                   it, and a 95- hook that rebuilt too would be exactly the
 #                   redundant work this design set out not to do.
 #
-#                   "Really regenerated" is proven with an mtime sentinel:
-#                   the UKI is stamped to 2000-01-01 immediately before the
-#                   reinstall, and the assertion is that the stamp is gone
-#                   afterwards. The obvious check -- "the sha256 changed" --
-#                   does NOT work, and the first run of this test failed on
-#                   it: mkinitcpio's UKI output is byte-reproducible, so a
-#                   genuine rebuild from unchanged inputs produces the
-#                   identical file. (That also corrects a claim in
-#                   omarchy-deck-kernel.sh's own comments, written before
-#                   anyone measured it.)
+#                   "Really regenerated" is proven with a BUILD NONCE -- see
+#                   WHY THE ORACLE IS A NONCE below. Two earlier oracles were
+#                   tried here and both are wrong; do not "simplify" back to
+#                   either one.
 #
 #   reinstall 2     Same again. entry_refs is still exactly 1. This is the
 #                   "must not duplicate entries on repeat runs" requirement,
@@ -63,6 +57,93 @@
 #   remove          `pacman -Rdd linux-neptune-<series>` fires the hook with
 #                   zero Neptune kernels installed; UKI and entry must both
 #                   be gone and the run must still exit 0.
+#
+# WHY THE ORACLE IS A NONCE, AND NOT AN mtime SENTINEL OR A BARE sha256
+#
+# Proving "this UKI was really rebuilt" is harder than it looks, because the
+# two obvious probes are each defeated by a different property of the stack.
+#
+#   sha256 alone.       Defeated by reproducibility. mkinitcpio's UKI output
+#                       is byte-reproducible, so a genuine rebuild from
+#                       unchanged inputs produces the identical file. The
+#                       first version of this test asserted "the sha changed"
+#                       and failed on a correct system. (That also corrects a
+#                       claim in omarchy-deck-kernel.sh's own comments,
+#                       written before anyone measured it.)
+#
+#   mtime sentinel.     Defeated by a content-addressed installer. The second
+#                       version stamped the UKI to 2000-01-01 before the
+#                       reinstall and asserted the stamp was gone afterwards.
+#                       That held only because limine-mkinitcpio-hook 1.36.0
+#                       ended limine-mkinitcpio-install with an unconditional
+#                           mv -f "${tmp_uki_path}" "${uki_path}"
+#                       so every rebuild rewrote the destination whether or
+#                       not its bytes had changed. 1.37.1 deleted that mv:
+#                       mkinitcpio now builds into a temp dir and the ESP
+#                       write is delegated to the compiled limine-entry-tool
+#                           limine-entry-tool --add-uki "$name" "$file" ...
+#                       which is content-addressed and silently does not
+#                       rewrite a byte-identical UKI. So on 1.37.1 the stamp
+#                       survives a real rebuild and the assertion fails on a
+#                       correct system. Measured 2026-08-11 by running this
+#                       suite against both substrates: PASS on the `stable`
+#                       one (hook 1.36.0-1), FAIL on the `edge` one (hook
+#                       1.37.1-1), with limine itself identical at 12.5.2-1 in
+#                       both. Gap A below rebuilt correctly in the same failing
+#                       run -- when the destination is ABSENT the write does
+#                       happen, with a fresh mtime -- which is what proved the
+#                       skip is content-conditional and not our bug.
+#
+#                       Worse, the stamp perturbed the system under test.
+#                       omarchy-deck-kernel's idempotency guard is
+#                       `test "$uki" -nt "$moddir/vmlinuz"`, so a UKI stamped
+#                       to 2000-01-01 looks stale to it and it correctly
+#                       rebuilds -- tripping the "our hook must not rebuild"
+#                       assertion too. On 1.36.0 the unconditional mv erased
+#                       the stamp before our hook ever looked, which is the
+#                       only reason that assertion used to pass.
+#
+#   nonce (current).    Perturb the INPUTS, not the artifact. A unique value
+#                       is written to /etc/omarchy-deck-uki-nonce, which is
+#                       listed in mkinitcpio's FILES=() and is therefore an
+#                       input to every initramfs. Change it before a reinstall
+#                       and a genuine rebuild MUST produce different bytes;
+#                       assert the sha256 changed. This is immune to both
+#                       defeats above -- reproducibility is what makes it
+#                       sound (identical bytes now mean identical inputs, so a
+#                       changed sha can only mean the build really re-ran) and
+#                       a content-addressed installer is obliged to write
+#                       because the content genuinely differs. It also proves
+#                       strictly more than either predecessor: not "a file was
+#                       written" but "the initramfs was regenerated from
+#                       current inputs", which is the property that actually
+#                       matters and the one that survives the next upstream
+#                       rearrangement of who copies what to the ESP.
+#
+# The mtime is still reported at every phase, and reinstall{1,2} additionally
+# report uki_mtime_changed. Those are OBSERVATIONS, deliberately not asserted.
+# They are worth keeping because they are how the two stacks were told apart,
+# but read them carefully -- the naive reading is wrong on BOTH, which is the
+# whole reason this suite no longer asserts on them. Measured 2026-08-11, on
+# runs where the nonce proved the UKI really was rebuilt each time:
+#
+#   1.36.0  uki_mtime_changed=0, mtime frozen at 2026-07-23 17:43:58Z across
+#           every phase -- a rebuild that provably changed the UKI's bytes did
+#           not move its mtime at all. mkinitcpio gives the UKI a REPRODUCIBLE
+#           timestamp (a function of the inputs, not of when the build ran) and
+#           `mv -f` carries that onto the ESP. So the mtime here says nothing
+#           about whether a build happened. The old sentinel worked only by
+#           accident: 2000-01-01 is not that canonical value, so restoring the
+#           canonical value happened to erase the stamp.
+#
+#   1.37.1  uki_mtime_changed=1, mtimes advancing in real time (…906 → …924 →
+#           …932). limine-entry-tool stamps wall-clock time WHEN IT WRITES,
+#           and skips writing a byte-identical UKI -- which is why the sentinel
+#           survives a real rebuild here and the old assertion failed.
+#
+# So mtime is input-derived on one stack and write-conditional on the other,
+# and is a sound proof of regeneration on neither. Do not turn these back into
+# assertions.
 #
 # Every assertion is on state read back from the ESP and the Limine config,
 # never on log text -- except the two "did this hook run at all" checks,
@@ -189,10 +270,40 @@ for _ in $(seq 1 60); do
 done
 emit "network_resolved=$online"
 
+NONCE_FILE=/etc/omarchy-deck-uki-nonce
+nonce_seq=0
+
+uki_sha()   { [[ -f $UKI ]] && sha256sum "$UKI" | cut -d' ' -f1; }
+uki_mtime() { [[ -f $UKI ]] && stat -c %Y "$UKI"; }
+
+# stamp_nonce -- write a fresh unique value into an initramfs INPUT, so that
+# the next genuine rebuild is obliged to produce different bytes.
+stamp_nonce() {
+  nonce_seq=$((nonce_seq + 1))
+  printf 'omarchy-deck-uki-nonce %s %s\n' "$nonce_seq" "$(date +%s%N)" >"$NONCE_FILE"
+}
+
+# --- 0. arm the regeneration oracle -------------------------------------------
+# The UKI's mtime is NOT a usable proof of rebuild: limine-mkinitcpio-hook
+# 1.36.0 ended limine-mkinitcpio-install with an unconditional
+# `mv -f "$tmp_uki_path" "$uki_path"`, but 1.37.1 deleted that and delegates
+# the ESP write to `limine-entry-tool --add-uki`, which is content-addressed
+# and silently does not rewrite a byte-identical UKI. And a bare sha256 is no
+# proof either, because mkinitcpio's UKI output is byte-reproducible. So make
+# the INPUTS differ instead: listing the nonce in FILES=() puts it inside
+# every initramfs, and then a changed sha256 can only mean the build re-ran.
+# Full account: WHY THE ORACLE IS A NONCE at the top of this file.
+#
+# If the sed below ever stops matching, nonce_files_configured goes to 0 and
+# the suite fails there rather than silently degrading into the sha256 oracle
+# that reproducibility already defeated.
+stamp_nonce
+sed -i "s|^FILES=()\$|FILES=(${NONCE_FILE})|" /etc/mkinitcpio.conf
+emit "nonce_file_present=$([[ -f $NONCE_FILE ]] && echo 1 || echo 0)"
+emit "nonce_files_configured=$(grep -qxF "FILES=(${NONCE_FILE})" /etc/mkinitcpio.conf && echo 1 || echo 0)"
+
 # State is read back from the ESP and the Limine config every time, never
 # remembered from a previous step.
-SENTINEL_MTIME=$(date -d '2000-01-01 00:00:00' +%s)
-
 snap() {
   local tag=$1
   local present=0 sha="" mtime="" refs=0 stale_present=0 stale_refs=0 nept=0
@@ -211,8 +322,8 @@ snap() {
   nept=$(find /boot/EFI/Linux -maxdepth 1 -name '*linux-neptune-*.efi' 2>/dev/null | wc -l)
   emit "${tag}.uki_present=${present}"
   emit "${tag}.uki_sha=${sha}"
+  # OBSERVATION, not an assertion -- see the mtime note at the top of the file.
   emit "${tag}.uki_mtime=${mtime}"
-  emit "${tag}.uki_is_sentinel=$([[ $mtime == "$SENTINEL_MTIME" ]] && echo 1 || echo 0)"
   emit "${tag}.entry_refs=${refs}"
   emit "${tag}.stale_present=${stale_present}"
   emit "${tag}.stale_refs=${stale_refs}"
@@ -253,19 +364,33 @@ emit "hook_script_matches=$(cmp -s "$SCRIPT" "$HOOK_SCRIPT" && echo 1 || echo 0)
 snap after_install
 
 # --- 2. forced reinstall, twice ----------------------------------------------
-# Stamp the UKI with a sentinel mtime so "was it really regenerated?" is a
-# state question with a yes/no answer. Comparing content hashes does not work
-# here: mkinitcpio's UKI output is byte-reproducible.
-touch -d "@${SENTINEL_MTIME}" "$UKI"
-emit "reinstall1_sentinel_applied=$([[ $(stat -c %Y "$UKI") == "$SENTINEL_MTIME" ]] && echo 1 || echo 0)"
-
+# Move the nonce before each reinstall, so "was it really regenerated?" is a
+# state question with a yes/no answer: the initramfs inputs have provably
+# changed, so a build that really re-ran must emit different bytes and a
+# content-addressed installer must write them. uki_mtime_changed is recorded
+# alongside purely as an observation -- asserting on it is what broke this
+# suite before, and it reads 0 on 1.36.0 even for a UKI that provably WAS
+# rebuilt. Read the mtime note at the top of this file before trusting it.
+sha_pre=$(uki_sha); mtime_pre=$(uki_mtime)
+stamp_nonce
 pacman -S --noconfirm "$KP" >"$OUT/reinstall1.out" 2>&1
 emit "reinstall1_exit=$?"
+sha_post=$(uki_sha); mtime_post=$(uki_mtime)
+emit "reinstall1.uki_content_changed=$([[ -n $sha_post && $sha_post != "$sha_pre" ]] && echo 1 || echo 0)"
+emit "reinstall1.uki_mtime_changed=$([[ -n $mtime_post && $mtime_post != "$mtime_pre" ]] && echo 1 || echo 0)"
 hooks_fired reinstall1 "$OUT/reinstall1.out"
 snap after_reinstall1
 
+# The second pass is also what proves the oracle itself is live: nothing but
+# the nonce differs between these two transactions, so if this one reports no
+# content change the nonce is not reaching the initramfs.
+sha_pre=$(uki_sha); mtime_pre=$(uki_mtime)
+stamp_nonce
 pacman -S --noconfirm "$KP" >"$OUT/reinstall2.out" 2>&1
 emit "reinstall2_exit=$?"
+sha_post=$(uki_sha); mtime_post=$(uki_mtime)
+emit "reinstall2.uki_content_changed=$([[ -n $sha_post && $sha_post != "$sha_pre" ]] && echo 1 || echo 0)"
+emit "reinstall2.uki_mtime_changed=$([[ -n $mtime_post && $mtime_post != "$mtime_pre" ]] && echo 1 || echo 0)"
 hooks_fired reinstall2 "$OUT/reinstall2.out"
 snap after_reinstall2
 
@@ -455,15 +580,18 @@ check "reinstall1.our_hook_fired"       "$(field reinstall1.our_hook_fired)" 1
 check "after_reinstall1.uki_present"    "$(field after_reinstall1.uki_present)" 1
 check "after_reinstall1.entry_refs"     "$(field after_reinstall1.entry_refs)" 1
 
-# The sentinel proves regeneration; our hook not rebuilding proves the 95-
-# hook is not duplicating upstream's work.
-check "reinstall1_sentinel_applied"       "$(field reinstall1_sentinel_applied)" 1
-check "after_reinstall1.uki_is_sentinel"  "$(field after_reinstall1.uki_is_sentinel)" 0
+# The nonce proves regeneration; our hook not rebuilding proves the 95- hook
+# is not duplicating upstream's work. Checked in that order so that a broken
+# oracle reports itself as a broken oracle instead of as a product failure.
+check "nonce_file_present"                "$(field nonce_file_present)" 1
+check "nonce_files_configured"            "$(field nonce_files_configured)" 1
+check "reinstall1.uki_content_changed"    "$(field reinstall1.uki_content_changed)" 1
 check "reinstall1.our_hook_rebuilt"       "$(field reinstall1.our_hook_rebuilt)" 0
 
 # 3. repeat runs must not duplicate anything
 check "reinstall2_exit"              "$(field reinstall2_exit)" 0
 check "reinstall2.our_hook_fired"    "$(field reinstall2.our_hook_fired)" 1
+check "reinstall2.uki_content_changed" "$(field reinstall2.uki_content_changed)" 1
 check "after_reinstall2.entry_refs"  "$(field after_reinstall2.entry_refs)" 1
 check "after_reinstall2.neptune_ukis" "$(field after_reinstall2.neptune_ukis)" 1
 

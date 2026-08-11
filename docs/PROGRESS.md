@@ -267,7 +267,8 @@ missing will waste an hour rebuilding them.
 |---|---|---|
 | **Omarchy 4.0 beta ISO (ours)** | `~/ISOs/omarchy-2026.08.10-x86_64-quattro.iso` | 6,390,581,248 B, built 2026-08-10 from `omarchy-iso` **`a12bfea`**, sha256 `fbc87422…df03b`. **This is P1.4's ISO** — the one on the Ventoy stick. Rebuild flags: §3.10 |
 | 🆕 **Omarchy Quattro beta 2 (upstream's)** | `~/ISOs/omarchy-quattro-beta2.iso` | Downloaded 2026-08-11 with operator approval from `https://iso.omarchy.org/omarchy-quattro-beta2.iso`. 6,390,581,248 B — **the same byte count as ours** — Last-Modified 2026-08-10 13:44:37 UTC. sha256 `8dda1034…1b4a`, **ours, computed after download; upstream publishes no checksum** (§5.22). Content differs from ours in 23 of 24 sampled windows despite the equal size |
-| **QEMU substrate image** | `test/images/neptune-substrate.raw` | 14 GB apparent / ~2.9 GB sparse, gitignored. Every `test/vm/` suite uses it; rebuilt automatically by `test/images/vm-neptune-image.sh` if absent (~6 min) |
+| **QEMU substrate image** | `test/images/neptune-substrate.raw` | 14 GB apparent / ~2.9 GB sparse, gitignored. **Rebuilt 2026-08-11 from the `edge` channel** with the boot-chain pin asserted (limine 12.5.2-1, hook 1.37.1-1, snapper-sync 1.31.0-1); all four VM suites green against it. Rebuilt automatically by `test/images/vm-neptune-image.sh` if absent (~6 min) |
+| ⚠️ **Previous substrate, kept** | `test/images/neptune-substrate.prev.raw` | The old **`stable`-channel** image (hook **1.36.0-1**). Kept only because it is the A/B control that proved the mtime oracle was invalid, and because rebuilding right now needs a workaround for a broken upstream Arch mirror. **Never point a suite at it expecting the product's boot chain** — that is the exact defect the pin exists to prevent. Delete once the mirror heals |
 | **`omarchy-iso` scratch clone** | session scratch — **will be lost** | Had two local deviations worth reapplying if rebuilding: `--network host` on the Docker run (§7's bridge throttle) and a scratch pacman cache instead of the host's (§3.10 item 3) |
 
 ---
@@ -2219,8 +2220,24 @@ backup rescue (the rebuild wipes both).
   and the ETag is an S3 multipart hash, so a downloaded image cannot be checked
   against upstream. Also: a beta ISO is a *snapshot*, and `quattro`/`edge` run
   ahead of it — **`omarchy-update` does not put a machine on "the beta"**.
+- 🔴 **A UKI's mtime is NOT proof it was regenerated — on either limine stack,
+  and it never was.** Measured on both, 2026-08-11, by a suite that now passes
+  on each:
+  - On **1.36.0** the mtime is **frozen across genuine rebuilds**
+    (`uki_mtime_changed=0`, stuck at 2026-07-23). mkinitcpio gives the UKI a
+    *reproducible* timestamp derived from its inputs, not from when the build
+    ran, and `mv -f` carries that onto the ESP. The old mtime-sentinel oracle
+    therefore worked **by accident**: 2000-01-01 simply is not that canonical
+    value, so any write erased the stamp.
+  - On **1.37.1** the mtime advances by wall clock — but writes are skipped
+    entirely for a byte-identical file, so an unchanged mtime means "no write",
+    not "no rebuild".
+  **Input-derived on one, write-conditional on the other, sound on neither.**
+  Prove regeneration by perturbing the *inputs* — a nonce baked into the
+  initramfs, asserted as a content change — which is what
+  `test/vm/vm-kernel-hook-test.sh` now does.
 - **`limine-mkinitcpio-hook` stopped writing the UKI itself between 1.36.0 and
-  1.37.1, so an mtime is no longer proof of regeneration.** 1.36.0's
+  1.37.1.** 1.36.0's
   `limine-mkinitcpio-install` ended in an unconditional `mv -f "$tmp_uki_path"
   "$uki_path"`; in 1.37.1 that line is gone and the ESP write is delegated to
   `limine-entry-tool --add-uki`, which is **content-addressed and silently
@@ -2229,11 +2246,11 @@ backup rescue (the rebuild wipes both).
   identical `limine` 12.5.2-1 on each, hook **1.36.0-1 → 1.37.1-1** the only
   variable. Proof it still writes when it should: in the same failing run, gap
   A deletes the UKI and it reappears with a fresh mtime.
-  ⚠️ **Two consequences.** Any test proving "was it really rebuilt?" must
-  perturb the *inputs* (a nonce in the initramfs → different bytes), never the
-  artifact's timestamp. And `src/omarchy-deck-kernel.sh`'s own idempotency
-  guard is `test "$uki" -nt "$moddir/vmlinuz"` — correct, but it now sees
-  timestamps upstream no longer refreshes on a no-op reinstall.
+  ⚠️ **The consequence for our own code:** `src/omarchy-deck-kernel.sh`'s
+  idempotency guard is `test "$uki" -nt "$moddir/vmlinuz"` — still correct, but
+  it is now reading a timestamp that upstream sets by two different rules
+  depending on version (see the fact above). It has not misbehaved on either
+  stack; know that it rests on a value neither stack promises.
 - **`git ls-files '*.sh'` lists only TRACKED files, so running "CI's own
   command" locally does NOT lint a file you have just created.** It becomes
   lintable the moment you `git add` it — the check passes, you commit, and the

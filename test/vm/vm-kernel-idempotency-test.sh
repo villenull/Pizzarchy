@@ -33,8 +33,11 @@
 #   unchanged inputs produces an identical file. The sha256 still catches a
 #   rebuild whose *inputs* changed, which is the case that matters for
 #   correctness, but "run 2 rebuilt everything for nothing" would pass this
-#   test silently. Use the mtime-sentinel technique in vm-kernel-hook-test.sh
-#   if that ever needs asserting here.
+#   test silently. Use the build-nonce technique in vm-kernel-hook-test.sh if
+#   that ever needs asserting here -- and read WHY THE ORACLE IS A NONCE at
+#   the top of that file first. This note used to point at an mtime sentinel,
+#   which limine-mkinitcpio-hook 1.37.1 invalidated (it no longer rewrites a
+#   byte-identical UKI, so the stamp survives a real rebuild).
 #
 # * Everything is injected without root on the host. The payload scripts are
 #   written onto the guest's ESP with mtools at a byte offset — the same
