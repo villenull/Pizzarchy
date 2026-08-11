@@ -224,7 +224,7 @@ deliberate exception, not a shortcut.
 hand-edited files only mattered for restoring the current install's state.
 Since that state is scheduled to be wiped, losing them costs nothing.
 
-### 2.6 On-screen keyboard — REVISED 2026-08-10 by R-42: squeekboard EVERYWHERE except Gaming Mode
+### 2.6 On-screen keyboard — REVISED TWICE 2026-08-10: squeekboard on the DESKTOP, T8's own OSK in the INSTALLER
 
 > ⚠️ **The original decision below is superseded, and not by preference — by
 > measurement.** It routed Desktop Mode's keyboard through Steam. **R-42 proves
@@ -242,16 +242,32 @@ Since that state is scheduled to be wiped, losing them costs nothing.
 >
 > | Where | Keyboard | Pointer / keys |
 > |---|---|---|
-> | **Installer (live ISO)** | squeekboard, auto-show on focus | lizard mode |
-> | **Desktop Mode** | **squeekboard**, auto-show on focus | **lizard mode** |
+> | **Installer (live ISO)** | **T8's mapper-drawn OSK** — squeekboard cannot run here | lizard mode |
+> | **Desktop Mode** | **squeekboard**, auto-show on focus, until T8 replaces it | **lizard mode** |
 > | **Gaming Mode** | Steam's own, native and free | Steam |
 >
 > **Steam is NOT autostarted.** Launch it when wanted, quit it when done.
 >
+> ⚠️ **The installer row was wrong here until 2026-08-10 (session 18), and it
+> was wrong by carry-over, not by measurement.** R-42 rewrote the *Desktop*
+> half; the installer row was inherited from the superseded decision below and
+> never re-checked, because R-42 was about Steam. It contradicted a finding that
+> already existed: `docs/findings/T2-gamepad-spike.md` §4 inspected the built 4.0
+> ISO and found **no Wayland compositor of any kind** — no `hyprland`,
+> `gamescope`, `weston`, `sway`, `cage` or `labwc` binary, and no
+> `squeekboard`/`wvkbd`. squeekboard is a Wayland client; there is nothing for it
+> to be a client *of*. Shipping it in the live ISO means shipping an entire
+> compositor stack, which is a far larger change than drawing the OSK ourselves.
+> That is why `docs/tasks/T8-onscreen-keyboard.md` exists, and why T2 §4 chose a
+> mapper-drawn OSK for the installer months before Desktop Mode needed one.
+>
 > What this cancels: the `~/.config/autostart/steam.desktop` requirement, and
 > the plan to exclude squeekboard from the installed system. squeekboard and its
-> two GSettings now ship **everywhere** — which `stage-desktop-settings` already
-> installs as dconf site defaults.
+> two GSettings now ship **on the installed system** — which
+> `stage-desktop-settings` already installs as dconf site defaults. ⚠️ **They do
+> NOT belong in the live ISO**, where neither has anything to act on: that is
+> T8's territory, and T5 should not carry them into the ISO payload on the
+> strength of "ships everywhere".
 >
 > What survives unchanged: **the idle lock stays disabled** (R-38). Whether
 > squeekboard can reach a layer-shell lock surface is **untested** — it was seen
@@ -1408,6 +1424,43 @@ desktop makes Steam take the controller — the native pad node is replaced by
 virtual pad**, so one press would drive Steam's UI *and* inject a keystroke.
 **T3/T4 owe the mapper a "Steam is running" policy**; nothing currently stops it
 binding Steam's virtual pad.
+
+---
+
+## 5.21 🐞 NEW — `lizard_mode=N` persists nowhere, and a reboot silently takes STEAM+X and Space
+
+**Found 2026-08-10 (session 18) by grepping for it, then reading the Deck.**
+Nothing in `src/`, `test/`, `tools/` or `.github/` writes
+`/sys/module/hid_steam/parameters/lizard_mode` — the only hits are comments in
+`src/deck-input-mapper.py` and its test explaining what the knob *means*. The
+Deck sits at `N` today solely because a human echoed it there in session 17.
+
+It is a **module parameter**, so a reboot restores `Y`. What that costs, both
+measured in §5.9 / R-29:
+
+- **STEAM+X stops working.** `BTN_MODE` is one of the six buttons lizard mode
+  swallows entirely — no evdev node sees it — so the chord cannot be detected at
+  all, and the OSK toggle in `src/deck-input-mapper.py` becomes unreachable.
+- **`Y → KEY_SPACE` stops working.** Lizard mode provides no Space, and Space is
+  precisely what archinstall's multi-select needs. This is the reason the mapper
+  exists.
+
+⚠️ **It is a degradation, not a brick.** With lizard mode back on, the firmware
+supplies its own pointer, Enter, Esc, Tab and arrows, so the Deck stays usable —
+which is exactly why nothing has noticed. The failure is silent and partial, the
+shape `CLAUDE.md` forbids.
+
+**Why this is not a one-line fix, and needs a decision:** persisting `N` makes
+`deck-input-mapper.service` the *only* input path from boot. Today, if the
+mapper dies, lizard mode is the safety net. Persist `N` and a mapper that fails
+to start leaves a handheld with no pointer and no keys, recoverable only over
+SSH. Any implementation therefore owes a **fallback**: restore `Y` if the mapper
+is not running. Candidate mechanisms — `modprobe.d` options (applies at module
+load, before any userspace check), a `systemd` unit ordered against the mapper,
+or `tmpfiles.d` — differ mainly in whether that fallback is expressible.
+
+**Do not implement this without the operator present**, per `docs/START-HERE.md`
+§3: it changes the input path on the one physical device.
 
 ---
 

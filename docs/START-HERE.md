@@ -98,12 +98,17 @@ work without waiting for further instruction.**
 > Lizard mode swallows **X, Y, L1, R1, STEAM and QAM entirely** — no evdev node
 > sees them — and provides **no Space**, which archinstall's multi-select needs.
 >
-> ⚠️ **Three things are load-bearing and silently break the product if lost:**
-> the **`omarchy.tray` bar widget** (without a StatusNotifier host, closing
-> Steam's window *quits* it and Desktop Mode loses its keyboard), the **idle
-> lock staying off** (`shell.json`, and `lock: 0` locks INSTANTLY rather than
-> disabling), and the **installer's two GSettings**. None of them fails a test
-> today.
+> ⚠️ **Two things are load-bearing and silently break the product if lost:** the
+> **idle lock staying off** (`shell.json`, and `lock: 0` locks INSTANTLY rather
+> than disabling) and the **desktop's two GSettings**
+> (`screen-keyboard-enabled`, `input-sources`). Neither fails a test today.
+>
+> *(A third used to be listed here — the `omarchy.tray` bar widget, because
+> without a StatusNotifier host closing Steam's window quits it and Desktop Mode
+> loses its keyboard. **Session 18 retired it:** the revised §2.6 does not
+> autostart Steam and does not use Steam's keyboard on the desktop, so the tray
+> host no longer holds the keyboard up. Dropping the widget is now a bar-layout
+> choice, not a silent product break.)*
 >
 > ⚠️ **Lizard mode is the load-bearing fact for T4.** It swallows **X, Y, L1,
 > R1, STEAM and QAM entirely** — no evdev node sees them — and provides no
@@ -163,9 +168,17 @@ work without waiting for further instruction.**
 > met. ⚠️ **Verify them with `dconf read -d`**, never `gsettings get`: a plain
 > read returns the *user's* value and passes while the site default is missing.
 >
-> ⚠️ Still a T5 item: **`shell.json` is a per-user dotfile**, so a *new* account
-> needs it seeded. And per §2.6 squeekboard itself belongs to the **live ISO**,
-> not the installed system.
+> ⚠️ Still a T5 item: **`shell.json` is a per-user dotfile.**
+> `stage-desktop-settings` *does* seed it from `/usr/share/omarchy/config/` for
+> the invoking user, so the gap is narrower than "absent" — what T5 owes is
+> running the stage for an account that does not exist at image-build time.
+>
+> ⚠️ **The line that used to sit here said squeekboard belongs to the live ISO,
+> not the installed system. That is backwards** — it survived from the
+> *superseded* §2.6. Corrected in session 18: **squeekboard is for Desktop Mode**
+> (until T8 replaces it) and **cannot run in the live ISO at all**, which has no
+> Wayland compositor (`docs/findings/T2-gamepad-spike.md` §4, measured on the
+> built 4.0 ISO). The installer's keyboard is **T8's**, and always was.
 >
 > They are T5 constraints: GSettings in one user's dconf, **absent from a built
 > image**. No test would notice — every suite runs on the Deck where they are

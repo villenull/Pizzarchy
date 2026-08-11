@@ -596,14 +596,30 @@ project does not build it.
 
 | | |
 |---|---|
-| Deck | Omarchy desktop, `ssh steamdeck` working, nothing left running from this session |
-| `lizard_mode` | restored to **`Y`** (the default) |
+| Deck | Omarchy desktop, `ssh steamdeck` working |
+| `lizard_mode` | **`N`** — see the correction below |
 | fcitx5 | restored — stopped only for the R-35 experiment |
-| squeekboard | stopped; it is not installed as an autostart |
+| squeekboard | **running** — see the correction below |
 | Mapper | fixed version deployed via `stage-input-mapper`, service **active** |
 | Probe scripts/logs | removed from the Deck's `/tmp` |
 | Steam | started for the R-35b test, then **shut down** — the state it was found in. Input devices verified back to native `Steam Deck` and the mapper re-bound to it |
 | `screen-keyboard-enabled` | left **`true`** deliberately — it is a product requirement, not scaffolding |
+
+⚠️ **Two rows above were stale within the same session, and session 18 caught
+them by reading the Deck instead of this table.** They were written before the
+mapper grew into the full input layer, and that work *required* `lizard_mode=N`
+(`BTN_MODE` is invisible without it) and left squeekboard up as the thing
+STEAM+X toggles. Measured over SSH at the start of session 18, with nothing
+touched in between: `lizard_mode` = **`N`**, `deck-input-mapper.service` =
+**active**, squeekboard = **1 process**.
+
+**The lesson is the table's, not the session's:** a "state on exit" block
+written before the session exits is a prediction. Write it last, or verify it
+from the device. `docs/START-HERE.md` had the right values all along.
+
+⚠️ And `lizard_mode=N` **persists nowhere** — nothing in `src/`, `test/`,
+`tools/` or `.github/` writes it (session 18 grepped). It is a module parameter
+and a reboot restores `Y`, taking **STEAM+X** and **Space** with it.
 
 ✅ **Session 16's display-always-on is REVERTED** (operator instruction, end of
 session 17). Verified: sleep/suspend/hibernate/hybrid-sleep targets back to
