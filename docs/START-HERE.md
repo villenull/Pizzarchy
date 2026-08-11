@@ -209,7 +209,7 @@ work without waiting for further instruction.**
 >
 > Hardware evidence: `docs/findings/P15-live-iso-recon.md` (R-0…R-19, raw logs
 > in `P15-recon-raw/`), `docs/findings/P2-steam-integration-and-rotation.md`
-> (R-20…**R-28**), and **`docs/findings/P17-input-and-osk.md` (R-29…R-36)** —
+> (R-20…**R-28**), and **`docs/findings/P17-input-and-osk.md` (R-29…R-42)** —
 > the only one so far where a human watched the screen.
 >
 > ### There are now unit tests. Run them before and after touching `src/`.

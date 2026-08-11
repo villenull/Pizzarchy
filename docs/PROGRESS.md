@@ -1339,7 +1339,7 @@ Why a flasher was reframed rather than adopted:
 scaffolding around a distro-specific core (`pacman`, `jupiter-staging`,
 `limine`, `mkinitcpio`, `sddm`, `uwsm`). You would not port that core; you would
 rewrite it. What is genuinely portable is the five `render_*` helper bodies, the
-session-switch *policy*, the mapper, the probes — and §7's 38 facts, which are
+session-switch *policy*, the mapper, the probes — and §7's 45 facts, which are
 the single biggest accelerator and are not code at all.
 
 ⚠️ **"A day" buys ported-and-conformance-green, NOT shippable.** §5.18 surfaced

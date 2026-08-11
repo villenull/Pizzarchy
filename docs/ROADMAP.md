@@ -186,7 +186,7 @@ themselves. Soak time is wall-clock and no abstraction compresses it.
 | # | Item | Where |
 |---|---|---|
 | P4.1 | Write the **"Deck-ready" contract** — a capability checklist where every row names its oracle *and* whether a machine or a human decides it | Dev |
-| P4.2 | **Extract the portable core** (the five `render_*` helpers, the session-switch policy, the mapper, the probes). Prove it by making Omarchy consume it with the existing 63 assertions and the soak **unchanged** | Dev |
+| P4.2 | **Extract the portable core** (the five `render_*` helpers, the session-switch policy, the mapper, the probes). Prove it by making Omarchy consume it with the existing 70 assertions and the soak **unchanged** | Dev |
 | P4.3 | **Define the profile interface**, derived empirically from the measured distro-specific surface — package names, kernel, boot chain, initramfs, display manager, session target | Dev |
 | P4.4 | **Generalise the conformance suite** into one `deck-conformance` runner. Every check must distinguish "found nothing" from "looked in the wrong place" — **mutation-test it** | Dev |
 | P4.5 | **Porting guide + traps document.** The traps are the higher-value half: `comm` truncation, `After=` ordering cycles, `StartLimit*` placement, Steam's fallbacks, blocking reads on input nodes, `uaccess` vs groups | Dev |
