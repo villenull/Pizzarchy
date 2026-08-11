@@ -761,6 +761,9 @@ def main() -> None:
     osk_tty = None
     osk_stream = None
     osk_layer_proc = None
+    # MUTABLE: degrades to "dbus" if our own keyboard fails at runtime. See
+    # osk_fall_back -- this is what makes step 7 safe to ship.
+    osk_backend = args.osk_backend
     # Both of our own backends share the routing: pads become cursors, triggers
     # press. Only the DRAWING differs -- characters on a console, or a
     # layer-shell surface. That is the seam T8 asked for, and it is why
@@ -846,9 +849,8 @@ def main() -> None:
                 stdin=subprocess.PIPE, text=True,
             )
         except OSError as exc:
-            print(f"deck-input-mapper: could not start the OSK overlay: {exc}",
-                  file=sys.stderr, flush=True)
             osk_layer_proc = None
+            osk_fall_back(f"could not start the overlay: {exc}")
             return
         osk_layer_send()
 
@@ -857,14 +859,23 @@ def main() -> None:
         nonlocal osk_layer_proc
         if osk_layer_proc is None or osk_layer_proc.stdin is None:
             return
+        # An overlay that started and then died is the likeliest failure --
+        # a missing library, a compositor without layer-shell, a GTK error --
+        # and it looks identical to a healthy one until the pipe is used.
+        exited = osk_layer_proc.poll()
+        if exited is not None:
+            osk_layer_proc = None
+            osk_fall_back(f"the overlay exited with status {exited}")
+            osk_dbus_toggle(True)
+            return
         try:
             osk_layer_proc.stdin.write(
                 osk_layout.format_state_line(mapper.osk, mapper.cursors))
             osk_layer_proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
-            print(f"deck-input-mapper: the OSK overlay went away ({exc})",
-                  file=sys.stderr, flush=True)
             osk_layer_proc = None
+            osk_fall_back(f"the overlay went away: {exc}")
+            osk_dbus_toggle(True)
 
     def osk_layer_stop() -> None:
         nonlocal osk_layer_proc
@@ -881,28 +892,30 @@ def main() -> None:
             osk_layer_proc.kill()
         osk_layer_proc = None
 
-    def set_osk_visible(visible: bool) -> None:
-        nonlocal osk_visible
-        osk_visible = visible
-        if args.verbose or ui is None:
-            print(f"osk -> {'show' if visible else 'hide'}", file=sys.stderr, flush=True)
-        if osk_tty is not None:
-            mapper.osk_active = visible
-            if visible:
-                mapper.osk.closed = False
-                osk_draw()
-            else:
-                osk_erase()
+    def osk_fall_back(reason: str) -> None:
+        """Give up on our own keyboard and hand the job back to squeekboard.
+
+        ⚠️ THIS IS WHAT MAKES RETIRING SQUEEKBOARD SAFE (T8 step 7). Our overlay
+        needs a compositor, a library that must be preloaded, and a process that
+        must stay alive; squeekboard needs none of that and is already installed.
+        Without this, any one of those failing on a device with no keyboard
+        attached leaves it with no way to type at all -- and with lizard_mode=N
+        no way to recover except SSH.
+
+        So squeekboard is retired as the DEFAULT, not removed as the fallback.
+        The worst case is the behaviour that shipped before this step.
+        """
+        nonlocal osk_backend
+        if osk_backend == "dbus":
             return
-        if args.osk_backend == "layer" and osk_drawn_here:
-            mapper.osk_active = visible
-            if visible:
-                mapper.osk.closed = False
-                osk_layer_start()
-            else:
-                osk_layer_stop()
-            return
-        if args.osk_backend != "dbus" or ui is None:
+        print(f"deck-input-mapper: the {osk_backend} keyboard failed ({reason}); "
+              "falling back to squeekboard over DBus for the rest of this session",
+              file=sys.stderr, flush=True)
+        osk_backend = "dbus"
+        mapper.osk_active = False
+
+    def osk_dbus_toggle(visible: bool) -> None:
+        if ui is None:
             return
         argv = OSK_TOGGLE_ARGV_SHOW if visible else OSK_TOGGLE_ARGV_HIDE
         try:
@@ -912,6 +925,35 @@ def main() -> None:
             # pointer down with it.
             print(f"deck-input-mapper: could not toggle the OSK: {exc}",
                   file=sys.stderr, flush=True)
+
+    def set_osk_visible(visible: bool) -> None:
+        nonlocal osk_visible
+        osk_visible = visible
+        if args.verbose or ui is None:
+            print(f"osk -> {'show' if visible else 'hide'} ({osk_backend})",
+                  file=sys.stderr, flush=True)
+        if osk_backend == "tty" and osk_tty is not None:
+            mapper.osk_active = visible
+            if visible:
+                mapper.osk.closed = False
+                osk_draw()
+            else:
+                osk_erase()
+            return
+        if osk_backend == "layer" and osk_drawn_here:
+            mapper.osk_active = visible
+            if visible:
+                mapper.osk.closed = False
+                osk_layer_start()
+            else:
+                osk_layer_stop()
+            # osk_layer_start may have fallen back; honour it in the same call
+            # rather than leaving the user with nothing until the next press.
+            if osk_backend == "dbus" and visible:
+                osk_dbus_toggle(True)
+            return
+        if osk_backend == "dbus":
+            osk_dbus_toggle(visible)
 
     def run_pending(actions: list[str]) -> None:
         """Perform queued side effects. Never blocks the input loop: a DBus

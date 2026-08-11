@@ -111,7 +111,8 @@ mapfile -t files < <(git ls-files '*.sh'); shellcheck -x "${files[@]}"
 Now: **10 suites and that command exit 0** — six shell (`test-deck-session.sh` 70,
 `test-osk-install-layout.sh` 16, four VM-helper suites) and three Python
 (`test-deck-input-mapper.py` 106, `test-deck-osk-layout.py` 134,
-`test-deck-osk-tty.py` 49, `test-deck-osk-wayland.py` 47). ⚠️ The Python ones are not in the `test-*.sh` glob;
+`test-deck-osk-tty.py` 49, `test-deck-osk-wayland.py` 47;
+`test-osk-install-layout.sh` is 19). ⚠️ The Python ones are not in the `test-*.sh` glob;
 run both globs. A tenth, `test/osk-tty-e2e.py`, is in **neither** — it needs
 `/dev/uinput` and is run by hand, because a suite that skips itself when a
 device is missing reports green while asserting nothing.
@@ -147,8 +148,27 @@ quiet: the process starts, GTK warns, and an ordinary **focusable window**
 appears. `deck_osk_wayland` re-execs itself once with `LD_PRELOAD` set. Found by
 running it; no test could have seen it.
 
+**Step 7 is coded.** `stage-input-mapper` writes
+`ExecStart=… --osk-backend=layer`, so STEAM+X opens our overlay instead of
+squeekboard — and **squeekboard stays installed as an automatic fallback**. If
+the overlay will not start, or starts and dies, the mapper falls back to it and
+says so. That is the entire justification for flipping the default: our overlay
+needs a compositor, a preloaded library and a live process, and squeekboard needs
+none of those, so without the fallback any one of them failing leaves a
+keyboard-less handheld recoverable only over SSH. **Proven, not asserted** — the
+e2e suite runs a mapper with `WAYLAND_DISPLAY` unset and checks it fires.
+**Rollback is one line:** `MAPPER_OSK_BACKEND=dbus`.
+
+⚠️ **A real regression, recorded rather than hidden:** squeekboard auto-shows on
+text focus (§5.20); ours is **summon-only**. Valve's own keyboard is summon-only
+too (R-35b), so this matches stock SteamOS, but it is a step back from what the
+Deck does today. Ours could bind `zwp_input_method_v2` to learn it — new work,
+decided after seeing summon-only in use.
+
 ⚠️ **None of this has run on the Deck** — the stage now installs three modules
-and that has never executed on hardware. Also unproven: the TTY keyboard and a
+and that has never executed on hardware. **T8 step 7 is gated on exactly one
+thing: a hardware pass with the operator present**, and the runbook is
+`docs/tasks/T8-step7-hardware-pass.md`. Also unproven: the TTY keyboard and a
 TUI (`gum`, `archinstall`) sharing one console, which is what
 `deck_osk_tty.write_at`'s TIOCSWINSZ note is about.
 

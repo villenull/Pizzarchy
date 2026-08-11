@@ -213,6 +213,20 @@ readonly OSK_LIB_DIR=/usr/local/lib/deck-osk
 # silently -- the mapper starts, navigation works, and the keyboard is missing.
 OSK_MODULES=("$OSK_SRC_NAME" deck_osk_tty.py deck_osk_wayland.py)
 readonly OSK_MODULES
+
+# Which keyboard STEAM+X opens in Desktop Mode (T8 step 7).
+#
+# `layer` is our own overlay: two cursors, one per trackpad, drawn by us. It
+# replaces squeekboard as the DEFAULT -- but squeekboard is deliberately NOT
+# removed. The mapper falls back to it automatically if the overlay cannot
+# start or dies (`osk_fall_back`), because our overlay needs a compositor, a
+# preloaded library and a live process, and squeekboard needs none of those.
+# The worst case is therefore the behaviour that shipped before this change,
+# not a handheld with no way to type.
+#
+# ⚠️ Set this to `dbus` to put squeekboard back in charge without touching
+# anything else. That is the whole rollback.
+readonly MAPPER_OSK_BACKEND=layer
 # /etc/systemd/user, not ~/.config: this is installed by an installer and has to
 # apply to whatever user the image creates, so T5 can bake it in unchanged.
 readonly MAPPER_UNIT=/etc/systemd/user/deck-input-mapper.service
@@ -1808,7 +1822,7 @@ StartLimitIntervalSec=60
 
 [Service]
 Type=simple
-ExecStart=${MAPPER_BIN}
+ExecStart=${MAPPER_BIN} --osk-backend=${MAPPER_OSK_BACKEND}
 # The pad may not have enumerated yet at session start. Restart rather than
 # fail permanently -- but bounded (above), so a genuinely missing device shows
 # up in the journal instead of spinning silently.

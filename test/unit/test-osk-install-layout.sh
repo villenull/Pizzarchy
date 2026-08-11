@@ -165,9 +165,36 @@ pass "OSK_MODULES carries the core and both renderers"
 
 # Match the INVOCATION, not the string "--type": the failure message beside it
 # also contains "--type", so a looser grep passes with the check deleted.
+# --- the backend the unit asks for must be one the mapper accepts ------------
+#
+# ⚠️ A cross-file contract with teeth. The unit's ExecStart names a backend that
+# argparse validates at STARTUP: a typo (`wayland` for `layer`) makes the mapper
+# exit 2 before it opens the pad, and with lizard_mode=N that is a handheld with
+# no input at all. Nothing else checks that these two files agree.
+
+osk_backend=$(grep -oP '^readonly MAPPER_OSK_BACKEND=\K\S+' "$REPO_ROOT/src/deck-session.sh") ||
+  fail "MAPPER_OSK_BACKEND is declared in deck-session.sh"
+# shellcheck disable=SC2016  # a grep PATTERN matching a literal ${...} in the
+# stage's source; expanding it would search for this shell's variables instead.
+grep -q 'ExecStart=.*--osk-backend=\${MAPPER_OSK_BACKEND}' <<<"$stage_body" ||
+  fail "the unit's ExecStart passes the backend" "$stage_body"
+pass "the unit's ExecStart passes --osk-backend=\${MAPPER_OSK_BACKEND}"
+
+for mod in "${osk_modules[@]}"; do
+  install -m 0644 "$REPO_ROOT/src/$mod" "$root$osk_lib_dir/$mod"
+done
+accepted=$("$root$mapper_bin" --osk-backend "$osk_backend" --list 2>&1) ||
+  fail "the mapper accepts the backend the unit will pass it" \
+       "deck-session.sh says '$osk_backend'; the mapper rejected it: $accepted"
+pass "the mapper accepts --osk-backend=$osk_backend, the value the unit passes"
+
+[[ $osk_backend == layer ]] ||
+  printf 'note - MAPPER_OSK_BACKEND is %s, not layer: squeekboard is still in charge\n' "$osk_backend"
+
+# Match the INVOCATION, not the string "--type": the failure message beside it
+# also contains "--type", so a looser grep passes with the check deleted.
 # (Mutation-tested: replacing the command with `true` survived a bare grep.)
-# shellcheck disable=SC2016  # a grep PATTERN: \$ matches a literal dollar in
-# the stage's source, which is the whole point of the assertion.
+# shellcheck disable=SC2016  # a grep PATTERN: \$ matches a literal dollar.
 grep -q '\$("\$MAPPER_BIN" --type' <<<"$stage_body" ||
   fail "the stage verifies the core by RUNNING the mapper, not by stat-ing a file" "$stage_body"
 pass "the stage verifies the install by running the mapper's --type path"

@@ -1,7 +1,8 @@
 # T8 — the on-screen keyboard we draw ourselves
 
 **Model: Sonnet for the renderers, Opus for the input/layout core.**
-**Status: specified session 17. STEPS 1–6 DONE (session 18, 2026-08-10).**
+**Status: specified session 17. STEPS 1–6 DONE; STEP 7 CODED, AWAITING THE DECK
+(session 18, 2026-08-10).**
 
 > ## Where this stands
 >
@@ -13,7 +14,7 @@
 > | 4. TTY renderer (installer) | ✅ `src/deck_osk_tty.py` + `--osk-backend=tty` |
 > | 5. Layer-shell renderer (Desktop Mode) | ✅ `src/deck_osk_wayland.py` |
 > | 6. Pointer suppression while the OSK is up | ✅ both backends |
-> | 7. Retire squeekboard from Desktop Mode | ⬜ **next**, and it needs the Deck |
+> | 7. Retire squeekboard from Desktop Mode | 🟡 **coded + fallback proven; needs one hardware pass** |
 >
 > **`src/deck_osk_layout.py`** — two layers (letters, symbols), split into two
 > halves, hit-testing in normalised 0..1 coordinates within a half, three shift
@@ -122,7 +123,44 @@
 > stops feeding `pointer_delta` while the keyboard is up, so the motion is never
 > generated. The layer surface adds nothing to suppress, having no input region.
 >
-> **Totals: 134 + 106 + 49 + 47 + 16 unit assertions, plus 19 end-to-end.
+> ### Step 7 — squeekboard is retired as the DEFAULT, not removed
+>
+> `stage-input-mapper` now writes `ExecStart=… --osk-backend=layer`, so STEAM+X
+> opens our overlay instead of squeekboard. **squeekboard stays installed on
+> purpose**, because the mapper falls back to it automatically:
+>
+> ```
+> overlay will not start        -> fall back, and show squeekboard now
+> overlay exits after starting  -> fall back, and show squeekboard now
+> ```
+>
+> ⚠️ **That fallback is the entire justification for flipping the default.** Our
+> overlay needs a compositor, a library that must be preloaded, and a live
+> process; squeekboard needs none of those. Without the fallback, any one of them
+> failing on a device with no keyboard attached leaves it unable to type — and
+> with `lizard_mode=N`, unrecoverable except over SSH. With it, the worst case is
+> the behaviour that shipped before this step. **It is proven, not asserted:**
+> `test/osk-tty-e2e.py` runs a mapper with `WAYLAND_DISPLAY` unset and checks the
+> fallback fires, names its reason, and leaves the mapper alive.
+>
+> **Rollback is one line:** `MAPPER_OSK_BACKEND=dbus` in `src/deck-session.sh`,
+> then re-run the stage.
+>
+> ⚠️ **A real regression to weigh, not hidden:** squeekboard **auto-shows on text
+> focus** (§5.20, proven on hardware). Ours is **summon-only** — STEAM+X. Valve's
+> own keyboard is summon-only too (R-35b), so this matches stock SteamOS, but it
+> is a step back from what the Deck does today. Ours could learn focus-triggered
+> show by binding `zwp_input_method_v2` the way squeekboard does; that is new
+> work, not part of step 7.
+>
+> ### What step 7 still needs, and it is the only thing
+>
+> **One hardware pass with the operator present.** Everything above is green on a
+> dev machine and the overlay is proven on Hyprland *here* — but the Deck has
+> never run any of it, and T8's own gate says retire "only once step 5 is proven
+> on hardware". The runbook is `docs/tasks/T8-step7-hardware-pass.md`.
+
+> **Totals: 134 + 106 + 49 + 47 + 19 unit assertions, plus 22 end-to-end.
 > 60/60 mutations caught.** ⚠️ One "SURVIVED" was spurious — the mutation's
 > anchor did not match, so nothing was mutated. A mutation that reports survival
 > without applying is a false negative; check the patch applied before believing

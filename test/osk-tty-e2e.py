@@ -238,6 +238,55 @@ check("a capital arrives as shift WRAPPING the key, not beside it",
 check("and nothing else was emitted -- navigation keys stay silent while up",
       len(emitted), 8)
 
+# --- the fallback that makes retiring squeekboard safe (T8 step 7) ----------
+#
+# ⚠️ The whole justification for pointing the unit at our own keyboard is that
+# a failure hands the job back to squeekboard rather than leaving a handheld
+# with no way to type. That claim is worth exactly as much as this test.
+#
+# Broken on purpose: no WAYLAND_DISPLAY, so the overlay cannot reach a
+# compositor and exits. The mapper must notice and say so.
+
+pad2 = UInput(PAD_CAPS, name="Deck OSK fallback pad", version=1)
+time.sleep(0.6)
+broken_env = {k: v for k, v in os.environ.items()
+              if k not in ("WAYLAND_DISPLAY", "DISPLAY")}
+fallback = subprocess.Popen(
+    [sys.executable, MAPPER, "--device", "Deck OSK fallback pad",
+     "--osk-backend", "layer", "--dry-run"],
+    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=broken_env,
+)
+time.sleep(1.2)
+try:
+    for code, value in ((e.BTN_MODE, 1), (e.BTN_NORTH, 1), (e.BTN_NORTH, 0), (e.BTN_MODE, 0)):
+        pad2.write(e.EV_KEY, code, value)
+        pad2.syn()
+        time.sleep(0.05)
+    time.sleep(2.5)
+    # Nudge a pad so the mapper takes another run at the dead overlay: the
+    # failure is detected on the next state write, not at spawn.
+    for _ in range(3):
+        pad2.write(e.EV_ABS, e.ABS_HAT1X, 20000)
+        pad2.syn()
+        time.sleep(0.3)
+    time.sleep(1.0)
+finally:
+    fallback.terminate()
+    try:
+        _, fb_err = fallback.communicate(timeout=6)
+    except subprocess.TimeoutExpired:
+        fallback.kill()
+        _, fb_err = fallback.communicate()
+    pad2.close()
+
+check("a failing overlay is reported, not swallowed",
+      "falling back to squeekboard" in fb_err, True)
+check("and the mapper survives it -- navigation outlives the keyboard",
+      fallback.returncode in (0, -15), True)
+check("the reason is named, not just the fact",
+      any(word in fb_err for word in ("exited with status", "could not start",
+                                      "went away")), True)
+
 print()
 print(f"{'PASS' if FAILURES == 0 else 'FAIL'} — {FAILURES} failure(s)")
 sys.exit(1 if FAILURES else 0)
