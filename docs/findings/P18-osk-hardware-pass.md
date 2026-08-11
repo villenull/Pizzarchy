@@ -359,3 +359,37 @@ fcitx5's state.
 setting, not a silent default), spawn the watcher from the mapper, and show the
 overlay on `focus 1`. squeekboard's `SetVisible` fallback is unaffected either
 way — it never needed the seat.
+
+---
+
+## State at session end — ⚠️ THE DECK WAS POWERED OFF, AND THAT CHANGES ONE THING
+
+| | |
+|---|---|
+| Deck | **powered off** at operator request, after 10h55m uptime |
+| Snapshot | **#8**, taken before the session's first write |
+| `/usr/local/lib/deck-osk/` | all three modules installed |
+| Unit | `ExecStart=… --osk-backend=layer` |
+| Mapper on shutdown | active, bound to `event7`, **0 fallbacks** |
+| squeekboard | installed, running — the automatic fallback |
+| Mapper crashes this boot | **6 — all BEFORE the ENODEV fix was deployed.** None after |
+
+⚠️ **`lizard_mode` was `N` and persists NOWHERE (§5.21). The Deck is now off, so
+it will come back as `Y`.** On next boot, until something sets it:
+
+- **STEAM+X will not work** — `BTN_MODE` is one of the six buttons lizard mode
+  swallows entirely, so the chord cannot be detected and the OSK cannot be
+  summoned at all.
+- **`Y → KEY_SPACE` will not work** — archinstall's multi-select toggle.
+
+Neither is a brick: lizard mode supplies its own pointer, Enter, Esc, Tab and
+arrows, so the Deck stays usable. **But the on-screen keyboard proved in R-43
+will appear broken to anyone who boots the Deck and presses STEAM+X.** Set it
+first:
+
+```bash
+ssh steamdeck 'echo N | sudo tee /sys/module/hid_steam/parameters/lizard_mode'
+```
+
+**This is exactly why §5.21 is open.** The next session that touches the Deck
+should decide it rather than re-run that command by hand for a third time.
