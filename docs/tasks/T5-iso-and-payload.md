@@ -2,6 +2,13 @@
 
 **Model: Sonnet, Opus for the repo / `pacman.conf` plumbing.**
 
+> ⚠️ **Fork the *pinned* `omarchy-iso`, not its HEAD** (added 2026-08-11,
+> `docs/PROGRESS.md` §5.22). Phase 2.9 records one SHA for the upstream builder;
+> this fork inherits it, and P2.9c rebuilds against it. Upstream moves several
+> times a day and has already **renamed the `omarchy-apply-system` finalizer**
+> its own installer calls — a fork taken at the wrong point calls a binary that
+> no longer exists.
+
 ## Objective
 
 A single bootable ISO that installs Arch base + Neptune kernel and firmware +

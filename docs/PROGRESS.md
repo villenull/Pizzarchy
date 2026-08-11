@@ -28,9 +28,16 @@ may use Wi-Fi (§2.2).
 | **T5** ISO + package payload | ⬜ not started | Unblocked by R1 and simplified by §2.2. **New constraints from P1.5:** offline-only pacman (§7), encryption default (§5.12), repo precedence (§5.13) |
 | **T6** Integration + release | ⬜ not started | Gated on Omarchy 4.0 stable |
 
-**The plan is `docs/ROADMAP.md`** — three phases: answer the unknowns and rebuild
-the test bed (1), build the product (2), prove it from a factory reset and
-release (3).
+**The plan is `docs/ROADMAP.md`** — answer the unknowns and rebuild the test bed
+(1), build the product (2), **catch up to upstream (2.9 — new 2026-08-11)**,
+prove it from a factory reset and release (3), generalise into a Deck enablement
+layer (4). *(This line said "three phases" until 2026-08-11; it was stale from
+the day phase 4 was added.)*
+
+**🆕 Phase 2.9 — rebase onto Omarchy 4.0 beta 2** (`docs/tasks/T9-beta2-rebase.md`,
+§5.22). Everything we own sits on the 4.0 snapshot of 2026-08-10; upstream has
+moved, measurably and not cosmetically. The rebase happens *before* phase 3 so
+the release run has one moving variable, not two.
 
 **P1.5 is ✅ COMPLETE (2026-08-10).** All six phases ran in one session. The
 Deck now runs package-based **Omarchy 4.0 + Neptune 6.11.11-valve29**,
@@ -108,14 +115,20 @@ grep patterns, an intentional `A && B || C`) and now carry narrow
 mapfile -t files < <(git ls-files '*.sh'); shellcheck -x "${files[@]}"
 ```
 
-Now: **10 suites and that command exit 0** — six shell (`test-deck-session.sh` 70,
-`test-osk-install-layout.sh` 16, four VM-helper suites) and three Python
+Now: **11 suites and that command exit 0** — six shell (`test-deck-session.sh` 70,
+`test-osk-install-layout.sh` 19, four VM-helper suites) and five Python
 (`test-deck-input-mapper.py` 106, `test-deck-osk-layout.py` 134,
-`test-deck-osk-tty.py` 49, `test-deck-osk-wayland.py` 47;
-`test-osk-install-layout.sh` is 19). ⚠️ The Python ones are not in the `test-*.sh` glob;
-run both globs. A tenth, `test/osk-tty-e2e.py`, is in **neither** — it needs
+`test-deck-osk-tty.py` 54, `test-deck-osk-wayland.py` 47,
+`test-deck-osk-focus.py` 37). ⚠️ The Python ones are not in the `test-*.sh` glob;
+run both globs. One more, `test/osk-tty-e2e.py`, is in **neither** — it needs
 `/dev/uinput` and is run by hand, because a suite that skips itself when a
 device is missing reports green while asserting nothing.
+
+*(Re-counted by running everything 2026-08-11. The previous version of this
+paragraph said "10 suites … three Python" and then listed four, gave
+`osk-install-layout` as both 16 and 19, and omitted `test-deck-osk-focus.py`
+entirely — a paragraph disagreeing with itself in three places. **Count them;
+do not quote them.**)*
 
 **Session 18 (2026-08-10) corrected §2.6 and built T8's core.** It found the
 installer row of §2.6 assigning squeekboard to a live ISO that has no Wayland
@@ -243,7 +256,7 @@ missing will waste an hour rebuilding them.
 
 | Artifact | Where | Notes |
 |---|---|---|
-| **Omarchy 4.0 beta ISO** | `~/ISOs/omarchy-2026.08.10-x86_64-quattro.iso` | 6.0 GB, built 2026-08-10, `.sha256` alongside. **This is P1.4's ISO** — copy to the Ventoy stick. Rebuild only if a newer 4.0 is wanted (§3.10 has the flags) |
+| **Omarchy 4.0 beta ISO** | `~/ISOs/omarchy-2026.08.10-x86_64-quattro.iso` | 6.0 GB, built 2026-08-10 from `omarchy-iso` **`a12bfea`**, `.sha256` alongside. **This is P1.4's ISO** — copy to the Ventoy stick. ⚠️ **Superseded at P2.9c**; the builder is already 4 commits ahead and one of them renames the finalizer it calls (§5.22). Rebuild flags: §3.10 |
 | **QEMU substrate image** | `test/images/neptune-substrate.raw` | 14 GB apparent / ~2.9 GB sparse, gitignored. Every `test/vm/` suite uses it; rebuilt automatically by `test/images/vm-neptune-image.sh` if absent (~6 min) |
 | **`omarchy-iso` scratch clone** | session scratch — **will be lost** | Had two local deviations worth reapplying if rebuilding: `--network host` on the Docker run (§7's bridge throttle) and a scratch pacman cache instead of the host's (§3.10 item 3) |
 
@@ -1493,7 +1506,7 @@ Why a flasher was reframed rather than adopted:
 scaffolding around a distro-specific core (`pacman`, `jupiter-staging`,
 `limine`, `mkinitcpio`, `sddm`, `uwsm`). You would not port that core; you would
 rewrite it. What is genuinely portable is the five `render_*` helper bodies, the
-session-switch *policy*, the mapper, the probes — and §7's 45 facts, which are
+session-switch *policy*, the mapper, the probes — and §7's 47 facts, which are
 the single biggest accelerator and are not code at all.
 
 ⚠️ **"A day" buys ported-and-conformance-green, NOT shippable.** §5.18 surfaced
@@ -1602,6 +1615,90 @@ or `tmpfiles.d` — differ mainly in whether that fallback is expressible.
 
 ---
 
+## 5.22 🆕 Phase 2.9 — rebase everything onto Omarchy 4.0 beta 2 (added 2026-08-11)
+
+**Operator direction, session 19.** Upstream released a second 4.0 beta.
+Everything this project owns — the built ISO, the QEMU substrate, both install
+scripts, the input/OSK layer and the test Deck — sits on the 4.0 snapshot of
+**2026-08-10**. A new roadmap block moves all of it, *before* phase 3, so the
+release run has one moving variable instead of two.
+
+**Spec: `docs/tasks/T9-beta2-rebase.md`. Measured delta:
+`docs/findings/T9-beta2-delta.md`. Ordering: `docs/ROADMAP.md` phase 2.9
+(P2.9a–P2.9g).**
+
+### The pin — NOT YET RECORDED. P2.9a fills this in.
+
+| What | Value |
+|---|---|
+| `basecamp/omarchy` ref + SHA | *(unrecorded)* |
+| `omacom-io/omarchy-iso` SHA | *(unrecorded)* |
+| `omarchy-dev` / `omarchy-settings-dev` version | *(unrecorded)* |
+| Channel — mirror **and** pkgs | *(unrecorded)* |
+
+⚠️ **"Beta 2" does not identify a build, and as of 2026-08-11 nothing public
+carries the name.** Checked and returned nothing: GitHub releases (newest
+`v3.8.4`), tags (same), the `version` file on `quattro` (**still
+`4.0.0.alpha`**, never bumped for beta 1 either), `omarchy.net` (names only
+3.0), and channel probes — only **`edge`** and **`stable`** answer 200;
+`beta`, `beta2`, `rc`, `quattro`, `testing`, `preview`, `nightly` all 404.
+
+What did move: `quattro` HEAD `1c9dfc5` (2026-08-11 12:30 UTC) and the `edge`
+channel, rebuilt 11 minutes later carrying
+`omarchy-dev-4.0.0.r1652.g1c9dfc5-1`. **`edge` tracks `quattro` HEAD.** The
+`stable` channel still carries `r1046.gd570d99` — a 2026-07-13 commit, **606
+behind** — with its db last modified 2026-08-05, matching the public
+alpha→beta announcement.
+
+**Open question for the operator: where was beta 2 announced, and is there a
+download?** If it is a published ISO rather than a channel snapshot, P2.9c
+rebuilds the wrong artifact and phase 3 should install from theirs.
+
+### Why it is a block and not a footnote — measured, not feared
+
+37 commits between our install baseline and 2026-08-11 changed, among others:
+
+- **`etc/sudoers.d/omarchy-tzupdate`** — dropped the `tzupdate` grant
+  (#6694). `src/deck-session.sh` (~line 1157) quotes the **old** line in a
+  comment whose whole argument was "that file belongs to a package on a beta
+  distro, and if it changed the picker would go back to failing silently."
+  **It changed four days later.** The half we rely on survived; the comment is
+  now wrong. Fix the quote, keep the reasoning, note it was borne out.
+- **Three `bin/omarchy-apply-*` renames**, and `omarchy-iso`'s HEAD commit
+  exists to call the renamed `omarchy-apply-system` finalizer. Our `src/`
+  references none of them; **T5's fork inherits the exposure.**
+- **`shell/plugins/lock/Service.qml`** — the Quickshell lock service whose idle
+  policy we deliberately neutered (screensaver 150 s, lock 86400 s). This is
+  the most plausible route back to a Deck that locks itself with no keyboard.
+- **`default/omarchy/omarchy-menu.jsonc` and `bin/omarchy-menu`** — P2.4's
+  extension seam.
+- **Four new `migrations/*.sh`**, root and machine-wide, run by
+  `omarchy-update`. One rewrites `/etc/bluetooth/main.conf` and says outright
+  that *an update over SSH would otherwise abort*. **We update over SSH**, and
+  BT is an open parity row.
+
+Nothing in those 37 commits touches Limine, the mkinitcpio hook, snapper or
+the ESP — `src/omarchy-deck-kernel.sh` looks untouched, which is what T1's
+design predicted. ⚠️ Do not promote that to a fact without checking the pinned
+range *and* the `limine*` package versions, which move independently of the
+branch.
+
+### The one decision inside this block
+
+**Recommended: bring the Deck up in place (`omarchy-update`) after snapshot #8
+— not a reinstall.** P3.1/P3.2 already buy the clean-install proof from a
+factory reset; a rebuild here spends those hours twice and costs snapshots
+#1–#7 and the SSH loop. The gap — the *installer* path changed underneath us —
+is precisely what P2.9d's QEMU install test covers, which is why P2.9d is not
+optional. If the operator prefers a reinstall, that is defensible, but then say
+here plainly that phase 3's install is no longer the first from this ISO.
+
+⚠️ **This does not replace P3.6** (rebase onto 4.0 *stable*). It makes P3.6 the
+second run of a known procedure instead of the first, on a step that gates the
+release.
+
+---
+
 ## 6. Blocked on human
 
 - **`docs/ROADMAP.md` P1.4 — Ventoy on the test USB + the stock Omarchy 4.0 beta
@@ -1613,6 +1710,15 @@ or `tmpfiles.d` — differ mainly in whether that fallback is expressible.
   recovery image on a second USB as the floor, and anything personal copied
   off the Deck first. Approved in principle by §2.5; still confirm before
   executing.
+- 🆕 **Where was Omarchy 4.0 "beta 2" announced, and is there a download?**
+  (§5.22). Nothing public carries the name — no tag, no release, no channel —
+  so P2.9a cannot pin it without the operator's pointer. **A link answers it.**
+  If beta 2 is a published ISO rather than a channel snapshot, P2.9c changes
+  shape and phase 3 should install from theirs, not a rebuild of ours.
+- 🆕 **`docs/ROADMAP.md` P2.9e — bringing the Deck to beta 2.** Snapshot #8,
+  then in-place `omarchy-update`, then re-running every `deck-session.sh`
+  stage. Prepared and described before execution, per the rule below. Batch it
+  with P2.9f's hands-on list — that is one operator session, not two.
 - **Any write to the physical Deck.** Prepare, describe, wait. Batch requests.
 - **Anything touching TDP, fan curves, or charge limits** — every time, no
   exceptions. Genuine hardware-damage risk.
@@ -1786,6 +1892,18 @@ backup rescue (the rebuild wipes both).
   executes at source time, inside the unit test.** Keep new work inside
   functions. A sourcing shell also inherits `set -euo pipefail` and every
   constant as `readonly`, so sourcing twice into one shell aborts.
+- **An Omarchy version string does not identify a build, and 4.0 has no tag.**
+  `basecamp/omarchy` publishes no 4.0 tag or release; the `version` file on
+  `quattro` reads `4.0.0.alpha` months into beta. `pkgs.omarchy.org` serves only
+  **`edge`** (tracks `quattro` HEAD, rebuilt within minutes of a commit) and
+  **`stable`** — measured 606 commits apart on 2026-08-11. Package versions are
+  git-describes (`4.0.0.rN.gSHA`). **Pin the SHA; the words are decoration.**
+- **`omarchy-update` runs upstream `migrations/*.sh` as root, machine-wide, and
+  they mutate system state** — adding packages, rewriting `/etc/bluetooth/main.conf`,
+  writing `/etc/modprobe.d/`. One carries a comment that an update **over SSH**
+  would otherwise abort on `/dev/rfkill`, which is exactly how this project
+  drives the Deck. Read the new migrations before updating, and re-verify the
+  load-bearing settings after — none of them fails a test today.
 
 ---
 

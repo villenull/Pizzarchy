@@ -34,6 +34,12 @@ both against stable rather than assuming beta behavior carried over.
 
 Budget this as real work, not a formality.
 
+⚠️ **Run `docs/tasks/T9-beta2-rebase.md`'s procedure rather than improvising**
+(added 2026-08-11). Phase 2.9 performs the identical rebase onto **beta 2**, so
+by the time this step runs the procedure has been executed once — on a step that
+does not gate the release — and its seam list, pinning discipline and failure
+modes are known rather than guessed.
+
 ### 2. Full end-to-end hardware run (tier T4 in `docs/PLAN.md` §9.2)
 
 The complete matrix, on the operator's OLED Deck, with **no network

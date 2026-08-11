@@ -4,6 +4,11 @@
 > Deck-ready distro; **phase 4 (added 2026-08-10)** turns that into a layer so
 > the next one costs ~a day.
 >
+> **🆕 Phase 2.9 (added 2026-08-11)** sits between building the product and
+> proving it: upstream shipped a second 4.0 beta, and everything this project
+> owns gets moved onto it *before* the release run starts. Rebasing inside
+> phase 3 would mean two moving variables and one matrix.
+>
 > **This is the authoritative ordering of the work.** `docs/PROGRESS.md` holds
 > current state and findings; `TASK-*.md` hold the per-task detail; this file
 > holds the plan. Written 2026-08-10, after the scope reset (`docs/PROGRESS.md` §2).
@@ -21,6 +26,7 @@ Desktop Mode button that opens **Omarchy 4.0** and a way back.
 |---|---|---|
 | **1 — Answer the unknowns, rebuild the test bed** | Every open question that can change a design gets answered; the Deck is rebuilt onto Omarchy 4.0 | QEMU + one big Deck session |
 | **2 — Build the product** | Installer UI, session/parity completion, the ISO itself | Dev machine + QEMU, short Deck iterations |
+| **2.9 — Catch up to upstream** 🆕 | Rebase every artifact — ISO, substrate, scripts, the test Deck — onto **Omarchy 4.0 beta 2**, and re-establish by measurement every fact that names upstream behavior | Dev machine + QEMU, one Deck pass |
 | **3 — Prove it like a user, release** | Factory-reset the Deck, install from our ISO exactly as an end user would, release | Deck |
 | **4 — Generalise: the Deck enablement layer** | Turn one distro's hard-won result into a layer, so the next distro is ~a day of porting instead of sixteen sessions | Dev machine + one validation pass per distro |
 
@@ -138,6 +144,68 @@ short, targeted Deck iterations over `tools/deck-sync.sh`.
 
 ---
 
+## Phase 2.9 — Catch up to upstream: rebase onto 4.0 beta 2
+
+**Added 2026-08-11 by operator direction.** Full detail:
+`docs/tasks/T9-beta2-rebase.md`. Seeded delta measurement:
+`docs/findings/T9-beta2-delta.md`.
+
+Everything this project owns currently sits on the 4.0 snapshot of
+**2026-08-10**: the built ISO, the QEMU substrate, both install scripts, the
+input/OSK layer, and the test Deck. This block moves all of it onto beta 2 and
+**re-establishes by measurement** every recorded fact that names upstream
+behavior.
+
+⚠️ **The pin is not yet recorded, and the name does not identify the build.**
+Upstream has no 4.0 tag, no GitHub release, a `version` file still reading
+`4.0.0.alpha`, and exactly two package channels (`edge`, `stable`). `edge`
+tracks `quattro` HEAD and is rebuilt within minutes of a commit; its version
+string is a git-describe (`4.0.0.rN.gSHA`). **P2.9a's whole job is turning
+"beta 2" into three SHAs** — and asking the operator where it was announced,
+because if beta 2 is a *published ISO* then P2.9c rebuilds the wrong artifact.
+
+**Why it is a block and not a footnote:** the drift is already measured and it
+is not cosmetic. In 37 commits upstream changed a sudoers file this repo quotes
+verbatim, renamed three `omarchy-apply-*` binaries the ISO builder calls, edited
+the Quickshell **lock service** whose idle policy we deliberately neutered,
+edited the menu file our Desktop Mode row extends, and added four migrations
+that run as root on update — one of which rewrites `/etc/bluetooth/main.conf`
+and notes that an update over SSH would otherwise abort. We update over SSH.
+
+| # | Item | Where | Task ref |
+|---|---|---|---|
+| P2.9a | **Pin the snapshot** — `basecamp/omarchy` SHA, `omarchy-iso` SHA, `omarchy-dev` version, and the channel (mirror *and* pkgs, which can disagree). Every later item cites it; none says "latest" | Dev | T9 §1 |
+| P2.9b | **Measure the delta against our seams before touching anything** — finish `docs/findings/T9-beta2-delta.md`, every row marked *no impact · re-verify · breaks us*. ⚠️ Includes reading the new `migrations/*.sh`, which run as root on update | Dev | T9 §2 |
+| P2.9c | **Rebuild the ISO** from the pinned `omarchy-iso`, with §3.10's three gotchas intact, then **re-inspect it** for the two facts that were measured *from the image*: no Wayland compositor in the live environment (T2 §4) and the encryption default (§5.12) | Dev | T9 §3 |
+| P2.9d | **Rebuild the QEMU substrate from that ISO** and re-run everything hardware-free: shellcheck's own command, both unit globs, the VM suites, and `osk-tty-e2e.py` by hand. ⚠️ A substrate that mimics the *old* Quattro passes while testing a system that no longer exists | Dev + QEMU | T9 §4 |
+| P2.9e | **Bring the Deck to beta 2** — snapshot #8 first, then **in-place `omarchy-update`** (recommended over a reinstall: phase 3 already buys the clean-install proof). Re-run every `deck-session.sh` stage — the first real test of the idempotence claim against a moved substrate — plus `stage-audit-privileges`, `dconf read -d`, `lizard_mode`, and a switch soak of ≥5 cycles | Deck | T9 §5 |
+| P2.9f | **The hands-on pass** — OSK on STEAM+X, both cursors including diagonals, both switch directions, the Desktop Mode menu row, and every P2.9b row marked *re-verify*. Batch into one operator session | Deck | T9 §6 |
+| P2.9g | **Update the record** — the pin in `docs/PROGRESS.md` §1.1, a §5.22 outcome, and every §7 fact that names upstream behavior. A stale entry under "don't re-derive" is worse than no entry | Dev | T9 §7 |
+
+**Ordering.** P2.9a–P2.9d need no hardware and can run at any point. P2.9e is
+better *after* T5's ISO fork exists (the fork inherits the pin, and rebuilding
+twice is waste) — but waiting is not required, and a test bed running an old
+beta silently invalidates every hardware fact recorded against it.
+
+**This does not replace P3.6.** That one rebases onto 4.0 **stable** and still
+gates the release. What phase 2.9 buys is that P3.6 will be the *second* time
+this procedure runs, not the first.
+
+### Exit criteria
+
+- [ ] The pin is three SHAs + a version string + a channel, written down
+- [ ] The delta document classifies **every** changed upstream file that
+      touches a listed seam — no "probably fine" rows
+- [ ] A new ISO exists from the pinned builder, sha256 recorded, re-inspected
+      rather than assumed
+- [ ] Substrate rebuilt; all 11 unit suites, the VM suites and the e2e drive pass
+- [ ] The Deck runs beta 2, every install stage re-ran clean, load-bearing
+      settings verified with `dconf read -d`, switch soaked ≥5 cycles
+- [ ] The hands-on list is signed off **on screen**, not inferred from logs
+- [ ] Every §7 fact naming upstream behavior is re-checked or deleted
+
+---
+
 ## Phase 3 — Prove it like a user, release
 
 The release test **starts from a factory reset** — deliberately. The
@@ -153,7 +221,7 @@ exactly what we did.
 | P3.3 | Kernel-update resilience: force a kernel reinstall, reboot, Neptune entry still default | `docs/tasks/T6-integration-release.md` §3 |
 | P3.4 | Fix → re-run the affected portion; be honest about blast radius | `docs/tasks/T6-integration-release.md` §2 |
 | P3.5 | Trademark/glyph check (Valve iconography), honest LCD statement, known-issues list | `docs/tasks/T6-integration-release.md` §5, `docs/PROGRESS.md` §5.8 |
-| P3.6 | Rebase onto Omarchy 4.0 **stable** (whenever it lands — if it lands earlier, fold in during phase 2), re-verify the shell hooks | `docs/tasks/T6-integration-release.md` §1 |
+| P3.6 | Rebase onto Omarchy 4.0 **stable** (whenever it lands — if it lands earlier, fold in during phase 2), re-verify the shell hooks. **Run phase 2.9's procedure** (`docs/tasks/T9-beta2-rebase.md`) rather than improvising: by then it has been executed once, on a step that does not gate the release | `docs/tasks/T6-integration-release.md` §1 |
 | P3.7 | Tag, build, checksum, publish | `docs/tasks/T6-integration-release.md` §7 |
 
 ### Exit criteria
@@ -228,7 +296,9 @@ flashing.
 | Our fork inherits upstream's encryption default | 2 | Ship it off by default; TPM2 auto-unlock as follow-on (§5.12) |
 | ~~Valve's packages shadowed by Arch's~~ | 2 | **RETIRED** — audit done (P16). 101 overlaps, Valve older in 50, so reordering is rejected; the real surface is one package and the fix is `pacman -S jupiter-staging/gamescope` (§5.13) |
 | T2 concludes custom UI needed for many screens | 1→2 | That's what the spike is *for*; scope conversation before phase 2 |
-| Omarchy 4.0 beta churn breaks shell hooks | 2 | Keep integration points thin (`docs/PLAN.md` §11); re-verify at P3.6 |
+| Omarchy 4.0 beta churn breaks shell hooks | 2 → **2.9** | **No longer hypothetical.** In 37 commits upstream changed a sudoers file this repo quotes, renamed three `omarchy-apply-*` binaries, and edited both the menu file and the lock service we hook. Keep integration points thin (`docs/PLAN.md` §11); **absorb the churn deliberately at phase 2.9**, re-verify again at P3.6 |
+| An upstream **migration** reverts a load-bearing setting on update | 2.9 | Migrations run as root, machine-wide, during `omarchy-update`; one already rewrites `/etc/bluetooth/main.conf` and can abort over SSH. **Read them before updating** (P2.9b), then re-verify with `dconf read -d` and `shell.json` after (P2.9e) — the idle lock and the two OSK GSettings fail no test today |
+| "Beta 2" is pinned by name and the name means nothing | 2.9 | `edge` tracks `quattro` HEAD, rebuilt within minutes of a commit, versioned `4.0.0.rN.gSHA`. Two installs can both say `4.0.0` and be 600 commits apart. **Pin the SHA** (P2.9a) |
 | TDP/fan work damages hardware | 2 | Per-item operator approval, every time — unchanged hard rule |
 | 4.0 stable lands late | 3 | Everything through P3.5 works on beta; only P3.6 gates on stable |
 | LCD divergence | 3 | Ship "OLED-verified, LCD-untested," recruit a tester after release |

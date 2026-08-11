@@ -3,7 +3,35 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
-> ## Where things stand (updated 2026-08-10, end of session 17)
+> ## Where things stand (updated 2026-08-11, session 19; body below is sessions 17–18)
+>
+> ### 🆕 UPSTREAM MOVED — there is now a PHASE 2.9, before phase 3
+>
+> **Operator direction, 2026-08-11: Omarchy shipped a 4.0 beta 2, and
+> everything we own gets rebased onto it before the release run.** Spec:
+> `docs/tasks/T9-beta2-rebase.md`. Measured delta:
+> `docs/findings/T9-beta2-delta.md`. Ordering: `docs/ROADMAP.md` phase 2.9
+> (P2.9a–P2.9g). Decision record: `docs/PROGRESS.md` §5.22.
+>
+> ⚠️ **"Beta 2" is not yet pinned, and the name identifies nothing.** Upstream
+> publishes **no 4.0 tag and no release**; `version` on `quattro` still reads
+> `4.0.0.alpha`; only two package channels exist (`edge`, which tracks
+> `quattro` HEAD and rebuilds within minutes, and `stable`, measured **606
+> commits behind**). Package versions are git-describes. **Pin the SHA.**
+> P2.9a's first move is asking the operator where beta 2 was announced.
+>
+> **The drift is already measured and is not cosmetic.** In 37 commits upstream
+> changed a sudoers file `src/deck-session.sh` quotes verbatim (~line 1157 —
+> now stale), renamed three `omarchy-apply-*` binaries the ISO builder calls,
+> edited the Quickshell **lock service** whose idle policy we deliberately
+> neutered, edited the menu file P2.4's Desktop Mode row extends, and added
+> **four migrations that run as root on `omarchy-update`** — one of which
+> rewrites `/etc/bluetooth/main.conf` and notes that an update **over SSH**
+> would otherwise abort. We update over SSH.
+>
+> Nothing in the delta touches Limine, the mkinitcpio hook, snapper or the ESP,
+> so `src/omarchy-deck-kernel.sh` looks untouched — **do not promote that to a
+> fact** without checking the pinned range and the `limine*` package versions.
 >
 > ### 🆕 SESSION 17 WAS THE FIRST TIME ANY OF THIS WAS SEEN ON A SCREEN — read this first
 >
@@ -215,9 +243,9 @@ work without waiting for further instruction.**
 > 2. `docs/PROGRESS.md` **§5.9–§5.20** — the open issues. §5.10/§5.13/§5.14/
 >    §5.16/§5.18/**§5.20** are now closed; **§5.17 is the live one**, and
 >    **§5.9 gained session 17's measured lizard-mode map**
-> 3. `docs/ROADMAP.md` — **four** phases now; phase 2 is the live work queue and
->    **phase 4 is new** (the enablement layer)
-> 4. `docs/PROGRESS.md` §7 — 45 facts that each cost real time; do not
+> 3. `docs/ROADMAP.md` — phase 2 is the live work queue, **phase 2.9 is new**
+>    (the beta 2 rebase, before phase 3) and phase 4 is the enablement layer
+> 4. `docs/PROGRESS.md` §7 — **47** facts that each cost real time; do not
 >    re-derive them
 >
 > Hardware evidence: `docs/findings/P15-live-iso-recon.md` (R-0…R-19, raw logs
@@ -231,14 +259,23 @@ work without waiting for further instruction.**
 > for f in test/unit/test-*.sh; do ./"$f"; done; for f in test/unit/test-*.py; do python3 "$f"; done
 > ```
 >
-> **10 suites, seconds, no VM.** ⚠️ That is *two* globs — the shell one alone
-> misses all four Python suites, which is where the input layer's coverage
+> **11 suites, seconds, no VM.** ⚠️ That is *two* globs — the shell one alone
+> misses all five Python suites, which is where the input layer's coverage
 > lives. Six shell (`test-deck-session.sh` **70**, `test-osk-install-layout.sh`
-> **16**, four VM-helper suites) and four Python (`test-deck-input-mapper.py`
-> **106**, `test-deck-osk-layout.py` **134**, `test-deck-osk-tty.py` **49**,
-> `test-deck-osk-wayland.py` **47**).
+> **19**, four VM-helper suites) and five Python (`test-deck-input-mapper.py`
+> **106**, `test-deck-osk-layout.py` **134**, `test-deck-osk-tty.py` **54**,
+> `test-deck-osk-wayland.py` **47**, `test-deck-osk-focus.py` **37**).
 >
-> ⚠️ **A tenth suite is NOT in either glob, on purpose.**
+> *(Every number in that sentence was **re-counted by running the suites**
+> 2026-08-11. Four were wrong: the suite total, `osk-install-layout` (16→19),
+> `osk-tty` (49→54), and `test-deck-osk-focus.py` was missing entirely — it
+> arrived with the focus watcher in `44e8f66`. Count them; don't quote them.)*
+>
+> ⚠️ **This is the failure this file keeps warning about, found again by
+> running one glob.** The paragraph above is the *documentation* of the test
+> suite, and it was wrong about the test suite.
+>
+> ⚠️ **One more suite is NOT in either glob, on purpose.**
 > `test/osk-tty-e2e.py` drives the on-screen keyboard end to end — virtual pad →
 > mapper → cursors → rendered console → keystrokes — and needs a writable
 > `/dev/uinput`. It is excluded from CI because a test that skips itself when a
@@ -420,7 +457,7 @@ it.
 |---|---|
 | `CLAUDE.md` | Auto-loaded every session. Hard constraints. |
 | `docs/ROADMAP.md` | **The plan — three phases.** Where the current block fits and what gates what. |
-| `docs/PROGRESS.md` | **Every session start. This is the authoritative state.** Scope, findings, open issues, and 36 facts not to re-derive. |
+| `docs/PROGRESS.md` | **Every session start. This is the authoritative state.** Scope, findings, open issues, and **47** facts not to re-derive. |
 | `docs/SESSIONS.md` | Usage-limit budgeting and the block schedule. |
 | `docs/PLAN.md` | **Frozen and partly superseded.** Read the banner at the top first. Good for §6.1a (installer screens), §8 (bug hypotheses), §9 (test tiers), §11 (maintenance risks). |
 | `docs/tasks/` | One file per work block. |
@@ -481,7 +518,8 @@ VM.
 
 ## 4. The work queue
 
-**The ordering lives in `docs/ROADMAP.md` — four phases.** Task-to-phase mapping:
+**The ordering lives in `docs/ROADMAP.md` — four phases, plus 2.9 wedged
+between 2 and 3.** Task-to-phase mapping:
 
 | Task | File | Model | State |
 |---|---|---|---|
@@ -493,6 +531,7 @@ VM.
 | T4 | `docs/tasks/T4-installer-ui.md` | Sonnet | ⬜ **unblocked, re-scoped by §5.9** → P2.5–P2.6 |
 | T5 | `docs/tasks/T5-iso-and-payload.md` | Sonnet/Opus | ⬜ P2.7–P2.8, now with §5.12/§5.13 constraints |
 | T6 | `docs/tasks/T6-integration-release.md` | **Opus** | ⬜ phase 3 |
+| T9 | `docs/tasks/T9-beta2-rebase.md` | **Opus** | ⬜ **phase 2.9 — NEW (2026-08-11).** Rebase every artifact onto Omarchy 4.0 **beta 2** and re-establish by measurement each fact that names upstream behavior. P2.9a–P2.9d need no hardware; **P2.9a is blocked on one question to the operator** — where beta 2 was announced. Makes P3.6 (rebase onto *stable*) the second run of the procedure, not the first |
 | T8 | `docs/tasks/T8-onscreen-keyboard.md` | Sonnet/**Opus** | ✅ **DONE (session 18) — all seven steps, hardware-proven (R-43) and console-sharing proven in QEMU (R-47).** Was P2.4b. Input half was already done in the mapper, chord included |
 | T7 | `docs/tasks/T7-enablement-layer.md` | **Opus** | ⬜ **phase 4 — NEW.** Generalise into a Deck enablement layer so the next distro is ~a day. Deliberately after phase 3: abstracting from one *finished* example is engineering, from one unfinished example is guessing |
 
@@ -503,6 +542,13 @@ are done as far as a script can verify them. Sensible entry points:
   (T4's installer screens; text entry is the real gap) or **P2.7/P2.8** (T5's
   `omarchy-iso` fork, which now carries six recorded constraints — see above).
   Either is days of work and needs no hardware.
+- 🆕 **Also without the Deck, and cheap: P2.9a–P2.9d** — pin beta 2, finish the
+  delta document, rebuild the ISO, rebuild the substrate and re-run every
+  suite. ⚠️ **P2.9a needs one answer from the operator first** (where beta 2
+  was announced); P2.9b can start immediately from the seed in
+  `docs/findings/T9-beta2-delta.md`. Do **not** rebuild the substrate from the
+  old ISO — a substrate mimicking the previous Quattro passes while testing a
+  system that no longer exists.
 - **With the Deck, needing a HUMAN present:** everything left on P2.1/P2.2/P2.4
   is a thing a script cannot check — does the OSK appear on text focus, are the
   buttons mapped correctly, does sound actually come out, do haptics and gyro
