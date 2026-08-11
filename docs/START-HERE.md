@@ -62,15 +62,27 @@ work without waiting for further instruction.**
 > (`deck-input-mapper.service`, active), plus `python-evdev` and `squeekboard`
 > from Arch `[extra]`.
 >
-> ⚠️ **TWO TEMPORARY CHANGES ARE STILL IN EFFECT on the Deck.** Neither is part
-> of the product; both were operator-requested for testing:
+> ⚠️ **ONE TEMPORARY CHANGE IS STILL IN EFFECT on the Deck**, operator-requested
+> for testing:
 >
 > 1. **The display never sleeps** — idle/screensaver/lock disabled, sleep
 >    targets masked. This is an **OLED** panel, so burn-in is the reason not to
 >    leave it. Revert: `sudo /usr/local/sbin/deck-always-on-revert.sh`.
-> 2. **A gsettings input source** was set (`org.gnome.desktop.input-sources`)
->    to silence squeekboard's "No system layout". Revert:
->    `gsettings reset org.gnome.desktop.input-sources sources`.
+>
+> 🆕 **Two GSettings values on the Deck are NOT temporary — they are product
+> requirements, and session 17 corrected an earlier note telling you to revert
+> one of them:**
+>
+> - `org.gnome.desktop.input-sources sources` = `[('xkb','us')]` — squeekboard
+>   has no keys to draw without it. *(Previously listed here as a temporary hack
+>   to undo. It is not.)*
+> - `org.gnome.desktop.a11y.applications screen-keyboard-enabled` = `true` —
+>   set by session 17. Ships `false`, and **the OSK never auto-shows without
+>   it** (§5.20).
+>
+> Both are T5 constraints now: they live in one user's dconf and would be
+> **absent from a built image**. No test would notice — every suite runs on the
+> Deck where they are already set.
 >
 > Also: the backlight sysfs node is deliberately left **0644**, not the 666
 > found. If it is 666 again, Steam fell back — which means a helper broke.
@@ -100,16 +112,18 @@ work without waiting for further instruction.**
 > 1. `docs/PROGRESS.md` §1 (state) and §2 (the five scope decisions) — these
 >    reversed several earlier ones, and a session that misses them will build
 >    the wrong thing
-> 2. `docs/PROGRESS.md` **§5.9–§5.18** — the open issues. §5.10/§5.13/§5.14/
->    §5.16/§5.18 are now closed; **§5.17 is the live one**
+> 2. `docs/PROGRESS.md` **§5.9–§5.20** — the open issues. §5.10/§5.13/§5.14/
+>    §5.16/§5.18/**§5.20** are now closed; **§5.17 is the live one**, and
+>    **§5.9 gained session 17's measured lizard-mode map**
 > 3. `docs/ROADMAP.md` — **four** phases now; phase 2 is the live work queue and
 >    **phase 4 is new** (the enablement layer)
-> 4. `docs/PROGRESS.md` §7 — 38 facts that each cost real time; do not
+> 4. `docs/PROGRESS.md` §7 — 45 facts that each cost real time; do not
 >    re-derive them
 >
 > Hardware evidence: `docs/findings/P15-live-iso-recon.md` (R-0…R-19, raw logs
-> in `P15-recon-raw/`) and
-> `docs/findings/P2-steam-integration-and-rotation.md` (R-20…**R-28**).
+> in `P15-recon-raw/`), `docs/findings/P2-steam-integration-and-rotation.md`
+> (R-20…**R-28**), and **`docs/findings/P17-input-and-osk.md` (R-29…R-36)** —
+> the only one so far where a human watched the screen.
 >
 > ### There are now unit tests. Run them before and after touching `src/`.
 >
@@ -120,7 +134,7 @@ work without waiting for further instruction.**
 > (That glob is the 5 shell suites; `test/unit/test-deck-input-mapper.py` is a
 > sixth and is **not** in it — run it separately.)
 >
-> `test/unit/test-deck-session.sh` is now **62 assertions** covering all five
+> `test/unit/test-deck-session.sh` is now **63 assertions** covering all five
 > generated files — the `steamos-update` stub's exit-code protocol, the
 > install-marker contract, both polkit helpers' argument validation, the sddm
 > restart helper's shape, and Steam's shim. It has teeth: **mutation-tested,
@@ -197,7 +211,7 @@ work without waiting for further instruction.**
 > **Phase 4 comes AFTER phase 3, deliberately.** Abstracting from one *finished,
 > soak-proven* example is engineering; from an unfinished one it is guessing.
 > P4.2 proves the extraction by making Omarchy consume the core with the
-> existing **62 assertions and the soak unchanged** — if those need editing, the
+> existing **63 assertions and the soak unchanged** — if those need editing, the
 > seam is wrong.
 >
 > ### ⛔ A Deck-specific USB flasher was considered and REFRAMED — don't re-propose it cold
