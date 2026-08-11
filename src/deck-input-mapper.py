@@ -241,23 +241,88 @@ class Mapper:
 
 # --- device plumbing ---------------------------------------------------------
 
+# Steam takes the controller over via hidraw and re-presents it as a virtual
+# Xbox pad, in Desktop Mode as well as Gaming Mode -- measured 2026-08-10, when
+# starting Steam on the desktop made the native "Steam Deck" node disappear and
+# this mapper re-bind to Steam's replacement. Binding that pad is always wrong:
+# Steam is already handling those buttons for its own UI, so every press would
+# act twice, once in Steam and once as an injected keystroke.
+#
+# Match on the name Steam gives it. The trailing index varies ("... pad 0"), and
+# a real, physically attached Xbox controller would also match -- which is the
+# right call anyway, since this mapper exists to drive an installer from the
+# Deck's built-in controls, not to remap arbitrary gamepads.
+STEAM_VIRTUAL_PAD_MARKERS = ("x-box", "xbox")
+
+
+def is_steam_virtual_pad(dev: InputDevice) -> bool:
+    name = dev.name.lower()
+    return any(marker in name for marker in STEAM_VIRTUAL_PAD_MARKERS)
+
+
 def looks_like_gamepad(dev: InputDevice) -> bool:
     caps = dev.capabilities()
-    return e.BTN_SOUTH in caps.get(e.EV_KEY, [])
+    if e.BTN_SOUTH not in caps.get(e.EV_KEY, []):
+        return False
+    # Capability alone matches Steam's virtual pad too -- that is exactly how
+    # this mapper latched onto it.
+    return not is_steam_virtual_pad(dev)
 
 
-def pick_device(selector: str | None) -> InputDevice:
-    if selector and selector.startswith("/dev/"):
-        return InputDevice(selector)
-    candidates = [InputDevice(p) for p in list_devices()]
+def _match(candidates: list[InputDevice], selector: str | None) -> InputDevice | None:
     for dev in candidates:
         if selector:
             if selector.lower() in dev.name.lower() and looks_like_gamepad(dev):
                 return dev
         elif looks_like_gamepad(dev):
             return dev
-    names = ", ".join(f"{d.path}:{d.name}" for d in candidates) or "none"
-    sys.exit(f"deck-input-mapper: no gamepad matched {selector!r}. Devices: {names}")
+    return None
+
+
+# How long to wait between rescans while Steam owns the controller.
+STEAM_RESCAN_INTERVAL = 5.0
+
+
+def pick_device(selector: str | None) -> InputDevice:
+    """Find the pad, WAITING (not exiting) while Steam owns the controller.
+
+    The distinction matters and is not cosmetic. `Restart=on-failure` with
+    `StartLimitBurst=5` means exiting here would burn every restart within ~10s
+    of Steam starting, trip the start limit, and leave the mapper permanently
+    dead -- including after Steam quits and the native pad comes back. So:
+
+      Steam's virtual pad is present  -> expected and temporary; wait and rescan
+      no gamepad of any kind          -> a real failure; exit loudly
+
+    Never collapse those two into one "not found" branch. CLAUDE.md forbids
+    swallowing the second, and the unit's restart policy cannot survive the
+    first.
+    """
+    if selector and selector.startswith("/dev/"):
+        return InputDevice(selector)
+
+    announced_wait = False
+    while True:
+        candidates = [InputDevice(p) for p in list_devices()]
+        dev = _match(candidates, selector)
+        if dev is not None:
+            return dev
+
+        steam_pads = [d.name for d in candidates if is_steam_virtual_pad(d)]
+        if not steam_pads:
+            names = ", ".join(f"{d.path}:{d.name}" for d in candidates) or "none"
+            sys.exit(f"deck-input-mapper: no gamepad matched {selector!r}. Devices: {names}")
+
+        if not announced_wait:
+            # Say it once, then stay quiet -- this can last for hours.
+            print(
+                f"deck-input-mapper: Steam owns the controller ({steam_pads[0]}); "
+                f"waiting for the native pad, rescanning every {STEAM_RESCAN_INTERVAL:.0f}s",
+                file=sys.stderr,
+                flush=True,
+            )
+            announced_wait = True
+        time.sleep(STEAM_RESCAN_INTERVAL)
 
 
 def main() -> None:

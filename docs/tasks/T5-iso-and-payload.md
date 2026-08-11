@@ -206,24 +206,36 @@ Arch's `gamescope` is the bare compositor; Valve's ships the SteamOS session.
 Both are `3.16.25`, so no version check can tell them apart -- test for the
 session *file*. Full data: `docs/findings/P16-repo-overlap-audit.md`.
 
-### 4. Session settings that are load-bearing and currently live in ONE user's session
+### 4. Session settings that are load-bearing and live in ONE user's session
 
-Added session 17. Three values decide whether the shipped device works, and none
-of them is in a package or a repo file today -- they were set by hand on the
-test Deck and would simply be absent from a built image.
+Added session 17, **scoped by §2.6's decision** — which splits these across two
+different images rather than one.
+
+**In the LIVE ISO (the installer), squeekboard is the keyboard**, and it needs
+both of these or it silently never appears:
 
 | Setting | Why it is load-bearing | Ships as |
 |---|---|---|
-| `org.gnome.desktop.a11y.applications screen-keyboard-enabled` | **`false` by default.** squeekboard's auto-show gate -- with it unset, the on-screen keyboard never appears on text focus no matter what else is right (PROGRESS.md 5.20) | `true` |
+| `org.gnome.desktop.a11y.applications screen-keyboard-enabled` | **`false` by default.** squeekboard's auto-show gate — with it unset the keyboard never appears on text focus no matter what else is right (§5.20) | `true` |
 | `org.gnome.desktop.input-sources sources` | empty by default; squeekboard warns `No system layout` and has no keys to draw | `[('xkb','us')]` |
-| `~/.config/hypr/monitors.lua` rotation | 5.11 -- the desktop renders sideways without it | baked, not per-user |
 
-The first two are **GSettings in a user's dconf database**, so "install a file"
-is not enough -- they need a dconf default (`/etc/dconf/db/local.d/`) or a
-first-boot step, and the choice has to survive a *new* user account, not just
-the one on the test Deck.
+Both are **GSettings in a dconf database**, so "install a file" is not enough —
+they need a dconf default (`/etc/dconf/db/local.d/`) or a first-boot step, and
+the choice must survive a *new* user account, not just the one on the test Deck.
 
-⚠️ **The general trap:** all three were discovered by something failing on
+**On the INSTALLED system, squeekboard is NOT shipped at all** (§2.6). Instead:
+
+| Requirement | Why |
+|---|---|
+| A Steam autostart entry in Desktop Mode | Valve's keyboard lives inside the Steam client; no Steam, no keyboard. `~/.config/autostart/` is the mechanism already in use on this Deck |
+| `~/.config/hypr/monitors.lua` rotation | §5.11 — the desktop renders sideways without it. Baked, not per-user |
+
+⚠️ **The accepted risk that follows** (§2.6): with no squeekboard fallback, a
+Desktop Mode where Steam is not running has **no text entry at all**. Recovery is
+SSH or a USB keyboard. This was chosen deliberately; do not "fix" it by adding
+squeekboard back without raising it as a scope change.
+
+⚠️ **The general trap:** all of these were discovered by something failing on
 screen, not by anything failing a check. Nothing in the current test suite would
 notice their absence, because every suite runs against the Deck where they are
-already set. A conformance check for these belongs in T6's release gate.
+already set. A conformance check for them belongs in T6's release gate.

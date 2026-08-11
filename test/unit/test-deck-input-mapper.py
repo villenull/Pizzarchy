@@ -213,5 +213,48 @@ check(
             e.KEY_PAGEDOWN, e.KEY_LEFT, e.KEY_RIGHT, e.KEY_UP, e.KEY_DOWN}),
 )
 
+# --- device selection: Steam's virtual pad must never be bound ----------------
+#
+# Measured 2026-08-10: starting Steam on the DESKTOP makes the native "Steam
+# Deck" node disappear and re-presents the controller as "Microsoft X-Box 360
+# pad 0". Selecting purely on the BTN_SOUTH capability matched that pad too, so
+# the mapper latched onto it and would have injected a keystroke for every
+# press Steam was already handling.
+
+
+class FakeDev:
+    """Minimal stand-in for evdev.InputDevice: name + capabilities only."""
+
+    def __init__(self, name, path="/dev/input/eventX", south=True):
+        self.name = name
+        self.path = path
+        self._south = south
+
+    def capabilities(self):
+        return {e.EV_KEY: [e.BTN_SOUTH]} if self._south else {e.EV_KEY: [e.BTN_A - 1]}
+
+
+check("the native Deck pad is accepted",
+      m.looks_like_gamepad(FakeDev("Steam Deck")), True)
+check("Steam's virtual pad is REJECTED",
+      m.looks_like_gamepad(FakeDev("Microsoft X-Box 360 pad 0")), False)
+check("the virtual pad is identified by name",
+      m.is_steam_virtual_pad(FakeDev("Microsoft X-Box 360 pad 0")), True)
+check("a differently-indexed virtual pad is still identified",
+      m.is_steam_virtual_pad(FakeDev("Microsoft X-Box 360 pad 3")), True)
+check("the native pad is not mistaken for Steam's",
+      m.is_steam_virtual_pad(FakeDev("Steam Deck")), False)
+check("a device without BTN_SOUTH is still rejected",
+      m.looks_like_gamepad(FakeDev("Steam Deck Motion Sensors", south=False)), False)
+
+# The selector path must apply the same exclusion, or --device would reintroduce it.
+check("_match skips Steam's pad and finds the native one",
+      m._match([FakeDev("Microsoft X-Box 360 pad 0"), FakeDev("Steam Deck")], None).name,
+      "Steam Deck")
+check("_match returns None when only Steam's pad is present",
+      m._match([FakeDev("Microsoft X-Box 360 pad 0")], None), None)
+check("_match with a selector still excludes Steam's pad",
+      m._match([FakeDev("Microsoft X-Box 360 pad 0")], "x-box"), None)
+
 print(f"\n{'PASS' if FAILURES == 0 else 'FAILED'} — {FAILURES} failure(s)")
 sys.exit(1 if FAILURES else 0)

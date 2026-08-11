@@ -214,6 +214,39 @@ deliberate exception, not a shortcut.
 hand-edited files only mattered for restoring the current install's state.
 Since that state is scheduled to be wiped, losing them costs nothing.
 
+### 2.6 On-screen keyboard: squeekboard for the INSTALLER, Steam's thereafter — decided 2026-08-10
+
+**Operator decision, session 17**, after both options were tested on hardware
+(§5.20, R-35b, R-37).
+
+| Where | Keyboard |
+|---|---|
+| **The installer (live ISO)** | **squeekboard**, auto-showing on text focus |
+| **Gaming Mode** | Steam's own — native to Valve's session, free |
+| **Desktop Mode** | **Steam's own, via STEAM+X** — Steam autostarts |
+
+The installer half is forced, not chosen: the live ISO has no Steam and Steam is
+proprietary, so Valve's keyboard is unavailable there at any price.
+
+**What this decision requires:**
+
+1. **Steam autostarts in Desktop Mode.** It does not today. `~/.config/autostart/`
+   is already the mechanism in use on this Deck (fcitx5 uses it), so this is one
+   `.desktop` entry with `Exec=steam -silent`.
+2. **The mapper must not bind Steam's virtual pad** (R-37). With Steam running it
+   currently re-binds to `Microsoft X-Box 360 pad 0` and injects keystrokes on
+   top of Steam's own input handling. Needed regardless of this decision.
+3. **squeekboard ships in the live ISO only**, not on the installed system —
+   along with its two GSettings (`screen-keyboard-enabled`, `input-sources`).
+
+⚠️ **Accepted risk, chosen deliberately with the alternative on the table: if
+Steam is not running in Desktop Mode there is NO text entry at all.** Valve's
+keyboard is summon-only and lives inside the Steam client, so a crash, a sign-out,
+an update or a user quitting Steam leaves a keyboard-less device with no way to
+type — including no way to type into a terminal to fix it. **Recovery is SSH or a
+USB keyboard.** A gated squeekboard fallback was offered and declined in favour
+of matching stock SteamOS exactly. `docs/RECOVERY.md` should say so plainly.
+
 ---
 
 ## 3. Findings that changed the plan
@@ -1260,8 +1293,9 @@ Ships **`false`**. `squeekboard` uses it as its auto-show gate, so nothing else
 being correct matters until it is set. With it `true`, focusing a text field
 pops the keyboard.
 
-**T5 must bake this into the image**, alongside the rotation and the
-`org.gnome.desktop.input-sources` setting — three GSettings/dotfile values that
+**T5 must bake this into the LIVE ISO** — see §2.6, which scopes squeekboard to
+the installer and hands everything after install to Steam's own keyboard. It
+sits alongside `org.gnome.desktop.input-sources` and the rotation: values that
 currently live in one user's session and are all load-bearing.
 
 ⚠️ **This was first recorded here as a NEGATIVE ("does not appear on focus"),

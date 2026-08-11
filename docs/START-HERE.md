@@ -69,20 +69,25 @@ work without waiting for further instruction.**
 >    targets masked. This is an **OLED** panel, so burn-in is the reason not to
 >    leave it. Revert: `sudo /usr/local/sbin/deck-always-on-revert.sh`.
 >
-> 🆕 **Two GSettings values on the Deck are NOT temporary — they are product
-> requirements, and session 17 corrected an earlier note telling you to revert
-> one of them:**
+> 🆕 **Two GSettings values are set on the Deck and are NOT temporary** — they
+> are requirements of **the installer image**, and session 17 corrected an
+> earlier note telling you to revert one of them:
 >
 > - `org.gnome.desktop.input-sources sources` = `[('xkb','us')]` — squeekboard
 >   has no keys to draw without it. *(Previously listed here as a temporary hack
 >   to undo. It is not.)*
 > - `org.gnome.desktop.a11y.applications screen-keyboard-enabled` = `true` —
->   set by session 17. Ships `false`, and **the OSK never auto-shows without
->   it** (§5.20).
+>   ships `false`, and **the OSK never auto-shows without it** (§5.20).
 >
-> Both are T5 constraints now: they live in one user's dconf and would be
-> **absent from a built image**. No test would notice — every suite runs on the
-> Deck where they are already set.
+> ⚠️ **They belong to the LIVE ISO, not the installed system** (§2.6): the
+> installer uses squeekboard, and everything after install uses **Steam's own
+> keyboard**. On the test Deck they are therefore a **known divergence from the
+> product** — harmless, since squeekboard is not autostarted, but do not read
+> the Deck as evidence of what the installed image should contain.
+>
+> They are T5 constraints: GSettings in one user's dconf, **absent from a built
+> image**. No test would notice — every suite runs on the Deck where they are
+> already set.
 >
 > Also: the backlight sysfs node is deliberately left **0644**, not the 666
 > found. If it is 666 again, Steam fell back — which means a helper broke.
