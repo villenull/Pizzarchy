@@ -2105,11 +2105,52 @@ it in that task. They are real and they are now written down.
    a comment that matched them would keep the sibling suite green with the code
    deleted — §7's artifact, manufactured on purpose.
 
-### 5.26 🔴 T4's design gate: nobody has read the lizard-mode knob IN THE LIVE ISO
+### 5.26 ✅ RESOLVED ON HARDWARE 2026-08-11 — the lizard knob exists AND is writable in the live ISO
 
-**Found 2026-08-11 (session 19) while specifying T4** —
-`docs/tasks/T4-screen-spec.md` §8, unknown **U6**. It is one line to check and
-it decides whether T4 has a product.
+**T4's design gate is OPEN.** Measured from a root shell on **tty2 of the booted
+ISO** (our 2026-08-10 build, OLED Deck), which is the environment the claim is
+about — not the installed system, where every previous lizard-mode measurement
+came from.
+
+```
+# cd /sys/module/hid_steam/parameters; ls -l
+-rw-r--r-- 1 root root 4096 Aug 11 23:29 lizard_mode
+# cat lizard_mode; uname -r
+Y
+7.1.6-arch1-…-T2-1-t2
+# lsmod | grep hid_steam
+hid_steam          36864  0
+ff_memless         24576  1 hid_steam
+# echo N > lizard_mode; cat lizard_mode; echo Y > lizard_mode; cat lizard_mode
+N
+Y
+```
+
+The node exists, mode **0644**, reads `Y`, `hid_steam` is loaded and bound
+(pulling `ff_memless`), the kernel is a `-t2` build with no `valve` in it, and
+**the write is accepted at runtime and reverts cleanly**. That last line is the
+half that mattered: a 0644 sysfs parameter can still be rejected by the module,
+and mode alone would have been "T4 has a keyboard on paper".
+
+**Consequence: T4's bounded text-entry mode is reachable in the installer**, and
+`docs/tasks/T4-screen-spec.md` §2.3 stands as specified. No rework needed.
+
+⚠️ **Not proven by this, and do not let it drift into the record:** that a
+*mapper* can bind a pad in the live ISO and deliver keys there. The knob being
+writable removes the blocker; it does not demonstrate the input path. `python-evdev`
+is still absent from the live environment (T4 §2.4).
+
+*(History, kept because the shape recurs: this was 🔴 open, then 🟡 half-answered
+off-hardware from `docs/findings/T4-harness-feasibility.md` §5 — `hid-steam.ko.zst`
+ships in the ISO and `modinfo` declares the parameter, so the module and the knob
+were known present, but QEMU has no Steam Controller to bind to (`hid_steam.loaded=0`)
+and could answer neither "does the node appear" nor "is the write accepted". The
+off-hardware half correctly predicted the outcome and correctly refused to claim
+it.)*
+
+**Original statement of the gate**, for anyone tracing why it was blocking:
+`docs/tasks/T4-screen-spec.md` §8, unknown **U6**. One line to check, and it
+decided whether T4 had a product.
 
 **Every lizard-mode measurement this project owns was taken on the INSTALLED
 system, running Valve's Neptune kernel.** The live ISO boots a different kernel
@@ -2121,25 +2162,9 @@ the ISO's kernel, **text-entry mode cannot be entered at all**: the Wi-Fi
 passphrase screen and the account screen have no keyboard, and the
 controller-only install — the entire point of the project — has no mechanism.
 
-🟡 **HALF-ANSWERED off-hardware, 2026-08-11** (`docs/findings/T4-harness-feasibility.md` §5):
-`hid-steam.ko.zst` **is present in the live ISO**, and `modinfo` on it
-**declares the `lizard_mode` parameter**. So the module ships and the knob is
-compiled in — the sysfs node should therefore exist on the Deck once the module
-binds to real hardware. QEMU cannot finish the answer (`hid_steam.loaded=0`
-there, no Steam Controller to bind to), so the *writability* half and the
-does-it-actually-appear half still need the Deck. **The gate is much less
-likely to be closed than it looked, but it is not yet open.**
-
-➡️ **Still add to the next Deck session, before anything else on the list:**
-
-```bash
-ls -l /sys/module/hid_steam/parameters/lizard_mode; cat /sys/module/hid_steam/parameters/lizard_mode
-```
-
-…run **from the live ISO**, not from the installed system. Four more unknowns
-are ranked beside it in that spec; **U2** (does the QEMU credential-injection
-tier work against archiso at all) should be settled *before* any screen is
-written, because the whole automated-verification tier depends on it.
+Of the five unknowns ranked beside it in that spec, **U2 and U3 are also now
+settled** (U2 off-hardware in `docs/findings/T4-harness-feasibility.md`; U3 in
+the same live-ISO pass as U6 — see §7). **U1, U4 and U5 remain open.**
 
 ### 5.26a Three defects in upstream's installer that strand a keyboard-less device
 
@@ -2278,6 +2303,24 @@ backup rescue (the rebuild wipes both).
   on no evdev node. It provides Enter, Esc, Tab, arrows and both mouse buttons,
   but **no Space**. Suppress it with
   `/sys/module/hid_steam/parameters/lizard_mode` (writable, non-persistent).
+  ✅ **True in the LIVE ISO as well as the installed system** — node present at
+  0644, reads `Y`, write accepted and reverted, under the ISO's own `-t2` kernel
+  (measured on hardware 2026-08-11, §5.26). Both environments, not one.
+- **The live ISO's console is `50 160` — 50 rows × 160 columns**, measured with
+  `stty size` on **tty2** (2026-08-11, OLED). That is 1280×800 at an 8×16 font:
+  the *landscape* geometry rendered onto the portrait panel, which is why it
+  reads sideways until `fbcon=rotate:1` lands. It comfortably fits upstream's
+  ~81-column logo and our 73-column OSK side by side — T4 §8's U3 feared 80×25,
+  which would have wrapped the frame and eaten half the screen. ⚠️ **tty2 only.
+  The installer runs on tty1 under `quiet splash`**, and session 19 already lost
+  time to a console width cached across a mode change. Read the geometry; do not
+  hard-code this number.
+- **The live ISO's root shell is `zsh` WITH AUTOCORRECT, and root logs in on a
+  TTY with no password.** A mistyped command stops and waits:
+  `zsh: correct 'GREP' to 'grep' [nyae]?`. Anything scripted that types into a
+  shell there can block on a prompt that looks nothing like the screen it was
+  aiming at — the same class as an interactive pager with no controller exit
+  (§5.26a). Measured 2026-08-11.
 - **An evdev node can be enumerated and permanently silent.** Counting nodes,
   `systemctl is-active`, and a log line naming the bound device all reported
   health while the mapper delivered nothing for an entire session (§R-31).
@@ -2490,17 +2533,14 @@ backup rescue (the rebuild wipes both).
   artifact. Both times the assertion had teeth once re-targeted. A survivor
   costs an hour of hunting for a coverage gap that does not exist — print the
   mutated line, or diff it, before believing the result.
-- ⚠️ **CI's shellcheck version is UNPINNED, so "verify with CI's own command"
-  does not mean you will get CI's own answer.** The workflow does
-  `apt-get install -y shellcheck` on `ubuntu-latest`; this dev machine runs
-  **0.11.0**. The two SC2016 findings above were flagged locally, and whether
-  the runner's older build flags them was **never confirmed** — the commit
-  message that said "CI is red on main" asserted more than had been measured.
-  The disable directives make both versions green either way. **The real hazard
-  is the reverse direction**: a newer local shellcheck passing something an
-  older CI rejects, or a suite that is green in CI and red for the next
-  developer. Pin the version in the workflow, or stop calling the local run
-  "CI's own command".
+- ✅ **CI's shellcheck is PINNED to v0.11.0** — fetched from the GitHub release,
+  not `apt`, with a version assertion that fails the job if it is anything else
+  (§5.25 decision 11, landed 2026-08-11; `.github/workflows/ci.yml`). *(This
+  entry previously read "UNPINNED … pin the version in the workflow", and was
+  stale from the moment decision 11 shipped. It is corrected rather than
+  deleted because the hazard it named is real and permanent: a newer local
+  shellcheck passing what an older CI rejects. The pin is what makes "verify
+  with CI's own command" a true statement — do not unpin it.)*
 - **reddit.com is blocked by policy for WebFetch and for the in-app browser**
   (measured 2026-08-11 — `www.` and `old.` alike). Links to r/omarchy threads
   cannot be read from a session; ask the operator to paste, or find the
