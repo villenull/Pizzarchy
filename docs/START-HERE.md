@@ -397,6 +397,7 @@ VM.
 | T4 | `docs/tasks/T4-installer-ui.md` | Sonnet | ⬜ **unblocked, re-scoped by §5.9** → P2.5–P2.6 |
 | T5 | `docs/tasks/T5-iso-and-payload.md` | Sonnet/Opus | ⬜ P2.7–P2.8, now with §5.12/§5.13 constraints |
 | T6 | `docs/tasks/T6-integration-release.md` | **Opus** | ⬜ phase 3 |
+| T8 | `docs/tasks/T8-onscreen-keyboard.md` | Sonnet/**Opus** | ⬜ **NEW (session 17) — P2.4b.** The OSK we draw ourselves: split layout, **two cursors**, one per trackpad. squeekboard cannot do this at any configuration, and the installer has no compositor (T2 §4). Input half is **already done** in the mapper, chord included |
 | T7 | `docs/tasks/T7-enablement-layer.md` | **Opus** | ⬜ **phase 4 — NEW.** Generalise into a Deck enablement layer so the next distro is ~a day. Deliberately after phase 3: abstracting from one *finished* example is engineering, from one unfinished example is guessing |
 
 **Phase 1 is closed. P2.0, P2.0b, P2.0c and P2.0e are done**, and P2.1/P2.2/P2.4
