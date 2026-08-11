@@ -206,6 +206,13 @@ readonly MAPPER_BIN=/usr/local/bin/deck-input-mapper
 # mapper derives this path as <its own dir>/../lib/deck-osk -- keep them in step.
 readonly OSK_SRC_NAME=deck_osk_layout.py
 readonly OSK_LIB_DIR=/usr/local/lib/deck-osk
+# Every module the mapper may import, installed together. The layout core is
+# needed always (it decides which keycodes the uinput device declares); the TTY
+# renderer only by --osk-backend=tty, which is the installer's keyboard. They
+# ship as a set because a half-installed pair is the failure that degrades
+# silently -- the mapper starts, navigation works, and the keyboard is missing.
+OSK_MODULES=("$OSK_SRC_NAME" deck_osk_tty.py)
+readonly OSK_MODULES
 # /etc/systemd/user, not ~/.config: this is installed by an installer and has to
 # apply to whatever user the image creates, so T5 can bake it in unchanged.
 readonly MAPPER_UNIT=/etc/systemd/user/deck-input-mapper.service
@@ -1698,8 +1705,11 @@ stage_input_mapper() {
   src_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
   [[ -f "${src_dir}/${MAPPER_SRC_NAME}" ]] ||
     fail "${MAPPER_SRC_NAME} not found beside ${PROG}.sh (looked in ${src_dir}). This stage installs it; sync the whole src/ directory, not just this script."
-  [[ -f "${src_dir}/${OSK_SRC_NAME}" ]] ||
-    fail "${OSK_SRC_NAME} not found beside ${PROG}.sh (looked in ${src_dir}). The mapper imports it for the on-screen keyboard's keycodes; sync the whole src/ directory."
+  local osk_module
+  for osk_module in "${OSK_MODULES[@]}"; do
+    [[ -f "${src_dir}/${osk_module}" ]] ||
+      fail "${osk_module} not found beside ${PROG}.sh (looked in ${src_dir}). The mapper imports it for the on-screen keyboard; sync the whole src/ directory."
+  done
 
   # python-evdev is in Arch's [extra], NOT the AUR -- CLAUDE.md forbids AUR-only
   # dependencies. Checked by import rather than by `pacman -Q`, because that is
@@ -1716,15 +1726,17 @@ stage_input_mapper() {
   python3 -c 'import os; os.close(os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK))' 2>/dev/null ||
     warn "/dev/uinput is not writable by ${USER:-$(id -un)} right now. If this user has no active local graphical session that is expected (uaccess grants it per-session) and the service will still work once logged in. If it persists inside the desktop, the mapper will fail to create its virtual keyboard."
 
-  # The OSK layout core goes in FIRST. The mapper imports it at module load and
-  # degrades to navigation-only without it (loudly, never silently), so
+  # The OSK modules go in FIRST. The mapper imports the layout core at module
+  # load and degrades to navigation-only without it (loudly, never silently), so
   # installing the script first would leave a window where a restart brings up a
   # mapper with no character keys and a warning nobody is watching for.
-  log "installing the OSK layout core: ${OSK_LIB_DIR}/${OSK_SRC_NAME}"
   $SUDO install -d -m 0755 -o root -g root "$OSK_LIB_DIR" ||
     fail "could not create ${OSK_LIB_DIR}"
-  $SUDO install -m 0644 -o root -g root "${src_dir}/${OSK_SRC_NAME}" "${OSK_LIB_DIR}/${OSK_SRC_NAME}" ||
-    fail "could not install ${OSK_LIB_DIR}/${OSK_SRC_NAME}"
+  for osk_module in "${OSK_MODULES[@]}"; do
+    log "installing the OSK module: ${OSK_LIB_DIR}/${osk_module}"
+    $SUDO install -m 0644 -o root -g root "${src_dir}/${osk_module}" "${OSK_LIB_DIR}/${osk_module}" ||
+      fail "could not install ${OSK_LIB_DIR}/${osk_module}"
+  done
 
   log "installing the input mapper: ${MAPPER_BIN}"
   $SUDO install -m 0755 -o root -g root "${src_dir}/${MAPPER_SRC_NAME}" "$MAPPER_BIN" ||
@@ -1742,6 +1754,21 @@ stage_input_mapper() {
   grep -q KEY_LEFTSHIFT <<<"$probe" ||
     fail "${MAPPER_BIN} resolved no shift modifier for 'A'; ${OSK_LIB_DIR}/${OSK_SRC_NAME} is not the file the mapper imported. Output: ${probe}"
   log "verified: the mapper imports the OSK layout core and resolves shifted characters"
+
+  # The renderer is not on the --type path, so it needs its own check: without
+  # it --osk-backend=tty comes up with no keyboard and one warning line. Import
+  # them from the INSTALLED directory, which is what the mapper will do.
+  local osk_import
+  osk_import=$(python3 -c "
+import sys
+sys.path.insert(0, '${OSK_LIB_DIR}')
+import deck_osk_layout, deck_osk_tty
+print(len(deck_osk_tty.render(deck_osk_layout.OnScreenKeyboard(), deck_osk_layout.Cursors())))
+" 2>&1) ||
+    fail "the OSK modules in ${OSK_LIB_DIR} do not import. The installer's keyboard would be missing. Output: ${osk_import}"
+  [[ $osk_import == 5 ]] ||
+    fail "the installed OSK renderer drew ${osk_import} rows for the letters layer, expected 5. Output: ${osk_import}"
+  log "verified: the installed OSK modules import and render"
 
   assert_ours_or_absent "$MAPPER_UNIT" "something else"
   log "installing the user unit: ${MAPPER_UNIT}"

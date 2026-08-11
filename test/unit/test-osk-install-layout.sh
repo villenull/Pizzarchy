@@ -43,6 +43,20 @@ pass "the install directory and the mapper's search path agree ($osk_lib_dir)"
   fail "the module named by OSK_SRC_NAME exists in src/" "$osk_src"
 pass "OSK_SRC_NAME names a file that exists ($osk_src)"
 
+# Every module the stage ships must exist. They install as a SET: a mapper with
+# the layout core but no renderer starts, navigates, and has no keyboard.
+osk_modules_line=$(grep -oP '^OSK_MODULES=\(\K[^)]+' "$REPO_ROOT/src/deck-session.sh") ||
+  fail "OSK_MODULES is declared in deck-session.sh"
+# shellcheck disable=SC2206  # deliberate word-splitting of a known-safe list
+osk_modules=(${osk_modules_line//\"\$OSK_SRC_NAME\"/$osk_src})
+[[ ${#osk_modules[@]} -ge 2 ]] ||
+  fail "OSK_MODULES lists the renderer as well as the core" "${osk_modules[*]}"
+for mod in "${osk_modules[@]}"; do
+  [[ -f "$REPO_ROOT/src/$mod" ]] ||
+    fail "every module in OSK_MODULES exists in src/" "missing: $mod"
+done
+pass "OSK_MODULES lists ${#osk_modules[@]} modules and all exist (${osk_modules[*]})"
+
 # --- build the installed shape and run the real script in it -----------------
 #
 # Mirrors stage-input-mapper: the script loses its .py extension, the module
@@ -51,7 +65,9 @@ pass "OSK_SRC_NAME names a file that exists ($osk_src)"
 root="$work/root"
 mkdir -p "$root$(dirname -- "$mapper_bin")" "$root$osk_lib_dir"
 install -m 0755 "$REPO_ROOT/src/deck-input-mapper.py" "$root$mapper_bin"
-install -m 0644 "$REPO_ROOT/src/$osk_src" "$root$osk_lib_dir/$osk_src"
+for mod in "${osk_modules[@]}"; do
+  install -m 0644 "$REPO_ROOT/src/$mod" "$root$osk_lib_dir/$mod"
+done
 
 # --dry-run resolves text through the layout and prints keystrokes without
 # opening /dev/uinput, so this needs no session, no pad and no privileges.
@@ -65,6 +81,20 @@ pass "a capital resolves to shift + key, not a bare keycode"
 
 grep -q 'KEY_A' <<<"$out" || fail "a letter resolves to its keycode" "$out"
 pass "a letter resolves to its keycode"
+
+# The renderer is not on the --type path, so it needs its own check from the
+# INSTALLED directory: it also has to find the layout core from there, and
+# `import deck_osk_layout` inside it is the thing that would break.
+rendered=$(python3 -c "
+import sys
+sys.path.insert(0, '$root$osk_lib_dir')
+import deck_osk_layout as osk, deck_osk_tty as tty
+rows = tty.render(osk.OnScreenKeyboard(), osk.Cursors())
+print(len(rows), tty.width(rows))
+" 2>&1) || fail "the installed renderer imports and draws" "$rendered"
+[[ $rendered == "5 73" ]] ||
+  fail "the installed renderer draws 5 rows, 73 columns" "got: $rendered"
+pass "the installed renderer imports the core from the same directory and draws (5 rows, 73 cols)"
 
 # The mapper must not have quietly fallen back to the copy in src/: that would
 # make this suite pass on a dev machine and fail on the Deck, which is worse
@@ -115,9 +145,19 @@ stage_body=$(sed -n '/^stage_input_mapper()/,/^}/p' "$REPO_ROOT/src/deck-session
        "the function name changed; this suite's static checks are now vacuous"
 pass "stage_input_mapper() located in deck-session.sh"
 
-grep -q 'install .*OSK_SRC_NAME.*OSK_LIB_DIR' <<<"$stage_body" ||
-  fail "the stage installs the layout core into OSK_LIB_DIR" "$stage_body"
-pass "the stage installs the layout core into OSK_LIB_DIR"
+grep -q 'install .*osk_module.*OSK_LIB_DIR' <<<"$stage_body" ||
+  fail "the stage installs each OSK module into OSK_LIB_DIR" "$stage_body"
+pass "the stage installs each OSK module into OSK_LIB_DIR"
+
+# shellcheck disable=SC2016  # a grep PATTERN matching literal ${...} in the
+# stage's source; expanding it here would search for this shell's variables.
+grep -q 'for osk_module in "\${OSK_MODULES\[@\]}"' <<<"$stage_body" ||
+  fail "the stage loops over OSK_MODULES rather than naming one file" "$stage_body"
+pass "the stage ships the whole OSK_MODULES set, not just the core"
+
+grep -q 'import deck_osk_layout, deck_osk_tty' <<<"$stage_body" ||
+  fail "the stage verifies the RENDERER imports too -- it is not on the --type path" "$stage_body"
+pass "the stage verifies the renderer imports from the installed directory"
 
 # Match the INVOCATION, not the string "--type": the failure message beside it
 # also contains "--type", so a looser grep passes with the check deleted.

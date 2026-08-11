@@ -205,12 +205,16 @@ OSK_KEYCODES: frozenset[int] = frozenset(
 # --- hit-testing (pure) ------------------------------------------------------
 
 
-def key_at(layer: Layer, half: str, x: float, y: float) -> Key | None:
-    """Which key is at (x, y), normalised 0..1 WITHIN that half?
+def locate(layer: Layer, half: str, x: float, y: float) -> tuple[int, int] | None:
+    """Which (row index, key index) is at (x, y), normalised 0..1 in that half?
 
     Returns None outside the half. A cursor is clamped to its half by
     construction, so None means a caller bug rather than a user miss -- but it
     is still the honest answer, and silently clamping would hide it.
+
+    Renderers need the INDICES, not just the key: highlighting by comparing Key
+    objects would light up every cell sharing an instance (space and shift are
+    module-level singletons reused across layers).
     """
     rows = layer.half(half)
     if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0) or not rows:
@@ -218,7 +222,8 @@ def key_at(layer: Layer, half: str, x: float, y: float) -> Key | None:
 
     # int() then clamp, rather than rounding: the last row/column owns its
     # closing edge, so y == 1.0 lands on the bottom row instead of off the end.
-    row = rows[min(int(y * len(rows)), len(rows) - 1)]
+    row_index = min(int(y * len(rows)), len(rows) - 1)
+    row = rows[row_index]
     if not row:
         return None
 
@@ -228,11 +233,19 @@ def key_at(layer: Layer, half: str, x: float, y: float) -> Key | None:
     cells = sum(key.span for key in row)
     cell = min(int(x * cells), cells - 1)
     seen = 0
-    for key in row:
+    for key_index, key in enumerate(row):
         seen += key.span
         if cell < seen:
-            return key
-    return row[-1]  # unreachable while span >= 1; a miss here would be silent
+            return (row_index, key_index)
+    return (row_index, len(row) - 1)  # unreachable while span >= 1
+
+
+def key_at(layer: Layer, half: str, x: float, y: float) -> Key | None:
+    """Which key is at (x, y), normalised 0..1 WITHIN that half?"""
+    found = locate(layer, half, x, y)
+    if found is None:
+        return None
+    return layer.half(half)[found[0]][found[1]]
 
 
 # --- the state machine -------------------------------------------------------
@@ -271,13 +284,24 @@ class OnScreenKeyboard:
         return False
 
     def face(self, key: Key) -> str:
-        """The label to draw, under the current shift state."""
+        """The label to draw, under the current shift state.
+
+        The shift key reports its OWN state here rather than in a renderer, so
+        both renderers show the same thing and neither has to know the state
+        machine. Without it a user cannot tell one-shot from locked, and the
+        only feedback is typing a character and seeing the wrong case.
+        """
+        if key.action == "shift":
+            return {"off": "shift", "once": "Shift", "locked": "LOCK"}[self.shift]
         if key.shift_label and self.shift_applies_to(key):
             return key.shift_label
         return key.label
 
     def key_at(self, half: str, x: float, y: float) -> Key | None:
         return key_at(self.layer, half, x, y)
+
+    def locate(self, half: str, x: float, y: float) -> tuple[int, int] | None:
+        return locate(self.layer, half, x, y)
 
     def press(self, key: Key | None) -> list[tuple[int, int]]:
         """Apply a press. Returns the keystrokes to emit, possibly empty."""

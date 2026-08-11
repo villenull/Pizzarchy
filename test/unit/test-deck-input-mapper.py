@@ -360,6 +360,77 @@ mm.pointer_delta(e.ABS_HAT0X, 0, 0.0)
 check("left trackpad does not move the pointer",
       mm.pointer_delta(e.ABS_HAT0X, 30000, 0.05), (0, 0))
 
+# --- OSK routing: what changes when the keyboard is up (T8 step 4) -----------
+#
+# ⚠️ `osk_active` is set ONLY by the tty backend. With squeekboard the pads must
+# keep driving the system pointer, because squeekboard is a surface being
+# pointed AT rather than something this process draws. Everything below asserts
+# the gate as much as the routing: the default path must be untouched.
+
+osk_mod = m.osk_layout
+MINV, MAXV = osk_mod.PAD_RANGE
+
+
+def osk_mapper():
+    mm = fresh()
+    mm.osk = osk_mod.OnScreenKeyboard()
+    mm.cursors = osk_mod.Cursors()
+    mm.osk_active = True
+    return mm
+
+
+mm = osk_mapper()
+check("with the OSK up, a pad axis emits no keystroke",
+      mm.translate(e.EV_ABS, e.ABS_HAT1X, MAXV, 0.0), [])
+check("but it did move that cursor", mm.cursors.position("right")[0], 1.0)
+check("and left the other cursor alone", mm.cursors.position("left"), (0.5, 0.5))
+
+# Each trigger presses the key under its OWN cursor -- the whole point of two.
+mm = osk_mapper()
+mm.translate(e.EV_ABS, e.ABS_HAT0X, MINV, 0.0)   # left cursor -> top-left "1"
+mm.translate(e.EV_ABS, e.ABS_HAT0Y, MAXV, 0.0)
+mm.translate(e.EV_ABS, e.ABS_HAT1X, MAXV, 0.0)   # right cursor -> top-right "0"
+mm.translate(e.EV_ABS, e.ABS_HAT1Y, MAXV, 0.0)
+check("the LEFT trigger types the key under the LEFT cursor",
+      mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1), [(e.KEY_1, 1), (e.KEY_1, 0)])
+check("the RIGHT trigger types the key under the RIGHT cursor",
+      mm.translate(e.EV_KEY, e.BTN_TR2, 1, 0.2), [(e.KEY_0, 1), (e.KEY_0, 0)])
+check("a trigger RELEASE types nothing (or every key would double)",
+      mm.translate(e.EV_KEY, e.BTN_TR2, 0, 0.3), [])
+
+# With the keyboard up, the navigation profile underneath must be silent, or
+# every press does two things at once.
+mm = osk_mapper()
+check("A no longer sends Enter while the keyboard is up",
+      mm.translate(e.EV_KEY, e.BTN_SOUTH, 1, 0.0), [])
+check("Y no longer sends Space", mm.translate(e.EV_KEY, e.BTN_WEST, 1, 0.0), [])
+check("the d-pad no longer sends arrows",
+      mm.translate(e.EV_KEY, e.BTN_DPAD_UP, 1, 0.0), [])
+check("the stick no longer sends arrows",
+      mm.translate(e.EV_ABS, e.ABS_Y, -32768, 0.0), [])
+
+# The chord must survive: it is how a user dismisses a keyboard opened by
+# accident, and it is checked BEFORE the OSK branch for exactly that reason.
+mm = osk_mapper()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("STEAM+X still queues a toggle while the keyboard is up",
+      (mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.1), mm.pending_actions),
+      ([], ["toggle-osk"]))
+
+# --- and none of that may happen with the OSK DOWN ---------------------------
+
+mm = fresh()
+check("with the OSK down, the triggers are mouse buttons again",
+      mm.translate(e.EV_KEY, e.BTN_TR2, 1, 0.0), [(e.BTN_LEFT, 1)])
+check("A sends Enter again", mm.translate(e.EV_KEY, e.BTN_SOUTH, 1, 0.0), [(e.KEY_ENTER, 1)])
+check("the d-pad sends arrows again",
+      mm.translate(e.EV_KEY, e.BTN_DPAD_UP, 1, 0.0), [(e.KEY_UP, 1)])
+check("a pad axis is not a keystroke either way",
+      mm.translate(e.EV_ABS, e.ABS_HAT1X, MAXV, 0.0), [])
+check("osk_active defaults to off", fresh().osk_active, False)
+check("and a mapper with no OSK attached routes nothing even if flagged",
+      m.Mapper(osk_active=True).translate(e.EV_KEY, e.BTN_TR2, 1, 0.0), [])
+
 # --- emitted-keys contract ---------------------------------------------------
 #
 # ⚠️ The sharpest assertion in this suite. A uinput device emits ONLY the codes

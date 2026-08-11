@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import pathlib
 import selectors
 import subprocess
@@ -78,28 +79,39 @@ OSK_SEARCH_DIRS = (
 )
 
 
-def _load_osk_layout():
-    """Import the layout core, or say loudly why the OSK is unavailable."""
+def _load_module(name: str):
+    """Import an OSK module by name, or say loudly why the OSK is unavailable.
+
+    Registered in sys.modules under its own name, because the modules import
+    each other by name -- `deck_osk_tty` does `import deck_osk_layout`, and it
+    must get the copy loaded from beside this script rather than searching the
+    system path for a different one.
+    """
     for directory in OSK_SEARCH_DIRS:
-        path = directory / _OSK_MODULE
+        path = directory / f"{name}.py"
         if not path.is_file():
             continue
         try:
-            spec = importlib.util.spec_from_file_location("deck_osk_layout", path)
+            spec = importlib.util.spec_from_file_location(name, path)
             module = importlib.util.module_from_spec(spec)
-            sys.modules["deck_osk_layout"] = module
+            sys.modules[name] = module
             spec.loader.exec_module(module)
             return module
-        except Exception as exc:  # a broken core must not cost us navigation
+        except Exception as exc:  # a broken module must not cost us navigation
             print(f"deck-input-mapper: {path} failed to import ({exc}); "
                   "the on-screen keyboard is DISABLED, navigation still works",
                   file=sys.stderr, flush=True)
             return None
-    print(f"deck-input-mapper: {_OSK_MODULE} not found in "
+    print(f"deck-input-mapper: {name}.py not found in "
           f"{', '.join(str(d) for d in OSK_SEARCH_DIRS)}; the on-screen keyboard "
           "is DISABLED, navigation still works",
           file=sys.stderr, flush=True)
     return None
+
+
+def _load_osk_layout():
+    """The layout core. Loaded at import time: it decides EMITTED_KEYS."""
+    return _load_module("deck_osk_layout")
 
 
 osk_layout = _load_osk_layout()
@@ -231,6 +243,10 @@ EMITTED_KEYS = sorted(
 )
 EMITTED_RELS = [e.REL_X, e.REL_Y]
 
+# Which half each trigger clicks, when the OSK is up. Empty without the layout
+# core, which is what makes a missing core cost the keyboard and nothing else.
+TRIGGER_HALF: dict[int, str] = dict(osk_layout.TRIGGER_HALF) if osk_layout else {}
+
 # Toggling squeekboard is a DBus call, not an input event. Kept as an argv
 # rather than a shell string so nothing here goes through a shell.
 OSK_TOGGLE_ARGV_SHOW = [
@@ -294,6 +310,14 @@ class Mapper:
     # arrived, so a lift-and-retouch re-baselines instead of hurling the cursor.
     pointer_last: dict[int, int] = field(default_factory=dict)
     pointer_last_seen: float = 0.0
+
+    # On-screen keyboard (T8). `osk_active` gates the whole routing change, and
+    # it is set ONLY by the tty backend -- with squeekboard the pads must keep
+    # driving the system pointer, because squeekboard is a surface being
+    # pointed at rather than something we draw.
+    osk_active: bool = False
+    osk: "object | None" = None       # deck_osk_layout.OnScreenKeyboard
+    cursors: "object | None" = None   # deck_osk_layout.Cursors
 
     def pointer_delta(self, code: int, value: int, now: float) -> tuple[int, int]:
         """Right trackpad -> relative pointer motion. Returns (dx, dy).
@@ -403,6 +427,25 @@ class Mapper:
         state.active_key = want
         return out
 
+    def _osk_event(self, etype: int, code: int, value: int) -> list[tuple[int, int]]:
+        """Route one event to the on-screen keyboard. Returns keystrokes.
+
+        Both pads become cursors and each trigger presses the key under its OWN
+        cursor. Everything else is deliberately swallowed: with the keyboard up,
+        A must not also send Enter and X must not also send Tab, or every key
+        press does two things at once.
+        """
+        if self.osk is None or self.cursors is None:
+            return []
+        if etype == e.EV_ABS:
+            self.cursors.update(code, value)
+            return []
+        if etype == e.EV_KEY and value == 1:
+            half = TRIGGER_HALF.get(code)
+            if half is not None:
+                return self.osk.press_at(half, *self.cursors.position(half))
+        return []
+
     def translate(self, etype: int, code: int, value: int, now: float) -> list[tuple[int, int]]:
         if etype == e.EV_KEY:
             # STEAM+X toggles the on-screen keyboard. Checked before every
@@ -415,6 +458,13 @@ class Mapper:
                 if value == 1:
                     self.pending_actions.append("toggle-osk")
                 return []
+        # ⚠️ AFTER the chord, BEFORE everything else. The chord has to keep
+        # working while the keyboard is up -- it is how a user dismisses one
+        # they opened by accident -- and nothing else may reach the navigation
+        # profile underneath.
+        if self.osk_active:
+            return self._osk_event(etype, code, value)
+        if etype == e.EV_KEY:
             if code in TRIGGER_BUTTON_MAP:
                 if value in (0, 1):
                     return [(TRIGGER_BUTTON_MAP[code], value)]
@@ -627,6 +677,15 @@ def main() -> None:
     ap.add_argument("--list", action="store_true", help="list input devices and exit")
     ap.add_argument("--type", metavar="TEXT",
                     help="type TEXT through the OSK layout and exit (no pad needed)")
+    ap.add_argument("--osk-backend", choices=("dbus", "tty", "none"), default="dbus",
+                    help="what STEAM+X opens: squeekboard over DBus (default, "
+                         "Desktop Mode), the TTY keyboard we draw (the installer, "
+                         "which has no compositor), or nothing")
+    ap.add_argument("--osk-tty", metavar="PATH", default="/dev/tty",
+                    help="where the tty backend draws (default /dev/tty)")
+    ap.add_argument("--osk-top-row", type=int, default=0, metavar="N",
+                    help="1-based console row for the keyboard's first line; "
+                         "0 means 'as low as it fits' (default)")
     args = ap.parse_args()
 
     if args.list:
@@ -681,29 +740,93 @@ def main() -> None:
 
     osk_visible = False
 
+    # --- the tty backend: the keyboard we draw ourselves (T8) ----------------
+    #
+    # Only set up when asked for. The default stays `dbus` so the installed
+    # Deck's user service keeps toggling squeekboard exactly as it does today --
+    # this whole path is dead weight there, and dead weight that cannot run is
+    # the point.
+    osk_tty = None
+    osk_stream = None
+    if args.osk_backend == "tty":
+        osk_tty = _load_module("deck_osk_tty")
+        if osk_layout is None or osk_tty is None:
+            print("deck-input-mapper: --osk-backend=tty needs both OSK modules; "
+                  "the keyboard is DISABLED, navigation still works",
+                  file=sys.stderr, flush=True)
+            osk_tty = None
+        else:
+            try:
+                osk_stream = open(args.osk_tty, "w")
+            except OSError as exc:
+                print(f"deck-input-mapper: cannot draw on {args.osk_tty} ({exc}); "
+                      "the keyboard is DISABLED, navigation still works",
+                      file=sys.stderr, flush=True)
+                osk_tty = None
+        if osk_tty is not None:
+            pad_abs = dict(pad.capabilities().get(e.EV_ABS, []))
+            mapper.osk = osk_layout.OnScreenKeyboard()
+            # The pads' OWN advertised ranges, not the measured default: this is
+            # the one place the two can disagree, and the device is the authority.
+            mapper.cursors = osk_layout.Cursors(ranges={
+                code: (ai.min, ai.max) for code, ai in pad_abs.items()
+                if code in osk_layout.PAD_AXES
+            })
+
+    def osk_draw() -> None:
+        rows = osk_tty.render(mapper.osk, mapper.cursors)
+        top = args.osk_top_row
+        if top <= 0:
+            # As low as it fits. The installer's TUI owns the rows above; see
+            # deck_osk_tty.write_at for how they are kept apart.
+            try:
+                height = os.get_terminal_size(osk_stream.fileno()).lines
+            except OSError:
+                height = 25  # the console default when the size is unknowable
+            top = max(1, height - len(rows) + 1)
+        osk_tty.write_at(osk_stream, rows, top)
+
+    def osk_erase() -> None:
+        rows = osk_tty.render(mapper.osk, mapper.cursors)
+        top = args.osk_top_row
+        if top <= 0:
+            try:
+                height = os.get_terminal_size(osk_stream.fileno()).lines
+            except OSError:
+                height = 25
+            top = max(1, height - len(rows) + 1)
+        osk_tty.clear_at(osk_stream, rows, top)
+
+    def set_osk_visible(visible: bool) -> None:
+        nonlocal osk_visible
+        osk_visible = visible
+        if args.verbose or ui is None:
+            print(f"osk -> {'show' if visible else 'hide'}", file=sys.stderr, flush=True)
+        if osk_tty is not None:
+            mapper.osk_active = visible
+            if visible:
+                mapper.osk.closed = False
+                osk_draw()
+            else:
+                osk_erase()
+            return
+        if args.osk_backend != "dbus" or ui is None:
+            return
+        argv = OSK_TOGGLE_ARGV_SHOW if visible else OSK_TOGGLE_ARGV_HIDE
+        try:
+            subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            # Loud, but not fatal: losing the OSK toggle must not take the
+            # pointer down with it.
+            print(f"deck-input-mapper: could not toggle the OSK: {exc}",
+                  file=sys.stderr, flush=True)
+
     def run_pending(actions: list[str]) -> None:
         """Perform queued side effects. Never blocks the input loop: a DBus
         call that hangs must not freeze the pointer."""
-        nonlocal osk_visible
         while actions:
-            action = actions.pop(0)
-            if action != "toggle-osk":
-                continue
-            osk_visible = not osk_visible
-            argv = OSK_TOGGLE_ARGV_SHOW if osk_visible else OSK_TOGGLE_ARGV_HIDE
-            if args.verbose or ui is None:
-                print(f"osk -> {'show' if osk_visible else 'hide'}", file=sys.stderr, flush=True)
-            if ui is None:
-                continue
-            try:
-                subprocess.Popen(
-                    argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-            except OSError as exc:
-                # Loud, but not fatal: losing the OSK toggle must not take the
-                # pointer down with it.
-                print(f"deck-input-mapper: could not toggle the OSK: {exc}",
-                      file=sys.stderr, flush=True)
+            if actions.pop(0) == "toggle-osk":
+                set_osk_visible(not osk_visible)
 
     if args.grab:
         pad.grab()
@@ -731,7 +854,14 @@ def main() -> None:
                             emit_motion(pending_dx, pending_dy)
                             pending_dx = pending_dy = 0
                         continue
-                    if event.type == e.EV_ABS and event.code in POINTER_AXES:
+                    # ⚠️ `not mapper.osk_active`. With the keyboard up the right
+                    # pad is a CURSOR, not the pointer; without this it would be
+                    # both at once, and the system pointer would wander across
+                    # whatever is behind the keyboard. This is T8 step 6's
+                    # pointer-suppression question, answered for the tty backend
+                    # by never generating the motion in the first place.
+                    if (event.type == e.EV_ABS and event.code in POINTER_AXES
+                            and not mapper.osk_active):
                         dx, dy = mapper.pointer_delta(event.code, event.value, now)
                         pending_dx += dx
                         pending_dy += dy
@@ -742,6 +872,14 @@ def main() -> None:
                 # A device that never sends SYN_REPORT must still move.
                 if pending_dx or pending_dy:
                     emit_motion(pending_dx, pending_dy)
+                # Redraw once per batch, not per event: the pads run at 250 Hz
+                # and a redraw per sample would spend the whole loop writing
+                # escape sequences.
+                if osk_visible and osk_tty is not None:
+                    if mapper.osk.closed:
+                        set_osk_visible(False)
+                    else:
+                        osk_draw()
             for key, value in mapper.due_repeats(now):
                 emit(key, value)
     except KeyboardInterrupt:
@@ -749,6 +887,16 @@ def main() -> None:
     finally:
         if args.grab:
             pad.ungrab()
+        # Erase the keyboard before leaving. A mapper that exits with its own
+        # rows still painted leaves the installer looking corrupted, and the
+        # TUI underneath has no reason to redraw them.
+        if osk_visible and osk_tty is not None:
+            try:
+                osk_erase()
+            except OSError:
+                pass
+        if osk_stream is not None:
+            osk_stream.close()
         if ui is not None:
             ui.close()
 
