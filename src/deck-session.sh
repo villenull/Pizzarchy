@@ -199,6 +199,13 @@ readonly IDLE_LOCK_SECONDS=86400
 # --- Desktop-mode input mapper (ROADMAP P2.1, T3 §4) ----------------------
 readonly MAPPER_SRC_NAME=deck-input-mapper.py
 readonly MAPPER_BIN=/usr/local/bin/deck-input-mapper
+
+# The OSK layout core (T8). Imported by the mapper, so it needs a real directory
+# rather than a sibling of MAPPER_BIN: the mapper is installed WITHOUT its .py
+# extension and /usr/local/bin is not a place to put importable modules. The
+# mapper derives this path as <its own dir>/../lib/deck-osk -- keep them in step.
+readonly OSK_SRC_NAME=deck_osk_layout.py
+readonly OSK_LIB_DIR=/usr/local/lib/deck-osk
 # /etc/systemd/user, not ~/.config: this is installed by an installer and has to
 # apply to whatever user the image creates, so T5 can bake it in unchanged.
 readonly MAPPER_UNIT=/etc/systemd/user/deck-input-mapper.service
@@ -1691,6 +1698,8 @@ stage_input_mapper() {
   src_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
   [[ -f "${src_dir}/${MAPPER_SRC_NAME}" ]] ||
     fail "${MAPPER_SRC_NAME} not found beside ${PROG}.sh (looked in ${src_dir}). This stage installs it; sync the whole src/ directory, not just this script."
+  [[ -f "${src_dir}/${OSK_SRC_NAME}" ]] ||
+    fail "${OSK_SRC_NAME} not found beside ${PROG}.sh (looked in ${src_dir}). The mapper imports it for the on-screen keyboard's keycodes; sync the whole src/ directory."
 
   # python-evdev is in Arch's [extra], NOT the AUR -- CLAUDE.md forbids AUR-only
   # dependencies. Checked by import rather than by `pacman -Q`, because that is
@@ -1707,9 +1716,32 @@ stage_input_mapper() {
   python3 -c 'import os; os.close(os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK))' 2>/dev/null ||
     warn "/dev/uinput is not writable by ${USER:-$(id -un)} right now. If this user has no active local graphical session that is expected (uaccess grants it per-session) and the service will still work once logged in. If it persists inside the desktop, the mapper will fail to create its virtual keyboard."
 
+  # The OSK layout core goes in FIRST. The mapper imports it at module load and
+  # degrades to navigation-only without it (loudly, never silently), so
+  # installing the script first would leave a window where a restart brings up a
+  # mapper with no character keys and a warning nobody is watching for.
+  log "installing the OSK layout core: ${OSK_LIB_DIR}/${OSK_SRC_NAME}"
+  $SUDO install -d -m 0755 -o root -g root "$OSK_LIB_DIR" ||
+    fail "could not create ${OSK_LIB_DIR}"
+  $SUDO install -m 0644 -o root -g root "${src_dir}/${OSK_SRC_NAME}" "${OSK_LIB_DIR}/${OSK_SRC_NAME}" ||
+    fail "could not install ${OSK_LIB_DIR}/${OSK_SRC_NAME}"
+
   log "installing the input mapper: ${MAPPER_BIN}"
   $SUDO install -m 0755 -o root -g root "${src_dir}/${MAPPER_SRC_NAME}" "$MAPPER_BIN" ||
     fail "could not install ${MAPPER_BIN}"
+
+  # Verify by RUNNING it, not by checking the file landed. A uinput device emits
+  # only the keycodes it declared, so a core that installed but does not import
+  # produces a mapper whose character keys are silently dead -- exactly the
+  # failure this project exists to attack. --type --dry-run resolves the text
+  # through the layout and prints the keystrokes without touching /dev/uinput,
+  # so it works here with no session and no pad attached.
+  local probe
+  probe=$("$MAPPER_BIN" --type 'aA1!' --dry-run 2>&1) ||
+    fail "${MAPPER_BIN} --type failed; the OSK layout core did not load. Output: ${probe}"
+  grep -q KEY_LEFTSHIFT <<<"$probe" ||
+    fail "${MAPPER_BIN} resolved no shift modifier for 'A'; ${OSK_LIB_DIR}/${OSK_SRC_NAME} is not the file the mapper imported. Output: ${probe}"
+  log "verified: the mapper imports the OSK layout core and resolves shifted characters"
 
   assert_ours_or_absent "$MAPPER_UNIT" "something else"
   log "installing the user unit: ${MAPPER_UNIT}"

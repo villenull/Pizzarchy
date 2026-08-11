@@ -42,6 +42,8 @@ USAGE
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import pathlib
 import selectors
 import subprocess
 import sys
@@ -49,6 +51,58 @@ import time
 from dataclasses import dataclass, field
 
 from evdev import InputDevice, UInput, ecodes as e, list_devices
+
+# --- the on-screen keyboard's layout core (T8) -------------------------------
+#
+# Imported rather than copied. OSK_KEYCODES decides which keycodes this
+# process's uinput device DECLARES, and a uinput device emits only what it
+# declared at creation -- an undeclared code is dropped by the kernel with no
+# error anywhere. A second copy of that list here would drift from the layouts
+# and take character keys down silently.
+#
+# The two files sit side by side in `src/` and are installed side by side by
+# `deck-session.sh stage-input-mapper`: the script in /usr/local/bin, the module
+# in /usr/local/lib/deck-osk.
+#
+# ⚠️ A MISSING CORE IS LOUD BUT NOT FATAL, and that is deliberate. With
+# lizard_mode=N this process is the ONLY input path on the device
+# (docs/PROGRESS.md §5.9); refusing to start would leave a handheld with no
+# pointer and no keys, recoverable only over SSH. Navigation keeps working and
+# the OSK is what is lost -- the same trade the DBus OSK toggle already makes.
+
+_OSK_MODULE = "deck_osk_layout.py"
+_HERE = pathlib.Path(__file__).resolve().parent
+OSK_SEARCH_DIRS = (
+    _HERE,                                  # src/, and any dev run
+    _HERE.parent / "lib" / "deck-osk",      # /usr/local/bin -> /usr/local/lib
+)
+
+
+def _load_osk_layout():
+    """Import the layout core, or say loudly why the OSK is unavailable."""
+    for directory in OSK_SEARCH_DIRS:
+        path = directory / _OSK_MODULE
+        if not path.is_file():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("deck_osk_layout", path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules["deck_osk_layout"] = module
+            spec.loader.exec_module(module)
+            return module
+        except Exception as exc:  # a broken core must not cost us navigation
+            print(f"deck-input-mapper: {path} failed to import ({exc}); "
+                  "the on-screen keyboard is DISABLED, navigation still works",
+                  file=sys.stderr, flush=True)
+            return None
+    print(f"deck-input-mapper: {_OSK_MODULE} not found in "
+          f"{', '.join(str(d) for d in OSK_SEARCH_DIRS)}; the on-screen keyboard "
+          "is DISABLED, navigation still works",
+          file=sys.stderr, flush=True)
+    return None
+
+
+osk_layout = _load_osk_layout()
 
 # --- the mapping tables ------------------------------------------------------
 
@@ -165,8 +219,15 @@ STICK_RELEASE = 0.35
 REPEAT_DELAY = 0.40
 REPEAT_INTERVAL = 0.15
 
+# ⚠️ The uinput device declares exactly this set, and emits NOTHING else -- the
+# kernel drops an undeclared code without an error. Every character key the OSK
+# can type therefore has to be in here before a renderer ever draws it, which is
+# why the layout core is imported at module load rather than when the OSK opens.
 EMITTED_KEYS = sorted(
-    set(BUTTON_MAP.values()) | set(HAT_MAP.values()) | set(TRIGGER_BUTTON_MAP.values())
+    set(BUTTON_MAP.values())
+    | set(HAT_MAP.values())
+    | set(TRIGGER_BUTTON_MAP.values())
+    | (set(osk_layout.OSK_KEYCODES) if osk_layout else set())
 )
 EMITTED_RELS = [e.REL_X, e.REL_Y]
 
@@ -520,6 +581,43 @@ def pick_device(selector: str | None) -> InputDevice:
         time.sleep(STEAM_RESCAN_INTERVAL)
 
 
+# A freshly created uinput device is not usable the instant UInput() returns:
+# udev has to process it and the compositor has to open it. Typing immediately
+# lands in a device nothing is reading yet, and every character is lost with no
+# error -- the exact shape of the defects session 17 spent a day on. Measured
+# nowhere yet; 0.4s is the conventional settle used by ydotool and friends, and
+# --type prints what it sent so a human can see the difference.
+UINPUT_SETTLE = 0.4
+
+
+def type_text(text: str, dry_run: bool = False) -> None:
+    """Type `text` through the OSK layout core and exit.
+
+    This exists so the character-emission path can be proven on hardware before
+    a renderer exists (T8 steps 4-5). It needs no pad, no compositor and no
+    cursor: focus a text field, run it, and see whether the text appears.
+    """
+    if osk_layout is None:
+        print("deck-input-mapper: --type needs the OSK layout core, which did "
+              "not load (see the message above)", file=sys.stderr, flush=True)
+        raise SystemExit(2)
+
+    strokes = osk_layout.strokes_for_text(text)  # raises on an unreachable char
+    if dry_run:
+        for code, value in strokes:
+            print(f"emit {e.KEY.get(code, code)} {value}", file=sys.stderr, flush=True)
+        return
+
+    with UInput({e.EV_KEY: EMITTED_KEYS, e.EV_REL: EMITTED_RELS},
+                name="deck-input-mapper virtual keyboard") as ui:
+        time.sleep(UINPUT_SETTLE)
+        for code, value in strokes:
+            ui.write(e.EV_KEY, code, value)
+            ui.syn()
+    print(f"deck-input-mapper: typed {len(strokes)} events for {text!r}",
+          file=sys.stderr, flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--device", help="evdev path or a substring of the device name")
@@ -527,6 +625,8 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="print emissions instead of injecting")
     ap.add_argument("--verbose", action="store_true", help="log every emission to stderr")
     ap.add_argument("--list", action="store_true", help="list input devices and exit")
+    ap.add_argument("--type", metavar="TEXT",
+                    help="type TEXT through the OSK layout and exit (no pad needed)")
     args = ap.parse_args()
 
     if args.list:
@@ -534,6 +634,10 @@ def main() -> None:
             dev = InputDevice(path)
             tag = " [gamepad]" if looks_like_gamepad(dev) else ""
             print(f"{path}  {dev.name}{tag}")
+        return
+
+    if args.type is not None:
+        type_text(args.type, dry_run=args.dry_run)
         return
 
     pad = pick_device(args.device)

@@ -354,14 +354,58 @@ check("left trackpad does not move the pointer",
       mm.pointer_delta(e.ABS_HAT0X, 30000, 0.05), (0, 0))
 
 # --- emitted-keys contract ---------------------------------------------------
+#
+# ⚠️ The sharpest assertion in this suite. A uinput device emits ONLY the codes
+# it declared at creation, and the kernel drops the rest with no error on any
+# side -- so a key missing from here is dead on the Deck and nothing reports it.
+#
+# The navigation set is written out longhand rather than derived from the
+# mapping tables: deriving it would make the assertion agree with whatever the
+# tables happen to say, which is not a contract.
 
-check(
-    "virtual keyboard advertises exactly the mapped keys",
-    sorted(m.EMITTED_KEYS),
-    sorted({e.KEY_ENTER, e.KEY_ESC, e.KEY_SPACE, e.KEY_TAB, e.KEY_PAGEUP,
+NAV_KEYS = {e.KEY_ENTER, e.KEY_ESC, e.KEY_SPACE, e.KEY_TAB, e.KEY_PAGEUP,
             e.KEY_PAGEDOWN, e.KEY_LEFT, e.KEY_RIGHT, e.KEY_UP, e.KEY_DOWN,
-            e.BTN_LEFT, e.BTN_RIGHT}),
+            e.BTN_LEFT, e.BTN_RIGHT}
+
+check("the OSK layout core loaded (without it every character key is absent)",
+      m.osk_layout is not None, True)
+check(
+    "virtual keyboard advertises the navigation keys AND every OSK key",
+    sorted(m.EMITTED_KEYS),
+    sorted(NAV_KEYS | set(m.osk_layout.OSK_KEYCODES)),
 )
+check("it advertises nothing beyond those two sources",
+      sorted(set(m.EMITTED_KEYS) - NAV_KEYS - set(m.osk_layout.OSK_KEYCODES)), [])
+check("the shift modifier is advertised -- capitals are silent without it",
+      e.KEY_LEFTSHIFT in m.EMITTED_KEYS, True)
+# Spot-check a character key by hand, so this cannot pass by both sides being
+# empty: KEY_A is on no navigation path and must arrive purely from the layouts.
+check("a character key made it into the declared set", e.KEY_A in m.EMITTED_KEYS, True)
+
+# --- the missing-core fallback -----------------------------------------------
+#
+# With lizard_mode=N the mapper is the only input path on the device, so a
+# missing layout core must cost the OSK and nothing else. This asserts the
+# search is a real lookup rather than a hardcoded path that happens to exist.
+
+check("the core is searched for beside the script and in the install dir",
+      [p.name for p in m.OSK_SEARCH_DIRS], ["src", "deck-osk"])
+
+import contextlib  # noqa: E402 -- local to this block
+import io  # noqa: E402
+import pathlib as _pathlib  # noqa: E402
+
+_saved_dirs = m.OSK_SEARCH_DIRS
+m.OSK_SEARCH_DIRS = (_pathlib.Path("/nonexistent/deck-osk"),)
+_stderr = io.StringIO()
+with contextlib.redirect_stderr(_stderr):
+    _missing = m._load_osk_layout()
+m.OSK_SEARCH_DIRS = _saved_dirs
+check("a missing core returns None rather than raising", _missing, None)
+check("and says so on stderr rather than failing silently",
+      "DISABLED" in _stderr.getvalue(), True)
+check("and names the module it could not find",
+      "deck_osk_layout.py" in _stderr.getvalue(), True)
 
 # --- device selection: Steam's virtual pad must never be bound ----------------
 #

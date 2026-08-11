@@ -94,9 +94,26 @@ never by trusting this line — it has been stale before.
 
 ✅ **CI is green again.** It was RED while this file claimed otherwise:
 `shellcheck -x` exited 1 on `src/deck-session.sh` (SC2006) and CI's shellcheck
-step has no `|| true`. Fixed in session 17. Now: **5 shell suites (70 assertions
-in `test-deck-session.sh`), the mapper suite at 81 assertions, and
-`shellcheck` exit 0.**
+step has no `|| true`. Fixed in session 17. Now: **8 suites and `shellcheck`
+exit 0** — six shell (`test-deck-session.sh` 70, `test-osk-install-layout.sh`
+12, four VM-helper suites) and two Python (`test-deck-input-mapper.py` 89,
+`test-deck-osk-layout.py` 100). ⚠️ The Python ones are not in the `test-*.sh`
+glob; run both globs.
+
+**Session 18 (2026-08-10) corrected §2.6 and built T8's core.** It found the
+installer row of §2.6 assigning squeekboard to a live ISO that has no Wayland
+compositor at all — a carry-over from the superseded decision, contradicting
+`docs/findings/T2-gamepad-spike.md` §4, which had measured it. Three more stale
+claims went with it (see the §2.6 note and `docs/findings/P17-input-and-osk.md`),
+and **§5.21 is new**: `lizard_mode=N` persists nowhere, so a reboot silently
+removes STEAM+X and Space.
+
+Then **T8 steps 1 and 2**: `src/deck_osk_layout.py` (two layers, split halves,
+hit-testing, three shift states, `strokes_for_text()`), the mapper declaring
+`OSK_KEYCODES` on its uinput device, `deck-input-mapper --type TEXT`, and
+`stage-input-mapper` installing and **verifying** the core by running it.
+⚠️ **None of that has run on the Deck** — the stage now installs a second file
+and that has never executed on hardware.
 
 ### 1.1 Artifacts that live OUTSIDE this repo
 

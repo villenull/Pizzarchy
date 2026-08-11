@@ -1,7 +1,44 @@
 # T8 — the on-screen keyboard we draw ourselves
 
 **Model: Sonnet for the renderers, Opus for the input/layout core.**
-**Status: specified 2026-08-10 (session 17), not started.**
+**Status: specified session 17. STEPS 1 AND 2 DONE (session 18, 2026-08-10).**
+
+> ## Where this stands
+>
+> | Step | State |
+> |---|---|
+> | 1. Layout core + hit-testing + shift layers | ✅ `src/deck_osk_layout.py` |
+> | 2. Character emission in the mapper | ✅ keycodes declared, `--type` types |
+> | 3. Absolute dual-cursor mapping from both pads | ⬜ next, and needs no hardware |
+> | 4. TTY renderer (installer) | ⬜ |
+> | 5. Layer-shell renderer (Desktop Mode) | ⬜ |
+> | 6. Pointer suppression while the OSK is up | ⬜ |
+> | 7. Retire squeekboard from Desktop Mode | ⬜ gated on 5 being proven on hardware |
+>
+> **`src/deck_osk_layout.py`** — two layers (letters, symbols), split into two
+> halves, hit-testing in normalised 0..1 coordinates within a half, three shift
+> states, and `strokes_for_text()`. Every printable ASCII character is reachable
+> and round-trips, asserted against a US-layout table the test owns rather than
+> the module's own. **100 assertions, 12/12 mutations caught.**
+>
+> **The mapper** now folds `OSK_KEYCODES` into `EMITTED_KEYS`. That is the
+> load-bearing half of step 2: a uinput device emits only the codes it declared
+> at creation, so every character key had to be declared before any renderer
+> draws it or they would all be silently dead. Its suite is **89 assertions**.
+>
+> **`deck-input-mapper --type TEXT`** types a string through the layout with no
+> pad, no cursor and no renderer. It exists so a human can point the emission
+> path at a text field and see whether text appears — steps 4–5 are the only
+> way to test it otherwise, and this project has been burned three times by
+> paths that were present, enumerated and silent.
+>
+> **`test/unit/test-osk-install-layout.sh`** (12 assertions) pins the thing
+> nothing else could see: the install directory is derived **twice**, literally
+> in `deck-session.sh` and computed in the mapper, and nothing makes them agree.
+>
+> ⚠️ **NOT YET RUN ON THE DECK.** `stage-input-mapper` now installs a second
+> file and verifies it by running the mapper. That has never executed on
+> hardware. Until it does, the claim is "green on a dev machine".
 
 ## Objective
 
@@ -41,8 +78,8 @@ auto-shows on focus today (`docs/PROGRESS.md` §5.20) and is installed by
 | Buttons → keys, d-pad/stick → arrows with auto-repeat | ✅ done |
 | Right trackpad → pointer, triggers → mouse buttons | ✅ done |
 | STEAM+X chord, queued as an action | ✅ done — currently toggles squeekboard |
-| **Character keys** (letters, digits, symbols, shift) | ❌ **missing — the nav profile deliberately has none** |
-| **A renderer** | ❌ missing |
+| **Character keys** (letters, digits, symbols, shift) | ✅ done — session 18, `src/deck_osk_layout.py` |
+| **A renderer** | ❌ missing — steps 4 and 5, the remaining bulk |
 
 **The chord already lands.** T8 changes what it opens, not how it is detected.
 
@@ -106,10 +143,12 @@ keyboard knows a controller exists — the property that makes one layer drive
 
 ## Steps
 
-1. Layout core + hit-testing + shift layers, with unit tests. No device.
-2. Character emission in the mapper (keycodes + modifiers), unit-tested.
+1. ✅ Layout core + hit-testing + shift layers, with unit tests. No device.
+2. ✅ Character emission in the mapper (keycodes + modifiers), unit-tested.
 3. Absolute dual-cursor mapping from both pads, unit-tested against the
-   measured ranges.
+   measured ranges. **Start here.** The core takes 0..1 within a half already,
+   so this is the mapping from ±32767 to that — and it is the step where T8's
+   first failure mode bites: test both axes moving together.
 4. TTY renderer; drive `iwctl`/`gum` in QEMU with a virtual pad only.
 5. Layer-shell renderer for Desktop Mode; STEAM+X opens **this**, not
    squeekboard.

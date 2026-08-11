@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+"""deck_osk_layout -- the on-screen keyboard's layout core (T8 steps 1-2).
+
+WHAT THIS IS
+    The pure half of `docs/tasks/T8-onscreen-keyboard.md`: a split keyboard
+    layout, hit-testing in normalised coordinates, shift/layer state, and the
+    keystroke sequences to emit. No rendering, no device access, no evdev
+    device -- the same discipline as `Mapper.translate()`, so all of it is
+    testable without a screen or a human.
+
+WHY IT IS A SEPARATE FILE, AND WHY THE NAME HAS UNDERSCORES
+    T8 ships TWO renderers over one core: a bare-TTY one for the installer
+    (which has no compositor at all -- `docs/findings/T2-gamepad-spike.md` §4
+    measured that on the built 4.0 ISO) and a Wayland layer-shell one for
+    Desktop Mode. Two renderers plus `deck-input-mapper.py` make three
+    importers, so the core cannot live inside any of them.
+
+    Everything else in `src/` is hyphenated, which is fine for a script and
+    fatal for a module: `import deck-osk-layout` is a syntax error. This one is
+    imported, so it gets underscores. Do not "fix" it for consistency.
+
+THE MODEL
+    Two halves, left and right, one per trackpad -- both pads report ABSOLUTE
+    position over +/-32767 (measured, R-29..R-31), so a cursor per half is a
+    direct mapping with no delta accumulation. This core does not care: it
+    takes x/y already normalised to 0..1 WITHIN A HALF and answers which key
+    is there.
+
+    Rows are equal height; keys within a row are as wide as their `span`. Row
+    counts are per LAYER (the letters layer has five rows, symbols four), so
+    both halves of one layer always line up visually.
+
+SHIFT
+    Three states, and the distinction is deliberate:
+
+      off     nothing held
+      once    one-shot -- applies to the next key, then clears. Applies to
+              EVERY key, so `1` types `!`.
+      locked  caps lock -- applies to LETTERS ONLY, so `ABC12` is typeable
+              without toggling. This is what a lock key means everywhere else.
+
+    `face()` reports the label under the current state, so the screen never
+    shows a character the next press will not type. That property is the whole
+    reason the label function lives in the core rather than in a renderer.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from evdev import ecodes as e
+
+# --- the pieces --------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Key:
+    """One key. `code` is what it types; action keys type nothing."""
+
+    code: int = 0
+    label: str = ""
+    shift_label: str = ""  # "" -> shift does not change the face
+    action: str = ""  # "" types; else "shift" | "layer" | "close"
+    target: str = ""  # layer name, for action == "layer"
+    span: int = 1
+    is_letter: bool = False  # caps lock applies to these and nothing else
+
+    @property
+    def types(self) -> bool:
+        return not self.action and self.code != 0
+
+
+@dataclass(frozen=True)
+class Layer:
+    """One layer's two halves. Each half is a tuple of rows of keys."""
+
+    name: str
+    left: tuple[tuple[Key, ...], ...]
+    right: tuple[tuple[Key, ...], ...]
+
+    def half(self, half: str) -> tuple[tuple[Key, ...], ...]:
+        if half == "left":
+            return self.left
+        if half == "right":
+            return self.right
+        raise ValueError(f"half must be 'left' or 'right', got {half!r}")
+
+
+# --- layout construction helpers ---------------------------------------------
+#
+# Terse on purpose: the layout tables below are the thing a human reads to
+# check the keyboard, and they only read as a keyboard if one key is one token.
+
+
+def letter(ch: str) -> Key:
+    """A-Z. The only keys caps lock applies to."""
+    return Key(code=getattr(e, f"KEY_{ch.upper()}"), label=ch.lower(),
+               shift_label=ch.upper(), is_letter=True)
+
+
+def sym(code: int, base: str, shifted: str) -> Key:
+    """A key whose two faces are both printable -- digits and punctuation."""
+    return Key(code=code, label=base, shift_label=shifted)
+
+
+def act(action: str, label: str, span: int = 1, target: str = "", code: int = 0) -> Key:
+    """A key that changes state (shift/layer/close) or types a control key."""
+    return Key(code=code, label=label, action=action, target=target, span=span)
+
+
+# --- the layouts -------------------------------------------------------------
+#
+# Read these as a keyboard. Left half is what the LEFT trackpad's cursor moves
+# over, right half the right's; each trigger clicks its own side.
+#
+# The digit row is repeated on both layers deliberately. A Wi-Fi passphrase --
+# the screen this whole task exists for -- mixes digits with everything else,
+# and a spare row costs nothing.
+
+_D = {  # digits, with their US-layout shifted faces
+    "1": sym(e.KEY_1, "1", "!"), "2": sym(e.KEY_2, "2", "@"),
+    "3": sym(e.KEY_3, "3", "#"), "4": sym(e.KEY_4, "4", "$"),
+    "5": sym(e.KEY_5, "5", "%"), "6": sym(e.KEY_6, "6", "^"),
+    "7": sym(e.KEY_7, "7", "&"), "8": sym(e.KEY_8, "8", "*"),
+    "9": sym(e.KEY_9, "9", "("), "0": sym(e.KEY_0, "0", ")"),
+}
+
+DIGITS_LEFT = tuple(_D[c] for c in "12345")
+DIGITS_RIGHT = tuple(_D[c] for c in "67890")
+
+# The function row, shared in shape by both layers so muscle memory carries.
+SHIFT_KEY = act("shift", "shift", span=2)
+CLOSE_KEY = act("close", "close", span=2)
+SPACE_KEY = act("", "space", span=3, code=e.KEY_SPACE)
+TAB_KEY = act("", "tab", code=e.KEY_TAB)
+BACKSPACE_KEY = act("", "back", code=e.KEY_BACKSPACE)
+ENTER_KEY = act("", "enter", code=e.KEY_ENTER)
+
+LETTERS = Layer(
+    name="letters",
+    left=(
+        DIGITS_LEFT,
+        tuple(letter(c) for c in "qwert"),
+        tuple(letter(c) for c in "asdfg"),
+        tuple(letter(c) for c in "zxcvb"),
+        (SHIFT_KEY, act("layer", "?#=", span=2, target="symbols"), TAB_KEY),
+    ),
+    right=(
+        DIGITS_RIGHT,
+        tuple(letter(c) for c in "yuiop"),
+        tuple(letter(c) for c in "hjkl") + (BACKSPACE_KEY,),
+        tuple(letter(c) for c in "nm")
+        + (sym(e.KEY_COMMA, ",", "<"), sym(e.KEY_DOT, ".", ">"), ENTER_KEY),
+        (SPACE_KEY, CLOSE_KEY),
+    ),
+)
+
+# Four rows, not five: with shift covering !@#$%^&*() and _+{}|:"<>? there are
+# exactly eleven unshifted punctuation keys left, and the spare cells go to
+# cursor movement -- which is what fixing a typo mid-passphrase actually needs.
+SYMBOLS = Layer(
+    name="symbols",
+    left=(
+        DIGITS_LEFT,
+        (sym(e.KEY_MINUS, "-", "_"), sym(e.KEY_EQUAL, "=", "+"),
+         sym(e.KEY_LEFTBRACE, "[", "{"), sym(e.KEY_RIGHTBRACE, "]", "}"),
+         sym(e.KEY_BACKSLASH, "\\", "|")),
+        (sym(e.KEY_SLASH, "/", "?"),
+         act("", "left", code=e.KEY_LEFT), act("", "up", code=e.KEY_UP),
+         act("", "down", code=e.KEY_DOWN), act("", "right", code=e.KEY_RIGHT)),
+        (SHIFT_KEY, act("layer", "abc", span=2, target="letters"), TAB_KEY),
+    ),
+    right=(
+        DIGITS_RIGHT,
+        (sym(e.KEY_SEMICOLON, ";", ":"), sym(e.KEY_APOSTROPHE, "'", '"'),
+         sym(e.KEY_GRAVE, "`", "~"), sym(e.KEY_COMMA, ",", "<"),
+         sym(e.KEY_DOT, ".", ">")),
+        (act("", "home", code=e.KEY_HOME), act("", "end", code=e.KEY_END),
+         act("", "del", code=e.KEY_DELETE), BACKSPACE_KEY, ENTER_KEY),
+        (SPACE_KEY, CLOSE_KEY),
+    ),
+)
+
+LAYERS: dict[str, Layer] = {layer.name: layer for layer in (LETTERS, SYMBOLS)}
+INITIAL_LAYER = "letters"
+
+SHIFT_CODE = e.KEY_LEFTSHIFT
+
+# Every keycode this keyboard can emit, shift included.
+#
+# ⚠️ LOAD-BEARING. A uinput device emits ONLY the codes it declared when it was
+# created -- an undeclared code is dropped by the kernel with no error anywhere.
+# `deck-input-mapper.py` folds this into its own EMITTED_KEYS for exactly that
+# reason. If this set drifts from the layouts, the affected keys go silently
+# dead, which is the failure mode CLAUDE.md forbids; `test-deck-osk-layout.py`
+# pins it against the tables.
+OSK_KEYCODES: frozenset[int] = frozenset(
+    [SHIFT_CODE]
+    + [key.code for layer in LAYERS.values()
+       for half in (layer.left, layer.right)
+       for row in half for key in row if key.code]
+)
+
+
+# --- hit-testing (pure) ------------------------------------------------------
+
+
+def key_at(layer: Layer, half: str, x: float, y: float) -> Key | None:
+    """Which key is at (x, y), normalised 0..1 WITHIN that half?
+
+    Returns None outside the half. A cursor is clamped to its half by
+    construction, so None means a caller bug rather than a user miss -- but it
+    is still the honest answer, and silently clamping would hide it.
+    """
+    rows = layer.half(half)
+    if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0) or not rows:
+        return None
+
+    # int() then clamp, rather than rounding: the last row/column owns its
+    # closing edge, so y == 1.0 lands on the bottom row instead of off the end.
+    row = rows[min(int(y * len(rows)), len(rows) - 1)]
+    if not row:
+        return None
+
+    # Integer cell arithmetic, not accumulated float fractions: with spans of
+    # 2 and 3 in the function row, summing x against fractions drifts at the
+    # boundaries and puts a click on the wrong key.
+    cells = sum(key.span for key in row)
+    cell = min(int(x * cells), cells - 1)
+    seen = 0
+    for key in row:
+        seen += key.span
+        if cell < seen:
+            return key
+    return row[-1]  # unreachable while span >= 1; a miss here would be silent
+
+
+# --- the state machine -------------------------------------------------------
+
+
+class OnScreenKeyboard:
+    """Layer + shift state, and the keystrokes a press produces.
+
+    `press()` returns (keycode, value) pairs in the same shape as
+    `Mapper.translate()`, so `deck-input-mapper.py` can feed them to the emit
+    path it already has rather than growing a second one.
+    """
+
+    def __init__(self, layer: str = INITIAL_LAYER) -> None:
+        if layer not in LAYERS:
+            raise ValueError(f"unknown layer {layer!r}")
+        self.layer_name = layer
+        self.shift = "off"  # "off" | "once" | "locked"
+        self.closed = False
+
+    @property
+    def layer(self) -> Layer:
+        return LAYERS[self.layer_name]
+
+    def shift_applies_to(self, key: Key) -> bool:
+        """Is shift in force for THIS key right now?
+
+        `once` is a shift and hits everything. `locked` is a caps lock and hits
+        letters only, so a passphrase can mix capitals and unshifted digits
+        without toggling between them.
+        """
+        if self.shift == "once":
+            return True
+        if self.shift == "locked":
+            return key.is_letter
+        return False
+
+    def face(self, key: Key) -> str:
+        """The label to draw, under the current shift state."""
+        if key.shift_label and self.shift_applies_to(key):
+            return key.shift_label
+        return key.label
+
+    def key_at(self, half: str, x: float, y: float) -> Key | None:
+        return key_at(self.layer, half, x, y)
+
+    def press(self, key: Key | None) -> list[tuple[int, int]]:
+        """Apply a press. Returns the keystrokes to emit, possibly empty."""
+        if key is None:
+            return []
+
+        if key.action == "shift":
+            self.shift = {"off": "once", "once": "locked"}.get(self.shift, "off")
+            return []
+        if key.action == "layer":
+            self.layer_name = key.target
+            return []
+        if key.action == "close":
+            self.closed = True
+            return []
+        if not key.code:
+            return []
+
+        shifted = self.shift_applies_to(key)
+        strokes = [(key.code, 1), (key.code, 0)]
+        if shifted:
+            strokes = [(SHIFT_CODE, 1)] + strokes + [(SHIFT_CODE, 0)]
+        # One-shot shift is spent by the key it modified -- including keys with
+        # no shifted face, which is what makes it a shift rather than a mode.
+        if self.shift == "once":
+            self.shift = "off"
+        return strokes
+
+    def press_at(self, half: str, x: float, y: float) -> list[tuple[int, int]]:
+        """Hit-test and press in one call -- what a renderer's click does."""
+        return self.press(self.key_at(half, x, y))
+
+
+# --- typing text directly, without a renderer --------------------------------
+#
+# Layers are a DISPLAY concern: emission only needs a keycode and whether shift
+# is held, so text can be typed without any cursor, layer switching or screen.
+#
+# This exists so the emission path is verifiable before a renderer exists --
+# `deck-input-mapper --type` drives it. Session 17 cost nine defects to the
+# pattern of a path that was present, enumerated and silent, and this is the
+# cheapest way to point a human at the real one and ask whether text appeared.
+
+
+def find_face(ch: str) -> tuple[int, bool] | None:
+    """Which (keycode, shifted) types `ch`? None if the layout cannot."""
+    shifted_hit = None
+    for layer in LAYERS.values():
+        for half in (layer.left, layer.right):
+            for row in half:
+                for key in row:
+                    if not key.types:
+                        continue
+                    if key.label == ch:
+                        return (key.code, False)  # prefer the unshifted face
+                    if key.shift_label == ch and shifted_hit is None:
+                        shifted_hit = (key.code, True)
+    return shifted_hit
+
+
+def strokes_for_text(text: str) -> list[tuple[int, int]]:
+    """Every keystroke needed to type `text`. Raises on an unreachable char.
+
+    Raising rather than skipping is the point: a passphrase silently missing a
+    character is a device that will not join the network, with nothing on
+    screen or in a log to say why.
+    """
+    out: list[tuple[int, int]] = []
+    for ch in text:
+        if ch == " ":
+            found: tuple[int, bool] | None = (e.KEY_SPACE, False)
+        else:
+            found = find_face(ch)
+        if found is None:
+            raise ValueError(f"no key in any layer types {ch!r}")
+        code, shifted = found
+        if shifted:
+            out.append((SHIFT_CODE, 1))
+        out += [(code, 1), (code, 0)]
+        if shifted:
+            out.append((SHIFT_CODE, 0))
+    return out

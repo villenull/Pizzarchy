@@ -228,13 +228,21 @@ work without waiting for further instruction.**
 > ### There are now unit tests. Run them before and after touching `src/`.
 >
 > ```bash
-> for f in test/unit/test-*.sh; do ./"$f"; done   # 5 suites, seconds, no VM
+> for f in test/unit/test-*.sh; do ./"$f"; done; for f in test/unit/test-*.py; do python3 "$f"; done
 > ```
 >
-> (That glob is the 5 shell suites; `test/unit/test-deck-input-mapper.py` is a
-> sixth and is **not** in it — run it separately. It is now **81 assertions**,
-> and session 17 rewrote a chunk of it: the old d-pad tests asserted a device
-> model this hardware does not have.)
+> **8 suites, seconds, no VM.** ⚠️ That is *two* globs — the shell one alone
+> misses both Python suites, which is where the input layer's coverage lives.
+> Six shell suites (`test-deck-session.sh` at **70 assertions**,
+> `test-osk-install-layout.sh` at **12**, four VM-helper suites) and two Python
+> ones: `test-deck-input-mapper.py` at **89** and `test-deck-osk-layout.py` at
+> **100**.
+>
+> Session 17 rewrote a chunk of the mapper suite (the old d-pad tests asserted a
+> device model this hardware does not have). Session 18 added the OSK layout
+> core's suite, **mutation-tested 12/12**, plus five more mutations across the
+> mapper and the install path — **two of which survived the first attempt** and
+> were real coverage gaps, not test-writing noise.
 >
 > `test/unit/test-deck-session.sh` is now **70 assertions** covering all five
 > generated files — the `steamos-update` stub's exit-code protocol, the
