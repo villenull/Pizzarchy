@@ -47,6 +47,64 @@ all 404** as of this measurement.
    **after** it. So beta 2 was cut at or very near the same builder commit we
    already used. The two images are close relatives, hours apart.
 
+### 1a. Our ISO vs beta 2: identical size, different bytes almost everywhere
+
+Measured 2026-08-11, **without downloading the image**, by two cheap tests:
+
+| Test | Result |
+|---|---|
+| Byte size | **Identical: 6,390,581,248 both.** `~/ISOs/omarchy-2026.08.10-x86_64-quattro.iso` and upstream's beta 2 agree to the byte |
+| S3 multipart ETag, reproduced locally at 5 MiB parts | **1219 parts — matches upstream's part count exactly**, confirming the part size and the size. Hash does **not** match: ours `226f2963…-1219`, upstream `e55e5c58…-1219` |
+| 24 × 64 KiB windows fetched by HTTP `Range` and compared against ours | **23 of 24 differ.** Only the window at offset 266,274,218 is identical |
+
+**So the two images are the same size to the byte and different in content
+nearly everywhere** — the signature of the same inputs built twice. That was a
+hypothesis at this point, and it was **tested by unpacking both images and
+diffing their package manifests. It held.**
+
+### ✅ 1b. RESOLVED — we were already on beta 2, and our build is slightly newer
+
+Full evidence: **`docs/findings/T9-iso-comparison.md`.** The headline:
+
+| | upstream beta 2 | our local build |
+|---|---|---|
+| `omarchy-dev` / `omarchy-settings-dev` | **`4.0.0.r1617.g6d7826d-1`** | **`4.0.0.r1617.g6d7826d-1`** |
+| `basecamp/omarchy` commit | **`6d7826d`** (2026-08-10 12:53 UTC, *"Give non-login shells the system locale"*) | **`6d7826d`** |
+| package channel | **`edge`** | **`edge`** |
+| `omarchy-iso` builder commit | **`a12bfea`** | **`a12bfea`** |
+| offline repo | 1244 packages | 1244 packages, **none exclusive to either** |
+| squashfs sealed | 2026-08-10 **13:35** UTC | 2026-08-10 **15:24** UTC |
+
+**Same Omarchy commit, same channel, same builder.** The entire difference is
+**7 stock Arch package rebuilds** (six of them pure `pkgrel` bumps) plus a
+`__pycache__/` directory — and **ours carries the newer ones**, because our
+squashfs was sealed ~2 hours *later* despite upstream publishing afterwards.
+All `omarchy-*` and `limine*` rows are identical, and 20 installer/config files
+compared byte-for-byte are identical.
+
+🔥 **Therefore the premise of phase 2.9 was wrong in our favour: the "rebase
+onto beta 2" had already happened.** The Deck was installed on 2026-08-10 from
+our ISO, so — pending one `omarchy-version` read when it is next powered on —
+**the Deck is already running beta 2's exact Omarchy commit.** P2.9c's rebuild
+would reproduce a file we have; it is skipped, with this as the reason.
+
+⚠️ **One provenance-only difference:** `/root/omarchy_iso_ref` is `edge`
+upstream and **`quattro`** in ours. That is a git *ref name* exported as
+`OMARCHY_ISO_REF`, not a package source; `omarchy_mirror` is `edge` in both.
+⚠️ **No commit sha is stamped inside either ISO** — the builder commit was
+pinned by content-diffing files that `a12bfea` touched, not read from a stamp.
+
+**Both facts that had to be re-confirmed on a new image survived**, and one got
+stronger: the live environment has **no `libwayland-*.so` at all** — not merely
+no compositor — so T8's draw-our-own-OSK premise holds; and the installer still
+defaults to LUKS2 (`root/configurator` line 601, unencrypted hidden behind
+Ctrl+C), so §5.12 stands.
+
+*(Method, reproducible without a download:
+`/tmp/.../scratchpad/etag.py` computes an S3 multipart ETag at a given part
+size; `rangecmp.py` pulls N windows over HTTP `Range` and diffs them against a
+local file. Both are cheap enough to run before committing to 6 GB.)*
+
 ### ⚠️ The consequence that changes the plan: beta 2 ≠ today's `edge`
 
 `quattro` HEAD is now **~24 hours and ~30 commits ahead of beta 2**, and `edge`

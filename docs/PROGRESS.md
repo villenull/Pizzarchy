@@ -256,7 +256,8 @@ missing will waste an hour rebuilding them.
 
 | Artifact | Where | Notes |
 |---|---|---|
-| **Omarchy 4.0 beta ISO** | `~/ISOs/omarchy-2026.08.10-x86_64-quattro.iso` | 6.0 GB, built 2026-08-10 from `omarchy-iso` **`a12bfea`**, `.sha256` alongside. **This is P1.4's ISO** — copy to the Ventoy stick. ⚠️ **Superseded at P2.9c**; the builder is already 4 commits ahead and one of them renames the finalizer it calls (§5.22). Rebuild flags: §3.10 |
+| **Omarchy 4.0 beta ISO (ours)** | `~/ISOs/omarchy-2026.08.10-x86_64-quattro.iso` | 6,390,581,248 B, built 2026-08-10 from `omarchy-iso` **`a12bfea`**, sha256 `fbc87422…df03b`. **This is P1.4's ISO** — the one on the Ventoy stick. Rebuild flags: §3.10 |
+| 🆕 **Omarchy Quattro beta 2 (upstream's)** | `~/ISOs/omarchy-quattro-beta2.iso` | Downloaded 2026-08-11 with operator approval from `https://iso.omarchy.org/omarchy-quattro-beta2.iso`. 6,390,581,248 B — **the same byte count as ours** — Last-Modified 2026-08-10 13:44:37 UTC. sha256 `8dda1034…1b4a`, **ours, computed after download; upstream publishes no checksum** (§5.22). Content differs from ours in 23 of 24 sampled windows despite the equal size |
 | **QEMU substrate image** | `test/images/neptune-substrate.raw` | 14 GB apparent / ~2.9 GB sparse, gitignored. Every `test/vm/` suite uses it; rebuilt automatically by `test/images/vm-neptune-image.sh` if absent (~6 min) |
 | **`omarchy-iso` scratch clone** | session scratch — **will be lost** | Had two local deviations worth reapplying if rebuilding: `--network host` on the Docker run (§7's bridge throttle) and a scratch pacman cache instead of the host's (§3.10 item 3) |
 
@@ -1596,6 +1597,11 @@ measured in §5.9 / R-29:
   precisely what archinstall's multi-select needs. This is the reason the mapper
   exists.
 
+✅ **CONFIRMED IN THE FIELD 2026-08-11** — the operator power-cycled the Deck and
+reported STEAM+X dead on first startup, exactly as predicted below. See §5.23.
+It also blocks the new STEAM/QAM menu bindings requested there: **one fix closes
+both.**
+
 ⚠️ **It is a degradation, not a brick.** With lizard mode back on, the firmware
 supplies its own pointer, Enter, Esc, Tab and arrows, so the Deck stays usable —
 which is exactly why nothing has noticed. The failure is silent and partial, the
@@ -1627,7 +1633,28 @@ release run has one moving variable instead of two.
 `docs/findings/T9-beta2-delta.md`. Ordering: `docs/ROADMAP.md` phase 2.9
 (P2.9a–P2.9g).**
 
-### The pin — ✅ the artifact is identified. P2.9a fills in the rest.
+### 🔥 RESOLVED 2026-08-11 — we were ALREADY on beta 2, and our build is newer
+
+**Measured by unpacking both ISOs and diffing their manifests**
+(`docs/findings/T9-iso-comparison.md`). Upstream's beta 2 and our 2026-08-10
+build carry the **same `omarchy-dev 4.0.0.r1617.g6d7826d-1`**, the **same
+`basecamp/omarchy` commit `6d7826d`**, the **same `edge` channel** and the
+**same `omarchy-iso` builder `a12bfea`**. 1244 packages each, none exclusive to
+either; the whole difference is **7 stock Arch rebuilds** — and **ours are the
+newer ones**, our squashfs having been sealed 15:24 UTC against their 13:35.
+
+**So "rebase onto beta 2" was already done before it was proposed.** The Deck
+was installed from our ISO on 2026-08-10, so it is running `6d7826d` too —
+**confirm with one `omarchy-version` when it is next on**, then P2.9e is a
+verification, not a migration. **P2.9c's rebuild is skipped**, and this is the
+reason.
+
+⚠️ **The real drift is what comes NEXT.** `6d7826d` → `quattro` HEAD is **36
+commits / 85 files** (and HEAD moved again mid-measurement). That range —
+*not* beta 1 → beta 2 — is what the classification below actually covers, and
+it contains one **BREAKS US** row (see the end of this section).
+
+### The pin — ✅ resolved by measurement
 
 **Beta 2 is a published, unlisted ISO** (found 2026-08-11 by probing
 `iso.omarchy.org`; the r/omarchy thread the operator cited **could not be
@@ -1640,9 +1667,9 @@ browser**):
 | Size / stamp | **6,390,581,248 B (5.95 GiB), 2026-08-10 13:44:37 UTC** |
 | Upstream checksum | **none published** — `.sha256` 404s; the ETag is an S3 multipart hash, not usable for integrity |
 | Beta 1, for comparison | `omarchy-quattro-beta1.iso`, 6,371,614,720 B, 2026-08-05 21:12:44 UTC |
-| `omarchy-iso` SHA it was cut from | *(unrecorded — bracketed after `a12bfea` 11:30, before `e5f2b46` 16:19)* |
-| `basecamp/omarchy` SHA inside it | *(unrecorded — read from the image)* |
-| Channel it carries — mirror **and** pkgs | *(unrecorded)* |
+| `omarchy-iso` SHA it was cut from | ✅ **`a12bfea`** — pinned by content-diff, because **no commit sha is stamped anywhere inside either ISO** |
+| `basecamp/omarchy` SHA inside it | ✅ **`6d7826d`** = `omarchy-dev 4.0.0.r1617.g6d7826d-1`, 2026-08-10 12:53 UTC |
+| Channel it carries — mirror **and** pkgs | ✅ **`edge`** on both sides (`pkgs.omarchy.org/edge` + `mirror.omarchy.org`). ⚠️ `/root/omarchy_iso_ref` differs (`edge` theirs, `quattro` ours) — provenance only, no package-source effect |
 
 ⚠️ **The name still identifies nothing.** No 4.0 tag, no GitHub release, the
 `version` file on `quattro` is **still `4.0.0.alpha`** (never bumped for beta 1
@@ -1711,6 +1738,134 @@ here plainly that phase 3's install is no longer the first from this ISO.
 ⚠️ **This does not replace P3.6** (rebase onto 4.0 *stable*). It makes P3.6 the
 second run of a known procedure instead of the first, on a step that gates the
 release.
+
+### What the delta actually contains — **1 BREAKS US, 27 RE-VERIFY, 37 NO IMPACT**
+
+Full table, one row per changed non-test file with the patch hunk behind each
+verdict: **`docs/findings/T9-delta-classification.md`**. Because we are already
+on beta 2, this range is **`6d7826d` → `quattro` HEAD** — i.e. **what a move to
+edge, or eventually to stable, would bring**, not what we already have.
+
+🔴 **BREAKS US — `shell/plugins/lock/Service.qml` gained stranded-lock
+recovery.** When `omarchy-hyprland-session-locked` (new binary) exits 0 and PAM
+is configured, `recoverStrandedLock()` calls **`beginLock()` directly — it never
+reads `idle.lock`.** Our entire idle neutering (`src/deck-session.sh:180-197`,
+lock 86400 s) exists so this handheld can never be shown a password prompt it
+cannot answer; **that guarantee becomes insufficient by construction.** Worse,
+`ext-session-lock` renders above every layer surface, so `src/deck_osk_wayland.py`
+— our on-screen keyboard — would be **invisible underneath it**: keystrokes land
+where the user cannot see them. It is armed from three places plus a
+500 ms × 20 retry timer, and `bin/omarchy-launch-shell` now relaunches the shell
+up to 5×/min, re-running the check each time.
+
+**This is the strongest argument yet for staying pinned at beta 2 rather than
+tracking edge** — beta 2 predates it. It will arrive with stable, so **P3.6
+must confront it**, and the way to test it is to provoke it (kill quickshell
+while locked), not to read the QML and conclude it looks fine.
+
+Other rows that need a human when we do move — 🔴 six of the 27:
+`omarchy-hyprland-session-locked` (the sensor above) · `omarchy-launch-shell`
+(the supervisor that multiplies it) · **`default/hypr/bindings/utilities.lua`,
+which now globally binds RETURN/TAB/CTRL variants and all four arrows — 6 of
+the 10 keys `src/deck-input-mapper.py:133-159` emits, up from 1** ·
+`default/bash/envs` exporting the system locale to **non-login shells, which is
+our SSH loop**, meeting a sudoers-glob ordering assumption at
+`src/deck-session.sh:1601-1606` · `omarchy-hyprland-monitor-watch`'s new
+`hyprctl reload` backoff loop on a single-display device, active across the
+§5.18 switch window · the Bluetooth migration.
+
+**Proved absent, stated as negatives** (worth as much as the positives): the
+**boot chain is untouched** — every `limine|mkinitcpio|snapper|uki` hit in the
+range is a *deletion* from a removed code path, and `src/omarchy-deck-kernel.sh`
+has no row in the table at all. The greeter's `default/sddm/hyprland.lua`
+**sha256 is identical at both refs and still equals `UPSTREAM_GREETER_SHA256`**
+(`src/deck-session.sh:334`), so our drift alarm correctly stays silent.
+`steamos|gamescope|steam` and `squeekboard|osk`: **zero hits.** Both OSK
+GSettings: clear — though still verify with `dconf read -d`, since a package
+outside this range can ship a new default.
+
+⚠️ **One row lands on phase 3, not here:** `omarchy-system-factory-reset` **deleted
+its degraded path — a machine without a `@factory` snapshot is now refused.**
+Check that before P3.1 assumes the factory reset will run.
+
+---
+
+## 5.23 🆕 Three first-boot behaviours the operator hit (reported 2026-08-11)
+
+**Operator field report, session 19, on the Deck after a power cycle.** Two are
+already-diagnosed items whose *predicted* symptom has now been **observed**; the
+third is a new requirement. They share one root: **the Deck is carrying
+hand-tuned state that does not survive a boot**, and the product promises
+behaviour that only a built image can deliver.
+
+### 1. First startup lands on the DESKTOP, not Gaming Mode
+
+**Not a defect — the stage that flips it has deliberately never been run.**
+`./src/deck-session.sh stage-default-session` ("make Gaming Mode the default —
+do this last") was held back on purpose so that iteration lands somewhere with a
+shell (`docs/START-HERE.md`, and the P1.5 exit notes). Running it is one
+command and needs operator approval like any Deck write.
+
+⚠️ **But the operator experienced it as a bug, and that is the useful signal.**
+The product's promise is "boots to Gaming Mode like stock SteamOS"; a fresh
+install from our ISO must do that with nobody running a stage afterwards.
+**T5 owes the default session in the image** — add it to P2.7's bake-in list
+beside the two rotations, `99-deck-testing`'s exclusion and the three session
+settings (§5.20). Nothing tests this today.
+
+### 2. STEAM+X does not raise the keyboard on first startup
+
+**This is §5.21, observed.** That section predicted exactly this: `lizard_mode`
+is a module parameter, a reboot restores `Y`, and with lizard mode on
+**`BTN_MODE` reaches no evdev node at all**, so the chord cannot be detected —
+the OSK toggle is unreachable, and `Y → KEY_SPACE` is gone with it. The Deck was
+last recorded at `N`, set by hand, and the session-exit note said powering off
+would revert it. It did.
+
+**Upgrade §5.21 from "predicted" to "confirmed in the field."** The fix is still
+the one §5.21 describes and still needs the operator present: persisting `N`
+makes the mapper the *only* input path, so any implementation owes a fallback
+that restores `Y` when the mapper is not running.
+
+### 3. 🆕 REQUEST — STEAM should open the apps menu, QAM the Omarchy menu
+
+Operator request for Desktop Mode: **STEAM button → the apps menu**, **QAM
+button → the menu that lives at the top-left of the bar** (Omarchy's own menu).
+
+**Upstream already exposes both as commands** — measured from `quattro`'s
+`default/hypr/bindings/utilities.lua`, 2026-08-11:
+
+| Want | Upstream command | Its stock keybind |
+|---|---|---|
+| Apps menu | `omarchy-menu toggle apps` | `SUPER + ALT + SPACE` |
+| The bar's top-left menu | `omarchy-menu toggle` (root) | `SUPER + SPACE` |
+
+**Do it by exec'ing `omarchy-menu`, not by synthesising `SUPER+ALT+SPACE`.**
+The mapper already spawns helper processes (it drives squeekboard over
+`busctl`), and a synthesised chord depends on the user's keybinds being
+unchanged — which upstream edited in this very delta. Exec is deterministic;
+the coupling becomes `omarchy-menu`'s subcommand names, which is narrower and
+fails loudly.
+
+⚠️ **Two things gate this, and one is unmeasured:**
+
+1. **Both buttons need `lizard_mode=N`** — the same knob as item 2. Lizard mode
+   swallows STEAM and QAM entirely. **One fix (§5.21) closes items 2 and 3
+   together**; without it, neither button exists to bind.
+2. 🔴 **QAM's evdev code has never been measured.** Every recorded map says
+   only that lizard mode swallows it; `src/deck-input-mapper.py` references
+   `BTN_MODE` for STEAM and nothing for QAM. **One `evtest` press with lizard
+   mode off answers it** — do it in the same hands-on pass as §5.21's fix
+   rather than as its own trip.
+
+Also note **STEAM is already the chord's hold key** (STEAM+X toggles the OSK).
+Binding STEAM *alone* to the apps menu means distinguishing tap from
+hold-then-X — i.e. fire on release, only if no chord partner was pressed. That
+is a real state-machine change in the mapper, unit-testable without hardware.
+
+**Where this lands:** P2.4 (shell integration) already carries "QAM/Power-menu
+placement" as open work; this is that row, now specified. The mapper half is
+Deck-free and can be written and tested before the hands-on pass.
 
 ---
 

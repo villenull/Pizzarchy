@@ -13,23 +13,39 @@ work without waiting for further instruction.**
 > `docs/findings/T9-beta2-delta.md`. Ordering: `docs/ROADMAP.md` phase 2.9
 > (P2.9a–P2.9g). Decision record: `docs/PROGRESS.md` §5.22.
 >
-> ✅ **Beta 2 is a published, unlisted ISO:**
-> `https://iso.omarchy.org/omarchy-quattro-beta2.iso` — 6,390,581,248 B, stamped
-> **2026-08-10 13:44:37 UTC**, **no upstream checksum** (`.sha256` 404s; the
-> ETag is an S3 multipart hash and proves nothing). omarchy.org's own download
-> link still points at 3.8.4.
+> 🔥 **RESOLVED THE SAME DAY, AND THE PREMISE WAS WRONG IN OUR FAVOUR: WE WERE
+> ALREADY ON BETA 2.** Both ISOs were unpacked and their manifests diffed
+> (`docs/findings/T9-iso-comparison.md`). Upstream's
+> `https://iso.omarchy.org/omarchy-quattro-beta2.iso` (unlisted, **no published
+> checksum**) and our 2026-08-10 build carry the **same
+> `omarchy-dev 4.0.0.r1617.g6d7826d-1`**, the same `basecamp/omarchy` commit
+> **`6d7826d`**, the same **`edge`** channel, the same builder **`a12bfea`** —
+> 1244 packages each, **none exclusive to either**, differing only in 7 stock
+> Arch rebuilds **that ours carries the newer of**. The Deck was installed from
+> our ISO, so it is on `6d7826d` too — **confirm with one `omarchy-version`**
+> when it is next powered on.
 >
-> 🔥 **It is NOT what `omarchy-update` installs.** `quattro` HEAD is ~24 h and
-> **~30 commits ahead** of that ISO, and `edge` tracks HEAD within minutes, so
-> an unpinned update **overshoots beta 2**. Beta 2 (fixed, what users get) and
-> edge HEAD (moves daily) are different targets — P2.9a picks one *and writes it
-> down*. The name identifies nothing on its own: no 4.0 tag, no release,
-> `version` on `quattro` still `4.0.0.alpha`, versions are git-describes.
+> **P2.9a ✅ P2.9b ✅ P2.9c 🟡 (rebuild skipped, with cause).** Both facts that
+> were measured *from an image* survived re-confirmation: no Wayland compositor
+> in the live environment (stronger — **no `libwayland-*.so` at all**) and the
+> LUKS2 installer default (§5.12).
 >
-> ⚠️ **Our own ISO is a sibling, not an ancestor.** Ours: `omarchy-iso`
-> `a12bfea`, 2026-08-10 11:30 UTC. Beta 2: 13:44 UTC the same day, before the
-> builder's next commit. If they match on inspection, **skip the rebuild** —
-> reproducing a file we already have proves nothing.
+> 🔴 **What the block actually bought: the delta AHEAD of us.** `6d7826d` →
+> `quattro` HEAD is 36 commits, classified in
+> `docs/findings/T9-delta-classification.md` — **1 BREAKS US, 27 RE-VERIFY, 37
+> NO IMPACT.** The BREAKS US is `shell/plugins/lock/Service.qml`: a new
+> stranded-lock recovery path calls `beginLock()` **without reading
+> `idle.lock`**, so our idle neutering stops guaranteeing this handheld can
+> never face an unanswerable password prompt — and `ext-session-lock` renders
+> **above** our OSK's layer surface, so keystrokes would land where nobody can
+> see them. **That is the argument for staying pinned at beta 2 and not
+> tracking edge.** It arrives with stable, so P3.6 must confront it.
+>
+> ⚠️ Also ahead of us: `default/hypr/bindings/utilities.lua` now globally binds
+> RETURN, TAB and **all four arrows** — 6 of the 10 keys the mapper emits, up
+> from 1. And `omarchy-system-factory-reset` **deleted its degraded path**: a
+> machine with no `@factory` snapshot is now refused, which P3.1 assumes it can
+> do.
 >
 > ⚠️ **Quattro may ship stable THIS WEEK** (the thread that surfaced beta 2 says
 > so). If it does, phase 2.9 and P3.6 are one rebase, not two. Decide before

@@ -1153,17 +1153,26 @@ stage_timezone_helper() {
 
   # --- the sudoers grant ---
   #
-  # omarchy-settings-dev ALREADY ships an equivalent rule, found on this
-  # hardware in /etc/sudoers.d/omarchy-tzupdate:
+  # omarchy-settings-dev ALREADY ships an equivalent rule in
+  # /etc/sudoers.d/omarchy-tzupdate, and the desktop user is in wheel, so this
+  # helper would work with no grant of our own. We install one anyway,
+  # deliberately: that file belongs to a package on a beta distro, and if it
+  # changed the picker would go back to failing silently -- the exact defect
+  # this stage exists to remove, in a place nobody would look. Duplicating one
+  # narrow rule is cheap; sudo takes the last match and both say the same thing.
+  #
+  # ⚠️ THAT ARGUMENT WAS PROVEN RIGHT IN FOUR DAYS. Measured on this hardware
+  # 2026-08-10, upstream's file read:
   #
   #   %wheel ALL=(root) NOPASSWD: /usr/bin/tzupdate, /usr/bin/timedatectl set-timezone *
   #
-  # and the desktop user is in wheel, so this helper would work with no grant
-  # of our own. We install one anyway, deliberately: that file belongs to a
-  # package on a beta distro, and if it changed the picker would go back to
-  # failing silently -- the exact defect this stage exists to remove, in a
-  # place nobody would look. Duplicating one narrow rule is cheap; sudo takes
-  # the last match and both say the same thing.
+  # and upstream dropped the tzupdate half on 2026-08-11 (basecamp/omarchy
+  # #6694, "Fix command injection in theme install, drop tzupdate NOPASSWD"):
+  #
+  #   %wheel ALL=(root) NOPASSWD: /usr/bin/timedatectl set-timezone *
+  #
+  # The half this stage depends on survived, so nothing here breaks -- but the
+  # dependency was real and it moved. See PROGRESS.md 5.22.
   local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
   [[ -n $invoking_user && $invoking_user != root ]] ||
     fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
