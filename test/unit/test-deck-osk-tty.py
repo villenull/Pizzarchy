@@ -320,7 +320,160 @@ check("the last row that fits exactly is allowed",
 check("with no console_rows given, nothing is checked -- callers opt in",
       (tty.write_at(io.StringIO(), rows, 9999), True)[1], True)
 
+# --- rows_on_screen: COUNT the rows, never grep for a word (R-49, R-52) ------
+#
+# ⚠️ This is the assertion primitive both failures needed and neither had.
+# R-49: `stty rows` shrank the console, the kernel clamped all five keyboard
+# rows onto the last line, and the garbled result still contained `shift`.
+# R-52: a full-screen curses TUI repainted every line but the last, leaving
+# exactly the function row -- which is the row `shift` is on. Both look like a
+# keyboard to a substring check. Only the count tells them apart.
+
+kb, cur = fresh()
+rows = tty.render(kb, cur)
+KB_WIDTH = tty.width(rows)
+CONSOLE_W, CONSOLE_H = 80, 25
+
+
+def console(lines: dict[int, str]) -> str:
+    """A `CONSOLE_H` x `CONSOLE_W` screen, as /dev/vcsN folded gives it."""
+    return "\n".join(lines.get(n, "").ljust(CONSOLE_W)[:CONSOLE_W]
+                     for n in range(1, CONSOLE_H + 1))
+
+
+def drawn_at(top: int, source=None) -> dict[int, str]:
+    """The keyboard painted with its first line at `top`, 1-based."""
+    body = tty.to_plain(source if source is not None else rows).split("\n")
+    return {top + offset: line for offset, line in enumerate(body)}
+
+
+check("a clean draw is found on exactly the rows it was drawn on",
+      tty.rows_on_screen(console(drawn_at(20)), rows), [20, 21, 22, 23, 24])
+check("a blank console carries no keyboard rows",
+      tty.rows_on_screen(console({}), rows), [])
+check("neither does one full of somebody else's TUI",
+      tty.rows_on_screen(console({n: f"MENU LINE {n:02d} " + "-" * 60
+                                  for n in range(1, CONSOLE_H + 1)}), rows), [])
+
+# ⚠️ R-49's EXACT SHAPE. Five rows written to one line, each overwriting the
+# last -- which is what the kernel does when they fall past the end of the
+# console. The word survives; the keyboard does not.
+clamped = console({CONSOLE_H: tty.to_plain(rows).split("\n")[-1]})
+check("R-49's clamp is ONE row, not five", len(tty.rows_on_screen(clamped, rows)), 1)
+check("...while the word `shift` is still right there on it -- the lie",
+      "shift" in clamped, True)
+
+# ⚠️ R-52's EXACT SHAPE, measured in QEMU. A full-screen TUI repaints every
+# line except the console's last, so four keyboard rows die and the function
+# row lives. Same lie, different cause.
+partial = drawn_at(CONSOLE_H - len(rows) + 1)
+for line in range(1, CONSOLE_H):
+    partial[line] = f"MENU LINE {line:02d} PASS 01 " + "-" * 50
+check("a TUI repainting all but the last line leaves ONE row",
+      len(tty.rows_on_screen(console(partial), rows)), 1)
+check("...and that surviving row still carries `shift`", "shift" in console(partial), True)
+
+# ⚠️ AND THE SHAPE THE MEASUREMENT ACTUALLY TOOK, which is nastier than the one
+# above and was not the one predicted. ncurses repaints by diffing against its
+# own model of the physical screen, and that model has never heard of us -- so
+# a "full repaint" rewrote only the cells whose content changed and punched a
+# SINGLE CHARACTER through each keyboard row. Every row still reads as a
+# keyboard to a human and to a grep; one key per row now types something other
+# than what it draws.
+punched = drawn_at(20)
+for line in range(20, 25):
+    punched[line] = punched[line][:17] + "1" + punched[line][18:]
+check("one character punched through each row leaves NO intact row",
+      tty.rows_on_screen(console(punched), rows), [])
+check("...while `shift` is still on the screen, untouched",
+      "shift" in console(punched), True)
+check("...and each row differs from an intact one by exactly ONE character",
+      sum(a != b for a, b in zip(punched[24], drawn_at(20)[24])), 1)
+
+# The cursors move between a render and a console read. A row whose highlight
+# sits elsewhere is still that row -- otherwise every count would be a race.
+kb_moved, cur_moved = fresh()
+cur_moved.update(e.ABS_HAT0X, MIN)
+cur_moved.update(e.ABS_HAT0Y, MAX)
+cur_moved.update(e.ABS_HAT1X, MAX)
+cur_moved.update(e.ABS_HAT1Y, MAX)
+moved = tty.render(kb_moved, cur_moved)
+check("the highlight having moved does not lose a row",
+      tty.rows_on_screen(console(drawn_at(20, moved)), rows), [20, 21, 22, 23, 24])
+check("and the two renders really do differ, so that was not vacuous",
+      tty.to_plain(moved) == tty.to_plain(rows), False)
+
+# Partial damage is the whole point: one overwritten cell is not a row.
+damaged = drawn_at(20)
+damaged[22] = "XXXXXXX" + damaged[22][7:]
+check("a row with its FIRST cell overwritten does not count",
+      tty.rows_on_screen(console(damaged), rows), [20, 21, 23, 24])
+
+# ⚠️ And the last cell too, separately. A check that stopped after the first
+# cell would pass the test above and miss a keyboard whose right-hand half a
+# TUI had eaten -- which is half the screen, and the half `enter` is on.
+tail_damaged = drawn_at(20)
+tail_damaged[22] = tail_damaged[22][:KB_WIDTH - 7] + "XXXXXXX"
+check("a row with its LAST cell overwritten does not count either",
+      tty.rows_on_screen(console(tail_damaged), rows), [20, 21, 23, 24])
+
+# The keyboard is 73 columns; the other 7 are not its business.
+beside = drawn_at(20)
+beside[22] = beside[22][:KB_WIDTH].ljust(KB_WIDTH) + " TUI"
+check("text to the RIGHT of the keyboard does not disqualify the row",
+      tty.rows_on_screen(console(beside), rows), [20, 21, 22, 23, 24])
+
+# A console too narrow to hold a row truncates it, and a truncated row must not
+# be padded back into a match -- that would invent a keyboard that is not there.
+narrow = "\n".join(tty.to_plain(rows).split("\n")[i][:KB_WIDTH - 1] for i in range(len(rows)))
+check("a row cut off by a narrow console does not count",
+      tty.rows_on_screen(narrow, rows), [])
+
+# Offsets. A row found on line 1 must report 1, not 0.
+check("line numbering is 1-based, like every console coordinate here",
+      tty.rows_on_screen(console(drawn_at(1)), rows), [1, 2, 3, 4, 5])
+
+# The symbols layer puts `[` and `]` on real keys, which is exactly where a
+# naive "strip the highlight brackets" reader goes wrong.
+kb_sym, cur_sym = fresh()
+kb_sym.press_at("left", 0.5, 0.9)
+sym_rows = tty.render(kb_sym, cur_sym)
+check("the symbols layer round-trips too, bracket keys and all",
+      tty.rows_on_screen(console(drawn_at(20, sym_rows)), sym_rows), [20, 21, 22, 23])
+check("a bracket KEY reads as its face, not as an empty highlight",
+      tty.face_of(tty.cell_text("[", tty.KEY_CELL, False)), "[")
+check("and so does a highlighted one",
+      tty.face_of(tty.cell_text("[", tty.KEY_CELL, True)), "[")
+check("a highlighted cell and a plain one report the same face",
+      tty.face_of(tty.cell_text("space", 15, True)),
+      tty.face_of(tty.cell_text("space", 15, False)))
+
+# ⚠️ A HIGHLIGHT IS BOTH BRACKETS OR IT IS NOT A HIGHLIGHT. One of them is
+# somebody else's, and TUIs draw brackets constantly -- `[x]` checkboxes, `[1]`
+# menu indices. Unwrapping on either bracket alone would let a row a TUI had
+# half-eaten read back as intact, which is precisely the false pass this whole
+# section exists to prevent.
+check("a stray closing bracket does not make a cell a highlight",
+      tty.face_of("X  q  ]"), "X  q  ]")
+check("nor does a stray opening one", tty.face_of("[  q  X"), "[  q  X")
+half_bracketed = drawn_at(20)
+half_bracketed[22] = "X" + half_bracketed[22][1:KB_WIDTH - 1] + "]"
+check("a row whose ends a TUI replaced with brackets does not count",
+      tty.rows_on_screen(console(half_bracketed), rows), [20, 21, 23, 24])
+# Cross-layer: only the digits row is shared between the two layers, so a
+# symbols screen read against the letters render must find that one row and no
+# other. Both halves matter -- `[20]` alone would also be produced by a matcher
+# that had stopped looking after the first hit.
+check("a symbols screen read against the letters render finds only the shared digits row",
+      tty.rows_on_screen(console(drawn_at(20, sym_rows)), rows), [20])
+check("...and that row really is identical between the layers",
+      tty.to_plain(sym_rows).split("\n")[0], tty.to_plain(rows).split("\n")[0])
+check("...while the rows below it are not",
+      tty.to_plain(sym_rows).split("\n")[1] == tty.to_plain(rows).split("\n")[1], False)
+
 buf = io.StringIO()
+kb, cur = fresh()
+rows = tty.render(kb, cur)
 tty.clear_at(buf, rows, 19)
 cleared = buf.getvalue()
 check("clearing erases one line per rendered row", cleared.count("\x1b[K"), len(rows))

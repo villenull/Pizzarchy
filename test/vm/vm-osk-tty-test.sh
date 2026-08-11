@@ -43,6 +43,49 @@
 #   characters (asserted from what gum wrote to a file, not from pixels).
 #   Does not prove: the Deck's own panel geometry or rotation, or archinstall's
 #   full flow.
+#
+# ===========================================================================
+# THE SECOND EXPERIMENT -- R-52, the fork R-49 left open
+# ===========================================================================
+#
+# R-49 ended with the console no longer being shrunk, which left nothing
+# confining a TUI to the top of it. `gum` does not need confining: it is
+# line-oriented, uses three rows, and never reaches the bottom. A full-screen
+# curses application -- archinstall's menu -- is a different question, and
+# section 5 answers it with a real curses TUI on its own VT.
+#
+# ⚠️ IT ASSERTS BY COUNTING ROWS, NOT BY GREPPING FOR A WORD, and that is the
+# entire lesson of R-49. Five keyboard rows clamped onto one line still
+# contained `shift`, so every substring check passed on a keyboard that was
+# unusable. This suite's own `osk.shown` check is one of those, and it is kept
+# only because section 3 has other evidence. Section 5 uses
+# `deck_osk_tty.rows_on_screen`, which asks how many console lines carry a
+# WHOLE keyboard row -- the same function the unit suite mutation-tests, not a
+# second implementation that could drift from it.
+#
+# The measurement it makes, taken in the guest, rows out of five:
+#
+#                                            intact rows   `grep -c shift`
+#   keyboard drawn over the TUI ............      5              1
+#   ordinary repaint, all but last line ....      1              1   <- lies
+#   ordinary repaint, every line ...........      0              1   <- lies
+#   hard repaint (clearok / clear_logo) ....      0              0
+#   one pad sample later ...................      5         (not measured)
+#                                                       and the TUI is down five
+#
+# ⚠️ THE TWO MIDDLE ROWS ARE THE POINT. An ordinary curses repaint does not
+# erase the keyboard -- ncurses diffs against its own model of the physical
+# screen, which has never heard of us, so it writes only the cells whose
+# content changed and PUNCHES ONE CHARACTER THROUGH each keyboard row. What is
+# left looks exactly like a keyboard, greps exactly like a keyboard, and has
+# one key per row whose drawn label has been overwritten by that character. The
+# word grep never catches it at all; only the row count does.
+#
+# Neither side is wrong and neither yields. So the keyboard is summoned for one
+# text-entry prompt and killed after it (`docs/tasks/T4-screen-spec.md` §2.3),
+# which T4 §1's wrap makes sufficient: every text-entry moment is a prompt
+# function of ours, and archinstall's curses menu never runs interactively at
+# all. There is no pty relay here because nothing needs one.
 
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 
@@ -159,6 +202,89 @@ for line in sys.stdin:
     print(f"did {line.strip()}", flush=True)
 ui.close()
 PAD
+
+# A full-screen curses TUI, standing in for archinstall's menu. `gum` is the
+# easy case and section 3 already has it; this is the one R-49 left open.
+tui_src="$WORK/vm-fullscreen-tui.py"
+cat >"$tui_src" <<'TUI'
+#!/usr/bin/env python3
+"""A full-screen curses TUI -- the archinstall-shaped half of R-52.
+
+Real curses, real terminfo, laid out over EVERY row of the console, unlike
+`gum`, which lives in its top three.
+
+IT REPAINTS ON A KEYSTROKE, not on a timer. The keystrokes arrive from the
+on-screen keyboard through uinput and the VT, so the collision is driven by the
+real input path rather than by a clock this suite would race.
+
+⚠️ THERE ARE TWO KINDS OF REPAINT AND THEY FAIL DIFFERENTLY. This was found by
+running it, and the first version of this file asserted the wrong one.
+
+  1. AN ORDINARY REPAINT. ncurses copies the window into `newscr` and then
+     diffs `newscr` against its own model of the physical screen -- and it has
+     no model of anything the mapper painted. So a "full repaint" writes only
+     the cells whose CONTENT changed, which here is the one digit of `PASS nn`,
+     and PUNCHES A SINGLE CHARACTER THROUGH EACH KEYBOARD ROW. The keyboard
+     still looks like a keyboard. `touchline` does not save you: it forces the
+     window's lines into `newscr`, one layer above the diff that matters.
+  2. A HARD REPAINT -- `clearok`. curses throws its model away, clears, and
+     rewrites everything, which is what upstream's own `clear_logo`
+     (`\033[H\033[2J`, T4 §2.5) does on every validation failure. That one
+     really does erase the keyboard.
+
+Three keystrokes, one for each case: an ordinary repaint of every line but the
+console's last, an ordinary repaint of all of them, then a hard one.
+"""
+import curses
+import pathlib
+import time
+
+OUT = pathlib.Path("/root/osktest")
+
+# ⚠️ The mapper redraws the keyboard the instant a trigger event lands, which
+# is BEFORE this character has been delivered. The collision under test is the
+# repaint that comes AFTER that redraw, so a pause makes the ordering a fact
+# rather than a race between two things that both happen in microseconds.
+SETTLE = 0.6
+
+
+def paint(screen, first, last, generation, hard=False):
+    _, cols = screen.getmaxyx()
+    for row in range(first, last + 1):
+        text = f"MENU LINE {row:02d} PASS {generation:02d} ".ljust(cols - 1, "-")
+        try:
+            screen.addstr(row, 0, text[:cols - 1])
+        except curses.error:
+            pass
+    screen.touchline(first, last - first + 1)
+    if hard:
+        screen.clearok(True)
+    screen.refresh()
+
+
+def main(screen):
+    curses.curs_set(0)
+    rows, _ = screen.getmaxyx()
+    screen.clear()
+    paint(screen, 0, rows - 1, 0)
+    (OUT / "tui.paints").write_text("0")
+    received = ""
+    generation = 0
+    while True:
+        code = screen.getch()
+        if code < 0:
+            continue
+        received += chr(code) if 32 <= code < 127 else "?"
+        (OUT / "tui.received").write_text(received)
+        time.sleep(SETTLE)
+        generation += 1
+        last = rows - 2 if generation == 1 else rows - 1
+        paint(screen, 0, last, generation, hard=generation >= 3)
+        (OUT / "tui.paints").write_text(str(generation))
+
+
+curses.wrapper(main)
+TUI
 
 probe_src="$WORK/omarchy-deck-osk-probe.sh"
 cat >"$probe_src" <<'PROBE'
@@ -336,6 +462,129 @@ snap 6-dismissed
 emit "osk.gone=$(grep -c 'shift' "$OUT/screen.6-dismissed")"
 emit "mapper.alive=$(pgrep -cf deck-input-mapper)"
 emit "mapper.errors=$(grep -ci 'traceback\|DISABLED' "$OUT/mapper.err")"
+
+# --- 5. R-52: the same console, but with a FULL-SCREEN curses TUI on it -------
+#
+# Everything above used `gum`, which is line-oriented: three rows at the top,
+# never reaching the bottom, so of course it coexists. This is the case R-49
+# left open -- a curses application laid out over the whole console.
+#
+# A fresh VT and a fresh mapper. VT2 was deallocated the moment gum exited,
+# which is what disabled the first mapper's keyboard (R-48), so reusing either
+# would measure that teardown instead of this collision.
+pkill -f 'deck-input-[m]apper'
+sleep 1
+
+openvt -c 3 -s -f -- env TERM=linux python3 /root/vm-fullscreen-tui.py &
+sleep 3
+chvt 3
+sleep 2
+emit "curses.vt_active=$(fgconsole 2>/dev/null)"
+
+C3_ROWS=$(stty size </dev/tty3 2>/dev/null | cut -d' ' -f1)
+C3_ROWS=${C3_ROWS:-25}
+OSK_TOP3=$((C3_ROWS - OSK_HEIGHT + 1))
+emit "curses.console_rows=${C3_ROWS}"
+emit "curses.osk_top=${OSK_TOP3}"
+
+snap3() { fold -w "$(stty size </dev/tty3 2>/dev/null | cut -d' ' -f2 || echo 80)" \
+            </dev/vcs3 >"$OUT/screen.$1" 2>/dev/null; }
+
+# ⚠️ COUNTED, NOT GREPPED, AND THIS IS THE WHOLE POINT OF THE SECTION.
+# `rows_on_screen` asks how many console lines carry a WHOLE keyboard row;
+# `grep -c shift` asks whether one word is anywhere on the screen. R-49 is the
+# difference between those two questions, and both are emitted below so the
+# report shows them disagreeing rather than asserting that they do.
+#
+# It is the SHIPPED function, imported from the installed module -- not a
+# reimplementation in bash that could drift from the one the unit suite
+# mutation-tests.
+osk_rows() {
+  python3 - "$1" <<'PY'
+import sys
+sys.path.insert(0, "/usr/local/lib/deck-osk")
+import deck_osk_layout as osk
+import deck_osk_tty as tty
+rows = tty.render(osk.OnScreenKeyboard(), osk.Cursors())
+with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
+    print(len(tty.rows_on_screen(fh.read(), rows)))
+PY
+}
+tui_rows() { grep -c '^MENU LINE' "$1"; }
+
+# 5a. The TUI alone. Both halves of this are vacuity guards: a TUI that never
+# started would make every later number meaningless, and a counter that finds a
+# keyboard before one is drawn is not counting keyboards.
+snap3 7-tui-alone
+emit "curses.tui_rows_alone=$(tui_rows "$OUT/screen.7-tui-alone")"
+emit "curses.osk_rows_alone=$(osk_rows "$OUT/screen.7-tui-alone")"
+
+/usr/local/bin/deck-input-mapper --device 'OSK Virtual Deck Pad' \
+  --osk-backend tty --osk-tty /dev/tty3 --osk-top-row "$OSK_TOP3" \
+  >"$OUT/mapper2.out" 2>"$OUT/mapper2.err" &
+sleep 3
+emit "curses.mapper_bound=$(grep -c 'reading /dev' "$OUT/mapper2.err")"
+
+# 5b. Summon it, and MOVE A CURSOR before looking. The keyboard draws over a
+# full-screen TUI perfectly well -- that was never the problem.
+#
+# ⚠️ The cursor move is not decoration. `osk_rows` renders with DEFAULT cursor
+# positions, because a probe reading a console back cannot know where the
+# thumbs were; the screen therefore has its right-hand highlight somewhere the
+# render does not, and matching anyway is `face_of`'s whole job. Without this
+# move the two would coincide and the tolerance would never be exercised here
+# at all -- measured: five separate `face_of` mutations survived the VM checks
+# until this line moved up from 5c.
+pad "key BTN_MODE 1"; pad "key BTN_NORTH 1"; pad "key BTN_NORTH 0"; pad "key BTN_MODE 0"
+sleep 1
+pad "abs HAT1X -20000"; pad "abs HAT1Y 3000"; sleep 0.5
+snap3 8-osk-over-tui
+emit "curses.osk_rows_drawn=$(osk_rows "$OUT/screen.8-osk-over-tui")"
+emit "curses.tui_rows_with_osk=$(tui_rows "$OUT/screen.8-osk-over-tui")"
+
+# 5c. Type one character with the right trackpad. It reaches the curses app the
+# way it reached gum -- uinput, active VT, stdin -- and the app asks curses to
+# repaint every line but the console's last. What curses then actually writes
+# is the finding; see the header.
+pad "key BTN_TR2 1"; pad "key BTN_TR2 0"
+sleep 3
+snap3 9-after-partial-repaint
+emit "curses.paints_partial=$(cat "$OUT/tui.paints" 2>/dev/null)"
+emit "curses.osk_rows_after_partial=$(osk_rows "$OUT/screen.9-after-partial-repaint")"
+emit "curses.grep_shift_after_partial=$(grep -c 'shift' "$OUT/screen.9-after-partial-repaint")"
+
+# 5d. A second character. This repaint covers every line -- and STILL only
+# writes the cells ncurses believes changed, because its model of the physical
+# screen has never heard of the keyboard.
+pad "key BTN_TR2 1"; pad "key BTN_TR2 0"
+sleep 3
+snap3 10-after-full-repaint
+emit "curses.paints_full=$(cat "$OUT/tui.paints" 2>/dev/null)"
+emit "curses.osk_rows_after_full=$(osk_rows "$OUT/screen.10-after-full-repaint")"
+emit "curses.grep_shift_after_full=$(grep -c 'shift' "$OUT/screen.10-after-full-repaint")"
+
+# 5e. A third, and this one is a HARD repaint -- `clearok`, which is what
+# upstream's `clear_logo` does on every validation failure (T4 §2.5). Only now
+# does the keyboard actually leave the screen.
+pad "key BTN_TR2 1"; pad "key BTN_TR2 0"
+sleep 3
+snap3 11-after-hard-repaint
+emit "curses.paints_hard=$(cat "$OUT/tui.paints" 2>/dev/null)"
+emit "curses.osk_rows_after_hard=$(osk_rows "$OUT/screen.11-after-hard-repaint")"
+emit "curses.grep_shift_after_hard=$(grep -c 'shift' "$OUT/screen.11-after-hard-repaint")"
+emit "curses.tui_rows_after_hard=$(tui_rows "$OUT/screen.11-after-hard-repaint")"
+emit "curses.received=$(tr -d '\n' <"$OUT/tui.received" 2>/dev/null)"
+
+# 5f. And back the other way, so the fight is shown to be mutual rather than
+# the keyboard simply losing. One pad sample is enough to make the mapper
+# repaint, and it takes five rows off a TUI that has no idea it lost them.
+pad "abs HAT1X -19000"
+sleep 1
+snap3 12-osk-repainted
+emit "curses.osk_rows_after_nudge=$(osk_rows "$OUT/screen.12-osk-repainted")"
+emit "curses.tui_rows_after_nudge=$(tui_rows "$OUT/screen.12-osk-repainted")"
+emit "curses.mapper_alive=$(pgrep -cf deck-input-mapper)"
+emit "curses.mapper_errors=$(grep -ci 'traceback' "$OUT/mapper2.err")"
 PROBE
 
 
@@ -350,6 +599,7 @@ Type=oneshot
 ExecStartPre=/usr/bin/cp /boot/omarchy-deck-osk-probe.sh /root/omarchy-deck-osk-probe.sh
 ExecStartPre=/usr/bin/cp /boot/deck-input-mapper.py /root/deck-input-mapper.py
 ExecStartPre=/usr/bin/cp /boot/vm-osk-pad.py /root/vm-osk-pad.py
+ExecStartPre=/usr/bin/cp /boot/vm-fullscreen-tui.py /root/vm-fullscreen-tui.py
 ExecStartPre=/usr/bin/cp /boot/deck_osk_layout.py /root/deck_osk_layout.py
 ExecStartPre=/usr/bin/cp /boot/deck_osk_tty.py /root/deck_osk_tty.py
 ExecStartPre=/usr/bin/cp /boot/deck_osk_wayland.py /root/deck_osk_wayland.py
@@ -369,7 +619,7 @@ for f in "$REPO_ROOT/src/deck-input-mapper.py" \
          "$REPO_ROOT/src/deck_osk_layout.py" \
          "$REPO_ROOT/src/deck_osk_tty.py" \
          "$REPO_ROOT/src/deck_osk_wayland.py" \
-         "$pad_src" "$probe_src"; do
+         "$pad_src" "$tui_src" "$probe_src"; do
   MTOOLS_SKIP_CHECK=1 mcopy -o -i "${disk}@@${esp_offset}" "$f" "::/${f##*/}" ||
     fail "mcopy of ${f##*/} onto the ESP failed"
 done
@@ -470,8 +720,52 @@ check "dismissing cleared the keyboard" "$(field osk.gone)" 0
 check "the mapper survived the whole run" "$(field mapper.alive)" 1
 check "no traceback while the console was alive" "$(field mapper.errors_before_submit)" 0
 
+# --- R-52: the fork R-49 left open, decided by COUNTING ROWS ------------------
+#
+# ⚠️ Not one of these greps for a keyboard. Every number below is "how many
+# console lines carry a WHOLE keyboard row", which is the only question that
+# separates a keyboard from the wreckage of one -- see this file's header.
+curses_rows=$(field curses.console_rows)
+check "the curses TUI took the whole console"      "$(field curses.tui_rows_alone)" "$curses_rows"
+check "VT3 is the active console"                  "$(field curses.vt_active)" 3
+check "and nothing counted as a keyboard before one was drawn" \
+                                                   "$(field curses.osk_rows_alone)" 0
+check "the second mapper bound to the pad"         "$(field curses.mapper_bound)" 1
+check "the keyboard draws over a full-screen TUI fine -- all five rows" \
+                                                   "$(field curses.osk_rows_drawn)" 5
+check "...costing the TUI exactly those five"      "$(field curses.tui_rows_with_osk)" \
+                                                   "$(( curses_rows - 5 ))"
+check "the TUI received all three characters the trackpads typed" \
+                                                   "$(field curses.received)" "hhh"
+check "and repainted once per character"           "$(field curses.paints_hard)" 3
+
+# ⭐ THE MEASUREMENT THIS SECTION EXISTS FOR. Each row count is paired with the
+# word grep taken off the SAME screen, because the pair is the finding: for two
+# of the three repaints the grep says the keyboard is fine while the count says
+# it is destroyed, and the grep is what an earlier session believed.
+check "⭐ an ordinary repaint of all but the last line leaves ONE row of five" \
+                                                   "$(field curses.osk_rows_after_partial)" 1
+check "⭐ ...while the console still greps as 'shift'" \
+                                                   "$(field curses.grep_shift_after_partial)" 1
+check "⭐ an ordinary repaint of EVERY line leaves NO intact row" \
+                                                   "$(field curses.osk_rows_after_full)" 0
+check "⭐ ...and the console STILL greps as 'shift' -- the word never catches it" \
+                                                   "$(field curses.grep_shift_after_full)" 1
+check "only a HARD repaint (clearok, i.e. clear_logo) erases the keyboard" \
+                                                   "$(field curses.osk_rows_after_hard)" 0
+check "...and only then does the word go too"      "$(field curses.grep_shift_after_hard)" 0
+check "...leaving the TUI holding the whole console again" \
+                                                   "$(field curses.tui_rows_after_hard)" "$curses_rows"
+check "one pad sample repaints the keyboard"       "$(field curses.osk_rows_after_nudge)" 5
+check "...taking five rows back off the TUI -- neither side yields" \
+                                                   "$(field curses.tui_rows_after_nudge)" \
+                                                   "$(( curses_rows - 5 ))"
+check "the mapper survived the collision"          "$(field curses.mapper_alive)" 1
+check "with no traceback"                          "$(field curses.mapper_errors)" 0
+log "note   R-52 rows/greps: drawn 5 -> partial $(field curses.osk_rows_after_partial)/grep $(field curses.grep_shift_after_partial) -> full $(field curses.osk_rows_after_full)/grep $(field curses.grep_shift_after_full) -> hard $(field curses.osk_rows_after_hard)/grep $(field curses.grep_shift_after_hard) -> one pad sample $(field curses.osk_rows_after_nudge)"
+
 if [[ $status -eq 0 ]]; then
-  log "PASS — the on-screen keyboard and a real TUI share one console: gum stays above, the keyboard draws below, and what the trackpads typed reached gum through the kernel input layer"
+  log "PASS — a LINE-ORIENTED prompt shares the console (gum stays above, the keyboard draws below, and what the trackpads typed reached gum); a FULL-SCREEN curses TUI does not, and R-52 counts exactly how it fails"
   rm -rf "$WORK"
 else
   log "FAILED — full report: $result_txt (work dir preserved: $WORK)"

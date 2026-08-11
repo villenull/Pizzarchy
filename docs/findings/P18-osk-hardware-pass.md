@@ -360,6 +360,126 @@ setting, not a silent default), spawn the watcher from the mapper, and show the
 overlay on `focus 1`. squeekboard's `SetVisible` fallback is unaffected either
 way — it never needed the seat.
 
+## R-52 — ✅ RESOLVED: R-49's fork. A full-screen curses TUI cannot share the console, and `grep shift` never once notices
+
+**Session 22, 2026-08-11. `test/vm/vm-osk-tty-test.sh` section 5, in QEMU.**
+
+R-49 ended by leaving one question open and calling it a design fork: with the
+console no longer being shrunk, nothing confines a TUI to the top, so *"a
+full-screen curses TUI like archinstall's menu will draw over the keyboard, and
+the two will fight on redraw — a relay through a smaller pty, or a keyboard that
+hides while a full-screen screen is up."*
+
+**It is the second one, and `docs/tasks/T4-screen-spec.md` had already made it
+free before this was measured.** §1.2 wraps upstream's configurator by
+**redefining its prompt functions**, so every text-entry moment in the installer
+is a prompt of ours; §2.3 makes the mapper's lifetime *one prompt* — started
+before it, killed after it, with `lizard_mode` restored on every exit path; and
+§1.1 (READ, upstream's `.automated_script.sh`) shows archinstall never running
+interactively at all — the orchestrator drives it from the JSON the wrapped
+configurator wrote. **The keyboard and a full-screen TUI do not coexist by
+construction, so no pty relay has to make them.** No `write_at` change, no
+scroll regions, no resize handling.
+
+What was left was to *measure* what happens when they do, rather than assume it,
+and to leave a test that pins it. Section 5 runs a real curses TUI on VT3 —
+`curses.wrapper`, `TERM=linux`, laid out over all 50 rows — with the keyboard on
+the bottom five, and drives it with the trackpads.
+
+### The measurement, off `/dev/vcs3` in the guest
+
+| moment | intact keyboard rows | `grep -c shift` | TUI rows |
+|---|---|---|---|
+| keyboard drawn over the TUI | **5** of 5 | — | 45 |
+| ordinary repaint, every line but the last | **1** | **1** | — |
+| ordinary repaint, **every** line | **0** | **1** | — |
+| hard repaint (`clearok`) | **0** | 0 | 50 |
+| one pad sample later | **5** | — | 45 |
+
+(`—` = not emitted by the probe. Only the three repaints carry the grep, which
+is where the two questions disagree.)
+
+Console 50×160, keyboard at rows 46–50, `curses.received = hhh` — three
+characters typed with the trackpads, read back from what the curses app itself
+wrote to a file. The mapper survived it with zero tracebacks.
+
+### 🐞 The part that was predicted wrong, and is worse than the prediction
+
+The expectation — written into the first version of this suite — was that a
+full-screen repaint *erases* the keyboard. It does not.
+
+```
+   1      2      3 2    4      5         6      7      8      9      0
+   q      w      e 2    r      t         y      u      i      o      p
+   a      s   [  d 2]   f      g      [  h  ]   j      k      l     back
+   z      x      c 2    v      b         n      m      ,      .    enter
+    shift          2#=        tab             space            close
+```
+
+That is `/dev/vcs3` **after** the TUI repainted every one of its fifty lines.
+**ncurses writes only the cells whose content changed against its own model of
+the physical screen, and that model has never heard of us**, so the repaint
+punched *one character* — the `2` of `PASS 02` — through each keyboard row and
+left the rest standing. Five intact rows became zero while what is on screen
+still reads as a keyboard and still greps as one. The layer key now says `2#=`
+where the renderer drew `?#=`: **a user cannot read what they are about to
+press, and nothing about the screen announces that.**
+
+⚠️ **`touchline` does not save you** and looked like it would: it forces the
+window's lines into `newscr`, which is one layer above the `newscr`→`curscr`
+diff that actually decides what reaches the terminal. Only `clearok` — which is
+what upstream's own `clear_logo` (`\033[H\033[2J`, T4 §2.5) does on every
+validation failure — throws the model away and really repaints.
+
+### The assertion, and why it is a count
+
+**`grep -c shift` returned 1 on every screen where the keyboard was destroyed.**
+It never once caught it. R-49 recorded that five rows clamped onto one still
+contained the word; R-52 is the same lie from the opposite direction, and it is
+now reproduced live rather than reasoned about.
+
+`src/deck_osk_tty.rows_on_screen(screen, rows)` is the answer: it asks how many
+console lines carry a **whole** rendered keyboard row, cell for cell at the
+column the row puts it, tolerating only the highlight brackets moving with the
+cursors. The VM probe imports **that** function from the installed module rather
+than reimplementing the count in bash, so what CI mutation-tests and what the
+guest measures cannot drift apart.
+
+- Unit: `test/unit/test-deck-osk-tty.py`, **81 assertions** (was 47), including
+  R-49's clamp and R-52's punch as explicit fixtures, each paired with an
+  assertion that the word `shift` is *still on that screen*.
+- Mutation, **two tiers, scored separately because they are not equivalent**:
+  **14/14** caught by the unit suite, and **10/14** by the VM assertions
+  re-scored offline against the guest's own `/dev/vcs3` captures. Every one of
+  the four VM survivors is caught by the unit suite, and each survives for a
+  structural reason rather than a missing assertion: renumbering the lines
+  cannot move a *count*; the guest's console is 160 columns so nothing is ever
+  truncated; and no captured screen happens to carry a lone stray bracket or
+  damage confined to a row's last cell. **The VM tier pins the behaviour in the
+  real world; it is not where the discrimination lives.**
+
+⚠️ **And the VM tier scored 6/14 until one line moved.** `osk_rows` renders
+with *default* cursor positions — a probe reading a console back cannot know
+where the thumbs were — and the first version snapshotted before any cursor had
+moved, so the render and the screen agreed on where the highlights were and the
+tolerance for them differing was never exercised at all. Moving the cursor
+before the snapshot took it to 10/14. **A test that never disagrees with itself
+proves nothing about the disagreement it is for.**
+
+### What this closes and what it does not
+
+**Closes:** T8 step 4's last open item, and R-49's fork. The answer is a policy
+plus the test that pins it. `docs/tasks/T8-onscreen-keyboard.md` step 4 and
+`docs/ROADMAP.md`'s P2.4b row both still describe this as open — ⚠️ **stale**.
+
+**Does not close:** T4 §8's **U4**, and this sharpens it. `clear_logo` runs on
+every validation failure in S1 and S3, and it is a hard clear — so the keyboard
+*will* be erased mid-typing, and the mapper only repaints on a pad sample
+(measured here: one sample brings all five rows back). A user who stops moving
+their thumb after a rejected username is typing on a keyboard that is no longer
+drawn. A timer-driven repaint while the OSK is shown is the fix; it is T4 work,
+not T8's.
+
 ---
 
 ## State at session end — ⚠️ THE DECK WAS POWERED OFF, AND THAT CHANGES ONE THING
