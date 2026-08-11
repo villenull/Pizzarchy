@@ -12,10 +12,57 @@ re-running at pin time rather than trusting.
 
 ---
 
-## 1. What "beta 2" is — and what it demonstrably is *not*
+## 1. What "beta 2" is — ✅ RESOLVED: a published ISO, unlisted, no checksum
 
-The operator reports Omarchy released 4.0 **beta 2** on 2026-08-11. **Nothing
-publicly reachable carries that name.** What was checked, and what it returned:
+**Beta 2 is an ISO at a direct URL.** Found 2026-08-11 by probing
+`iso.omarchy.org` after the operator pointed at an r/omarchy thread (which
+neither WebFetch nor the in-app browser can open — **reddit.com is blocked by
+policy on both surfaces**, so the post itself was never read).
+
+| Artifact | Bytes | Last-Modified (UTC) | ETag |
+|---|---|---|---|
+| `https://iso.omarchy.org/omarchy-quattro-beta2.iso` | **6,390,581,248** (5.95 GiB) | **2026-08-10 13:44:37** | `e55e5c58ffe6ab2371b16640b6c07f7f-1219` |
+| `https://iso.omarchy.org/omarchy-quattro-beta1.iso` | 6,371,614,720 (5.93 GiB) | 2026-08-05 21:12:44 | `ff788ec390ac3c2d4dc424535d95d3aa-1216` |
+| `https://iso.omarchy.org/omarchy-3.8.4.iso` | 7,957,577,728 (7.41 GiB) | 2026-07-21 00:21:41 | `c372d94af51e9e9cd3c7e585b8cb5a6e-1518` |
+
+Beta 1's timestamp matches dhh's alpha→beta announcement *and* the `stable`
+channel db rebuild (2026-08-05 23:01) to within two hours. The naming pattern is
+`omarchy-quattro-beta{N}.iso`; **`beta3`, `rc1` and a bare `omarchy-quattro.iso`
+all 404** as of this measurement.
+
+⚠️ **Three things about that ISO worth knowing before planning around it.**
+
+1. **It is unlisted.** `omarchy.org`'s download link still points at
+   `omarchy-3.8.4.iso`; the beta ISOs are reachable only by direct URL.
+   `iso.omarchy.org/` itself redirects to `omarchy.org`.
+2. **No published checksum.** `omarchy-quattro-beta2.iso.sha256` and
+   `.sha256` both 404. The ETag is an **S3 multipart hash** (1219 parts) — not
+   an MD5 of the file, so it is not a usable integrity check without knowing the
+   part size. **We can record our own sha256 after download; we cannot verify
+   against upstream's.** For a 6 GB image that boots as root, say so plainly
+   rather than implying it was verified.
+3. 🔥 **It was cut ~2h14m after we built our own ISO.** Ours came from
+   `omarchy-iso` **`a12bfea`** at 2026-08-10 11:30 UTC; beta 2 is stamped 13:44
+   UTC the same day, and `omarchy-iso`'s next commits are 16:19 and 20:51 UTC —
+   **after** it. So beta 2 was cut at or very near the same builder commit we
+   already used. The two images are close relatives, hours apart.
+
+### ⚠️ The consequence that changes the plan: beta 2 ≠ today's `edge`
+
+`quattro` HEAD is now **~24 hours and ~30 commits ahead of beta 2**, and `edge`
+tracks HEAD within minutes. **A plain `omarchy-update` on the Deck does not
+bring it to beta 2 — it overshoots into whatever edge holds that hour.** If the
+goal is "run what users run", the pin is beta 2's snapshot and the update must
+be pinned to it. If the goal is "run what upstream is about to ship", it is edge
+HEAD and it moves daily. **These are different targets; T9 step 1 must state
+which one was chosen and why.**
+
+---
+
+### What beta 2 is *not* — the negatives still hold and are still useful
+
+**No tag, no release, no channel carries the name.** What was checked, and what
+it returned:
 
 | Checked | Result |
 |---|---|
@@ -48,8 +95,17 @@ not happened as of this measurement.**
 Two installs both calling themselves `4.0.0` can be 600 commits apart. **Pin
 the SHA.**
 
-**Open question for the operator:** where was beta 2 announced, and is there a
-download? If it is a published ISO, T9 step 3 rebuilds the wrong thing.
+*(That paragraph was written before the ISO was found, and it survives because
+its conclusion held: **the `stable` channel was not promoted for beta 2** — its
+db has not moved since 2026-08-05. So beta 2 is an ISO, not a channel event,
+and a machine tracking `edge` is already past it. ⚠️ **Which channel each beta
+ISO actually carries is unverified** — it can only be read from inside the
+image, which is T9 step 3a's job. Do not assume it from the timestamps.)*
+
+**Two open calls for the operator**, both recorded in `docs/PROGRESS.md` §6:
+approval to download the 6 GB ISO (no upstream checksum to verify it against),
+and whether to rebase now or wait — the thread that surfaced beta 2 is titled
+*"Omarchy Quattro will be shipping this week."*
 
 ---
 

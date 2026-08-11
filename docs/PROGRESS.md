@@ -1506,7 +1506,7 @@ Why a flasher was reframed rather than adopted:
 scaffolding around a distro-specific core (`pacman`, `jupiter-staging`,
 `limine`, `mkinitcpio`, `sddm`, `uwsm`). You would not port that core; you would
 rewrite it. What is genuinely portable is the five `render_*` helper bodies, the
-session-switch *policy*, the mapper, the probes — and §7's 47 facts, which are
+session-switch *policy*, the mapper, the probes — and §7's 49 facts, which are
 the single biggest accelerator and are not code at all.
 
 ⚠️ **"A day" buys ported-and-conformance-green, NOT shippable.** §5.18 surfaced
@@ -1627,32 +1627,47 @@ release run has one moving variable instead of two.
 `docs/findings/T9-beta2-delta.md`. Ordering: `docs/ROADMAP.md` phase 2.9
 (P2.9a–P2.9g).**
 
-### The pin — NOT YET RECORDED. P2.9a fills this in.
+### The pin — ✅ the artifact is identified. P2.9a fills in the rest.
+
+**Beta 2 is a published, unlisted ISO** (found 2026-08-11 by probing
+`iso.omarchy.org`; the r/omarchy thread the operator cited **could not be
+read — reddit.com is blocked by policy for both WebFetch and the in-app
+browser**):
 
 | What | Value |
 |---|---|
-| `basecamp/omarchy` ref + SHA | *(unrecorded)* |
-| `omacom-io/omarchy-iso` SHA | *(unrecorded)* |
-| `omarchy-dev` / `omarchy-settings-dev` version | *(unrecorded)* |
-| Channel — mirror **and** pkgs | *(unrecorded)* |
+| Beta 2 ISO | **`https://iso.omarchy.org/omarchy-quattro-beta2.iso`** |
+| Size / stamp | **6,390,581,248 B (5.95 GiB), 2026-08-10 13:44:37 UTC** |
+| Upstream checksum | **none published** — `.sha256` 404s; the ETag is an S3 multipart hash, not usable for integrity |
+| Beta 1, for comparison | `omarchy-quattro-beta1.iso`, 6,371,614,720 B, 2026-08-05 21:12:44 UTC |
+| `omarchy-iso` SHA it was cut from | *(unrecorded — bracketed after `a12bfea` 11:30, before `e5f2b46` 16:19)* |
+| `basecamp/omarchy` SHA inside it | *(unrecorded — read from the image)* |
+| Channel it carries — mirror **and** pkgs | *(unrecorded)* |
 
-⚠️ **"Beta 2" does not identify a build, and as of 2026-08-11 nothing public
-carries the name.** Checked and returned nothing: GitHub releases (newest
-`v3.8.4`), tags (same), the `version` file on `quattro` (**still
-`4.0.0.alpha`**, never bumped for beta 1 either), `omarchy.net` (names only
-3.0), and channel probes — only **`edge`** and **`stable`** answer 200;
+⚠️ **The name still identifies nothing.** No 4.0 tag, no GitHub release, the
+`version` file on `quattro` is **still `4.0.0.alpha`** (never bumped for beta 1
+either), and only **`edge`** and **`stable`** answer as package channels —
 `beta`, `beta2`, `rc`, `quattro`, `testing`, `preview`, `nightly` all 404.
+Refinement measured the same day: **`--rc` pins the *Arch* mirror
+(`rc-mirror.omarchy.org`) while still taking Omarchy packages from `edge`** —
+so "channel" is always a pair.
 
-What did move: `quattro` HEAD `1c9dfc5` (2026-08-11 12:30 UTC) and the `edge`
-channel, rebuilt 11 minutes later carrying
-`omarchy-dev-4.0.0.r1652.g1c9dfc5-1`. **`edge` tracks `quattro` HEAD.** The
-`stable` channel still carries `r1046.gd570d99` — a 2026-07-13 commit, **606
-behind** — with its db last modified 2026-08-05, matching the public
-alpha→beta announcement.
+🔥 **The finding that changes the plan: beta 2 is not what an update installs.**
+`quattro` HEAD `1c9dfc5` (2026-08-11 12:30 UTC) is **~24 h and ~30 commits ahead
+of the beta 2 ISO**, and `edge` was rebuilt 11 minutes after that commit
+(`omarchy-dev-4.0.0.r1652.g1c9dfc5-1`). **`omarchy-update` overshoots beta 2**
+into whatever edge holds that hour. Rebasing onto *beta 2* (fixed, what users
+get) and onto *edge HEAD* (moves daily) are different targets — **P2.9a must
+choose one and say so here.**
 
-**Open question for the operator: where was beta 2 announced, and is there a
-download?** If it is a published ISO rather than a channel snapshot, P2.9c
-rebuilds the wrong artifact and phase 3 should install from theirs.
+⚠️ **Our own ISO and beta 2 are hours apart.** Ours: `omarchy-iso` `a12bfea`,
+2026-08-10 11:30 UTC. Beta 2: stamped 13:44 UTC the same day, *before* the
+builder's next commit at 16:19. If inspection shows they match, P2.9c's rebuild
+proves nothing and should be skipped rather than performed for form's sake.
+
+⚠️ **Timing.** The thread the operator cited is titled *"Omarchy Quattro will be
+shipping this week."* If 4.0 **stable** lands within days, phase 2.9 and P3.6
+collapse into one rebase — worth deciding before spending an operator session.
 
 ### Why it is a block and not a footnote — measured, not feared
 
@@ -1710,11 +1725,13 @@ release.
   recovery image on a second USB as the floor, and anything personal copied
   off the Deck first. Approved in principle by §2.5; still confirm before
   executing.
-- 🆕 **Where was Omarchy 4.0 "beta 2" announced, and is there a download?**
-  (§5.22). Nothing public carries the name — no tag, no release, no channel —
-  so P2.9a cannot pin it without the operator's pointer. **A link answers it.**
-  If beta 2 is a published ISO rather than a channel snapshot, P2.9c changes
-  shape and phase 3 should install from theirs, not a rebuild of ours.
+- 🆕 **Approval to download the beta 2 ISO** — 6.0 GB from
+  `https://iso.omarchy.org/omarchy-quattro-beta2.iso`, with **no upstream
+  checksum to verify it against** (§5.22). Needed for P2.9a's remaining pin
+  fields, which can only be read from inside the image.
+- 🆕 **A timing decision: rebase onto beta 2 now, or wait for stable?** The
+  thread the operator cited says Quattro ships **this week**. If stable lands in
+  days, phase 2.9 and P3.6 are the same work twice.
 - 🆕 **`docs/ROADMAP.md` P2.9e — bringing the Deck to beta 2.** Snapshot #8,
   then in-place `omarchy-update`, then re-running every `deck-session.sh`
   stage. Prepared and described before execution, per the rule below. Batch it
@@ -1898,6 +1915,17 @@ backup rescue (the rebuild wipes both).
   **`edge`** (tracks `quattro` HEAD, rebuilt within minutes of a commit) and
   **`stable`** — measured 606 commits apart on 2026-08-11. Package versions are
   git-describes (`4.0.0.rN.gSHA`). **Pin the SHA; the words are decoration.**
+- **Omarchy's beta ISOs are published but unlisted, at
+  `https://iso.omarchy.org/omarchy-quattro-beta{N}.iso`** — beta 1
+  2026-08-05, beta 2 2026-08-10, while omarchy.org's own download link still
+  points at `omarchy-3.8.4.iso`. **No `.sha256` is published for any of them**,
+  and the ETag is an S3 multipart hash, so a downloaded image cannot be checked
+  against upstream. Also: a beta ISO is a *snapshot*, and `quattro`/`edge` run
+  ahead of it — **`omarchy-update` does not put a machine on "the beta"**.
+- **reddit.com is blocked by policy for WebFetch and for the in-app browser**
+  (measured 2026-08-11 — `www.` and `old.` alike). Links to r/omarchy threads
+  cannot be read from a session; ask the operator to paste, or find the
+  underlying artifact directly, which is how beta 2's URL was found.
 - **`omarchy-update` runs upstream `migrations/*.sh` as root, machine-wide, and
   they mutate system state** — adding packages, rewriting `/etc/bluetooth/main.conf`,
   writing `/etc/modprobe.d/`. One carries a comment that an update **over SSH**

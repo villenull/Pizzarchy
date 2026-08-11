@@ -5,14 +5,22 @@
 > (phase 3), added 2026-08-11 by operator direction after upstream shipped a
 > second 4.0 beta.
 >
-> ⚠️ **The pin is not yet recorded.** As of 2026-08-11 nothing publicly
-> identifiable is *named* "beta 2": `basecamp/omarchy` has no 4.0 tag or
-> GitHub release, its `version` file on `quattro` still reads `4.0.0.alpha`,
-> `omarchy.net` names only 3.0, and `pkgs.omarchy.org` serves exactly two
-> channels — `edge` and `stable`. What upstream *does* have is a `quattro`
-> branch moving fast and an `edge` channel rebuilt from its HEAD. **Step 1
-> exists to turn "beta 2" into three SHAs and a version string** before any
-> other step runs.
+> ✅ **Beta 2 is a published ISO — found and measured 2026-08-11:**
+> `https://iso.omarchy.org/omarchy-quattro-beta2.iso`, **6,390,581,248 bytes**,
+> Last-Modified **2026-08-10 13:44:37 UTC**. Unlisted (omarchy.org still links
+> 3.8.4), **no published checksum**, and cut ~2h14m *after* our own ISO from
+> what looks like the same builder commit. Full evidence:
+> `docs/findings/T9-beta2-delta.md` §1.
+>
+> ⚠️ **It is still not a version string.** No 4.0 tag, no GitHub release,
+> `version` on `quattro` reads `4.0.0.alpha`, and `pkgs.omarchy.org` serves only
+> `edge` and `stable`. **Step 1 still has to turn that ISO into SHAs** — and
+> answer the question it raises:
+>
+> 🔥 **`quattro` HEAD is now ~24 hours and ~30 commits AHEAD of beta 2**, and
+> `edge` tracks HEAD within minutes. **A plain `omarchy-update` overshoots beta
+> 2** into whatever edge holds that hour. Rebasing onto *beta 2* and rebasing
+> onto *edge HEAD* are different targets. Step 1 must say which was chosen.
 
 **Model: Opus.** This touches the boot chain, the session layer and the one
 physical device at once, and its whole job is noticing what silently changed.
@@ -70,31 +78,40 @@ it.
 
 ## Steps
 
-### 1. Pin the snapshot — three SHAs, one version string, one channel
+### 1. Pin the snapshot — and first, choose the target
+
+**Decide before pinning:** *beta 2 the artifact* (reproducible, and what a user
+downloading today gets) or *edge HEAD* (what upstream is about to ship, moving
+several times a day). They are ~30 commits apart and diverging. A defensible
+default is **beta 2**, because a release test wants a fixed target — but say it
+out loud in `docs/PROGRESS.md` §5.22 rather than letting `omarchy-update` decide
+by accident.
 
 Record in `docs/PROGRESS.md` §1.1, and **cite it from every later step**. No
 step may say "latest".
 
 | What | How to read it | Recorded value |
 |---|---|---|
-| `basecamp/omarchy` ref + SHA | `gh api repos/basecamp/omarchy/commits/quattro` | *(fill in)* |
-| `omacom-io/omarchy-iso` SHA | `gh api repos/omacom-io/omarchy-iso/commits/master` | *(fill in)* |
-| `omarchy-dev` package version | `curl -s https://pkgs.omarchy.org/<channel>/x86_64/omarchy.db \| tar tf - \| grep '^omarchy-dev-'` | *(fill in)* |
-| Channel (mirror **and** pkgs) | `omarchy-version-channel` on the Deck | *(fill in)* |
+| Beta 2 ISO | `curl -sSI https://iso.omarchy.org/omarchy-quattro-beta2.iso` | **6,390,581,248 B, 2026-08-10 13:44:37 UTC** ✅ |
+| Its sha256 | ours, computed after download — **upstream publishes none** | *(fill in)* |
+| `omacom-io/omarchy-iso` SHA it was cut from | inspect the ISO, or bracket by timestamp: after `a12bfea` (11:30), before `e5f2b46` (16:19) | *(fill in)* |
+| `basecamp/omarchy` SHA on the ISO | `omarchy-version` / the `omarchy-dev` package version *inside* the image | *(fill in)* |
+| Channel the ISO carries (mirror **and** pkgs) | `omarchy-version-channel` after install | *(fill in)* |
 
 ⚠️ **The channel is two settings, not one**, and they can disagree —
-`omarchy-version-channel` prints `edge / stable` when they do. §3.10 records
-that a bare `omarchy-iso-make` mixes ref `quattro` with mirror `stable` and
-produces an ISO whose installer has no questions to ask. Same trap here.
+`omarchy-version-channel` prints `edge / stable` when they do. Measured
+2026-08-11: the Arch mirror is one of `stable-mirror` / `rc-mirror` /
+`mirror`(edge), the Omarchy package channel is only `stable` or `edge`, and
+**`--rc` pins the Arch mirror while still taking Omarchy packages from edge**.
+§3.10 records the matching trap on the builder side.
 
 ⚠️ **`omarchy-dev`'s version is a git-describe** — `4.0.0.rN.gSHA` — not a
 release name. Two "beta 2" installs can differ by 40 commits and both call
 themselves 4.0.0. **The SHA is the pin; the words are not.**
 
-**Ask the operator for the beta 2 announcement or download link** before
-filling the table. If beta 2 turns out to be an ISO published somewhere, that
-artifact — not a rebuilt one — is what phase 3 must eventually install from,
-and step 3 changes shape.
+⚠️ **Downloading the ISO needs operator approval** — 6.0 GB, and there is no
+published checksum to verify it against. Record our own sha256 and state
+plainly that it attests to *what we downloaded*, not to what upstream built.
 
 ### 2. Measure the delta against our seams — before touching anything
 
@@ -122,9 +139,25 @@ and rewrites `/etc/bluetooth/main.conf`. A migration is upstream code executing
 against our carefully-staged state — the exact thing that can silently revert a
 load-bearing setting.
 
-### 3. Rebuild the ISO from the pinned `omarchy-iso`
+### 3. Take upstream's beta 2 ISO as the reference — *then* rebuild ours
 
-Inherit §3.10's three gotchas, none of which are optional:
+**Both, in this order, and they answer different questions.**
+
+**3a — Download upstream's beta 2 ISO** (operator approval: 6.0 GB, no
+published checksum). It is the artifact a user actually gets, and it is the
+only way to read what beta 2 *contains*: which `omarchy-iso` commit built it,
+which package channel it carries, and which `omarchy-dev` version installs from
+it. Mount it and read; do not infer from the branch. Record our own sha256 and
+label it as ours.
+
+⚠️ **Do not assume it differs much from what we already built.** Ours came from
+`a12bfea` at 11:30 UTC; beta 2 is stamped 13:44 UTC the same day, before the
+builder's next commit. If the inspection shows they match, **say so and skip
+3b** — a rebuild that reproduces a file we already have is not evidence of
+anything.
+
+**3b — Rebuild ours from the pinned `omarchy-iso`** (T5's fork base). Inherit
+§3.10's three gotchas, none of which are optional:
 
 1. `OMARCHY_ISO_REF` and `OMARCHY_MIRROR` must agree — build with
    `OMARCHY_MIRROR=edge` (what `--quattro` sets) or the channels disagree.
@@ -194,6 +227,14 @@ Order of operations:
 2. Confirm the channel (`omarchy-version-channel`) matches the step-1 pin;
    `omarchy-channel-set` if not.
 3. `omarchy-update`, then read what the migrations actually did.
+
+   🔥 **`omarchy-update` does not land on beta 2 — it lands on whatever `edge`
+   holds that hour**, which on 2026-08-11 was already ~30 commits past it. If
+   step 1 chose beta 2 as the target, this is the step where that choice is
+   either honoured or silently lost. Either pin the update, or record honestly
+   that the Deck now runs *edge as of `<date>`* and not beta 2. **Do not write
+   "the Deck is on beta 2" if what ran was an unpinned update** — that is the
+   silent-inaccuracy failure `CLAUDE.md` exists to prevent.
 4. **Re-run every `deck-session.sh` install stage.** They are idempotent by
    design (`CLAUDE.md`) — this is the first real test of that claim against a
    moved substrate, and any stage that now fails is a genuine finding.
@@ -273,8 +314,14 @@ Batch into one operator session, and do it **after** step 5, on the Deck:
 
 ## Escalate if
 
-- Beta 2 turns out to be a *published artifact* (a real ISO or tag) rather than
-  a channel snapshot — step 3 changes shape and phase 3's install should use it
+- **Quattro stable ships before this block finishes** — the r/omarchy thread the
+  operator cited is titled *"Omarchy Quattro will be shipping this week"*. If
+  stable lands mid-block, stop and re-decide: rebasing onto beta 2 and then
+  again onto stable days later is two operator sessions for one outcome, and
+  P3.6 already owns the second one
+- The published beta 2 ISO turns out to differ **materially** from what we
+  built at `a12bfea` — that would mean upstream ships something the builder
+  repo does not produce, which is a T5 problem, not a T9 one
 - An upstream change makes one of the five hard constraints in `CLAUDE.md`
   unsatisfiable (Limine, no-AUR-helper, loud failure, idempotence)
 - The Quickshell menu extension mechanism (P2.4) is gone or changed shape —

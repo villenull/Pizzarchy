@@ -13,12 +13,31 @@ work without waiting for further instruction.**
 > `docs/findings/T9-beta2-delta.md`. Ordering: `docs/ROADMAP.md` phase 2.9
 > (P2.9a–P2.9g). Decision record: `docs/PROGRESS.md` §5.22.
 >
-> ⚠️ **"Beta 2" is not yet pinned, and the name identifies nothing.** Upstream
-> publishes **no 4.0 tag and no release**; `version` on `quattro` still reads
-> `4.0.0.alpha`; only two package channels exist (`edge`, which tracks
-> `quattro` HEAD and rebuilds within minutes, and `stable`, measured **606
-> commits behind**). Package versions are git-describes. **Pin the SHA.**
-> P2.9a's first move is asking the operator where beta 2 was announced.
+> ✅ **Beta 2 is a published, unlisted ISO:**
+> `https://iso.omarchy.org/omarchy-quattro-beta2.iso` — 6,390,581,248 B, stamped
+> **2026-08-10 13:44:37 UTC**, **no upstream checksum** (`.sha256` 404s; the
+> ETag is an S3 multipart hash and proves nothing). omarchy.org's own download
+> link still points at 3.8.4.
+>
+> 🔥 **It is NOT what `omarchy-update` installs.** `quattro` HEAD is ~24 h and
+> **~30 commits ahead** of that ISO, and `edge` tracks HEAD within minutes, so
+> an unpinned update **overshoots beta 2**. Beta 2 (fixed, what users get) and
+> edge HEAD (moves daily) are different targets — P2.9a picks one *and writes it
+> down*. The name identifies nothing on its own: no 4.0 tag, no release,
+> `version` on `quattro` still `4.0.0.alpha`, versions are git-describes.
+>
+> ⚠️ **Our own ISO is a sibling, not an ancestor.** Ours: `omarchy-iso`
+> `a12bfea`, 2026-08-10 11:30 UTC. Beta 2: 13:44 UTC the same day, before the
+> builder's next commit. If they match on inspection, **skip the rebuild** —
+> reproducing a file we already have proves nothing.
+>
+> ⚠️ **Quattro may ship stable THIS WEEK** (the thread that surfaced beta 2 says
+> so). If it does, phase 2.9 and P3.6 are one rebase, not two. Decide before
+> spending an operator session.
+>
+> ⛔ **reddit.com is blocked by policy** — for WebFetch *and* the in-app browser.
+> The r/omarchy thread was never read; everything above came from probing
+> `iso.omarchy.org` directly. Don't burn time retrying Reddit.
 >
 > **The drift is already measured and is not cosmetic.** In 37 commits upstream
 > changed a sudoers file `src/deck-session.sh` quotes verbatim (~line 1157 —
@@ -245,7 +264,7 @@ work without waiting for further instruction.**
 >    **§5.9 gained session 17's measured lizard-mode map**
 > 3. `docs/ROADMAP.md` — phase 2 is the live work queue, **phase 2.9 is new**
 >    (the beta 2 rebase, before phase 3) and phase 4 is the enablement layer
-> 4. `docs/PROGRESS.md` §7 — **47** facts that each cost real time; do not
+> 4. `docs/PROGRESS.md` §7 — **49** facts that each cost real time; do not
 >    re-derive them
 >
 > Hardware evidence: `docs/findings/P15-live-iso-recon.md` (R-0…R-19, raw logs
@@ -457,7 +476,7 @@ it.
 |---|---|
 | `CLAUDE.md` | Auto-loaded every session. Hard constraints. |
 | `docs/ROADMAP.md` | **The plan — three phases.** Where the current block fits and what gates what. |
-| `docs/PROGRESS.md` | **Every session start. This is the authoritative state.** Scope, findings, open issues, and **47** facts not to re-derive. |
+| `docs/PROGRESS.md` | **Every session start. This is the authoritative state.** Scope, findings, open issues, and **49** facts not to re-derive. |
 | `docs/SESSIONS.md` | Usage-limit budgeting and the block schedule. |
 | `docs/PLAN.md` | **Frozen and partly superseded.** Read the banner at the top first. Good for §6.1a (installer screens), §8 (bug hypotheses), §9 (test tiers), §11 (maintenance risks). |
 | `docs/tasks/` | One file per work block. |
@@ -531,7 +550,7 @@ between 2 and 3.** Task-to-phase mapping:
 | T4 | `docs/tasks/T4-installer-ui.md` | Sonnet | ⬜ **unblocked, re-scoped by §5.9** → P2.5–P2.6 |
 | T5 | `docs/tasks/T5-iso-and-payload.md` | Sonnet/Opus | ⬜ P2.7–P2.8, now with §5.12/§5.13 constraints |
 | T6 | `docs/tasks/T6-integration-release.md` | **Opus** | ⬜ phase 3 |
-| T9 | `docs/tasks/T9-beta2-rebase.md` | **Opus** | ⬜ **phase 2.9 — NEW (2026-08-11).** Rebase every artifact onto Omarchy 4.0 **beta 2** and re-establish by measurement each fact that names upstream behavior. P2.9a–P2.9d need no hardware; **P2.9a is blocked on one question to the operator** — where beta 2 was announced. Makes P3.6 (rebase onto *stable*) the second run of the procedure, not the first |
+| T9 | `docs/tasks/T9-beta2-rebase.md` | **Opus** | ⬜ **phase 2.9 — NEW (2026-08-11).** Rebase every artifact onto Omarchy 4.0 **beta 2** and re-establish by measurement each fact that names upstream behavior. P2.9a–P2.9d need no hardware. **Two operator calls open:** approval to download the 6 GB beta 2 ISO (no upstream checksum exists), and whether to rebase now or wait for stable, which may ship this week. Makes P3.6 (rebase onto *stable*) the second run of the procedure, not the first |
 | T8 | `docs/tasks/T8-onscreen-keyboard.md` | Sonnet/**Opus** | ✅ **DONE (session 18) — all seven steps, hardware-proven (R-43) and console-sharing proven in QEMU (R-47).** Was P2.4b. Input half was already done in the mapper, chord included |
 | T7 | `docs/tasks/T7-enablement-layer.md` | **Opus** | ⬜ **phase 4 — NEW.** Generalise into a Deck enablement layer so the next distro is ~a day. Deliberately after phase 3: abstracting from one *finished* example is engineering, from one unfinished example is guessing |
 

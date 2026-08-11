@@ -156,13 +156,21 @@ input/OSK layer, and the test Deck. This block moves all of it onto beta 2 and
 **re-establishes by measurement** every recorded fact that names upstream
 behavior.
 
-⚠️ **The pin is not yet recorded, and the name does not identify the build.**
-Upstream has no 4.0 tag, no GitHub release, a `version` file still reading
-`4.0.0.alpha`, and exactly two package channels (`edge`, `stable`). `edge`
-tracks `quattro` HEAD and is rebuilt within minutes of a commit; its version
-string is a git-describe (`4.0.0.rN.gSHA`). **P2.9a's whole job is turning
-"beta 2" into three SHAs** — and asking the operator where it was announced,
-because if beta 2 is a *published ISO* then P2.9c rebuilds the wrong artifact.
+✅ **Beta 2 is a published, unlisted ISO** —
+`https://iso.omarchy.org/omarchy-quattro-beta2.iso`, 6,390,581,248 B, stamped
+**2026-08-10 13:44:37 UTC**, **no upstream checksum**. Measured 2026-08-11.
+
+🔥 **But it is not what an update installs.** `quattro` HEAD is ~24 h and ~30
+commits *ahead* of that ISO, and `edge` tracks HEAD within minutes, so
+`omarchy-update` overshoots beta 2. **Rebasing onto beta 2 (fixed) and onto edge
+HEAD (moves daily) are different targets — P2.9a chooses one and writes it
+down.** The name identifies nothing on its own: no 4.0 tag, no release, a
+`version` file reading `4.0.0.alpha`, and version strings that are git-describes
+(`4.0.0.rN.gSHA`).
+
+⚠️ **Timing.** The thread that surfaced beta 2 is titled *"Omarchy Quattro will
+be shipping this week."* If 4.0 stable lands within days, this block and P3.6
+are one rebase, not two — decide before spending an operator session.
 
 **Why it is a block and not a footnote:** the drift is already measured and it
 is not cosmetic. In 37 commits upstream changed a sudoers file this repo quotes
@@ -174,11 +182,11 @@ and notes that an update over SSH would otherwise abort. We update over SSH.
 
 | # | Item | Where | Task ref |
 |---|---|---|---|
-| P2.9a | **Pin the snapshot** — `basecamp/omarchy` SHA, `omarchy-iso` SHA, `omarchy-dev` version, and the channel (mirror *and* pkgs, which can disagree). Every later item cites it; none says "latest" | Dev | T9 §1 |
+| P2.9a | **Choose the target, then pin it** — beta 2 the artifact, or edge HEAD? Then the `omarchy-iso` SHA it was cut from, the `basecamp/omarchy` SHA inside it, and the channel (mirror *and* pkgs, which can disagree). Every later item cites it; none says "latest" | Dev | T9 §1 |
 | P2.9b | **Measure the delta against our seams before touching anything** — finish `docs/findings/T9-beta2-delta.md`, every row marked *no impact · re-verify · breaks us*. ⚠️ Includes reading the new `migrations/*.sh`, which run as root on update | Dev | T9 §2 |
-| P2.9c | **Rebuild the ISO** from the pinned `omarchy-iso`, with §3.10's three gotchas intact, then **re-inspect it** for the two facts that were measured *from the image*: no Wayland compositor in the live environment (T2 §4) and the encryption default (§5.12) | Dev | T9 §3 |
+| P2.9c | **Download upstream's beta 2 ISO and read what it contains** (operator approval — 6.0 GB, no published checksum), *then* rebuild ours from the pinned `omarchy-iso` with §3.10's three gotchas intact — **unless inspection shows the two images match**, which is plausible: ours was cut 2h14m earlier from what looks like the same builder commit. Re-inspect for the two facts measured *from the image*: no Wayland compositor in the live environment (T2 §4) and the encryption default (§5.12) | Dev | T9 §3 |
 | P2.9d | **Rebuild the QEMU substrate from that ISO** and re-run everything hardware-free: shellcheck's own command, both unit globs, the VM suites, and `osk-tty-e2e.py` by hand. ⚠️ A substrate that mimics the *old* Quattro passes while testing a system that no longer exists | Dev + QEMU | T9 §4 |
-| P2.9e | **Bring the Deck to beta 2** — snapshot #8 first, then **in-place `omarchy-update`** (recommended over a reinstall: phase 3 already buys the clean-install proof). Re-run every `deck-session.sh` stage — the first real test of the idempotence claim against a moved substrate — plus `stage-audit-privileges`, `dconf read -d`, `lizard_mode`, and a switch soak of ≥5 cycles | Deck | T9 §5 |
+| P2.9e | **Bring the Deck to the pinned target** — snapshot #8 first, then **in-place `omarchy-update`** (recommended over a reinstall: phase 3 already buys the clean-install proof). ⚠️ **An unpinned update lands on edge, not beta 2** — honour the P2.9a choice or record honestly which one the Deck ended up on. Re-run every `deck-session.sh` stage — the first real test of the idempotence claim against a moved substrate — plus `stage-audit-privileges`, `dconf read -d`, `lizard_mode`, and a switch soak of ≥5 cycles | Deck | T9 §5 |
 | P2.9f | **The hands-on pass** — OSK on STEAM+X, both cursors including diagonals, both switch directions, the Desktop Mode menu row, and every P2.9b row marked *re-verify*. Batch into one operator session | Deck | T9 §6 |
 | P2.9g | **Update the record** — the pin in `docs/PROGRESS.md` §1.1, a §5.22 outcome, and every §7 fact that names upstream behavior. A stale entry under "don't re-derive" is worse than no entry | Dev | T9 §7 |
 
