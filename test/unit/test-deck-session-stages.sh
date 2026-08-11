@@ -17,23 +17,39 @@
 # This suite runs the stage bodies themselves.
 #
 # ---------------------------------------------------------------------------
-# THE SEAM -- why this is possible without touching src/
+# THE TWO SEAMS
 # ---------------------------------------------------------------------------
+#
+# 1. $SUDO, which needed nothing from src/.
 #
 # Every privileged write in deck-session.sh goes through `$SUDO`:
 #
 #   $SUDO install -m 0755 -o root -g root "$tmp" "$SELECT_BIN"
 #
-# and deck-session.sh:382 sets SUDO="" at file scope, with only
-# stage_preconditions ever setting it to `sudo`. So a test that points SUDO at
-# a shim can intercept essentially every filesystem effect the stages have.
-# The shim (fake-sudo, below) rewrites absolute destination paths to land under
-# a temp fake root and appends its full argv to a call log, so a case can assert
-# on BOTH halves of what a stage did: the files it produced, and the privileged
-# commands it ran to produce them.
+# and deck-session.sh sets SUDO="" at file scope, with only stage_preconditions
+# ever setting it to `sudo`. So a test that points SUDO at a shim can intercept
+# essentially every filesystem effect the stages have. The shim (fake-sudo,
+# below) rewrites absolute destination paths to land under a temp fake root and
+# appends its full argv to a call log, so a case can assert on BOTH halves of
+# what a stage did: the files it produced, and the privileged commands it ran to
+# produce them.
 #
-# Nothing in src/ was changed to make this work. Where a stage cannot be
-# reached as it ships, it is left uncovered and said so -- see the next block.
+# 2. verify_*(), which is new in src/ and is why five sections below exist.
+#
+# The stages that could NOT be reached through $SUDO were the ones that verify
+# their work by EXECUTING what they installed, at a readonly absolute path, or
+# by reading a hardcoded system path -- neither of which goes through $SUDO. On
+# this dev machine /usr/bin/steamos-polkit-helpers/steamos-update exists
+# (gamescope-session-steam-git ships it) and `exec pkexec`s, so a unit suite
+# running the stage as it shipped would have driven a polkit prompt.
+#
+# deck-session.sh now factors each of those checks into a verify_* function that
+# TAKES the path to exercise, defaulting to the absolute constant -- the same
+# move render_update_stub made for generated text. Production passes nothing and
+# behaves exactly as before; this suite passes a copy under the fake root, or a
+# deliberately broken stub, and gets the identical checks run against it. There
+# is no "skip the check for a non-default path" branch in src/, and GATE 4 below
+# refuses to run if one appears.
 #
 # ---------------------------------------------------------------------------
 # WHAT IS COVERED, AND WHAT IS NOT (and exactly why not)
@@ -45,42 +61,42 @@
 #          stage-sddm-resilience    full (§4)
 #          stage-return-icon        full (§5)
 #          stage-desktop-settings   full (§6)
+#          stage-update-stub        full (§7)
+#          stage-timezone-helper    full (§8)
+#          stage-priv-write-helper  §9: the whole stage, plus every branch of
+#                                   its verifier. The ONE thing not exercised
+#                                   end to end is the real rendered helper's
+#                                   own WRITE, because the whitelist that
+#                                   guards it is anchored on a literal
+#                                   /sys/class/... prefix and refuses anything
+#                                   under a fake root -- correctly. The
+#                                   verifier's read/write/compare arm is
+#                                   covered against a stub helper instead, and
+#                                   the real helper's REFUSALS are covered
+#                                   against the real helper.
+#          stage-greeter-rotation   §10: everything except the "upstream's hash
+#                                   still matches" arm, which cannot be reached
+#                                   without a file that sha256s to
+#                                   UPSTREAM_GREETER_SHA256. The drift WARNING
+#                                   is covered; the silent arm is not.
 #
-# NOT COVERED, and the line that blocks each. None of these can be reached
-# without editing src/, which this suite deliberately does not do:
+# NOT COVERED, and why:
 #
-#   stage-update-stub        :993  `"$UPDATE_STUB" check` executes the readonly
-#                            ABSOLUTE path /usr/bin/steamos-polkit-helpers/
-#                            steamos-update. $SUDO is not in that call, so no
-#                            shim intercepts it. On the dev machine this file
-#                            already exists (gamescope-session-steam-git ships
-#                            it) and it `exec pkexec`s -- a unit suite must not
-#                            run that. See the FINDINGS block below.
-#   stage-timezone-helper    :1139 `command -v /usr/bin/timedatectl` and :1203
-#                            `"$TIMEZONE_HELPER" ...` -- same absolute-path
-#                            problem, plus a host-dependent precondition.
-#   stage-priv-write-helper  :1373 `"$PRIV_WRITE_HELPER" ...`, and :1370 reads
-#                            /sys/class/backlight/amdgpu_bl0/brightness, which
-#                            exists on any AMD laptop and would change the
-#                            stage's path depending on who ran the suite.
-#   stage-greeter-rotation   :1522 `[[ -f /usr/share/sddm/hyprland.lua ]]` and
-#                            :1613 `cat /etc/sddm.conf.d/*.conf` read the real
-#                            filesystem directly. The stage's outcome is a
-#                            property of the machine running the suite.
-#   stage-input-mapper       :1775 `"$MAPPER_BIN" --type` -- absolute path
-#                            again. Its static shape is already covered by
-#                            test/unit/test-osk-install-layout.sh.
-#
-# The install halves of the three polkit-helper stages are structurally
-# identical to stage-session-select's, which IS covered here end to end
-# (install -m 0755, install -d, visudo -c gating, install -m 0440), so the
-# marginal loss is the sudoers TEXT of two grants, named in the report.
+#   stage-input-mapper       Blocked from OUTSIDE this file.
+#                            test/unit/test-osk-install-layout.sh sed's
+#                            stage_input_mapper's body out of deck-session.sh
+#                            and greps it for three code shapes, one of which
+#                            is the very command substitution that would move
+#                            into a verify_input_mapper(). Splitting this stage
+#                            makes that suite fail, so the two have to be
+#                            changed in one go. Its static shape and the
+#                            mapper's own behaviour are already covered there.
 #
 # ---------------------------------------------------------------------------
 # SAFETY -- a test that could touch the real system is worse than no test
 # ---------------------------------------------------------------------------
 #
-# Four gates, all of which must hold before any stage body runs:
+# Five gates, all of which must hold before any stage body runs:
 #
 #   1. SUDO must be empty after sourcing deck-session.sh (copied from
 #      test/unit/test-deck-session.sh -- if that initialisation ever changes,
@@ -89,22 +105,36 @@
 #      this suite's stubs, not to the real binaries.
 #   3. fake-sudo refuses to run at all unless FAKE_ROOT and SANDBOX are set,
 #      and refuses any argument that would resolve outside them.
-#   4. Every path fake-sudo actually executed against is re-checked at the end
-#      of the run (§7) and must be inside $work.
+#   4. Every verify_* seam must take its path from $1 and must not name the
+#      absolute constant in an executed position. This gate is STATIC and it
+#      runs BEFORE any of §7-§10, deliberately: the failure it guards against
+#      is a seam silently reverting to the constant, and the cost of finding
+#      that out at runtime is executing the real pkexec'ing helper.
+#      `sandboxed` then refuses, per call, to hand a seam any path that is not
+#      inside $work.
+#   5. Every path fake-sudo actually executed against is re-checked at the end
+#      of the run (§11) and must be inside $work.
 #
 # TMPDIR is also pointed inside $work, so the `mktemp` calls inside the stages
 # stage their content there rather than in the system temp directory.
 #
+# THE HOST IS READ IN FOUR PLACES, all of them reads and all of them declared:
+# /etc/dconf/profile/user (§6, branched on), /usr/share/zoneinfo/<zone> (§8 --
+# the rendered helper validates against the real zoneinfo tree, by design),
+# /usr/bin/timedatectl's existence (§8's stage precondition), and `luac`'s
+# (§10). Sections that need one they cannot find say so and skip.
+#
 # ---------------------------------------------------------------------------
-# FINDINGS THIS SUITE PINS, AND ONE IT DELIBERATELY DOES NOT
+# FINDINGS THIS SUITE PINS
 # ---------------------------------------------------------------------------
 #
-# stage_return_icon is the ONE install stage that never calls
-# assert_ours_or_absent, and the .desktop file it writes carries no install
-# marker (deck-session.sh:2063-2073). A re-run therefore clobbers whatever is
-# at that path, which every other stage refuses to do. This suite asserts what
-# the stage does today and does NOT assert "there is no marker" -- pinning the
-# absence would enshrine it. It is reported instead.
+# stage_return_icon used to be the one install stage that wrote a file with no
+# ownership marker AND no assert_ours_or_absent in front of it, so a re-run
+# clobbered whatever was at that path. Fixed in src/; §5 now pins the marker,
+# the refusal and the re-run. Two other stages (stage-sddm-resilience,
+# stage-greeter-rotation) also have no assert_ours_or_absent, but the files they
+# write DO carry the marker, so the "would silently clobber" property was
+# unique to this one.
 
 set -euo pipefail
 
@@ -169,6 +199,29 @@ export RESOLVED_LOG="$resolved"
 export BREACH_LOG="$breach"
 export FAKE_DCONF_COMPILED="$work/dconf-compiled"
 
+# The timezone the fake timedatectl reports, held in a FILE rather than an
+# environment variable so `set-timezone` can actually change it. That matters:
+# verify_timezone_helper reads the zone, runs the helper, and re-reads -- a
+# constant oracle would make its "the helper changed the timezone" guard
+# unfalsifiable, which is the same defect the dconf stub above was written to
+# avoid.
+export FAKE_TZ_FILE="$work/timezone"
+
+# A whitelisted-SHAPED backlight node that does not exist, anywhere, on any
+# machine. §9 hands this to the priv-write helper so the stage takes its "no
+# backlight here" branch deterministically -- on a real AMD laptop the constant
+# WOULD exist and the stage would try to write it. It still matches the helper's
+# whitelist regex, so the helper's non-numeric refusal is exercised for the
+# right reason rather than being refused earlier as an unlisted path.
+readonly ABSENT_BACKLIGHT=/sys/class/backlight/deck-session-suite-absent/brightness
+
+# The zone §8 round-trips. It has to be one the REAL /usr/share/zoneinfo has,
+# because the rendered helper's last and most important validation is
+# `[[ -f /usr/share/zoneinfo/$tz ]]` -- reading the host's zoneinfo tree is the
+# point of that check, so faking it would be testing something else. UTC is on
+# every Linux with tzdata; §8 gates on it rather than assuming.
+readonly SUITE_TIMEZONE=UTC
+
 # The autologin/desktop user, fixed so the generated files are deterministic.
 # stage_session_select reads SUDO_USER first, exactly as it would under
 # `sudo ./deck-session.sh`.
@@ -197,7 +250,39 @@ reset_root() {
   ln -sf "$(command -v sh)" "$root/bin/sh"
   mkdir -p "$FAKE_HOME"
   rm -f "$FAKE_DCONF_COMPILED"
+
+  # The rendered timezone helper elevates with `sudo -n /usr/bin/timedatectl`,
+  # by ABSOLUTE path, because that is the form omarchy-settings-dev's sudoers
+  # rule matches. fake-sudo rewrites that under the fake root, so the stub has
+  # to exist there as well as on PATH -- and it is the same stub, so both views
+  # of "the system timezone" are the one file.
+  cp "$stub_bin/timedatectl" "$root/usr/bin/timedatectl"
+  printf '%s\n' "$SUITE_TIMEZONE" >"$FAKE_TZ_FILE"
+
   : >"$calls"; : >"$resolved"
+}
+
+# Write an executable test double. Body on stdin; the path must be inside $work,
+# which `sandboxed` enforces at every call site.
+write_program() {   # write_program <path>  <<'SH' ... SH
+  local p=$1
+  mkdir -p -- "$(dirname -- "$p")"
+  cat >"$p"
+  chmod +x "$p"
+  printf '%s' "$p"
+}
+
+# Refuse to hand a seam any path outside the work directory. Every path this
+# suite passes to a stage or a verify_* function goes through here, so a typo
+# that would point one of them at a REAL absolute path stops the run instead of
+# driving it. (GATE 4's static half stops the other direction: a seam that
+# ignores its argument and uses the constant.)
+sandboxed() {
+  local p=$1
+  [[ $p == "$work"/* ]] ||
+    fail_test "the suite only ever hands a seam a path inside its work directory" \
+      "refusing to pass '${p}', which is outside ${work}"
+  printf '%s' "$p"
 }
 
 # --- the shim that stands in for $SUDO, and for the literal `sudo` ----------
@@ -436,8 +521,30 @@ done
 exec /usr/bin/env "${args[@]}"
 STUB_ENV
 
+# --- timedatectl -----------------------------------------------------------
+#
+# Stateful, for the reason given at FAKE_TZ_FILE: `set-timezone` writes and
+# `show -p Timezone --value` reads the same file, so verify_timezone_helper's
+# before/after comparison is a real round trip. A stub that always echoed the
+# same zone would let a helper that changes the timezone it was not asked to
+# change walk straight through.
+#
+# Two callers reach this, by two different routes: the STAGE runs `timedatectl`
+# through PATH, and the rendered HELPER runs /usr/bin/timedatectl through
+# fake-sudo, which rewrites it to the copy reset_root drops in the fake root.
+cat >"$stub_bin/timedatectl" <<'STUB_TIMEDATECTL'
+#!/usr/bin/env bash
+set -uo pipefail
+printf 'timedatectl %s\n' "$*" >>"$CALLS_LOG"
+case ${1-} in
+  show)         cat "$FAKE_TZ_FILE" ;;
+  set-timezone) [[ -n ${2-} ]] || exit 2; printf '%s\n' "$2" >"$FAKE_TZ_FILE" ;;
+esac
+exit "${FAKE_TIMEDATECTL_RC:-0}"
+STUB_TIMEDATECTL
+
 # --- commands the stages only probe for, or only log through ---------------
-for stub in systemd-run findmnt timedatectl loginctl logger; do
+for stub in systemd-run findmnt loginctl logger; do
   cat >"$stub_bin/$stub" <<STUB_GENERIC
 #!/usr/bin/env bash
 set -uo pipefail
@@ -456,12 +563,12 @@ export FAKE_SYSTEMCTL_SHOW_TimeoutStopUSec="${SDDM_STOP_TIMEOUT}s"
 export FAKE_SYSTEMCTL_SHOW_RestartUSec=3s
 
 # --- GATE 2 ----------------------------------------------------------------
-for tool in sudo systemctl visudo dconf env getent; do
+for tool in sudo systemctl visudo dconf env getent timedatectl; do
   [[ $(command -v "$tool") == "$stub_bin/$tool" ]] ||
     fail_test "'${tool}' resolves to this suite's stub" \
       "got $(command -v "$tool"); the stub PATH is not in front, so this suite would drive the real system"
 done
-pass "sudo, systemctl, visudo, dconf, env and getent all resolve to stubs, not to the real binaries"
+pass "sudo, systemctl, visudo, dconf, env, getent and timedatectl all resolve to stubs, not to the real binaries"
 
 # --- GATE 3 ----------------------------------------------------------------
 rc=0
@@ -478,6 +585,47 @@ rc=0
     "a FAKE_ROOT of '/' would put every rewritten path back on the real filesystem"
 pass "fake-sudo refuses to run without a fake root, and refuses paths that resolve outside it"
 
+# --- GATE 4 ----------------------------------------------------------------
+#
+# The seams §7-§10 depend on, checked STATICALLY and checked FIRST.
+#
+# This is the one gate that cannot be a runtime probe, and the reason is the
+# whole reason those sections did not exist before. If verify_update_stub ever
+# stopped honouring its argument and went back to the constant, a runtime probe
+# would discover that BY RUNNING /usr/bin/steamos-polkit-helpers/steamos-update
+# -- which exists on this dev machine and is
+#
+#   exec pkexec --disable-internal-agent "$0" "$@"
+#
+# i.e. an authentication prompt, from a unit test. So: read the function bodies
+# instead, and refuse to proceed unless each one takes its path from $1 and
+# names no constant in a position where it would be executed. Only then do the
+# sections below hand these functions anything.
+#
+# Both halves are load-bearing. `${1:-` alone would still pass a function that
+# accepted the argument and ignored it; forbidding an executed "$CONSTANT" is
+# what makes ignoring it detectable here rather than in the process table.
+seam_check() {   # seam_check <function> <forbidden constant name>
+  local fn=$1 const=$2 body
+  declare -F "$fn" >/dev/null ||
+    fail_test "${fn} exists in deck-session.sh" \
+      "the verification seam is gone; without it this suite would run the REAL absolute path"
+  body=$(declare -f "$fn")
+  # shellcheck disable=SC2016  # a grep PATTERN matching a literal ${1:-...} in
+  # the function's own text; expanding it would search for this shell's $1.
+  grep -q '\${1:-' <<<"$body" ||
+    fail_test "${fn} takes the path to exercise as \$1" \
+      "no '\${1:-...}' in its body, so passing a path would have no effect and the real constant would run"
+  ! grep -qE "\"\\\$${const}\"" <<<"$body" ||
+    fail_test "${fn} does not execute \$${const} directly" \
+      "it names the absolute constant in an executed position, so the argument is not what gets run:"$'\n'"${body}"
+  pass "${fn} takes its path from \$1 and never executes \$${const} directly"
+}
+seam_check verify_update_stub               UPDATE_STUB
+seam_check verify_timezone_helper           TIMEZONE_HELPER
+seam_check verify_priv_write_helper         PRIV_WRITE_HELPER
+seam_check verify_greeter_compositor_command SDDM_GREETER_DROPIN
+
 # ===========================================================================
 # THE STAGE RUNNER
 # ===========================================================================
@@ -491,9 +639,13 @@ pass "fake-sudo refuses to run without a fake root, and refuses paths that resol
 # DESKTOP_SESSION is normally resolved by discovery in stage_preconditions,
 # which this suite does not run past its tool gate; it is not readonly for
 # exactly that reason ("resolved at runtime", deck-session.sh:138).
+# Trailing arguments are passed through to the function. That is how §7-§10
+# reach the seams: the stages take their destination as an optional argument
+# whose default is the absolute constant, so a call with no arguments here is
+# byte-for-byte what a Deck runs.
 stage_rc=0
 run_stage_body() {
-  local fn=$1
+  local fn=$1; shift
   stage_rc=0
   : >"$calls"
   (
@@ -502,7 +654,7 @@ run_stage_body() {
     # §1 then asserts.
     SUDO="$FAKE_SUDO_BIN"
     DESKTOP_SESSION=omarchy
-    "$fn"
+    "$fn" "$@"
   ) >"$work/stage.out" 2>"$work/stage.err" || stage_rc=$?
 }
 
@@ -905,6 +1057,13 @@ export FAKE_SYSTEMCTL_SHOW_RestartUSec=3s
 # ===========================================================================
 # 5. stage-return-icon -- the shell-agnostic way back to Gaming Mode
 # ===========================================================================
+#
+# ⚠️ THE ASSERTIONS BELOW CHANGED. Until this session this stage wrote its
+# .desktop with no install marker and no assert_ours_or_absent in front of it,
+# and this section pinned that -- deliberately asserting what the stage DID
+# rather than what it should do, and reporting the gap instead of enshrining it.
+# The gap is now closed in src/, so the marker, the refusal and the re-run are
+# asserted here like every other stage's.
 
 reset_root
 run_stage_body stage_return_icon
@@ -916,6 +1075,50 @@ ok_line /usr/share/applications/deck-return-to-gaming.desktop "Exec=/usr/bin/ste
 ok_line /usr/share/applications/deck-return-to-gaming.desktop "Icon=input-gaming" \
   "Icon=input-gaming -- a freedesktop name that resolves, and not Valve artwork this project may not ship"
 ok_line /usr/share/applications/deck-return-to-gaming.desktop "Type=Application" "it is a valid Desktop Entry type"
+
+# --- the ownership marker, and the refusal it makes possible ---------------
+ok_line /usr/share/applications/deck-return-to-gaming.desktop "$INSTALL_MARKER" \
+  "the entry carries the install marker, which is what lets a re-run tell its own file from somebody else's"
+
+# The marker is a '#' comment ahead of the group header. That is legal -- the
+# Desktop Entry spec ignores comment lines and does not require [Desktop Entry]
+# on line 1 -- but "legal" is exactly the kind of claim that turns out to be
+# wrong in front of a real parser, so ask one. Two, where both are available.
+desktop_file="$root/usr/share/applications/deck-return-to-gaming.desktop"
+python3 - "$desktop_file" <<'PY' || fail_test "the installed .desktop parses as a key file with the marker in front of the group header"
+import configparser, sys
+c = configparser.ConfigParser(interpolation=None, comment_prefixes=('#',))
+c.read(sys.argv[1])
+assert c.sections() == ["Desktop Entry"], c.sections()
+assert c["Desktop Entry"]["Type"] == "Application"
+PY
+pass "the installed .desktop still parses as a key file -- the marker comment did not displace [Desktop Entry]"
+
+if command -v desktop-file-validate >/dev/null 2>&1; then
+  desktop-file-validate "$desktop_file" >"$work/dfv.out" 2>&1 ||
+    fail_test "desktop-file-validate accepts the installed entry" "$(cat "$work/dfv.out")"
+  pass "desktop-file-validate accepts the entry with the marker comment on line 1"
+else
+  note "desktop-file-validate not installed; the freedesktop validator did not see this entry"
+fi
+
+# The idempotency requirement (CLAUDE.md): a re-run must recognise its own file.
+run_stage_body stage_return_icon
+ok_rc 0 "a second run succeeds -- assert_ours_or_absent recognises the entry as ours"
+
+# And the whole point of the marker: somebody else's file at that path is now
+# refused rather than overwritten. Before this change the stage replaced it
+# without a word.
+reset_root
+printf '[Desktop Entry]\nType=Application\nName=Somebody else\n' \
+  >"$root/usr/share/applications/deck-return-to-gaming.desktop"
+run_stage_body stage_return_icon
+ok_failed "a foreign .desktop at ${RETURN_DESKTOP_FILE} stops the stage instead of being clobbered"
+ok_in_err "was not written by deck-session.sh" "the refusal explains that something else owns the path"
+grep -qF "Somebody else" "$root/usr/share/applications/deck-return-to-gaming.desktop" ||
+  fail_test "the foreign entry is left exactly as it was" \
+    "it was overwritten anyway, which is the defect this case exists to prevent"
+pass "the foreign entry is left byte-for-byte alone, not merely 'the stage failed'"
 
 # ===========================================================================
 # 6. stage-desktop-settings -- the three values that decide whether the
@@ -1045,7 +1248,418 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
 esac
 
 # ===========================================================================
-# 7. The harness's own safety invariant
+# 7. stage-update-stub -- the exit codes Steam's first run depends on
+# ===========================================================================
+#
+# NEW COVERAGE. This stage was unreachable until deck-session.sh grew
+# verify_update_stub: it proves its work by RUNNING the file it installed, at
+# /usr/bin/steamos-polkit-helpers/steamos-update, and that file exists on this
+# dev machine and `exec pkexec`s. GATE 4 has already refused to continue unless
+# the seam is real, and `sandboxed` refuses to hand it anything outside $work.
+#
+# PROGRESS.md 5.14: exit 0 on the apply path made Steam reboot the Deck once per
+# OOBE pass. The three checks below the install are the only thing standing
+# between that and a boot loop, and until now nothing ran them off a Deck.
+
+# A steamos-update with dialable exit codes, so each of the verifier's three
+# checks can be failed one at a time while the other two stay correct.
+fake_update_stub() {   # fake_update_stub <path> <check-rc> <dup-rc> <apply-rc>
+  write_program "$1" >/dev/null <<SH
+#!/usr/bin/env bash
+case \${1-} in
+  check)                          exit $2 ;;
+  --supports-duplicate-detection) exit $3 ;;
+  *)                              exit $4 ;;
+esac
+SH
+}
+
+reset_root
+update_dest=$(sandboxed "${root}${UPDATE_STUB}")
+run_stage_body stage_update_stub "$update_dest"
+ok_rc 0 "stage-update-stub completes against a fake root"
+ok_file "$UPDATE_STUB" "it installs ${UPDATE_STUB}"
+ok_mode "$UPDATE_STUB" 755 "the stub is mode 0755 -- Steam execs it"
+ok_called "install -d -m 0755 -o root -g root ${root}${POLKIT_HELPER_DIR}" \
+  "it creates ${POLKIT_HELPER_DIR} rather than assuming it: on a non-SteamOS machine that whole tree is absent, which is the defect"
+ok_called "install -m 0755 -o root -g root" "the stub is installed root-owned -- Steam runs it through pkexec's tree"
+ok_before "install -d" "install -m 0755" "the directory is created before the file goes into it"
+ok_in_file "$UPDATE_STUB" "$INSTALL_MARKER" "the installed stub carries the install marker"
+ok_in_out "verified: 'check' exits 7 (up to date)" \
+  "the stage verifies by RUNNING the stub it installed, and says so"
+
+# The installed artefact itself, exercised directly. This is the protocol
+# test/unit/test-deck-session.sh checks against render_update_stub's TEXT; here
+# it is the file that really landed on disk, at the mode it landed with.
+rc=0; "$root$UPDATE_STUB" check >/dev/null 2>&1 || rc=$?
+[[ $rc -eq 7 ]] || fail_test "the INSTALLED stub answers 'check' with 7" "exited ${rc}"
+pass "the installed stub -- not the rendered text -- answers 'check' with 7"
+rc=0; "$root$UPDATE_STUB" >/dev/null 2>&1 || rc=$?
+[[ $rc -ne 0 ]] ||
+  fail_test "the INSTALLED stub does not exit 0 on the apply path" \
+    "0 means 'an update was applied' and Steam reboots to finish it, every OOBE pass"
+pass "the installed stub's apply path is non-zero, so Steam has nothing to reboot for"
+
+run_stage_body stage_update_stub "$update_dest"
+ok_rc 0 "a second run succeeds -- the marker makes the stage recognise its own stub"
+
+reset_root
+# The helper directory is NOT in STOCK_DIRS -- on a non-SteamOS machine it does
+# not exist, which is the whole defect -- so a foreign file needs it created.
+mkdir -p "$root$POLKIT_HELPER_DIR"
+printf '#!/bin/sh\n# a real SteamOS updater, hypothetically\n' >"$root$UPDATE_STUB"
+run_stage_body stage_update_stub "$update_dest"
+ok_failed "a foreign file at ${UPDATE_STUB} stops the stage rather than being overwritten"
+ok_in_err "was not written by deck-session.sh" "the refusal explains whose file is in the way"
+
+# --- the verifier's three guards, one broken at a time ---------------------
+#
+# The positive control comes first on purpose: it proves the fake stub is
+# otherwise correct, so each failure below is caused by the one code that was
+# changed and not by the double being wrong in some other way.
+probe_stub=$(sandboxed "$work/fake-steamos-update")
+
+fake_update_stub "$probe_stub" 7 1 7
+run_stage_body verify_update_stub "$probe_stub"
+ok_rc 0 "verify-update-stub passes a stub that answers 7 / non-zero / non-zero"
+
+fake_update_stub "$probe_stub" 0 1 7
+run_stage_body verify_update_stub "$probe_stub"
+ok_failed "a 'check' that exits 0 fails verification"
+ok_in_err "not 7" "the failure says Steam reads 7 as 'up to date' and anything else restores the first-run dialog"
+
+fake_update_stub "$probe_stub" 7 0 7
+run_stage_body verify_update_stub "$probe_stub"
+ok_failed "claiming duplicate-detection support fails verification"
+ok_in_err "claims duplicate-detection support" "the failure names the capability the stub does not implement"
+
+fake_update_stub "$probe_stub" 7 1 0
+run_stage_body verify_update_stub "$probe_stub"
+ok_failed "an apply path that exits 0 fails verification -- the boot loop of PROGRESS.md 5.14"
+ok_in_err "REBOOTS the device" "the failure says what exit 0 makes Steam do, not merely that it was wrong"
+
+# ===========================================================================
+# 8. stage-timezone-helper -- OOBE's picker, and the grant behind it
+# ===========================================================================
+#
+# NEW COVERAGE, same seam. Steam's timezone picker called an absolute path that
+# did not exist, got 127 every time, and silently changed nothing.
+#
+# The round trip below is real rather than mimed: the stage reads the zone
+# through `timedatectl`, the rendered helper writes it through
+# `sudo -n /usr/bin/timedatectl set-timezone`, and both resolve to the same
+# stateful stub over the same file. So "the helper changed a timezone it was
+# asked to leave alone" is a state this suite can actually produce.
+
+if [[ ! -x $TIMEDATECTL_BIN ]]; then
+  note "skipping §8: ${TIMEDATECTL_BIN} is absent, and the stage's own precondition refuses to install a helper that would fail at runtime"
+elif [[ ! -f /usr/share/zoneinfo/$SUITE_TIMEZONE ]]; then
+  note "skipping §8: /usr/share/zoneinfo/${SUITE_TIMEZONE} is absent, and the rendered helper validates against the real zoneinfo tree by design"
+else
+
+reset_root
+tz_dest=$(sandboxed "${root}${TIMEZONE_HELPER}")
+run_stage_body stage_timezone_helper "$tz_dest"
+ok_rc 0 "stage-timezone-helper completes against a fake root"
+ok_file "$TIMEZONE_HELPER" "it installs ${TIMEZONE_HELPER}"
+ok_mode "$TIMEZONE_HELPER" 755 "the helper is mode 0755"
+ok_in_file "$TIMEZONE_HELPER" "$INSTALL_MARKER" "the installed helper carries the install marker"
+
+ok_file "$TIMEZONE_SUDOERS" "it installs ${TIMEZONE_SUDOERS}"
+ok_mode "$TIMEZONE_SUDOERS" 440 "${TIMEZONE_SUDOERS} is mode 0440 -- sudo ignores a drop-in with any other mode"
+ok_line "$TIMEZONE_SUDOERS" "decktester ALL=(root) NOPASSWD: ${TIMEDATECTL_BIN} set-timezone *" \
+  "the grant is one SUBCOMMAND of one absolute path -- not the whole of timedatectl, whose set-ntp and set-time are not needed"
+ok_called "visudo -c -f" "the sudoers candidate is validated with 'visudo -c -f'"
+ok_before "visudo -c -f" "install -m 0440" \
+  "validation happens BEFORE the drop-in is installed -- a malformed sudoers file breaks sudo for every user"
+
+tz_grant=$(grep -v '^#' "$root$TIMEZONE_SUDOERS" | grep -v '^[[:space:]]*$' | head -1)
+! sudoers_line_is_blanket "$tz_grant" ||
+  fail_test "the timezone grant is scoped, not blanket" "sudoers_line_is_blanket flagged: ${tz_grant}"
+sudoers_line_is_nopasswd "$tz_grant" ||
+  fail_test "the timezone grant is passwordless" "Gaming Mode cannot answer a password prompt; got: ${tz_grant}"
+pass "the timezone drop-in reads as scoped-and-passwordless to the release check's own predicate"
+
+# The verification really drove the helper, and the helper really reached
+# timedatectl through the grant -- both halves are in the call log.
+ok_in_out "verified: helper set the timezone to its existing value (${SUITE_TIMEZONE})" \
+  "the stage verifies by RUNNING the helper against the zone the machine is already on, so a passing check changes nothing"
+ok_called "timedatectl set-timezone ${SUITE_TIMEZONE}" \
+  "the helper reached timedatectl by absolute path through sudo -- the form the sudoers rule matches"
+
+# The installed artefact's own security property. The grant covers
+# 'set-timezone <anything>', so this validation is the only thing between a
+# caller-supplied string and a privileged command.
+rc=0; "$root$TIMEZONE_HELPER" ../../etc/shadow >/dev/null 2>&1 || rc=$?
+[[ $rc -ne 0 ]] ||
+  fail_test "the INSTALLED helper refuses a path-traversal timezone" "it exited 0"
+pass "the installed helper -- not the rendered text -- refuses a traversal before elevating"
+
+run_stage_body stage_timezone_helper "$tz_dest"
+ok_rc 0 "a second run of stage-timezone-helper succeeds"
+
+reset_root
+mkdir -p "$root$POLKIT_HELPER_DIR"
+printf '#!/bin/sh\n# a real SteamOS helper, hypothetically\n' >"$root$TIMEZONE_HELPER"
+run_stage_body stage_timezone_helper "$tz_dest"
+ok_failed "a foreign file at ${TIMEZONE_HELPER} stops the stage"
+ok_in_err "was not written by deck-session.sh" "the refusal explains whose file is in the way"
+
+# --- the verifier's guards, against helpers that misbehave one way each ----
+reset_root
+tz_probe=$(sandboxed "$work/fake-set-timezone")
+
+write_program "$tz_probe" >/dev/null <<'SH'
+#!/usr/bin/env bash
+# Correct: sets exactly what it was asked for, refuses a traversal.
+case ${1-} in ..|../*|*/..|*/../*) exit 3 ;; esac
+printf '%s\n' "$1" >"$FAKE_TZ_FILE"
+SH
+run_stage_body verify_timezone_helper "$tz_probe"
+ok_rc 0 "verify-timezone-helper passes a helper that round-trips the zone and refuses a traversal"
+
+write_program "$tz_probe" >/dev/null <<'SH'
+#!/usr/bin/env bash
+exit 3
+SH
+run_stage_body verify_timezone_helper "$tz_probe"
+ok_failed "a helper that fails on the machine's CURRENT zone fails verification"
+ok_in_err "failed setting the timezone to its current value" \
+  "the failure says the helper installed but does not work, so the picker would still fail silently"
+
+write_program "$tz_probe" >/dev/null <<'SH'
+#!/usr/bin/env bash
+# Sets a DIFFERENT zone from the one it was handed.
+printf 'Antarctica/Troll\n' >"$FAKE_TZ_FILE"
+SH
+run_stage_body verify_timezone_helper "$tz_probe"
+ok_failed "a helper that changes the timezone it was asked to leave alone fails verification"
+ok_in_err "changed the timezone from" "the failure names both zones, so the read-back is a comparison and not a liveness check"
+
+write_program "$tz_probe" >/dev/null <<'SH'
+#!/usr/bin/env bash
+# Writes whatever it is handed, traversal included.
+printf '%s\n' "$1" >"$FAKE_TZ_FILE"
+SH
+printf '%s\n' "$SUITE_TIMEZONE" >"$FAKE_TZ_FILE"
+run_stage_body verify_timezone_helper "$tz_probe"
+ok_failed "a helper that accepts a path-traversal timezone fails verification"
+ok_in_err "accepted a path-traversal timezone" \
+  "the failure says it must validate against /usr/share/zoneinfo before elevating"
+
+fi   # §8 host gate
+
+# ===========================================================================
+# 9. stage-priv-write-helper -- the whitelist that bounds a root write
+# ===========================================================================
+#
+# NEW COVERAGE. Tier 1 of the three-tier fallback in deck-session.sh's header:
+# without this helper Steam reaches for `sudo -n tee` and then `sudo -n chmod
+# a+w`, which needs blanket NOPASSWD and leaves sysfs nodes world-writable after
+# every Gaming Mode start. The sudoers grant covers the helper with ANY
+# arguments, so the whitelist INSIDE it is the actual security boundary.
+#
+# ⚠️ THE SECOND SEAM ARGUMENT IS NOT SANDBOXED, and that is deliberate. It is
+# ${ABSENT_BACKLIGHT}: a path that MATCHES the helper's whitelist regex but
+# exists nowhere, so the stage takes its "no backlight here" branch on every
+# machine. Using the real constant instead would take the write branch on any
+# AMD laptop. It is only ever stat'd and handed to a helper that refuses it, but
+# gate it anyway -- an existing file there would mean writing to real sysfs.
+[[ ! -e $ABSENT_BACKLIGHT ]] ||
+  fail_test "the stand-in backlight node does not exist on this machine" \
+    "${ABSENT_BACKLIGHT} exists; §9 would hand a REAL sysfs path to a helper that writes"
+pass "the stand-in backlight node is absent, so §9 cannot reach a real sysfs write"
+
+reset_root
+pw_dest=$(sandboxed "${root}${PRIV_WRITE_HELPER}")
+run_stage_body stage_priv_write_helper "$pw_dest" "$ABSENT_BACKLIGHT"
+ok_rc 0 "stage-priv-write-helper completes against a fake root"
+ok_file "$PRIV_WRITE_HELPER" "it installs ${PRIV_WRITE_HELPER}"
+ok_mode "$PRIV_WRITE_HELPER" 755 "the helper is mode 0755"
+ok_in_file "$PRIV_WRITE_HELPER" "$INSTALL_MARKER" "the installed helper carries the install marker"
+
+ok_file "$PRIV_WRITE_SUDOERS" "it installs ${PRIV_WRITE_SUDOERS}"
+ok_mode "$PRIV_WRITE_SUDOERS" 440 "${PRIV_WRITE_SUDOERS} is mode 0440"
+ok_line "$PRIV_WRITE_SUDOERS" "decktester ALL=(root) NOPASSWD: ${PRIV_WRITE_HELPER}" \
+  "the grant names the helper's PRODUCTION absolute path and nothing else -- it is not repointed by the test seam"
+ok_called "visudo -c -f" "the sudoers candidate is validated with 'visudo -c -f'"
+ok_before "visudo -c -f" "install -m 0440" "validation happens before the drop-in is installed"
+
+pw_grant=$(grep -v '^#' "$root$PRIV_WRITE_SUDOERS" | grep -v '^[[:space:]]*$' | head -1)
+! sudoers_line_is_blanket "$pw_grant" ||
+  fail_test "the priv-write grant is scoped, not blanket" "sudoers_line_is_blanket flagged: ${pw_grant}"
+sudoers_line_is_nopasswd "$pw_grant" ||
+  fail_test "the priv-write grant is passwordless" "Steam cannot answer a password prompt; got: ${pw_grant}"
+pass "the priv-write drop-in reads as scoped-and-passwordless to the release check's own predicate"
+
+ok_in_err "not present, so the helper's write path was NOT exercised" \
+  "with no backlight node the stage SAYS the write path went unchecked rather than reporting a pass it did not earn"
+ok_in_out "verified: refuses a non-whitelisted path and a non-numeric value" \
+  "the refusals are still checked when the write path is not -- they are the security boundary, not a bonus"
+
+# The installed artefact's own refusals, including the one Steam actually asks
+# for and this project deliberately does not answer.
+rc=0; "$root$PRIV_WRITE_HELPER" /etc/shadow 1 >/dev/null 2>&1 || rc=$?
+[[ $rc -ne 0 ]] || fail_test "the INSTALLED helper refuses /etc/shadow" "it exited 0"
+pass "the installed helper refuses a path outside its whitelist"
+rc=0; "$root$PRIV_WRITE_HELPER" /dev/drm_dp_aux0 '' >/dev/null 2>&1 || rc=$?
+[[ $rc -ne 0 ]] ||
+  fail_test "the INSTALLED helper refuses /dev/drm_dp_aux0, which Steam does ask for" \
+    "it is deliberately NOT whitelisted -- an empty write to a DP AUX side band is not understood here"
+pass "the installed helper refuses /dev/drm_dp_aux0 with the empty value Steam sends for it"
+
+run_stage_body stage_priv_write_helper "$pw_dest" "$ABSENT_BACKLIGHT"
+ok_rc 0 "a second run of stage-priv-write-helper succeeds"
+
+reset_root
+mkdir -p "$root$POLKIT_HELPER_DIR"
+printf '#!/bin/sh\n# a real SteamOS helper, hypothetically\n' >"$root$PRIV_WRITE_HELPER"
+run_stage_body stage_priv_write_helper "$pw_dest" "$ABSENT_BACKLIGHT"
+ok_failed "a foreign file at ${PRIV_WRITE_HELPER} stops the stage"
+ok_in_err "was not written by deck-session.sh" "the refusal explains whose file is in the way"
+
+# --- the WRITE arm, which the stage above cannot reach --------------------
+#
+# The real helper's whitelist is anchored on a literal /sys/class/... prefix, so
+# it correctly refuses anything under a fake root -- there is no way to exercise
+# the real write off a Deck without weakening that anchor, which would be the
+# test seam introducing the hazard. So the verifier's read/write/compare arm is
+# covered against a helper double instead, one misbehaviour at a time.
+reset_root
+pw_probe=$(sandboxed "$work/fake-priv-write")
+fake_backlight=$(sandboxed "$work/fake-backlight")
+write_program "$pw_probe" >/dev/null <<'SH'
+#!/usr/bin/env bash
+[[ ${1-} == /etc/shadow ]] && exit "${FAKE_PW_SHADOW_RC:-3}"
+[[ ${2-} =~ ^[0-9]+$ ]] || exit "${FAKE_PW_NONNUMERIC_RC:-4}"
+[[ ${FAKE_PW_WRITE_RC:-0} -eq 0 ]] || exit "${FAKE_PW_WRITE_RC}"
+printf '%s\n' "${FAKE_PW_WRITE_VALUE:-$2}" >"$1"
+SH
+
+printf '412\n' >"$fake_backlight"
+run_stage_body verify_priv_write_helper "$pw_probe" "$fake_backlight"
+ok_rc 0 "verify-priv-write-helper passes a helper that writes back the value it was given"
+ok_in_out "verified: wrote ${fake_backlight} its existing value (412)" \
+  "the write arm ran: it read the node, wrote that same value through the helper, and re-read it"
+
+export FAKE_PW_WRITE_RC=5
+printf '412\n' >"$fake_backlight"
+run_stage_body verify_priv_write_helper "$pw_probe" "$fake_backlight"
+ok_failed "a helper that cannot write the node fails verification"
+ok_in_err "would fall through to the sudo tee/chmod path" \
+  "the failure names the consequence -- blanket sudo and world-writable sysfs -- not just a bad exit code"
+unset FAKE_PW_WRITE_RC
+
+export FAKE_PW_WRITE_VALUE=999
+printf '412\n' >"$fake_backlight"
+run_stage_body verify_priv_write_helper "$pw_probe" "$fake_backlight"
+ok_failed "a helper that writes a DIFFERENT value than it was asked for fails verification"
+ok_in_err "while being asked for 412" "the re-read is compared against the value sent, not merely checked for being non-empty"
+unset FAKE_PW_WRITE_VALUE
+
+export FAKE_PW_SHADOW_RC=0
+printf '412\n' >"$fake_backlight"
+run_stage_body verify_priv_write_helper "$pw_probe" "$fake_backlight"
+ok_failed "a helper that accepts /etc/shadow fails verification"
+ok_in_err "only thing bounding a root write" "the failure says the whitelist IS the boundary and it is not working"
+unset FAKE_PW_SHADOW_RC
+
+export FAKE_PW_NONNUMERIC_RC=0
+printf '412\n' >"$fake_backlight"
+run_stage_body verify_priv_write_helper "$pw_probe" "$fake_backlight"
+ok_failed "a helper that accepts a non-numeric brightness value fails verification"
+ok_in_err "accepted a non-numeric brightness value" "the value check is asserted separately from the path check"
+unset FAKE_PW_NONNUMERIC_RC
+
+# ===========================================================================
+# 10. stage-greeter-rotation -- the panel transform, and whose value WINS
+# ===========================================================================
+#
+# NEW COVERAGE. Two hardcoded system reads used to make this stage's outcome a
+# property of whichever laptop ran the suite: /usr/share/sddm/hyprland.lua, and
+# `cat /etc/sddm.conf.d/*.conf` for the winning CompositorCommand. Both are
+# parameters now.
+#
+# PROGRESS.md 5.11 and the INSTALL_MARKER comment in deck-session.sh: a '#' on
+# line 2 of a Lua config is a syntax error, Hyprland discards the whole file
+# without logging, and the greeter comes up rotated looking like the transform
+# simply did not work. Hence the marker prefix split, and hence the luac gate.
+
+reset_root
+upstream_fixture=$(sandboxed "$work/upstream-hyprland.lua")
+printf 'hl.config({ misc = { disable_hyprland_logo = true } })\n' >"$upstream_fixture"
+greeter_dropin=$(sandboxed "${root}${SDDM_GREETER_DROPIN}")
+
+# A drop-in that sorts BEFORE ours, exactly as Omarchy's 10-wayland.conf does.
+# Our 'zy-' name has to beat it, and this is the case that says so.
+printf '[Wayland]\nCompositorCommand=start-hyprland -- --config /usr/share/sddm/hyprland.lua\n' \
+  >"$root/etc/sddm.conf.d/10-wayland.conf"
+
+run_stage_body stage_greeter_rotation "$upstream_fixture" "$greeter_dropin"
+ok_rc 0 "stage-greeter-rotation completes against a fake root"
+
+ok_file "$GREETER_LUA" "it installs ${GREETER_LUA}"
+ok_mode "$GREETER_LUA" 644 "the greeter config is mode 0644 -- sddm reads it as another user"
+# The argv as the STAGE passed it, before fake-sudo rewrote it: GREETER_LUA is
+# not part of this stage's seam, so the destination it asks for is the real
+# production path -- which is what should be asserted here.
+ok_called "install -d -m 0755 -o root -g root $(dirname "$GREETER_LUA")" \
+  "it creates its own directory beside upstream's rather than editing the package-owned file"
+ok_line "$GREETER_LUA" "$INSTALL_MARKER_LUA" \
+  "the greeter config carries the LUA-prefixed marker -- a '#' on line 2 is a syntax error Hyprland discards silently"
+ok_line "$GREETER_LUA" \
+  "hl.monitor({ output = \"${PANEL_OUTPUT}\", mode = \"preferred\", position = \"auto\", scale = ${PANEL_SCALE}, transform = ${PANEL_TRANSFORM} })" \
+  "the transform line is exact: transform 3 (270deg), not 1 -- 1 was applied on this hardware and renders upside down"
+
+ok_file "$SDDM_GREETER_DROPIN" "it installs ${SDDM_GREETER_DROPIN}"
+ok_mode "$SDDM_GREETER_DROPIN" 644 "the sddm drop-in is mode 0644"
+ok_line "$SDDM_GREETER_DROPIN" "$INSTALL_MARKER" "the sddm drop-in carries the install marker"
+ok_line "$SDDM_GREETER_DROPIN" "CompositorCommand=start-hyprland -- --config ${GREETER_LUA}" \
+  "the drop-in repoints the greeter compositor at OUR config, not at upstream's"
+ok_line "$SDDM_GREETER_DROPIN" "DisplayServer=wayland" "it also pins the greeter to Wayland, where hl.monitor applies"
+
+ok_in_out "verified: ours is the winning CompositorCommand" \
+  "the stage checks which value WINS across the drop-in directory, not merely that its own file exists"
+ok_in_err "has changed since" \
+  "an upstream greeter config that no longer matches UPSTREAM_GREETER_SHA256 warns about drift rather than passing quietly"
+
+if command -v luac >/dev/null 2>&1; then
+  ok_in_out "verified: generated greeter config is valid Lua" "the stage syntax-checks the config before installing it"
+  luac -p "$root$GREETER_LUA" 2>"$work/luaerr" ||
+    fail_test "the INSTALLED greeter config parses as Lua" "$(cat "$work/luaerr")"
+  pass "the installed greeter config parses (luac -p) -- Hyprland would discard it silently otherwise"
+else
+  ok_in_err "was NOT syntax-checked" "with no luac the stage says the Lua check did not run rather than implying it passed"
+  note "luac is not installed, so neither the stage nor this suite parsed the generated Lua"
+fi
+
+run_stage_body stage_greeter_rotation "$upstream_fixture" "$greeter_dropin"
+ok_rc 0 "a second run of stage-greeter-rotation succeeds"
+
+# --- upstream's config is gone: mirroring it would be guesswork -----------
+reset_root
+run_stage_body stage_greeter_rotation "$(sandboxed "$work/no-such-upstream.lua")" "$greeter_dropin"
+ok_failed "an absent upstream greeter config stops the stage"
+ok_in_err "Omarchy's greeter config has moved" \
+  "the refusal says mirroring a file it cannot read would be guesswork, rather than shipping a stale mirror"
+ok_absent "$SDDM_GREETER_DROPIN" "nothing is written when the mirror source cannot be found"
+
+# --- something sorts after 'zy-' and takes the key ------------------------
+#
+# The whole reason the stage reads back a WINNER instead of its own file. This
+# is also the exact bug class SDDM_DROPIN's comment records: a name that sorted
+# before autologin.conf, and a comment asserting an ordering nobody checked.
+reset_root
+printf '[Wayland]\nCompositorCommand=start-hyprland -- --config /somebody/elses.lua\n' \
+  >"$root/etc/sddm.conf.d/zz-later.conf"
+run_stage_body stage_greeter_rotation "$upstream_fixture" "$greeter_dropin"
+ok_failed "a drop-in sorting after 'zy-' that overrides CompositorCommand fails the stage"
+ok_in_err "Something sorts after 'zy-'" \
+  "the failure says the greeter would still render rotated, and names the value that won"
+ok_file "$SDDM_GREETER_DROPIN" "our drop-in was still written -- 'installed' and 'winning' are different questions"
+
+# ===========================================================================
+# 11. The harness's own safety invariant
 # ===========================================================================
 #
 # Everything above is only trustworthy if none of it touched the real system.

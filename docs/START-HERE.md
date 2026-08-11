@@ -294,7 +294,7 @@ work without waiting for further instruction.**
 > for f in test/unit/test-*.sh; do ./"$f"; done; for f in test/unit/test-*.py; do python3 "$f"; done
 > ```
 >
-> **12 suites, seconds, no VM.** ⚠️ That is *two* globs — the shell one alone
+> **15 suites, seconds, no VM.** ⚠️ That is *two* globs — the shell one alone
 > misses all five Python suites, which is where the input layer's coverage
 > lives. Seven shell (`test-deck-session.sh` **70**, `test-osk-install-layout.sh`
 > **19**, `test-vm-limine-pin.sh` **12**, four VM-helper suites) and five Python (`test-deck-input-mapper.py`

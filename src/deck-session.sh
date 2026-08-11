@@ -269,6 +269,12 @@ readonly PRIV_WRITE_HELPER="${POLKIT_HELPER_DIR}/steamos-priv-write"
 readonly PRIV_WRITE_SUDOERS=/etc/sudoers.d/99-deck-priv-write
 readonly TIMEZONE_SUDOERS=/etc/sudoers.d/99-deck-set-timezone
 
+# The sysfs node stage-priv-write-helper verifies its write path against: the
+# exact one Steam moves for the brightness slider on this hardware, read from
+# Steam's own log (see this file's header). Named rather than repeated inline
+# so the stage and verify_priv_write_helper cannot drift apart.
+readonly DECK_BACKLIGHT=/sys/class/backlight/amdgpu_bl0/brightness
+
 # Called by absolute path from the timezone helper's sudo line, because that is
 # the form omarchy-settings-dev's own sudoers rule matches (see
 # stage_timezone_helper). `timedatectl` bare would resolve through PATH and
@@ -982,45 +988,91 @@ stage_update_stub() {
   # It is deliberately NOT a step toward a real updater. This device genuinely
   # cannot self-update the way SteamOS does (no RAUC, no A/B rootfs), and the
   # stub says so in its header, in --help, and in the journal.
-  assert_ours_or_absent "$UPDATE_STUB" "a real SteamOS updater"
+  #
+  # THE DESTINATION IS A PARAMETER -- see "THE VERIFICATION SEAM" above
+  # verify_update_stub. Production passes nothing and gets ${UPDATE_STUB}.
+  local stub=${1:-$UPDATE_STUB}
+  assert_ours_or_absent "$stub" "a real SteamOS updater"
 
-  log "installing the steamos-update stub: ${UPDATE_STUB}"
-  $SUDO install -d -m 0755 -o root -g root "$POLKIT_HELPER_DIR" ||
-    fail "could not create ${POLKIT_HELPER_DIR}"
+  log "installing the steamos-update stub: ${stub}"
+  # dirname, not ${POLKIT_HELPER_DIR}: identical for the default, and it keeps
+  # the directory that gets created and the file that lands in it in step.
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$stub")" ||
+    fail "could not create $(dirname "$stub")"
 
   local tmp
   tmp=$(mktemp) || fail "mktemp failed"
   render_update_stub >"$tmp" ||
     fail "could not render the steamos-update stub"
 
-  $SUDO install -m 0755 -o root -g root "$tmp" "$UPDATE_STUB" ||
-    fail "could not install ${UPDATE_STUB}"
+  $SUDO install -m 0755 -o root -g root "$tmp" "$stub" ||
+    fail "could not install ${stub}"
   rm -f "$tmp"
 
-  # Verify by running it, not by trusting the write. `check` answering 7 is the
-  # single behaviour Steam's first-run flow depends on.
+  verify_update_stub "$stub"
+
+  log "stage-update-stub: ok"
+  log "NOTE: this stub updates nothing. Real updates: ${REAL_UPDATE_HINT}"
+}
+
+# ===========================================================================
+# THE VERIFICATION SEAM -- read this before adding another verify_* function
+# ===========================================================================
+#
+# Several stages verify their work by EXECUTING what they just installed, at
+# the absolute path the real caller resolves. That is the strongest check
+# available and it is why these stages are trusted -- but it also made them
+# unreachable from test/unit/, because the absolute path is a readonly
+# constant, so a suite running off-Deck would have had to execute the REAL
+# /usr/bin/steamos-polkit-helpers/steamos-update (which exists on any machine
+# with gamescope-session installed, and `exec pkexec`s).
+#
+# The fix, and its shape matters:
+#
+#   * The verification is a FUNCTION that takes the path to exercise. A test
+#     passes a copy under a fake root, or a deliberately broken stub, and gets
+#     the same checks run against it. This is the same move render_update_stub
+#     made for generated text, for the same reason.
+#   * The parameter DEFAULTS to the absolute constant, and every caller in this
+#     file passes either nothing or the destination the stage just installed
+#     to. On a Deck the behaviour is byte-for-byte what it was.
+#   * Nothing here reads a path from the ENVIRONMENT. That was considered and
+#     rejected for these paths in test/unit/test-deck-session.sh's header: an
+#     env override would let a mis-set variable install a working-looking file
+#     somewhere Steam never looks, which is the silent-failure class this whole
+#     project exists to prevent, introduced by the test seam itself. A function
+#     argument cannot be set by accident.
+#   * There is NO "skip the check when handed a stub" branch anywhere below,
+#     deliberately. A verification that can be turned off is not one.
+#
+# Exercise the installed stub. Steam depends on three exit codes and this
+# stage's entire value is that they are checked by RUNNING the file rather than
+# by trusting the write.
+verify_update_stub() {
+  local stub=${1:-$UPDATE_STUB}
+
+  # `check` answering 7 is the single behaviour Steam's first-run flow depends
+  # on.
   local rc=0
-  "$UPDATE_STUB" check >/dev/null 2>&1 || rc=$?
+  "$stub" check >/dev/null 2>&1 || rc=$?
   [[ $rc -eq 7 ]] ||
-    fail "${UPDATE_STUB} installed but 'check' exited ${rc}, not 7. Steam reads 7 as 'up to date'; anything else puts the first-run update dialog back."
+    fail "${stub} installed but 'check' exited ${rc}, not 7. Steam reads 7 as 'up to date'; anything else puts the first-run update dialog back."
 
   rc=0
-  "$UPDATE_STUB" --supports-duplicate-detection >/dev/null 2>&1 || rc=$?
+  "$stub" --supports-duplicate-detection >/dev/null 2>&1 || rc=$?
   [[ $rc -ne 0 ]] ||
-    fail "${UPDATE_STUB} claims duplicate-detection support (exit 0). It does not implement it; that would make Steam depend on behaviour that is not there."
+    fail "${stub} claims duplicate-detection support (exit 0). It does not implement it; that would make Steam depend on behaviour that is not there."
 
   # The apply path must NOT exit 0. This assertion is the whole reason it is
   # here: an earlier version of this stub exited 0, Steam read that as "update
   # applied", and rebooted the Deck to finish it -- once per OOBE pass.
   rc=0
-  "$UPDATE_STUB" >/dev/null 2>&1 || rc=$?
+  "$stub" >/dev/null 2>&1 || rc=$?
   [[ $rc -ne 0 ]] ||
-    fail "${UPDATE_STUB} exits 0 on the apply path. Steam reads 0 as 'an OS update was applied' and REBOOTS the device to complete it, on every first-run pass. It must report 'nothing to apply' (7) instead."
+    fail "${stub} exits 0 on the apply path. Steam reads 0 as 'an OS update was applied' and REBOOTS the device to complete it, on every first-run pass. It must report 'nothing to apply' (7) instead."
 
   log "verified: 'check' exits 7 (up to date), capability probe declines,"
   log "          apply exits ${rc} (non-zero, so Steam will not reboot)"
-  log "stage-update-stub: ok"
-  log "NOTE: this stub updates nothing. Real updates: ${REAL_UPDATE_HINT}"
 }
 
 # The stub's body, written to stdout.
@@ -1144,21 +1196,25 @@ stage_timezone_helper() {
   #
   # Without it every call returns 127 and the picker silently does nothing:
   # the user chooses a timezone, sees no error, and the clock stays wrong.
-  assert_ours_or_absent "$TIMEZONE_HELPER" "a real SteamOS helper"
+  #
+  # THE DESTINATION IS A PARAMETER -- see "THE VERIFICATION SEAM" above
+  # verify_update_stub. Production passes nothing and gets ${TIMEZONE_HELPER}.
+  local helper=${1:-$TIMEZONE_HELPER}
+  assert_ours_or_absent "$helper" "a real SteamOS helper"
 
   command -v "$TIMEDATECTL_BIN" >/dev/null 2>&1 ||
     fail "${TIMEDATECTL_BIN} not found; the timezone helper would install and then fail at runtime"
 
-  log "installing the steamos-set-timezone helper: ${TIMEZONE_HELPER}"
-  $SUDO install -d -m 0755 -o root -g root "$POLKIT_HELPER_DIR" ||
-    fail "could not create ${POLKIT_HELPER_DIR}"
+  log "installing the steamos-set-timezone helper: ${helper}"
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$helper")" ||
+    fail "could not create $(dirname "$helper")"
 
   local tmp
   tmp=$(mktemp) || fail "mktemp failed"
   render_timezone_helper >"$tmp" ||
     fail "could not render the steamos-set-timezone helper"
-  $SUDO install -m 0755 -o root -g root "$tmp" "$TIMEZONE_HELPER" ||
-    fail "could not install ${TIMEZONE_HELPER}"
+  $SUDO install -m 0755 -o root -g root "$tmp" "$helper" ||
+    fail "could not install ${helper}"
   rm -f "$tmp"
 
   # --- the sudoers grant ---
@@ -1205,13 +1261,23 @@ EOF
     fail "could not install ${TIMEZONE_SUDOERS}"
   rm -f "$tmp"
 
+  verify_timezone_helper "$helper"
+
+  log "stage-timezone-helper: ok"
+}
+
+# Exercise the installed timezone helper. Takes the path for the reason set out
+# in "THE VERIFICATION SEAM" above verify_update_stub.
+verify_timezone_helper() {
+  local helper=${1:-$TIMEZONE_HELPER}
+
   # Verify by running it, not by trusting the write -- and verify against the
   # timezone the machine is ALREADY set to, so a passing test changes nothing.
   local before after
   before=$(timedatectl show -p Timezone --value) ||
     fail "could not read the current timezone"
-  "$TIMEZONE_HELPER" "$before" ||
-    fail "${TIMEZONE_HELPER} failed setting the timezone to its current value (${before}). The helper installed but does not work; the picker would still fail silently."
+  "$helper" "$before" ||
+    fail "${helper} failed setting the timezone to its current value (${before}). The helper installed but does not work; the picker would still fail silently."
   after=$(timedatectl show -p Timezone --value) ||
     fail "could not re-read the timezone after the helper ran"
   [[ $after == "$before" ]] ||
@@ -1221,12 +1287,11 @@ EOF
   # names out of its own list, but a helper that writes whatever it is handed
   # is not one worth having behind a sudo grant.
   local rc=0
-  "$TIMEZONE_HELPER" ../../etc/shadow >/dev/null 2>&1 || rc=$?
+  "$helper" ../../etc/shadow >/dev/null 2>&1 || rc=$?
   [[ $rc -ne 0 ]] ||
-    fail "${TIMEZONE_HELPER} accepted a path-traversal timezone. It must validate against /usr/share/zoneinfo before elevating."
+    fail "${helper} accepted a path-traversal timezone. It must validate against /usr/share/zoneinfo before elevating."
 
   log "verified: helper set the timezone to its existing value (${after}) and rejects a traversal argument"
-  log "stage-timezone-helper: ok"
 }
 
 # The timezone helper's body, written to stdout. Split out for the same reason
@@ -1337,18 +1402,24 @@ stage_priv_write_helper() {
   # and what that does is not understood here. It is not whitelisted, so this
   # helper refuses it loudly. Steam already tolerates that refusal -- it has
   # been getting 127 for it all along.
-  assert_ours_or_absent "$PRIV_WRITE_HELPER" "a real SteamOS helper"
+  #
+  # THE DESTINATION AND THE NODE IT IS VERIFIED AGAINST ARE PARAMETERS -- see
+  # "THE VERIFICATION SEAM" above verify_update_stub. Production passes nothing
+  # and gets ${PRIV_WRITE_HELPER} and ${DECK_BACKLIGHT}.
+  local helper=${1:-$PRIV_WRITE_HELPER}
+  local backlight=${2:-$DECK_BACKLIGHT}
+  assert_ours_or_absent "$helper" "a real SteamOS helper"
 
-  log "installing the steamos-priv-write helper: ${PRIV_WRITE_HELPER}"
-  $SUDO install -d -m 0755 -o root -g root "$POLKIT_HELPER_DIR" ||
-    fail "could not create ${POLKIT_HELPER_DIR}"
+  log "installing the steamos-priv-write helper: ${helper}"
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$helper")" ||
+    fail "could not create $(dirname "$helper")"
 
   local tmp
   tmp=$(mktemp) || fail "mktemp failed"
   render_priv_write_helper >"$tmp" ||
     fail "could not render the steamos-priv-write helper"
-  $SUDO install -m 0755 -o root -g root "$tmp" "$PRIV_WRITE_HELPER" ||
-    fail "could not install ${PRIV_WRITE_HELPER}"
+  $SUDO install -m 0755 -o root -g root "$tmp" "$helper" ||
+    fail "could not install ${helper}"
   rm -f "$tmp"
 
   local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
@@ -1374,17 +1445,37 @@ EOF
     fail "could not install ${PRIV_WRITE_SUDOERS}"
   rm -f "$tmp"
 
+  verify_priv_write_helper "$helper" "$backlight"
+
+  log "stage-priv-write-helper: ok"
+  log "NOTE: this covers brightness and the status LED only. Steam also asks"
+  log "      for /dev/drm_dp_aux0, which is deliberately NOT whitelisted."
+}
+
+# Exercise the installed priv-write helper. Takes the helper and the node to
+# write for the reason set out in "THE VERIFICATION SEAM" above
+# verify_update_stub.
+#
+# NOTE what the second parameter is NOT: it is not a way to widen what the
+# helper will write. The whitelist that decides that lives INSIDE the rendered
+# helper and is anchored on literal /sys/class/... prefixes, so handing this a
+# path outside that subtree makes the helper REFUSE -- which is why the caller
+# below still has to pass a real, whitelisted node to exercise the write path
+# at all.
+verify_priv_write_helper() {
+  local helper=${1:-$PRIV_WRITE_HELPER}
+  local bl=${2:-$DECK_BACKLIGHT}
+
   # Verify by running it against the real backlight, at its CURRENT value, so
   # a passing check leaves the screen exactly as it found it.
-  local bl=/sys/class/backlight/amdgpu_bl0/brightness
   if [[ -r $bl ]]; then
     local before after
     before=$(cat "$bl") || fail "could not read ${bl}"
-    "$PRIV_WRITE_HELPER" "$bl" "$before" ||
-      fail "${PRIV_WRITE_HELPER} failed writing ${bl} its own current value (${before}). Gaming Mode's brightness slider would fall through to the sudo tee/chmod path."
+    "$helper" "$bl" "$before" ||
+      fail "${helper} failed writing ${bl} its own current value (${before}). Gaming Mode's brightness slider would fall through to the sudo tee/chmod path."
     after=$(cat "$bl") || fail "could not re-read ${bl}"
     [[ $after == "$before" ]] ||
-      fail "${PRIV_WRITE_HELPER} changed ${bl} from ${before} to ${after} while being asked for ${before}"
+      fail "${helper} changed ${bl} from ${before} to ${after} while being asked for ${before}"
     log "verified: wrote ${bl} its existing value (${before}) through the helper"
   else
     warn "${bl} not present, so the helper's write path was NOT exercised. On non-Deck hardware that is expected; on a Deck it is not."
@@ -1393,19 +1484,16 @@ EOF
   # The whitelist is the security boundary, so prove it refuses rather than
   # trusting that it is written correctly.
   local rc=0
-  "$PRIV_WRITE_HELPER" /etc/shadow x >/dev/null 2>&1 || rc=$?
+  "$helper" /etc/shadow x >/dev/null 2>&1 || rc=$?
   [[ $rc -ne 0 ]] ||
-    fail "${PRIV_WRITE_HELPER} accepted /etc/shadow. Its whitelist is the only thing bounding a root write; it is not working."
+    fail "${helper} accepted /etc/shadow. Its whitelist is the only thing bounding a root write; it is not working."
 
   rc=0
-  "$PRIV_WRITE_HELPER" "$bl" 'not-a-number' >/dev/null 2>&1 || rc=$?
+  "$helper" "$bl" 'not-a-number' >/dev/null 2>&1 || rc=$?
   [[ $rc -ne 0 ]] ||
-    fail "${PRIV_WRITE_HELPER} accepted a non-numeric brightness value."
+    fail "${helper} accepted a non-numeric brightness value."
 
   log "verified: refuses a non-whitelisted path and a non-numeric value"
-  log "stage-priv-write-helper: ok"
-  log "NOTE: this covers brightness and the status LED only. Steam also asks"
-  log "      for /dev/drm_dp_aux0, which is deliberately NOT whitelisted."
 }
 
 # The priv-write helper's body, written to stdout. Split out for the same
@@ -1529,16 +1617,23 @@ stage_greeter_rotation() {
   #     the first thing a user sees and still has no known fix (R-19).
   #   - the console/TTY, which needs fbcon=rotate:1 on the kernel cmdline. That
   #     touches the boot chain and is held for separate operator approval.
-  [[ -f $UPSTREAM_GREETER_LUA ]] ||
-    fail "${UPSTREAM_GREETER_LUA} not found -- Omarchy's greeter config has moved, so mirroring it here would be guesswork. Re-check CompositorCommand in /etc/sddm.conf.d/ before continuing."
+  #
+  # THE TWO SYSTEM PATHS THIS STAGE READS ARE PARAMETERS -- see "THE
+  # VERIFICATION SEAM" above verify_update_stub. Production passes nothing and
+  # gets ${UPSTREAM_GREETER_LUA} and ${SDDM_GREETER_DROPIN}.
+  local upstream=${1:-$UPSTREAM_GREETER_LUA}
+  local dropin=${2:-$SDDM_GREETER_DROPIN}
+
+  [[ -f $upstream ]] ||
+    fail "${upstream} not found -- Omarchy's greeter config has moved, so mirroring it here would be guesswork. Re-check CompositorCommand in $(dirname "$dropin")/ before continuing."
 
   # Drift check. Ours is a copy, so upstream changing its greeter settings is
   # something a human has to notice; a silent divergence would show up months
   # later as a greeter that lost a setting nobody remembers.
   local actual
-  actual=$(sha256sum "$UPSTREAM_GREETER_LUA" | awk '{print $1}')
+  actual=$(sha256sum "$upstream" | awk '{print $1}')
   if [[ $actual != "$UPSTREAM_GREETER_SHA256" ]]; then
-    warn "${UPSTREAM_GREETER_LUA} has changed since ${GREETER_LUA} was mirrored from it (expected ${UPSTREAM_GREETER_SHA256:0:12}…, got ${actual:0:12}…). Diff the two and re-mirror, then update UPSTREAM_GREETER_SHA256. Proceeding: the transform below is still correct, but any NEW upstream greeter setting is not being carried over."
+    warn "${upstream} has changed since ${GREETER_LUA} was mirrored from it (expected ${UPSTREAM_GREETER_SHA256:0:12}…, got ${actual:0:12}…). Diff the two and re-mirror, then update UPSTREAM_GREETER_SHA256. Proceeding: the transform below is still correct, but any NEW upstream greeter setting is not being carried over."
   fi
 
   log "installing the greeter compositor config: ${GREETER_LUA}"
@@ -1596,7 +1691,7 @@ EOF
     fail "could not install ${GREETER_LUA}"
   rm -f "$tmp"
 
-  log "pointing SDDM's greeter compositor at it: ${SDDM_GREETER_DROPIN}"
+  log "pointing SDDM's greeter compositor at it: ${dropin}"
   tmp=$(mktemp) || fail "mktemp failed"
   cat >"$tmp" <<EOF
 # Written by ${PROG}.sh. Repoints SDDM's Wayland greeter compositor at a config
@@ -1612,23 +1707,36 @@ DisplayServer=wayland
 [Wayland]
 CompositorCommand=start-hyprland -- --config ${GREETER_LUA}
 EOF
-  $SUDO install -m 0644 -o root -g root "$tmp" "$SDDM_GREETER_DROPIN" ||
-    fail "could not install ${SDDM_GREETER_DROPIN}"
+  $SUDO install -m 0644 -o root -g root "$tmp" "$dropin" ||
+    fail "could not install ${dropin}"
   rm -f "$tmp"
 
-  # Verify the override actually wins. SDDM takes the LAST value for a key
-  # across /etc/sddm.conf.d/*.conf in lexical order, so asserting our file
-  # exists proves nothing about which value the greeter will use.
-  local winner
-  winner=$(cat /etc/sddm.conf.d/*.conf 2>/dev/null | grep '^CompositorCommand=' | tail -1)
-  [[ $winner == "CompositorCommand=start-hyprland -- --config ${GREETER_LUA}" ]] ||
-    fail "installed ${SDDM_GREETER_DROPIN} but the last CompositorCommand across /etc/sddm.conf.d is '${winner}'. Something sorts after 'zy-' and overrides it; the greeter would still render rotated."
-  log "verified: ours is the winning CompositorCommand"
+  verify_greeter_compositor_command "$dropin"
 
   log "stage-greeter-rotation: ok"
   log "NOTE: autologin means the greeter is normally skipped, so this is not"
   log "      exercised on a normal boot. To see it, disable the [Autologin]"
   log "      section and restart sddm."
+}
+
+# Verify the greeter override actually WINS. SDDM takes the LAST value for a
+# key across its drop-in directory in lexical order, so asserting our file
+# exists proves nothing about which value the greeter will use.
+#
+# Takes our drop-in's path -- the directory to sweep is its dirname -- for the
+# reason set out in "THE VERIFICATION SEAM" above verify_update_stub. Reading a
+# hardcoded /etc/sddm.conf.d made this stage's outcome a property of whichever
+# machine ran it, which is what kept it out of the unit suite.
+verify_greeter_compositor_command() {
+  local dropin=${1:-$SDDM_GREETER_DROPIN}
+  local conf_dir
+  conf_dir=$(dirname "$dropin")
+
+  local winner
+  winner=$(cat "$conf_dir"/*.conf 2>/dev/null | grep '^CompositorCommand=' | tail -1)
+  [[ $winner == "CompositorCommand=start-hyprland -- --config ${GREETER_LUA}" ]] ||
+    fail "installed ${dropin} but the last CompositorCommand across ${conf_dir} is '${winner}'. Something sorts after 'zy-' and overrides it; the greeter would still render rotated."
+  log "verified: ours is the winning CompositorCommand"
 }
 
 # ---------------------------------------------------------------------------
@@ -1734,6 +1842,23 @@ stage_input_mapper() {
   # an installed system -- PROGRESS.md 5.9's event5/event4/event11 are event6/
   # event5/event7 here -- and the device is named "Steam Deck", not "Steam Deck
   # Controller". Anything matching on either would bind the wrong node.
+  #
+  # ⚠️ THIS STAGE HAS NO VERIFICATION SEAM, AND THE REASON IS EXTERNAL. The
+  # mapper probe further down runs a readonly absolute path, which is the same
+  # thing that kept four sibling stages out of the unit suite until they grew a
+  # verify_* function taking that path as an argument (see "THE VERIFICATION
+  # SEAM" above verify_update_stub). The blocker here is not this file:
+  # test/unit/test-osk-install-layout.sh sed's this function's body out of
+  # deck-session.sh and greps it for three code shapes -- the module install
+  # loop's destination, the renderers' import line, and the command substitution
+  # that runs the mapper. Move any of them into a verify_input_mapper() and that
+  # suite goes red.
+  #
+  # Note what NOT to do about it: the patterns are deliberately not quoted in
+  # this comment, because a comment its greps matched would keep the suite green
+  # with the code deleted -- the "the regex matched a comment, not the code"
+  # artifact PROGRESS.md §7 records, manufactured on purpose. Split this stage
+  # and that suite in the same change, or leave both alone.
   local src_dir
   src_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
   [[ -f "${src_dir}/${MAPPER_SRC_NAME}" ]] ||
@@ -2067,10 +2192,21 @@ stage_return_icon() {
   # That takes a Nerd Font GLYPH rather than an icon file, which sidesteps the
   # artwork question entirely. It is per-user config, so T5 has to seed it the
   # same way it seeds monitors.lua -- see PROGRESS.md 5.11.
+  #
+  # This stage used to be the one that silently clobbered: no marker in the file
+  # it wrote and no ownership check in front of the write, so a .desktop that
+  # some other package (or a user) had put at this path was overwritten without
+  # a word. Every other stage refuses that, and now so does this one. The marker
+  # goes on line 1 as a '#' comment: the Desktop Entry spec ignores comment
+  # lines and does not require the group header to be first, and
+  # desktop-file-validate accepts it.
+  assert_ours_or_absent "$RETURN_DESKTOP_FILE" "another package's desktop entry"
+
   log "installing ${RETURN_DESKTOP_FILE}"
   local tmp
   tmp=$(mktemp) || fail "mktemp failed"
   cat >"$tmp" <<EOF
+${INSTALL_MARKER}
 [Desktop Entry]
 Type=Application
 Name=Return to Gaming Mode

@@ -124,8 +124,10 @@ exactly how `test/unit/test-vm-limine-pin.sh` went in red in commit `e5a5540`
 after its author ran the lint and saw exit 0. **Use the command above before
 committing; CI's narrower one only agrees with it afterwards.**
 
-Now: **12 suites and that command exit 0** — seven shell (`test-deck-session.sh` 70,
-`test-osk-install-layout.sh` 19, `test-vm-limine-pin.sh` 12, four VM-helper suites) and five Python
+Now: **15 suites and that command exit 0** — ten shell (`test-deck-session.sh` 70,
+`test-deck-session-stages.sh` **223**, `test-duplicated-upstream-facts.sh` 18,
+`test-iso-payload-audit.sh` 16, `test-osk-install-layout.sh` 19,
+`test-vm-limine-pin.sh` 16, four VM-helper suites) and five Python
 (`test-deck-input-mapper.py` 106, `test-deck-osk-layout.py` 134,
 `test-deck-osk-tty.py` 54, `test-deck-osk-wayland.py` 47,
 `test-deck-osk-focus.py` 37). ⚠️ The Python ones are not in the `test-*.sh` glob;
@@ -2058,6 +2060,33 @@ the owner is named.
 only input path the moment lizard mode is off; the fallback is what keeps a
 crashed mapper from costing you SSH-only recovery. Build and test the fallback
 *before* the Deck session, not during it.
+
+### 5.25a Three defects found while making the stages testable — deliberately NOT fixed
+
+Found 2026-08-11 (session 20) by the agent implementing decisions 9 and 10.
+Each was left alone because "production behaviour must not change" outranked
+it in that task. They are real and they are now written down.
+
+1. 🐞 **`verify_greeter_compositor_command` loses its own diagnostic.** Its
+   `winner=$(cat … | grep … | tail -1)` under `set -euo pipefail` exits **1
+   with no output at all** when no `CompositorCommand=` exists anywhere in the
+   drop-in directory — so the explicit `fail` with the good message is never
+   reached. Pre-existing, reproduced in a clean script rather than inferred.
+   Exit code is the same either way; **only the reason goes missing**, which is
+   the half a human needs at 2am.
+2. **`stage_sddm_resilience` and `stage_greeter_rotation` have no
+   `assert_ours_or_absent`.** The old suite header claimed `stage_return_icon`
+   was the only stage missing one; it was not — what was unique to it was
+   having *neither* marker nor check. Corrected.
+3. ⚠️ **`stage_input_mapper` cannot be given a test seam without breaking a
+   sibling suite.** `test/unit/test-osk-install-layout.sh` (~lines 148/158/198)
+   `sed`s that stage's body out of `deck-session.sh` and greps it for three
+   code shapes — one being the exact `$("$MAPPER_BIN" --type` substitution a
+   seam would move. The attempt was made, seen to fail, and **fully reverted**;
+   the stage is byte-identical to before apart from a comment recording the
+   coupling. ⚠️ That comment deliberately does **not** quote the grep patterns:
+   a comment that matched them would keep the sibling suite green with the code
+   deleted — §7's artifact, manufactured on purpose.
 
 ---
 
