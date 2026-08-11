@@ -300,6 +300,26 @@ tty.write_at(buf, rows, 19, ansi=False)
 check("ansi=False writes no reverse video", tty.REVERSE in buf.getvalue(), False)
 check("but still positions the rows", "\x1b[19;1H" in buf.getvalue(), True)
 
+# --- the out-of-bounds guard (R-49) ------------------------------------------
+#
+# ⚠️ Without it the kernel clamps every row that falls past the end of the
+# console onto the LAST line, where they overwrite each other -- measured in
+# QEMU as five keyboard rows collapsing into one garbled line that still greps
+# as a keyboard. Silent, and worse than an error.
+
+buf = io.StringIO()
+tty.write_at(buf, rows, 20, console_rows=24)
+check("a draw that fits is unaffected by the guard", "\x1b[20;1H" in buf.getvalue(), True)
+check("a draw running off the end refuses",
+      raises_saying(lambda: tty.write_at(io.StringIO(), rows, 21, console_rows=24),
+                    ValueError, "21", "24"), True)
+check("and so does one starting above the first row",
+      raises(lambda: tty.write_at(io.StringIO(), rows, 0, console_rows=24), ValueError), True)
+check("the last row that fits exactly is allowed",
+      (tty.write_at(io.StringIO(), rows, 24 - len(rows) + 1, console_rows=24), True)[1], True)
+check("with no console_rows given, nothing is checked -- callers opt in",
+      (tty.write_at(io.StringIO(), rows, 9999), True)[1], True)
+
 buf = io.StringIO()
 tty.clear_at(buf, rows, 19)
 cleared = buf.getvalue()

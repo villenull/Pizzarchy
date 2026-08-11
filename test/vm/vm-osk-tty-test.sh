@@ -237,13 +237,18 @@ CONSOLE_ROWS=${CONSOLE_ROWS:-25}
 OSK_HEIGHT=5                       # the letters layer is five rows
 TUI_ROWS=$((CONSOLE_ROWS - OSK_HEIGHT))
 OSK_TOP=$((TUI_ROWS + 1))
+# ⚠️ R-49: the console is NOT shrunk any more. `stty rows N` on a Linux VT
+# resizes the console itself -- measured, /dev/vcs2 went from 50 to 45 rows --
+# so shrinking the TUI out of the bottom rows deletes the very rows the
+# keyboard needs. The keyboard now takes the bottom of the FULL console and the
+# TUI is left believing it has all of it.
 emit "console.rows=${CONSOLE_ROWS}"
 emit "layout.tui_rows=${TUI_ROWS}"
 emit "layout.osk_top=${OSK_TOP}"
 
 # gum on VT2, with its window shrunk BEFORE it starts so it lays out small.
-openvt -c 2 -s -f -- bash -c "stty rows $TUI_ROWS </dev/tty2; \
-  gum input --placeholder 'Wi-Fi password' --prompt 'pass> ' >/root/osktest/typed.txt" &
+openvt -c 2 -s -f -- bash -c \
+  "gum input --placeholder 'Wi-Fi password' --prompt 'pass> ' >/root/osktest/typed.txt" &
 sleep 3
 chvt 2
 sleep 1
@@ -267,6 +272,15 @@ pad "key BTN_MODE 1"; pad "key BTN_NORTH 1"; pad "key BTN_NORTH 0"; pad "key BTN
 sleep 1
 snap 2-osk-shown
 emit "osk.shown=$(grep -c 'shift' "$OUT/screen.2-osk-shown")"
+# --- R-49 diagnostics: is the console still 50 rows, and where did all five
+# keyboard rows actually land? Two candidate causes, and these separate them:
+# (a) `stty rows` RESIZED the console, so row 46 does not exist and the kernel
+#     clamped; (b) the explicit --osk-top-row never reached the draw and the
+#     automatic "as low as it fits" placement ran against a 45-row winsize.
+emit "diag.stty_at_snap=$(stty size </dev/tty2 2>/dev/null | tr ' ' 'x')"
+emit "diag.vcs2_bytes=$(wc -c </dev/vcs2 2>/dev/null)"
+emit "diag.screen_lines=$(wc -l <"$OUT/screen.2-osk-shown")"
+emit "diag.rows_with_keys=$(grep -n 'q *w *e *r *t\|a *s *d *f *g\|z *x *c *v *b\|shift\|1 *2 *3 *4 *5' "$OUT/screen.2-osk-shown" | cut -d: -f1 | tr '\n' ',')"
 emit "gum.survived=$(grep -c 'pass>' "$OUT/screen.2-osk-shown")"
 
 # Which rows does each occupy? The whole question, answered from the kernel's
@@ -443,15 +457,11 @@ check "STEAM+X drew the keyboard on the console" "$(field osk.shown)" 1
 check "and gum SURVIVED it -- both on one console" "$(field gum.survived)" 1
 check "the keyboard sits below the TUI, not over it" \
       "$(( $(field row.osk_last) > $(field row.gum) ))" 1
-check "the keyboard is in the bottom region, inside the console" \
-      "$(( $(field row.osk_last) <= $(field console.rows) \
-        && $(field row.osk_last) > $(field layout.tui_rows) - 5 ))" 1
-# ⚠️ OPEN: the keyboard lands 5 rows above where --osk-top-row asked for, at
-# `stty rows` - 4 rather than the requested top + 4. It does not overlap the TUI
-# and it is inside the console, which is what the product needs -- but the
-# requested position is not being honoured and that is unexplained. Recorded in
-# docs/findings/P18-osk-hardware-pass.md rather than asserted away.
+check "the keyboard occupies exactly the rows it was given" \
+      "$(field row.osk_last)" "$(( $(field layout.osk_top) + 4 ))"
 log "note   requested osk_top=$(field layout.osk_top), last row landed at $(field row.osk_last) (expected $(( $(field layout.osk_top) + 4 )))"
+log "diag   stty_at_snap=$(field diag.stty_at_snap) vcs2_bytes=$(field diag.vcs2_bytes) screen_lines=$(field diag.screen_lines)"
+log "diag   rows carrying keyboard content: $(field diag.rows_with_keys)"
 
 # --- typing reaches the TUI ---------------------------------------------------
 check "shift redrew the keyboard"   "$(field osk.shift_shown)" 1

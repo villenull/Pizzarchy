@@ -205,10 +205,20 @@ accepting writes and the next redraw was fatal — and **the installer is a
 sequence of screens that start and exit**, so it fires in normal use. Drawing a
 keyboard is optional; being the only input path is not.
 
-⚠️ **R-49 is OPEN:** `--osk-top-row` is not honoured, by five rows — the keyboard
-lands at `stty rows` − 4 rather than the requested top + 4. It does not overlap
-the TUI and stays inside the console, so the product requirement holds, but the
-cause is unexplained and it matters for the Deck's different geometry.
+✅ **R-49 RESOLVED, and it was not what it looked like.** The keyboard landing
+five rows high was not a placement bug: **`stty rows N` RESIZES a Linux VT**
+(`/dev/vcs2` went 8000 → 7200 bytes), so the rows the keyboard was told to use
+had ceased to exist and the kernel clamped all five onto the last line, where
+they overwrote each other into one garbled row that still greped as a keyboard.
+⚠️ **That invalidates the mechanism `write_at` documented** — shrinking the TUI
+out of the bottom rows deletes the rows the keyboard needs. `write_at` now
+refuses out-of-bounds draws loudly, the mapper measures the console at every
+draw, and nothing shrinks the console. Verified: rows 46-50 as requested.
+
+⚠️ **Open, and it matters for the installer:** with no shrinking, nothing
+confines a TUI to the top. `gum` uses three rows and coexists happily; **a
+full-screen curses TUI like archinstall's menu will draw over the keyboard.**
+That is a design fork, not a bug.
 
 ⚠️ **Still open by choice:** ours is **summon-only**; squeekboard's
 focus-triggered auto-show (§5.20) is still enabled and independent of the mapper,

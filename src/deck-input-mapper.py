@@ -813,7 +813,7 @@ def main() -> None:
     def osk_draw() -> None:
         try:
             _osk_draw()
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             # ⚠️ A CONSOLE WRITE THAT FAILS MUST NOT TAKE THE INPUT LAYER DOWN.
             #
             # Measured in QEMU (session 18): `OSError: [Errno 5] Input/output
@@ -829,31 +829,33 @@ def main() -> None:
     def osk_erase() -> None:
         try:
             _osk_erase()
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             osk_fall_back(f"could not clear {args.osk_tty}: {exc}")
+
+    def _console_rows() -> int:
+        """The console's height RIGHT NOW.
+
+        Measured every draw, not cached: `stty rows` resizes a Linux VT (R-49),
+        so a height read at startup can be wrong by the time we draw.
+        """
+        try:
+            return os.get_terminal_size(osk_stream.fileno()).lines
+        except OSError:
+            return 25  # the console default when the size is unknowable
 
     def _osk_draw() -> None:
         rows = osk_tty.render(mapper.osk, mapper.cursors)
+        height = _console_rows()
         top = args.osk_top_row
         if top <= 0:
-            # As low as it fits. The installer's TUI owns the rows above; see
-            # deck_osk_tty.write_at for how they are kept apart.
-            try:
-                height = os.get_terminal_size(osk_stream.fileno()).lines
-            except OSError:
-                height = 25  # the console default when the size is unknowable
             top = max(1, height - len(rows) + 1)
-        osk_tty.write_at(osk_stream, rows, top)
+        osk_tty.write_at(osk_stream, rows, top, console_rows=height)
 
     def _osk_erase() -> None:
         rows = osk_tty.render(mapper.osk, mapper.cursors)
         top = args.osk_top_row
         if top <= 0:
-            try:
-                height = os.get_terminal_size(osk_stream.fileno()).lines
-            except OSError:
-                height = 25
-            top = max(1, height - len(rows) + 1)
+            top = max(1, _console_rows() - len(rows) + 1)
         osk_tty.clear_at(osk_stream, rows, top)
 
     def osk_layer_start() -> None:

@@ -213,19 +213,53 @@ is optional; being the only input path is not.** `test/osk-tty-e2e.py` now
 closes a pty's master end under a live keyboard to reproduce it, and was
 verified to fail 4 assertions with the fix reverted.
 
-## R-49 — ⚠️ OPEN: `--osk-top-row` is not being honoured, by five rows
+## R-49 — ✅ RESOLVED: `stty rows` RESIZES a Linux VT, and the keyboard fell off it
 
-The keyboard lands with its last row at **45** on a 50-row console when
-`--osk-top-row 46` was passed — i.e. at `stty rows` − 4, which is where the
-*automatic* "as low as it fits" placement would put it, not where the explicit
-argument asked.
+**First recorded here as "the requested position is not honoured, cause
+unexplained". That was wrong, and one measurement settled it.**
 
-It does not overlap the TUI and it is inside the console, so the product
-requirement holds and the suite asserts that. **But the requested position is
-being ignored and that is unexplained.** Two candidates, neither checked:
-the argument not reaching `osk_draw`'s `top`, or `os.get_terminal_size()`
-winning because the explicit value is being read as 0 somewhere.
+The keyboard was landing with its last row at 45 on what was believed to be a
+50-row console. Diagnostics inside the guest:
 
-Left open deliberately rather than asserted away. It matters for the Deck, whose
-console geometry differs again, and for any screen that wants the keyboard
-somewhere other than the bottom.
+```
+stty_at_snap = 45x160     vcs2_bytes = 7200      (7200 / 160 = 45 rows)
+rows carrying keyboard content: 45,              ← ONE row, not five
+```
+
+**`stty rows 45` did not merely change the size reported to applications — it
+resized the console.** `/dev/vcs2` shrank from 8000 bytes to 7200. Rows 46-50
+stopped existing, the kernel clamped all five keyboard rows onto the last line,
+and they overwrote each other. `--osk-top-row` was honoured exactly; it pointed
+off the end of a console that had shrunk underneath it.
+
+⚠️ **This invalidates the mechanism `deck_osk_tty.write_at` documented.**
+"Shrink the TUI's reported window with TIOCSWINSZ so it confines itself above
+the keyboard" is self-defeating on a VT: the rows you shrink the TUI out of are
+the same rows you delete. That docstring had been written from reasoning, never
+run, and it was wrong.
+
+⚠️ **And the failure was silent in the worst way.** Five rows collapsed onto one
+garbled line that still contained the word `shift` — so `osk.shown=1` passed,
+and a human glancing at a screenshot would have seen "a keyboard". Only counting
+which rows carried keyboard content exposed it.
+
+**Three changes:**
+
+1. `write_at` takes `console_rows` and **refuses**, with a message naming both
+   the rows it needs and the rows that exist, rather than painting five onto one.
+2. The mapper measures the console height **at every draw** — `stty rows` can
+   resize a VT at any moment, so a height read at startup is not trustworthy —
+   and passes the guard. A refusal degrades to navigation-only like any other
+   draw failure (R-48).
+3. The VM probe **stops shrinking the console**. The keyboard takes the bottom
+   rows of the full console and the TUI keeps all of it.
+
+**Verified:** console stays 50 rows, `row.osk_last = 50` for a requested top of
+46 — exactly the rows asked for — and `gum.received` is still `hlH1`.
+
+⚠️ **What this leaves open for archinstall, and it is a real question.** With no
+shrinking, nothing confines the TUI to the top. `gum` uses three rows and never
+collides, so it coexists happily. **A full-screen curses TUI like archinstall's
+menu will draw over the keyboard**, and the two will fight on redraw. That is a
+design fork — a relay through a smaller pty, or a keyboard that hides while a
+full-screen screen is up — and it needs deciding before the installer ships.

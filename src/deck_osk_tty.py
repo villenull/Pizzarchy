@@ -141,19 +141,37 @@ def width(rows: list[list[Segment]]) -> int:
     return max((sum(len(text) for text, _ in row) for row in rows), default=0)
 
 
-def write_at(stream, rows: list[list[Segment]], top_row: int, *, ansi: bool = True) -> None:
+def write_at(stream, rows: list[list[Segment]], top_row: int, *,
+             ansi: bool = True, console_rows: int | None = None) -> None:
     """Draw the keyboard with its first line at `top_row` (1-based).
 
-    ⚠️ THE INSTALLER'S TUI IS DRAWING ON THIS SAME CONSOLE. Nothing here stops
-    it painting over the keyboard; keeping them apart is the caller's job, and
-    the intended mechanism is to shrink the TUI's reported window (TIOCSWINSZ)
-    so it confines itself to the rows above `top_row`. A TUI that believes the
-    terminal is 18 rows tall does not scroll a 25-row console, and the bottom
-    seven rows stay ours.
+    ⚠️ THE INSTALLER'S TUI IS DRAWING ON THIS SAME CONSOLE, and the obvious way
+    to keep them apart DOES NOT WORK. Measured in QEMU (R-49): on a Linux VT,
+    `TIOCSWINSZ` does not merely change the size reported to applications --
+    **it resizes the console itself**. `stty rows 45` on a 50-row console makes
+    `/dev/vcs2` 45 rows long and rows 46-50 cease to exist.
+
+    So "shrink the TUI's window and draw underneath it" is self-defeating: the
+    rows you shrank the TUI out of are the same rows you just deleted. What
+    happened instead was silent and much worse than an error -- the kernel
+    clamped all five keyboard rows onto the last line, where they overwrote
+    each other, leaving one garbled row that still greps as a keyboard.
+
+    `console_rows` is the guard. Given it, a draw that would fall outside the
+    console REFUSES and raises, rather than painting five rows onto one.
+    Choosing where the keyboard actually goes is a live design question -- see
+    docs/findings/P18-osk-hardware-pass.md R-49.
 
     Cursor position is saved and restored around the draw, so the TUI's own
     cursor does not end up parked in the keyboard.
     """
+    if console_rows is not None:
+        last = top_row + len(rows) - 1
+        if top_row < 1 or last > console_rows:
+            raise ValueError(
+                f"the keyboard needs rows {top_row}-{last} but the console has "
+                f"{console_rows}; drawing would collapse them onto the last line"
+            )
     body = (to_ansi if ansi else to_plain)(rows)
     parts = ["\x1b[s"]  # save cursor
     for offset, line in enumerate(body.split("\n")):

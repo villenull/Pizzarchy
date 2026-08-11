@@ -307,8 +307,9 @@ keyboard knows a controller exists — the property that makes one layer drive
 4. ✅ TTY renderer, driven end to end by a virtual pad (`test/osk-tty-e2e.py`)
    **and by `gum` in QEMU** (`test/vm/vm-osk-tty-test.sh`, R-47): they share one
    console, and `gum.received = hlH1` — typed with the trackpads, read back from
-   what gum wrote to a file. ⚠️ **R-49 open:** `--osk-top-row` lands five rows
-   off; no overlap, cause unexplained.
+   what gum wrote to a file. ✅ **R-49 resolved:** `stty rows` resizes a Linux
+   VT, so the keyboard was falling off the end and being clamped onto one line.
+   ⚠️ Open: a full-screen curses TUI (archinstall) will still overdraw it.
 5. ✅ Layer-shell renderer for Desktop Mode; `--osk-backend=layer` opens
    **this**, not squeekboard. Verified on Hyprland: real layer surface, focus
    never moves, driven end to end from a virtual pad.
