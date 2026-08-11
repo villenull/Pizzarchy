@@ -75,7 +75,10 @@ for want in "$@"; do
     printf '%s %s\n' "${e%%=*}" "${e#*=}"
     found=yes
   done
-  [[ -n $found ]] || exit 1
+  # Emit pacman's own wording on stderr, because the block under test now
+  # forwards it into the failure message -- a stub that stayed silent would
+  # let a "(nothing on stderr)" message pass for a helpful one.
+  [[ -n $found ]] || { printf "error: package '%s' was not found\n" "$want" >&2; exit 1; }
 done
 STUB
 chmod +x "$stub_bin/arch-chroot"
@@ -141,9 +144,11 @@ pass "drift is caught in every pinned package, not only the first"
 if out=$(run_pin "$matching" 'limine=12.5.2-1 limine-mkinitcpio-hook=1.37.1-1'); then
   fail "a missing pinned package fails the build" "it exited 0; output: $out"
 fi
-grep -q "is not installed in the new root" <<<"$out" ||
-  fail "a missing package is reported as missing, not as a version mismatch" "$out"
-pass "a pinned package that is absent fails loudly, and says it is absent"
+grep -q "was not found" <<<"$out" ||
+  fail "the failure forwards pacman's own error instead of guessing" "$out"
+grep -q "NOT a drifted pin" <<<"$out" ||
+  fail "the failure distinguishes a broken chroot from a drifted pin" "$out"
+pass "a pinned package that is absent fails loudly, quoting pacman's own words"
 
 # --- a malformed pin --------------------------------------------------------
 
@@ -194,5 +199,46 @@ grep -q '"\$(id -u)" "\$(id -g)" "\$LIMINE_PIN"' "$BUILDER" ||
   fail "the docker invocation still passes the pin" \
     "without it the in-container LIMINE_PIN is unset and the block dies on set -u"
 pass "the pin is declared, passed to the container, and received in the right position"
+
+# --- WHERE the check runs, not just what it does ----------------------------
+#
+# ⚠️ This assertion exists because the first version of the check was correct
+# and still failed every real build. It ran straight after `pacstrap`, where
+# /mnt/etc/pacman.conf does not exist yet -- pacstrap's own NoExtract skips
+# that file, and the builder seeds it ~150 lines later. So `pacman -Q` in the
+# chroot died with "config file could not be read", and the check reported
+# "limine is not installed", which was false in all three of its claims.
+#
+# Nothing above could see that: the cases up there stub `arch-chroot`, so the
+# stub's pacman always works. The defect was purely an ORDERING property of the
+# real script, and this is the cheapest way to make ordering testable.
+
+pin_line=$(grep -n '^# --- the boot-chain pin, asserted' "$BUILDER" | cut -d: -f1)
+seed_line=$(grep -n '^cp /etc/pacman.conf /mnt/etc/pacman.conf' "$BUILDER" | cut -d: -f1)
+arch_line=$(grep -n "^grep -q '\^Architecture' /mnt/etc/pacman.conf" "$BUILDER" | cut -d: -f1)
+pacstrap_line=$(grep -n '^pacstrap -c /mnt' "$BUILDER" | cut -d: -f1)
+
+for probe in pin_line seed_line arch_line pacstrap_line; do
+  [[ -n ${!probe} && ${!probe} =~ ^[0-9]+$ ]] ||
+    fail "could not locate ${probe} in ${BUILDER}" \
+      "the anchor this ordering check greps for was renamed; the check cannot pass vacuously"
+done
+pass "all four ordering anchors are still findable in the builder"
+
+(( pacstrap_line < pin_line )) ||
+  fail "the pin check runs after pacstrap" "pacstrap is at ${pacstrap_line}, the check at ${pin_line}"
+(( seed_line < pin_line )) ||
+  fail "the pin check runs AFTER the guest's pacman.conf is seeded" \
+    "seeding is at line ${seed_line}, the check at ${pin_line} -- 'pacman -Q' in the chroot dies with 'config file could not be read' when the check runs first, and reports it as a missing package"
+(( arch_line < pin_line )) ||
+  fail "the pin check runs after the Architecture guard" \
+    "the guard is at ${arch_line}, the check at ${pin_line}; without Architecture every 'pacman -Q' in the guest fails"
+pass "the pin check runs after pacstrap AND after the guest's pacman.conf is usable"
+
+# shellcheck disable=SC2016 # the literal '$pin_err_file' text is the pattern
+grep -q '2>"\$pin_err_file"' "$BUILDER" ||
+  fail "the pin check captures pacman's stderr instead of discarding it" \
+    "discarding it is what made the original failure blame a missing package for a broken chroot"
+pass "pacman's own error survives into the failure message"
 
 printf 'all limine-pin tests passed\n'

@@ -2124,13 +2124,24 @@ backup rescue (the rebuild wipes both).
   ahead of it — **`omarchy-update` does not put a machine on "the beta"**.
 - **`git ls-files '*.sh'` lists only TRACKED files, so running "CI's own
   command" locally does NOT lint a file you have just created.** It becomes
-  lintable the moment you `git add` it — i.e. the check passes, you commit, and
-  CI goes red on the file you thought you had just verified. Measured
-  2026-08-11: `test/unit/test-vm-limine-pin.sh` shipped two SC2016 findings this
-  way in `e5a5540`, an hour after this file's own warning about "checking a
-  narrower set than CI does". **Locally use
+  lintable the moment you `git add` it — the check passes, you commit, and the
+  file you thought you had verified was never looked at. Measured 2026-08-11:
+  `test/unit/test-vm-limine-pin.sh` shipped two SC2016 findings this way in
+  `e5a5540`, an hour after this file's own warning about "checking a narrower
+  set than CI does". **Locally use
   `git ls-files --cached --others --exclude-standard '*.sh'`;** CI's narrower
   form is correct only because CI checks out a commit.
+- ⚠️ **CI's shellcheck version is UNPINNED, so "verify with CI's own command"
+  does not mean you will get CI's own answer.** The workflow does
+  `apt-get install -y shellcheck` on `ubuntu-latest`; this dev machine runs
+  **0.11.0**. The two SC2016 findings above were flagged locally, and whether
+  the runner's older build flags them was **never confirmed** — the commit
+  message that said "CI is red on main" asserted more than had been measured.
+  The disable directives make both versions green either way. **The real hazard
+  is the reverse direction**: a newer local shellcheck passing something an
+  older CI rejects, or a suite that is green in CI and red for the next
+  developer. Pin the version in the workflow, or stop calling the local run
+  "CI's own command".
 - **reddit.com is blocked by policy for WebFetch and for the in-app browser**
   (measured 2026-08-11 — `www.` and `old.` alike). Links to r/omarchy threads
   cannot be read from a session; ask the operator to paste, or find the

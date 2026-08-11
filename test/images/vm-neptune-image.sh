@@ -221,53 +221,6 @@ pacstrap -c /mnt \
   sudo which findutils psmisc dosfstools e2fsprogs less vim ||
   die "pacstrap failed"
 
-# --- the boot-chain pin, asserted -------------------------------------------
-#
-# The whole point of this substrate is that its limine stack matches the
-# product's. Nothing enforced that until 2026-08-11; see the note beside
-# LIMINE_PIN in the outer script. Assert it here, where the packages have just
-# landed, rather than discovering a mismatch as a mysterious VM-suite result.
-if [[ $LIMINE_PIN == any ]]; then
-  printf '[build] ⚠️  IMG_LIMINE_PIN=any -- boot-chain versions NOT checked\n' >&2
-  arch-chroot /mnt pacman -Q limine limine-mkinitcpio-hook limine-snapper-sync >&2 ||
-    die "could not query the limine stack"
-else
-  step "verify the boot-chain pin"
-  pin_drift=""
-  for spec in $LIMINE_PIN; do
-    pin_pkg=${spec%%=*}
-    pin_want=${spec#*=}
-    [[ $pin_pkg != "$spec" && -n $pin_want ]] ||
-      die "IMG_LIMINE_PIN entry '${spec}' is not pkg=version"
-    # `pacman -Q` prints "<name> <version>" and exits non-zero when the package
-    # is not installed -- which, right after pacstrap in a root we just built,
-    # means the pacstrap set and the pin disagree. Keep that case separate from
-    # a parse failure so the message points at the real cause; piping straight
-    # into awk would swallow the distinction under `pipefail` and report every
-    # absent package as a broken query.
-    if ! pin_line=$(arch-chroot /mnt pacman -Q "$pin_pkg" 2>/dev/null); then
-      die "${pin_pkg} is not installed in the new root, but the pin names it. Either the pacstrap set above no longer installs it, or the pin is stale."
-    fi
-    pin_got=$(awk '{print $2}' <<<"$pin_line")
-    [[ -n $pin_got ]] ||
-      die "could not parse a version out of 'pacman -Q ${pin_pkg}' -- got '${pin_line}'"
-    [[ $pin_got == "$pin_want" ]] ||
-      pin_drift+="  ${pin_pkg}: pinned ${pin_want}, got ${pin_got}"$'\n'
-  done
-  if [[ -n $pin_drift ]]; then
-    printf '[build] FAIL: the boot-chain stack drifted from the pin:\n%s' "$pin_drift" >&2
-    die "the substrate would test a boot chain the product does not run. Check whether the PRODUCT moved too (the ISO's own versions, docs/findings/T9-iso-comparison.md); if it did, re-pin with IMG_LIMINE_PIN and say so in PROGRESS.md. IMG_LIMINE_PIN=any bypasses this, deliberately and never in CI."
-  fi
-  printf '[build] boot-chain pin OK: %s\n' "$LIMINE_PIN" >&2
-fi
-# --- end boot-chain pin ---
-#
-# ⚠️ That marker and the one above are load-bearing: test/unit/test-vm-limine-pin.sh
-# extracts everything between them and RUNS it against a stubbed `arch-chroot`,
-# because this block lives inside a heredoc shipped into a container and cannot
-# be sourced. Renaming either marker makes the extraction return nothing --
-# which the suite treats as a failure, not as "no tests to run".
-
 # A stable machine-id: normally generated on first boot, but
 # limine-snapper-sync namespaces its ESP history directory by machine-id at
 # sync time, which happens in this chroot before any boot.
@@ -372,6 +325,63 @@ cp /etc/pacman.conf /mnt/etc/pacman.conf || die "could not seed the guest's pacm
 cp /etc/pacman.d/mirrorlist /mnt/etc/pacman.d/mirrorlist || die "could not seed the guest's mirrorlist"
 grep -q '^Architecture' /mnt/etc/pacman.conf ||
   die "the seeded pacman.conf has no Architecture line -- pacman -Q would fail in the guest"
+
+# --- the boot-chain pin, asserted -------------------------------------------
+#
+# The whole point of this substrate is that its limine stack matches the
+# product's. Nothing enforced that until 2026-08-11; see the note beside
+# LIMINE_PIN in the outer script. Assert it here, where the packages have just
+# landed, rather than discovering a mismatch as a mysterious VM-suite result.
+if [[ $LIMINE_PIN == any ]]; then
+  printf '[build] ⚠️  IMG_LIMINE_PIN=any -- boot-chain versions NOT checked\n' >&2
+  arch-chroot /mnt pacman -Q limine limine-mkinitcpio-hook limine-snapper-sync >&2 ||
+    die "could not query the limine stack"
+else
+  step "verify the boot-chain pin"
+  pin_drift=""
+  pin_err_file=$(mktemp) || die "mktemp failed"
+  for spec in $LIMINE_PIN; do
+    pin_pkg=${spec%%=*}
+    pin_want=${spec#*=}
+    [[ $pin_pkg != "$spec" && -n $pin_want ]] ||
+      die "IMG_LIMINE_PIN entry '${spec}' is not pkg=version"
+    # `pacman -Q` prints "<name> <version>" and exits non-zero when the package
+    # is not installed. Keep that separate from a parse failure so the message
+    # points at the real cause; piping straight into awk would swallow the
+    # distinction under `pipefail` and report every absent package as a broken
+    # query.
+    #
+    # ⚠️ CAPTURE stderr, DO NOT DISCARD IT. The first version of this check
+    # wrote `2>/dev/null` and then blamed a missing package for every failure.
+    # It ran before /mnt/etc/pacman.conf was seeded (pacstrap's own NoExtract
+    # skips that file), so pacman died with "config file could not be read" --
+    # and the check reported "limine is not installed", which was false in all
+    # three of its claims. The block now runs after the seeding above; keeping
+    # the real error in the message is what makes the next ordering mistake
+    # diagnosable in one read instead of a loop-mount.
+    if ! pin_line=$(arch-chroot /mnt pacman -Q "$pin_pkg" 2>"$pin_err_file"); then
+      pin_err=$(cat "$pin_err_file" 2>/dev/null)
+      die "'pacman -Q ${pin_pkg}' failed in the new root. pacman said: ${pin_err:-(nothing on stderr)} -- if that is 'package not found', the pacstrap set above no longer installs it or the pin is stale; anything else is a broken chroot, NOT a drifted pin."
+    fi
+    pin_got=$(awk '{print $2}' <<<"$pin_line")
+    [[ -n $pin_got ]] ||
+      die "could not parse a version out of 'pacman -Q ${pin_pkg}' -- got '${pin_line}'"
+    [[ $pin_got == "$pin_want" ]] ||
+      pin_drift+="  ${pin_pkg}: pinned ${pin_want}, got ${pin_got}"$'\n'
+  done
+  if [[ -n $pin_drift ]]; then
+    printf '[build] FAIL: the boot-chain stack drifted from the pin:\n%s' "$pin_drift" >&2
+    die "the substrate would test a boot chain the product does not run. Check whether the PRODUCT moved too (the ISO's own versions, docs/findings/T9-iso-comparison.md); if it did, re-pin with IMG_LIMINE_PIN and say so in PROGRESS.md. IMG_LIMINE_PIN=any bypasses this, deliberately and never in CI."
+  fi
+  printf '[build] boot-chain pin OK: %s\n' "$LIMINE_PIN" >&2
+fi
+# --- end boot-chain pin ---
+#
+# ⚠️ That marker and the one above are load-bearing: test/unit/test-vm-limine-pin.sh
+# extracts everything between them and RUNS it against a stubbed `arch-chroot`,
+# because this block lives inside a heredoc shipped into a container and cannot
+# be sourced. Renaming either marker makes the extraction return nothing --
+# which the suite treats as a failure, not as "no tests to run".
 
 # Valve repos, added the same way omarchy-deck-kernel.sh's stage_repos adds
 # them, so the guest starts from the state that script leaves behind.
