@@ -230,14 +230,18 @@ proprietary, so Valve's keyboard is unavailable there at any price.
 
 **What this decision requires:**
 
-1. 🐞 **BLOCKED — see R-41 before implementing this.** A resident Steam removes
-   lizard mode's **mouse and keyboard** nodes along with the gamepad, leaving the
-   desktop with no pointer and no keystrokes. The operator hit it as an inability
-   to dismiss the screensaver, recovered over SSH. R-39's checks all passed while
-   the device was uncontrollable, so **"STEAM+X shows the keyboard" is not
-   evidence the desktop is usable.** Either Steam Input must be shown to apply a
-   Desktop layout when resident (stock behaviour — verify first), or Desktop Mode
-   needs a non-Steam input path, which reopens this decision.
+1. 🐞 **BLOCKED — see R-41 before implementing this.** With Steam resident the
+   desktop receives **no input at all**. Every node stays enumerated — both
+   lizard-mode nodes *and* Steam's virtual pad — and **not one of them emits**;
+   Steam consumes the controller over hidraw and routes it only into its own UI.
+   The operator hit this as an unexitable screensaver, recovered over SSH.
+   ⚠️ The screensaver is the **symptom**: without it the desktop was equally
+   unusable, so raising that timeout hides the defect rather than fixing it.
+   R-39's checks all passed while the device was uncontrollable, so **"STEAM+X
+   shows the keyboard" is not evidence the desktop is usable.** Either Steam
+   Input must be shown to apply a Desktop layout when resident (stock behaviour —
+   verify first), or Desktop Mode needs a non-Steam input path, which reopens
+   this decision.
 
    Steam autostarts in Desktop Mode, as `Exec=steam -silent`, via
    `~/.config/autostart/` (already the mechanism in use here — fcitx5 uses it).
