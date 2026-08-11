@@ -42,6 +42,7 @@ USAGE
 from __future__ import annotations
 
 import argparse
+import errno
 import importlib.util
 import os
 import pathlib
@@ -982,7 +983,50 @@ def main() -> None:
                 # which is felt as jerkiness even though the input stream is a
                 # steady 250Hz. Measured on hardware.
                 pending_dx = pending_dy = 0
-                for event in pad.read():
+                try:
+                    events = list(pad.read())
+                except OSError as exc:
+                    # ⚠️ ENODEV: the pad's node vanished WHILE BEING READ.
+                    #
+                    # Measured on hardware 2026-08-10 (session 18's T8 step 7
+                    # pass): six crashes in one boot, `OSError: [Errno 19] No
+                    # such device` out of `pad.read()`, each one killing the
+                    # process. systemd restarted it -- until it would not,
+                    # because StartLimitBurst is 5 in 60s, and a burst of
+                    # re-enumerations exhausts that. With lizard_mode=N this
+                    # process is the ONLY input path, so exhausting it leaves a
+                    # handheld with no pointer and no keys.
+                    #
+                    # `pick_device` already knows how to wait patiently for a
+                    # pad to come back -- that is what it does while Steam owns
+                    # the controller. Reuse it rather than dying and hoping the
+                    # restart limit holds.
+                    if exc.errno != errno.ENODEV:
+                        raise
+                    print(f"deck-input-mapper: the pad disappeared ({exc}); "
+                          "waiting for it to come back",
+                          file=sys.stderr, flush=True)
+                    if osk_visible:
+                        set_osk_visible(False)
+                    try:
+                        sel.unregister(pad.fd)
+                    except (KeyError, ValueError, OSError):
+                        pass
+                    pad = pick_device(args.device)
+                    if args.grab:
+                        pad.grab()
+                    sel.register(pad.fd, selectors.EVENT_READ)
+                    print(f"deck-input-mapper: re-bound to {pad.path} ({pad.name})",
+                          file=sys.stderr, flush=True)
+                    # The replacement pad may advertise different ranges.
+                    if mapper.cursors is not None and osk_layout is not None:
+                        mapper.cursors.ranges = {
+                            code: (ai.min, ai.max)
+                            for code, ai in dict(pad.capabilities().get(e.EV_ABS, [])).items()
+                            if code in osk_layout.PAD_AXES
+                        }
+                    continue
+                for event in events:
                     if event.type == e.EV_SYN and event.code == e.SYN_REPORT:
                         if pending_dx or pending_dy:
                             emit_motion(pending_dx, pending_dy)

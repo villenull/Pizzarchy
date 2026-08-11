@@ -165,10 +165,34 @@ too (R-35b), so this matches stock SteamOS, but it is a step back from what the
 Deck does today. Ours could bind `zwp_input_method_v2` to learn it — new work,
 decided after seeing summon-only in use.
 
-⚠️ **None of this has run on the Deck** — the stage now installs three modules
-and that has never executed on hardware. **T8 step 7 is gated on exactly one
-thing: a hardware pass with the operator present**, and the runbook is
-`docs/tasks/T8-step7-hardware-pass.md`. Also unproven: the TTY keyboard and a
+✅ **T8 IS COMPLETE — all seven steps, proven on hardware.**
+`docs/findings/P18-osk-hardware-pass.md` (R-43…R-46). Snapshot #8, three modules
+installed to `/usr/local/lib/deck-osk/`, the unit rewritten to
+`--osk-backend=layer`, and the operator pressed STEAM+X on the Deck and
+confirmed it. **Zero fallbacks fired**, so what was on screen was ours rather
+than squeekboard.
+
+⚠️ **That confirmation was one argv away from being attached to the wrong
+process.** The session had left `--demo` overlays running while debugging, so
+"it works" could have described one of those. Settled by the live surface's argv
+(no `--demo`) and its parent (the mapper). **When a session has left debug
+artifacts on the device, a confirmation names a thing on screen, not a code
+path** — resolve which before recording it.
+
+🐞 **The pass found a defect nothing in this repo could see (R-44), now fixed.**
+The mapper died every time the pad re-enumerated: `OSError: [Errno 19] No such
+device` out of `pad.read()`, **six crashes and nine restarts in one boot**,
+against `StartLimitBurst=5`. With `lizard_mode=N` exhausting that limit leaves a
+handheld with no pointer and no keys. `ENODEV` is now handed to `pick_device`,
+which already waits patiently for a pad to return.
+`test/mapper-pad-loss-e2e.py` destroys a pad underneath a live read and was
+verified to fail 5 assertions with the fix reverted.
+
+⚠️ **Still open by choice:** ours is **summon-only**; squeekboard's
+focus-triggered auto-show (§5.20) is still enabled and independent of the mapper,
+so both keyboards may appear. Decide after seeing summon-only in use. Also
+unproven: the installer's TTY keyboard sharing a console with `gum`/`archinstall`
+(TIOCSWINSZ), and typing a full Wi-Fi passphrase end to end. Also unproven: the TTY keyboard and a
 TUI (`gum`, `archinstall`) sharing one console, which is what
 `deck_osk_tty.write_at`'s TIOCSWINSZ note is about.
 

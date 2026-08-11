@@ -1,8 +1,7 @@
 # T8 — the on-screen keyboard we draw ourselves
 
 **Model: Sonnet for the renderers, Opus for the input/layout core.**
-**Status: specified session 17. STEPS 1–6 DONE; STEP 7 CODED, AWAITING THE DECK
-(session 18, 2026-08-10).**
+**Status: ✅ ALL SEVEN STEPS DONE — proven on hardware, session 18, 2026-08-10.**
 
 > ## Where this stands
 >
@@ -14,7 +13,7 @@
 > | 4. TTY renderer (installer) | ✅ `src/deck_osk_tty.py` + `--osk-backend=tty` |
 > | 5. Layer-shell renderer (Desktop Mode) | ✅ `src/deck_osk_wayland.py` |
 > | 6. Pointer suppression while the OSK is up | ✅ both backends |
-> | 7. Retire squeekboard from Desktop Mode | 🟡 **coded + fallback proven; needs one hardware pass** |
+> | 7. Retire squeekboard from Desktop Mode | ✅ **done, operator-confirmed on the Deck** |
 >
 > **`src/deck_osk_layout.py`** — two layers (letters, symbols), split into two
 > halves, hit-testing in normalised 0..1 coordinates within a half, three shift
@@ -153,12 +152,32 @@
 > show by binding `zwp_input_method_v2` the way squeekboard does; that is new
 > work, not part of step 7.
 >
-> ### What step 7 still needs, and it is the only thing
+> ### ✅ The hardware pass ran, and the operator confirmed it
 >
-> **One hardware pass with the operator present.** Everything above is green on a
-> dev machine and the overlay is proven on Hyprland *here* — but the Deck has
-> never run any of it, and T8's own gate says retire "only once step 5 is proven
-> on hardware". The runbook is `docs/tasks/T8-step7-hardware-pass.md`.
+> **`docs/findings/P18-osk-hardware-pass.md` (R-43…R-46).** Snapshot #8, three
+> modules installed, unit rewritten to `--osk-backend=layer`, STEAM+X pressed,
+> **"it works"** — with **zero fallbacks**, so what was on screen was ours and
+> not squeekboard.
+>
+> ⚠️ **That confirmation was one argv away from being attached to the wrong
+> process.** The session had left `--demo` overlays running while debugging, so
+> "it works" could have described one of those. Settled by checking the live
+> surface's argv (no `--demo`) and its parent (the mapper). When a session has
+> left debug artifacts on the device, a confirmation names a *thing on screen*,
+> not a *code path*.
+>
+> 🐞 **And the pass found a defect nothing in this repo could see: the mapper
+> died every time the pad re-enumerated** — `OSError: [Errno 19] No such device`
+> out of `pad.read()`, **six crashes and nine restarts in one boot**, against a
+> `StartLimitBurst` of 5. With `lizard_mode=N` exhausting that limit is a
+> handheld with no input. Fixed by handing `ENODEV` to `pick_device`, which
+> already waits patiently for a pad to return. `test/mapper-pad-loss-e2e.py`
+> destroys a pad underneath a live read; verified to fail 5 assertions with the
+> fix reverted.
+>
+> **Still open, deliberately:** ours is **summon-only**; squeekboard's
+> focus-triggered auto-show is still enabled and independent of the mapper. Both
+> may appear. Decide after seeing summon-only in use.
 
 > **Totals: 134 + 106 + 49 + 47 + 19 unit assertions, plus 22 end-to-end.
 > 60/60 mutations caught.** ⚠️ One "SURVIVED" was spurious — the mutation's
