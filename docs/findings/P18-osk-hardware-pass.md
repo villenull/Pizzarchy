@@ -315,3 +315,47 @@ seat from it is a real trade and it is the operator's call, not a detail:
 
 **Recommendation: do not take the seat until that one measurement is in.**
 Summon-only via STEAM+X works today and costs nothing.
+
+## R-51 — ✅ MEASURED: taking the Wayland seat costs fcitx5 only its WAYLAND clients
+
+R-50 left one fact unmeasured, and said it alone decided whether auto-show was
+cheap or expensive: **does fcitx5 keep serving XWayland clients while the
+Wayland input-method seat belongs to someone else?**
+
+**It does.** fcitx5 takes `--disable <addon>` — its own running command line
+already used it (`--disable notificationitem`) — so the Wayland addon can be
+dropped without touching the rest.
+
+| | fcitx5 as shipped | with `waylandim` disabled |
+|---|---|---|
+| `XIM_SERVERS` (X11/XWayland) | `@server=fcitx` | **`@server=fcitx`** — unchanged |
+| `org.freedesktop.IBus` on the bus | present | **present** — unchanged |
+| `/virtualkeyboard` interface | published | **published** — unchanged |
+| Wayland input-method seat | **held by fcitx5** | **free — our watcher took it** |
+
+And the watcher did not merely bind: it immediately emitted **real focus
+events**, `focus 0` then `focus 1`, off a live compositor. That is the
+hand-rolled protocol working end to end — registry, bind, `get_input_method`,
+and `activate`/`done` decoded correctly — not just a successful handshake.
+
+### What this means
+
+Auto-show is **cheap**. The cost is precisely: fcitx5 no longer serves
+**Wayland-native** clients. XWayland clients keep it through XIM, and the IBus
+path is untouched. For a Deck running a Latin-script layout that cost is close
+to zero; for a user who needs CJK in Wayland-native applications it is real, so
+it should be a setting rather than a hard-coded default.
+
+### Method note, worth keeping
+
+The whole experiment is `pkill fcitx5` and relaunch with one more addon in
+`--disable`, then read three things. It is reversible in one command and took
+under a minute. ⚠️ **fcitx5 needs several seconds after start to reacquire the
+Wayland seat** — a check run ~1 s after relaunch showed the seat still free and
+looked like a failed restore. Wait and re-check before concluding anything about
+fcitx5's state.
+
+**Next increment, now unblocked:** ship `waylandim` disabled (a documented
+setting, not a silent default), spawn the watcher from the mapper, and show the
+overlay on `focus 1`. squeekboard's `SetVisible` fallback is unaffected either
+way — it never needed the seat.
