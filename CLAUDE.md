@@ -26,7 +26,8 @@ A Steam Deck–native, controller-only installer ISO for **Omarchy 4.0
 (Quattro)** that preserves stock SteamOS Gaming Mode and adds a Desktop Mode
 (Omarchy/Hyprland) reachable by button/icon, not just a keybind.
 
-The plan and its ordering: `docs/ROADMAP.md` (three phases). Current state and
+The plan and its ordering: `docs/ROADMAP.md` (four phases, plus a 2.9 wedged
+between 2 and 3 — **2.9 is complete**). Current state and
 every decision: `docs/PROGRESS.md`. Original spec: `docs/PLAN.md` — **frozen and
 partly superseded**; read the banner at its top before trusting any section.
 
@@ -82,8 +83,10 @@ Switch models at task boundaries, then `/clear`. Not mid-task.
 
 ## Already diagnosed — don't rediscover
 
-Original hypotheses in `docs/PLAN.md` §8; **confirmed outcomes and ~20 other
-hard-won facts in `docs/PROGRESS.md` §7 — read that, not §8.**
+Original hypotheses in `docs/PLAN.md` §8; **confirmed outcomes and 55 other
+hard-won facts in `docs/PROGRESS.md` §7 — read that, not §8.** Several were
+corrected by later measurement, so trust §7 over memory and re-check before
+building on any recorded value.
 
 1. `linux-neptune.sh` silently no-ops via `curl | bash` (missing
    `common-script.sh`) — fixed in `src/omarchy-deck-kernel.sh`; use that, not

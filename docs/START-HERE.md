@@ -28,24 +28,46 @@ work without waiting for further instruction.**
 > | **Phase 2.9** | complete — pin measured from inside both ISOs, delta ahead of us classified (1 BREAKS US / 27 RE-VERIFY / 37 NO IMPACT), substrate rebuilt on the channel we ship, **all four VM suites green** |
 > | **Twelve operator decisions** | §5.25 — all settled, do not re-litigate |
 > | **Five new test suites** | stage integration (300 assertions), duplicated-facts, limine pin, ISO payload audit, plus auto-show. **15 suites total** |
-> | **`stage-lizard-mode`** | the knob now follows the mapper's lifetime, with a fallback. ⚠️ One hole known (`systemctl kill`); see §5.25 |
-> | **OSK auto-show** | built, **not shipped** — two hand-offs in §5.27 must land together |
-> | **T4's screen spec** | `docs/tasks/T4-screen-spec.md` — wrap the configurator, six screens, and a gate (§5.26) |
-> | **T5's fork plan** | `docs/tasks/T5-fork-plan.md` — and the obvious fork point is **broken** (§3.10a) |
+> | **`stage-lizard-mode`** | ✅ the knob now follows the mapper's lifetime, **and the cgroup-kill hole is closed** — `OnFailure=` on a separate unit, all **eight** kill paths verified on systemd 261. No-input window: *until the next boot* → **106 ms** |
+> | **OSK auto-show** | built and mutation-proven, **not shipped** — §5.27 names two hand-offs that must land together |
+> | **The orphan bug** | ✅ fixed — a killed mapper could leave a watcher holding the Wayland seat, breaking a *later* mapper's auto-show permanently |
+> | **T4** | screen spec written (**wrap** the configurator, 6 screens + a Failure screen §6.1a never had) **and its automated test tier proven viable** against a real ISO |
+> | **T5** | fork plan written — and its first finding was that **the obvious fork point is broken** |
+> | **The keyboard overdraw fork** | ✅ resolved, and it was **free**: T4's wrap means a curses TUI and the keyboard never coexist |
+> | **`docs/RECOVERY.md`** | now answers "my screen is locked" with one command instead of a full reimage |
 >
-> #### Three findings that will bite whoever ignores them
+> #### Four findings that will bite whoever ignores them
 >
 > 1. 🔴 **Nobody has read the lizard-mode knob in the LIVE ISO** (§5.26). Every
->    such measurement came from the installed system on Valve's kernel. If the
->    knob is absent there, **T4 has no keyboard and no product**. One line, from
->    a booted USB. It is step 1 of the runbook for that reason.
+>    such measurement came from the installed system on Valve's kernel. 🟡
+>    Half-answered off-hardware since: the module ships in the ISO and `modinfo`
+>    declares the parameter — so it is *likely* fine, but writability still needs
+>    the Deck. **One line, from a booted USB. Step 1 of the runbook.**
 > 2. 🔴 **`hyprctl layers` cannot verify the lock fix.** It reports the surface
->    identically whether the rule works or not — only pixels distinguish them.
+>    identically whether the rule works or not; only pixels distinguish them.
 >    Same shape as R-29, where every check passed while the mapper was a no-op.
 > 3. 🔴 **The git ref and the package channel are two independent pins** and only
 >    one is expressible in git (§3.10a). Forking `omarchy-iso` at the commit our
 >    own ISO came from, and building today, yields an installer that calls a
 >    binary the runtime no longer has.
+> 4. ⚠️ **Session 20's real theme: four times a measurement TOOL lied, not the
+>    code** — `grep` in a UTF-8 locale against CP437 glyphs, a console width
+>    cached across a mode change, `hyprctl layers`, and `grep -c shift` on a
+>    keyboard that had been destroyed. Each was caught by checking the
+>    instrument rather than the reading. **When a result looks impossible, doubt
+>    the tool first.**
+>
+> #### Where to start, concretely
+>
+> 1. Read `docs/PROGRESS.md` §1 (state), **§5.24** (the live lock defect),
+>    **§5.25** (twelve settled decisions — do not re-litigate), §5.26/§5.27.
+> 2. Then `docs/tasks/P20-deck-session-runbook.md` — that is the next action and
+>    it needs the operator.
+> 3. Deck-free work if the operator is unavailable: T5's fork (`T5-fork-plan.md`,
+>    start at its slice 1) or T4's screens (`T4-screen-spec.md`, whose test tier
+>    is now proven). ⚠️ T4's §8 lists five ranked unknowns; **U4 got sharper**,
+>    not closed — `clear_logo` wipes the keyboard mid-typing and the mapper only
+>    repaints on a pad sample, so a user who stops moving their thumb types blind.
 >
 > ### 🆕 UPSTREAM MOVED — there was a PHASE 2.9, and it is now COMPLETE
 >

@@ -206,16 +206,21 @@ this procedure runs, not the first.
 
 ### Exit criteria
 
-- [ ] The pin is three SHAs + a version string + a channel, written down
-- [ ] The delta document classifies **every** changed upstream file that
-      touches a listed seam — no "probably fine" rows
-- [ ] A new ISO exists from the pinned builder, sha256 recorded, re-inspected
-      rather than assumed
-- [ ] Substrate rebuilt; all 11 unit suites, the VM suites and the e2e drive pass
-- [ ] The Deck runs beta 2, every install stage re-ran clean, load-bearing
-      settings verified with `dconf read -d`, switch soaked ≥5 cycles
-- [ ] The hands-on list is signed off **on screen**, not inferred from logs
-- [ ] Every §7 fact naming upstream behavior is re-checked or deleted
+- [x] The pin is recorded — read from **inside both ISOs**, not inferred:
+      `6d7826d` / `edge` / builder `a12bfea`
+- [x] The delta is classified file by file, every verdict citing a patch read:
+      **1 BREAKS US, 27 RE-VERIFY, 37 NO IMPACT**
+- [x] Upstream's beta 2 ISO downloaded and inspected. **The rebuild was skipped
+      with cause** — our image already carried identical inputs
+- [x] Substrate rebuilt on the shipped channel with the boot chain **asserted**;
+      all 15 unit suites and **all four VM suites** green on it
+- [ ] ~~The Deck runs beta 2~~ — **it already does**, having been installed from
+      our ISO. Confirm with one `omarchy-version`: P20 runbook §8
+- [ ] The hands-on list signed off **on screen** — `docs/tasks/P20-deck-session-runbook.md`
+- [x] §7 re-checked: two facts corrected by measurement, thirteen added
+
+**Phase 2.9 is closed except for the two rows needing a human**, and both are
+folded into the P20 runbook rather than left dangling here.
 
 ---
 

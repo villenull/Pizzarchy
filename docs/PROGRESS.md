@@ -24,9 +24,10 @@ may use Wi-Fi (§2.2).
 | **T1** Kernel / firmware / boot | ✅ done | Ten stages, **hardware-validated end to end 2026-08-10** (§5.2). Neptune pin bump still untested |
 | **T2** Gamepad input spike | ✅ done | Navigation confirmed; T4 is days not weeks. Text entry open — §3.9 |
 | **T3** Gaming Mode + switching | 🟡 **the core promise now works through Steam's own UI** (§5.10 closed, session 15). Rotation fixed on greeter + desktop (§5.11). Remaining: §5.15 (missing polkit helpers — brightness, timezone), §5.16 root cause, parity batches P2.2/P2.3, Quickshell pinning P2.4 |
-| **T4** Controller-only installer | ⬜ not started | **Re-scoped by §5.9** — lizard mode already makes the installer navigable; the real gap is text entry |
-| **T5** ISO + package payload | ⬜ not started | Unblocked by R1 and simplified by §2.2. **New constraints from P1.5:** offline-only pacman (§7), encryption default (§5.12), repo precedence (§5.13) |
+| **T4** Controller-only installer | 🟡 **specified, unblocked** | Full screen spec `docs/tasks/T4-screen-spec.md` (wrap the configurator, 6 screens + Failure). Its automated test tier is **proven viable** (`T4-harness-feasibility.md`). 🔴 Gated on §5.26's one-line live-ISO check. Was: **re-scoped by §5.9** — lizard mode already makes the installer navigable; the real gap is text entry |
+| **T5** ISO + package payload | 🟡 **planned** | Strategy, fork point and the six bake-ins: `docs/tasks/T5-fork-plan.md`. 🔴 The obvious fork point is BROKEN (§3.10a — ref and channel are two pins). Payload audit shipped (`tools/iso-payload-audit.sh`). Unblocked by R1 and simplified by §2.2. **New constraints from P1.5:** offline-only pacman (§7), encryption default (§5.12), repo precedence (§5.13) |
 | **T6** Integration + release | ⬜ not started | Gated on Omarchy 4.0 stable |
+| **T9** Rebase onto beta 2 | ✅ **done (phase 2.9)** | We were already on it, measured from inside both ISOs. Value delivered: the delta *ahead* of us classified, substrate pinned to the shipped channel, four VM suites green on it |
 
 **The plan is `docs/ROADMAP.md`** — answer the unknowns and rebuild the test bed
 (1), build the product (2), **catch up to upstream (2.9 — new 2026-08-11)**,
@@ -70,11 +71,15 @@ It opened **§5.15** (Steam's whole privileged-helper surface is missing — thi
 now the widest gap, and it owns Gaming Mode's brightness slider) and **§5.16**
 (the switch could permanently kill sddm; mitigated, root cause open).
 
-**Next action:** either **§5.15** (decide the polkit-helper scope — `timedatectl`
-for timezone is cheap; `steamos-priv-write` needs a security design) or the
-Deck-free work: **§5.13**'s repo-precedence audit, **P2.5** (T4 installer
-screens) or **P2.7** (T5 ISO fork). T5 also inherits a new obligation from
-§5.11: the desktop rotation currently lives in one user's dotfile.
+**Next action: `docs/tasks/P20-deck-session-runbook.md`.** One operator session,
+five approved changes plus one read-only check, ordered by blast radius, with
+rollbacks and a stop-early table. 🔴 It opens with the §5.26 gate — one line,
+run from a **booted USB**, that decides whether T4 has a keyboard at all.
+
+Everything else is either behind that session or independent of it: T5's fork
+(planned, §3.10a's two-pin trap recorded), T4's screens (specified, test tier
+proven viable), and §5.27's two hand-offs that must land together to ship OSK
+auto-show.
 
 **Session 17 (2026-08-10) was the eyes-and-hands pass**, the first time any of
 this was seen on a screen. **Nine defects, none visible to any check in this
@@ -2513,6 +2518,7 @@ backup rescue (the rebuild wipes both).
 
 One line each. Detail lives in git history and in the `FINDING-*.md` files.
 
+| 20 | **The largest session so far, 2026-08-11 — phase 2.9 opened and closed in one day.** It began "rebase onto the new 4.0 beta 2" and **measurement showed we were already on it**: same `6d7826d`, same `edge` channel, same builder as upstream's published ISO, differing only in 7 stock Arch rebuilds we carried the *newer* of. So the block's value was elsewhere — the delta **ahead** of us classified (1 BREAKS US / 27 RE-VERIFY / 37 NO IMPACT), the QEMU substrate rebuilt on the channel we actually ship with its boot chain **asserted**, and all four VM suites green on it for the first time. **Twelve operator decisions settled** (§5.25). 🔴 **Found the biggest live defect of the project so far: the power button locks the Deck into a password screen with no password field** (§5.24) — and inverted the delta's scariest row while finding it. Built `stage-lizard-mode` with a fallback whose safety argument I got **wrong twice**, corrected both times by measurement (§5.25). Shipped five new test suites; 15 total. Wrote T4's screen spec and **proved its automated test tier viable**, T5's fork plan (whose first finding was that the obvious fork point is *broken*), the P20 Deck runbook, and RECOVERY's one-command escape from a stranded lock. ⚠️ **The session's real theme: four times a measurement TOOL lied rather than the code** — `grep` against CP437 glyphs, a cached console width, `hyprctl layers`, and `grep -c shift` on a destroyed keyboard. Each was caught by checking the instrument, not the reading. |
 | # | What happened |
 |---|---|
 | 1 | Bootstrap; T0 §1 harness + libraries + unit tests; T0 §2–6 (Ventoy doc, override loader, `tools/deck-sync.sh`, CI, shellcheck baseline) |
