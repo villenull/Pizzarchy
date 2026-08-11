@@ -1,4 +1,4 @@
-# Session 17 — the input path, seen on a screen for the first time (R-29…R-37)
+# Session 17 — the input path, seen on a screen for the first time (R-29…R-38)
 
 **2026-08-10, OLED Deck, operator present and holding the device.** Session 16
 closed with the honest admission that *"nothing here was seen on a screen"*.
@@ -325,6 +325,74 @@ scanned and this was the only occurrence** — an isolated slip, not systemic. A
 regression assertion now checks the literal text survives into the rendered
 output, and it asserts on the text rather than on "no double space", which would
 pass for any other command whose output happened to be non-empty.
+
+## R-38 — Gaming Mode confirmed usable by a human, and the idle lock is a hole in §2.6
+
+**Gaming Mode: the operator looked at it and confirmed it works** (session 17).
+That closes P16 §5's standing caveat that *"the gamescope session was never
+verified as usable — only that logind created an active user session."* It is an
+eyeball confirmation, not a parity matrix: the ⏸ rows in
+`docs/findings/hardware-parity.md` (audible sound, haptics, gyro, mic, BT
+pairing) are still unverified in **both** sessions.
+
+### The idle lock defeats §2.6's keyboard plan
+
+Found because reverting session 16's display-always-on re-armed the idle cycle,
+and the operator immediately saw squeekboard appear over the screensaver. That
+part was **this session's own leftover** — a squeekboard started for the R-35
+test and missed by cleanup — but chasing it exposed a real design hole.
+
+Omarchy's idle service (`plugins/services/idle/Service.qml`) ships
+**screensaver at 150 s and lock at 300 s**, and the lock is a quickshell
+`TextField` password prompt. Autologin (`Relogin=true`) covers boot and session
+switches; it does **not** cover the idle lock.
+
+Under §2.6 the installed system carries no squeekboard, so Desktop Mode's only
+keyboard is Steam's, via STEAM+X. **Steam's OSK is an XWayland window and the
+lock is a Wayland layer-shell surface holding an exclusive input grab, so it
+almost certainly cannot render above the lock** — meaning 5 minutes of idle
+would lock a keyboard-less handheld out of itself, recoverable only by SSH or a
+USB keyboard.
+
+⚠️ **That inference is NOT measured.** Testing it means deliberately locking the
+device and trying STEAM+X. It was not run, because the operator chose to remove
+the lock instead, which makes the question moot rather than answered. Do not
+record it as fact.
+
+**Resolution (operator decision):** disable the idle **lock**, keep the
+**screensaver**. Burn-in protection is unchanged and the device never demands a
+password it has no way to accept — which is also stock behaviour, since neither
+SteamOS session auto-locks a personal handheld.
+
+### ⚠️ `lock: 0` does NOT disable it — it locks INSTANTLY
+
+There is no "off" sentinel. `IdleModel.secondsFromConfig` returns the fallback
+only for negative or non-finite values, so `0` is accepted, and then:
+
+```qml
+firstIdleTimeoutSeconds: Math.min(screensaverTimeoutSeconds, lockTimeoutSeconds)  // 0
+lockDelaySeconds:        Math.max(0, lockTimeoutSeconds - firstIdleTimeoutSeconds) // 0
+...
+if (root.lockDelaySeconds === 0) lockSystem("lock-timeout-immediate")   // fires at once
+```
+
+So the mechanism is a **large timeout**, set in `~/.config/omarchy/shell.json`:
+
+```json
+"idle": { "screensaver": 150, "lock": 86400 }
+```
+
+⚠️ **And there is a ceiling.** `lockDelaySeconds * 1000` feeds a QML
+`Timer.interval`, which is a 32-bit int, so a delay beyond ~2,147,483 s
+(~24.8 days) overflows. Do not "disable" this with 999999999 — 86400 is a day,
+which is effectively never for a handheld and is nowhere near the bound.
+
+The shell picks the change up live: `shell.qml` reads the user config through a
+`FileView` with `watchChanges: true`, so no restart is needed.
+
+**T5 owes the image this setting**, and it is not a GSettings — it is
+`~/.config/omarchy/shell.json`, a per-user dotfile, so it has the same
+"absent from a built image" problem as the rotation.
 
 ## State on exit
 

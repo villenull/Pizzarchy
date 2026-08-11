@@ -239,6 +239,15 @@ proprietary, so Valve's keyboard is unavailable there at any price.
 3. **squeekboard ships in the live ISO only**, not on the installed system —
    along with its two GSettings (`screen-keyboard-enabled`, `input-sources`).
 
+4. **The idle LOCK must be disabled** (R-38), keeping the screensaver. Omarchy
+   locks at 300 s with a password prompt, and Steam's OSK — an XWayland window —
+   almost certainly cannot render above the layer-shell lock, so an idle Desktop
+   Mode would lock a keyboard-less handheld out of itself every five minutes.
+   Set in `~/.config/omarchy/shell.json`: `"idle": {"screensaver": 150, "lock": 86400}`.
+   ⚠️ **`lock: 0` locks INSTANTLY rather than disabling** — there is no off
+   sentinel — and the value has a ~24.8-day ceiling before a QML int32 timer
+   overflows.
+
 ⚠️ **Accepted risk, chosen deliberately with the alternative on the table: if
 Steam is not running in Desktop Mode there is NO text entry at all.** Valve's
 keyboard is summon-only and lives inside the Steam client, so a crash, a sign-out,

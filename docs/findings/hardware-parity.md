@@ -41,6 +41,7 @@ investigations.
 | Trackpad haptics | ⏸ | ⏸ | needs a human |
 | Gyro actually responding | ⏸ | ⏸ | needs a human |
 | Button mapping correctness | ✅ **verified session 17** | ⏸ | see below |
+| Gaming Mode usable on screen | n/a | ✅ **operator confirmed, session 17** | closes P16 §5's caveat |
 | BT pairing with a real device | ⏸ | ⏸ | needs a human |
 
 **Everything that can be checked without hands is at parity except input**, and
