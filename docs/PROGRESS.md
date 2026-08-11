@@ -2130,6 +2130,52 @@ our users, and T4's wrap must handle them:
 ⚠️ **§6.1a never specified a Failure screen.** It is the screen most likely to
 be reached by someone who cannot recover from it.
 
+### 5.27 🆕 OSK auto-show is built but NOT SHIPPED — two hand-offs
+
+Built 2026-08-11 (session 20). `src/deck_osk_focus.py` is now a shippable
+program, `AutoShow` in the mapper consumes it, and `--osk-auto-show` turns it
+on. **Default is OFF, deliberately:** taking the Wayland input-method seat
+costs `fcitx5` its Wayland clients (R-50/R-51), which is the operator's call,
+not ours.
+
+**It does not reach a Deck yet.** Shipping it needs two edits in files another
+agent held at the time, and they must land *together*:
+
+1. **`src/deck-session.sh`** — add `deck_osk_focus.py` to `OSK_MODULES` and to
+   the stage's import check; add `readonly MAPPER_OSK_AUTO_SHOW=0` beside
+   `MAPPER_OSK_BACKEND`, appending ` --osk-auto-show` to `ExecStart` when 1.
+   ⚠️ **Verify by importing, never by running it** — running it during install
+   would try to take the seat.
+2. **`test/unit/test-osk-install-layout.sh`** — it pins the exact module list
+   and the exact import line, so it goes red the moment step 1 lands. Same
+   commit, not a follow-up.
+
+**And a third thing must move with them:** freeing the seat. On the dev machine
+`fcitx5` starts from Omarchy's `autostart.conf` with
+`--disable notificationitem`; auto-show needs `--disable notificationitem,waylandim`.
+⚠️ **Append, never replace**, ⚠️ the path may differ on 4.0 (find it, do not
+assume), and ⚠️ `omarchy-restart-xcompose` relaunches fcitx5 with the old flag
+and would silently undo it.
+
+⚠️ **Never observed in a single run:** a real compositor's `activate` reaching a
+drawn keyboard. The handshake is proven against live Hyprland, and the mapper's
+consumption is proven end-to-end against a real pad, pty and subprocess — but
+the middle link is a stub, because closing it means restarting the operator's
+`fcitx5` on their live desktop.
+
+### 5.27a 🐞 A killed mapper can orphan the focus watcher, and an orphan keeps the seat
+
+Pre-existing, **but newly consequential**: `SIGTERM` does not run the mapper's
+`finally`, so a plain `kill` leaves the watcher alive — and a watcher holding
+the input-method seat makes a *later* mapper's auto-show fail permanently with
+`unavailable`, which reads exactly like "the feature is broken".
+
+Under systemd's default `KillMode=control-group` the cgroup kill covers it.
+Outside systemd it does not. `PR_SET_PDEATHSIG` in the watcher closes it.
+⚠️ Note the shape: this is the **same cgroup-versus-process reasoning** as
+§5.25 decision 2's `ExecStopPost` hole. Two different features, one systemd
+mental model — get it wrong once and it is wrong in both.
+
 ---
 
 ## 6. Blocked on human

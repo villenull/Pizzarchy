@@ -10,9 +10,16 @@ and they are where the bugs live. Run directly:
 from __future__ import annotations
 
 import importlib.util
+import os
 import pathlib
+import select
+import socket
 import struct
+import subprocess
 import sys
+import tempfile
+import threading
+import time
 
 sys.dont_write_bytecode = True
 
@@ -156,6 +163,410 @@ try:
 finally:
     os.environ.clear()
     os.environ.update(saved)
+
+# --- the line protocol: the other end of this pipe is the mapper -------------
+#
+# Written down once, here, and imported by the mapper. A format defined twice
+# drifts, and this one drifts silently -- the keyboard just stops appearing.
+
+check("a focused field is one line", fw.format_focus_line(True), "focus 1\n")
+check("an unfocused one is the other", fw.format_focus_line(False), "focus 0\n")
+for state in (True, False):
+    line = fw.format_focus_line(state)
+    check(f"round trip {state}", fw.parse_focus_line(line.strip()), state)
+
+check("a line with the newline still on it parses",
+      fw.parse_focus_line("focus 1\n"), True)
+# ⚠️ None, never an exception. This parses bytes from another process while
+# holding the only input path on the device.
+for junk in ("", "focus", "focus 2", "focus -1", "focus true", "focus 1 1",
+             "unfocus 1", "deck-osk-focus: another input method owns the seat",
+             "  ", "1", "FOCUS 1"):
+    check(f"junk {junk!r} is not a focus line", fw.parse_focus_line(junk), None)
+
+# --- ⚠️ A PIPE READ IS NOT A LINE BOUNDARY -----------------------------------
+
+lines, rest = fw.split_lines(b"focus 1\nfocus 0\n")
+check("two lines in one read are both returned", lines, ["focus 1", "focus 0"])
+check("and nothing is left over", rest, b"")
+
+lines, rest = fw.split_lines(b"focus 1\nfoc")
+check("a partial tail is not returned as a line", lines, ["focus 1"])
+check("it is kept for the next read", rest, b"foc")
+lines, rest = fw.split_lines(rest + b"us 0\n")
+check("and completes when the rest arrives", lines, ["focus 0"])
+check("with nothing left", rest, b"")
+
+check("no newline at all yields no lines", fw.split_lines(b"focus 1")[0], [])
+check("and keeps every byte", fw.split_lines(b"focus 1")[1], b"focus 1")
+check("an empty read is empty, not an error", fw.split_lines(b""), ([], b""))
+check("a bare newline is an empty line, not a dropped one",
+      fw.split_lines(b"\nfocus 1\n")[0], ["", "focus 1"])
+# Undecodable bytes must not raise: this is a pipe, and the reader is the only
+# input path on the device.
+check("invalid utf-8 is replaced rather than thrown",
+      len(fw.split_lines(b"\xff\xfe\n")[0]), 1)
+
+# --- the exit vocabulary the mapper reads back --------------------------------
+
+check("every failure exit has a sentence",
+      sorted(fw.EXIT_REASONS), [fw.EXIT_NO_CONNECTION, fw.EXIT_NO_PROTOCOL,
+                                fw.EXIT_LOST, fw.EXIT_SEAT_TAKEN])
+check("success is NOT in the table (nothing to explain)",
+      fw.EXIT_OK in fw.EXIT_REASONS, False)
+check("the codes are distinct",
+      len({fw.EXIT_OK, fw.EXIT_NO_CONNECTION, fw.EXIT_NO_PROTOCOL,
+           fw.EXIT_LOST, fw.EXIT_SEAT_TAKEN}), 5)
+check("the seat sentence names the fix measured in R-51",
+      "waylandim" in fw.EXIT_REASONS[fw.EXIT_SEAT_TAKEN], True)
+
+
+# --- a FAKE COMPOSITOR, and it is named a fake on purpose ---------------------
+#
+# ⚠️ THIS PROVES NOTHING ABOUT HYPRLAND. It is a Unix socket that speaks the
+# handful of messages the watcher exchanges, so the WATCHER can be driven end to
+# end -- connect, round trip, bind, decode -- with no compositor, no seat
+# contest, and no display. The real-compositor half is R-51: the same program,
+# against a live Hyprland, emitted `focus 0` then `focus 1` off a real seat.
+#
+# What this catches that R-51 cannot: a regression, in CI, on a machine with no
+# Wayland at all.
+#
+# The encoders below are the TEST'S OWN. Reusing the module's would let a
+# mutation move both sides together and stay invisible.
+
+def t_str(value: str) -> bytes:
+    raw = value.encode() + b"\0"
+    return struct.pack("I", len(raw)) + raw + b"\0" * ((-len(raw)) % 4)
+
+
+def t_msg(object_id: int, opcode: int, body: bytes = b"") -> bytes:
+    return struct.pack("II", object_id, ((8 + len(body)) << 16) | opcode) + body
+
+
+def t_parse(buffer: bytes):
+    """Requests out of a read buffer: (object_id, opcode, body), plus the tail."""
+    out = []
+    while len(buffer) >= 8:
+        object_id, second = struct.unpack_from("II", buffer, 0)
+        size, opcode = second >> 16, second & 0xFFFF
+        if size < 8 or len(buffer) < size:
+            break
+        out.append((object_id, opcode, buffer[8:size]))
+        buffer = buffer[size:]
+    return out, buffer
+
+
+class FakeCompositor:
+    """Answers get_registry and sync, then runs a script once the input method
+    is asked for. Each script entry is ONE write, so batching is under test."""
+
+    def __init__(self, path: str, *, offer_manager: bool = True,
+                 offer_seat: bool = True, answer_sync: bool = True,
+                 script=()) -> None:
+        self.path = path
+        self.offer_manager = offer_manager
+        self.offer_seat = offer_seat
+        self.answer_sync = answer_sync
+        self.script = list(script)
+        self.im_id = None
+        self.new_ids = []       # every object the client asked to create, in order
+        self.bound = {}         # interface -> the id the client bound it to
+        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.server.bind(path)
+        self.server.listen(1)
+        self.conn = None
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self) -> None:
+        try:
+            self.conn, _ = self.server.accept()
+        except OSError:
+            return
+        buffer = b""
+        while True:
+            try:
+                chunk = self.conn.recv(65536)
+            except OSError:
+                return
+            if not chunk:
+                return
+            buffer += chunk
+            requests, buffer = t_parse(buffer)
+            for object_id, opcode, body in requests:
+                try:
+                    self._handle(object_id, opcode, body)
+                except OSError:
+                    return
+
+    def _handle(self, object_id: int, opcode: int, body: bytes) -> None:
+        if object_id == 1 and opcode == 1:            # wl_display.get_registry
+            registry = struct.unpack_from("I", body, 0)[0]
+            self.new_ids.append(registry)
+            self.registry_id = registry
+            out = b""
+            if self.offer_seat:
+                out += t_msg(registry, 0, struct.pack("I", 1) + t_str("wl_seat")
+                             + struct.pack("I", 9))
+            if self.offer_manager:
+                out += t_msg(registry, 0,
+                             struct.pack("I", 2)
+                             + t_str("zwp_input_method_manager_v2")
+                             + struct.pack("I", 1))
+            self.conn.sendall(out)
+            return
+        if object_id == 1 and opcode == 0:            # wl_display.sync
+            callback = struct.unpack_from("I", body, 0)[0]
+            self.new_ids.append(callback)
+            if self.answer_sync:
+                self.conn.sendall(t_msg(callback, 0, struct.pack("I", 0)))
+                # A real server frees the callback straight after. This is the
+                # message that used to make the watcher print a spurious
+                # `focus 0` on connect.
+                self.conn.sendall(t_msg(1, 1, struct.pack("I", callback)))
+            return
+        if object_id == getattr(self, "registry_id", None) and opcode == 0:
+            # wl_registry.bind(name, interface, version, new_id). Which object
+            # is which interface is learned HERE rather than read off the
+            # module's constants, so a renumbering cannot move both sides at
+            # once and stay invisible.
+            interface, offset = fw.unpack_string(body, 4)
+            new_id = struct.unpack_from("I", body, offset + 4)[0]
+            self.new_ids.append(new_id)
+            self.bound[interface] = new_id
+            return
+        if object_id == self.bound.get("zwp_input_method_manager_v2") and opcode == 0:
+            self.im_id = struct.unpack_from("I", body, 4)[0]
+            self.new_ids.append(self.im_id)
+            self.play(self.script)
+            return
+
+    def play(self, script) -> None:
+        """Send each batch of events TO THE ID THE CLIENT ASKED FOR.
+
+        ⚠️ Not to a number this file remembers. The first version of this fake
+        addressed a hard-coded 5, which was right until the client's ids were
+        renumbered -- and then the fake went on talking to the manager while
+        every assertion timed out.
+        """
+        for batch in script:
+            self.conn.sendall(b"".join(t_msg(self.im_id, op) for op in batch))
+            # Separate writes must land as separate reads, or the batching this
+            # file asserts on would be decided by the kernel.
+            time.sleep(0.1)
+
+    def hangup(self) -> None:
+        if self.conn is not None:
+            try:
+                self.conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            self.conn.close()
+
+    def close(self) -> None:
+        self.hangup()
+        try:
+            self.server.close()
+        except OSError:
+            pass
+
+
+# zwp_input_method_v2's event opcodes, from the protocol XML and written down
+# HERE rather than read from the module: a test that takes its opcodes from the
+# code under test cannot notice the code using the wrong one.
+ACTIVATE, DEACTIVATE, DONE, UNAVAILABLE = 0, 1, 5, 6
+
+WATCHER = REPO_ROOT / "src" / "deck_osk_focus.py"
+
+
+def run_watcher(sock_path: str, *args, timeout: float = 15.0):
+    """The real program, as a real process. Returns (code, stdout, stderr)."""
+    env = dict(os.environ)
+    env["WAYLAND_DISPLAY"] = sock_path
+    env["XDG_RUNTIME_DIR"] = os.path.dirname(sock_path)
+    proc = subprocess.Popen([sys.executable, str(WATCHER), *args],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, env=env)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = proc.communicate()
+        return None, out, err
+    return proc.returncode, out, err
+
+
+def read_lines(stream, count: int, timeout: float = 10.0) -> list[str]:
+    """Read `count` whole lines from a LIVE process, or fewer if it goes quiet.
+
+    Deliberately not `readline()`: this must not block past the deadline, and
+    it must not use the module's own splitter -- pinning `flush` and `split`
+    with the code under test would be circular.
+    """
+    fd = stream.fileno()
+    buffer, lines = b"", []
+    deadline = time.monotonic() + timeout
+    while len(lines) < count and time.monotonic() < deadline:
+        if not select.select([fd], [], [], deadline - time.monotonic())[0]:
+            break
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            break
+        buffer += chunk
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            lines.append(line.decode())
+    return lines
+
+
+tmp = tempfile.mkdtemp(prefix="deck-osk-focus-test.")
+
+# --- 1. activate and done in ONE write: the state commits at once ------------
+
+sock = os.path.join(tmp, "wayland-fake1")
+fake = FakeCompositor(sock, script=[[ACTIVATE, DONE]])
+code, out, err = run_watcher(sock, "--once")
+fake.close()
+check("a batched activate+done prints one line", out, "focus 1\n")
+check("and --once exits cleanly", code, fw.EXIT_OK)
+check("the input method was created on the id the module documents",
+      fake.im_id, fw.INPUT_METHOD_ID)
+check("the seat and manager were bound before it",
+      (fake.bound.get("wl_seat"), fake.bound.get(fw.MANAGER_INTERFACE)),
+      (fw.SEAT_ID, fw.MANAGER_ID))
+
+# ⚠️ THE RULE A FAKE COMPOSITOR WILL NOT ENFORCE FOR YOU, AND THE REAL ONE
+# ENFORCES ABSOLUTELY. libwayland's server keeps client objects in an array and
+# rejects any id past one-past-the-end, so every new object must take the next
+# free number IN THE ORDER IT IS SENT. Measured against live Hyprland 0.56 on
+# 2026-08-11: a sync callback numbered 4 while ids 1-2 existed came back
+# `invalid arguments for wl_display#1.sync` -- a message that names the wrong
+# thing, and cost a round of guessing. An earlier version of this suite passed
+# with exactly that bug, because a fake accepts any number you like.
+check("every object id is allocated densely, in the order it is sent",
+      fake.new_ids, [2, 3, 4, 5, 6])
+
+# --- 2. separate writes: activate alone must NOT show the keyboard ------------
+#
+# The protocol batches and commits with `done`. Acting on activate alone shows a
+# keyboard for a change the compositor may still revise. Asserted here against
+# the real program, on a real pipe, while it is still running -- which is also
+# the only assertion that can catch stdout losing its flush, because a process
+# that exits flushes everything on the way out and looks identical.
+
+sock = os.path.join(tmp, "wayland-fake2")
+# The third write is a bare `done` with nothing pending -- the compositor sends
+# one after surrounding-text and content-type changes too. It must print
+# NOTHING: a line per event rather than a line per change would have the reader
+# re-showing a keyboard that is already up.
+fake = FakeCompositor(sock, script=[[ACTIVATE], [DONE], [DONE], [DEACTIVATE, DONE]])
+env = dict(os.environ, WAYLAND_DISPLAY=sock, XDG_RUNTIME_DIR=tmp)
+live = subprocess.Popen([sys.executable, str(WATCHER)],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+lines = read_lines(live.stdout, 2)
+check("`done` is what shows the keyboard -- and it says so while still running",
+      lines[:1], ["focus 1"])
+check("a batched deactivate+done hides it again", lines[1:2], ["focus 0"])
+# Three writes preceded that: an uncommitted `activate`, the `done` that
+# committed it, and a bare `done` changing nothing. Neither of the two silent
+# ones may print, or the reader spends its time re-showing a keyboard that is
+# already up.
+check("and nothing else was printed at all",
+      read_lines(live.stdout, 1, timeout=1.0), [])
+fake.hangup()
+try:
+    check("a compositor that hangs up is a named exit, not a crash",
+          live.wait(timeout=10), fw.EXIT_LOST)
+except subprocess.TimeoutExpired:
+    live.kill()
+    check("a compositor that hangs up is a named exit, not a crash",
+          "still running", fw.EXIT_LOST)
+stderr_text = live.stderr.read().decode()
+live.stderr.close()
+live.stdout.close()
+fake.close()
+check("and it says the chord still works",
+      "STEAM+X" in stderr_text, True)
+
+# --- 3. the seat is already taken ---------------------------------------------
+
+sock = os.path.join(tmp, "wayland-fake3")
+fake = FakeCompositor(sock, script=[[UNAVAILABLE]])
+code, out, err = run_watcher(sock)
+fake.close()
+check("an occupied seat exits with its own code", code, fw.EXIT_SEAT_TAKEN)
+check("printing nothing on stdout -- there is no focus to report", out, "")
+check("it names both candidates rather than guessing",
+      ("squeekboard" in err and "fcitx5" in err), True)
+check("and the one-command fix R-51 measured", "--disable waylandim" in err, True)
+
+# --- 4. a compositor with no input-method protocol ----------------------------
+#
+# ⚠️ THE CASE THAT USED TO HANG. Reading a fixed number of times and hoping the
+# globals arrive means that when the manager is absent -- the exact case the
+# code was written to report -- the next read blocks forever and nothing is ever
+# reported. `wl_display.sync` is what makes "that was all of them" knowable.
+
+sock = os.path.join(tmp, "wayland-fake4")
+fake = FakeCompositor(sock, offer_manager=False)
+code, out, err = run_watcher(sock, timeout=15.0)
+fake.close()
+check("a compositor without the protocol is reported, not waited on",
+      code, fw.EXIT_NO_PROTOCOL)
+check("naming the interface it lacks",
+      "zwp_input_method_manager_v2" in err, True)
+
+# ...and the same for the seat. An unbound name here used to be a KeyError out
+# of `bind` -- a traceback where a sentence belongs.
+sock = os.path.join(tmp, "wayland-fake4b")
+fake = FakeCompositor(sock, offer_seat=False)
+code, out, err = run_watcher(sock)
+fake.close()
+check("a missing wl_seat is a sentence, not a traceback", code, fw.EXIT_NO_PROTOCOL)
+check("naming that one too", "wl_seat" in err, True)
+check("and no traceback escaped", "Traceback" in err, False)
+
+# --- 5. a compositor that accepts and then says nothing -----------------------
+
+sock = os.path.join(tmp, "wayland-fake5")
+fake = FakeCompositor(sock, answer_sync=False)
+code, out, err = run_watcher(sock, "--handshake-timeout", "0.4")
+fake.close()
+check("a silent compositor times out during setup", code, fw.EXIT_NO_CONNECTION)
+check("saying so", "did not answer" in err, True)
+
+# --- 6. no socket at all: the installer, and any non-Wayland console ----------
+
+code, out, err = run_watcher(os.path.join(tmp, "no-such-socket"))
+check("a missing socket is a clean refusal", code, fw.EXIT_NO_CONNECTION)
+check("named as a missing Wayland connection", "no Wayland connection" in err, True)
+
+# The handshake must not leave the socket on a timeout: silence is NORMAL once
+# watching, and a timeout there would report a healthy compositor as broken.
+sock = os.path.join(tmp, "wayland-fake7")
+fake = FakeCompositor(sock, script=[])
+env = dict(os.environ, WAYLAND_DISPLAY=sock, XDG_RUNTIME_DIR=tmp)
+live = subprocess.Popen([sys.executable, str(WATCHER),
+                         "--handshake-timeout", "0.4"],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+time.sleep(1.5)   # comfortably past the handshake timeout
+check("a bound watcher keeps waiting through silence", live.poll(), None)
+fake.play([[ACTIVATE, DONE]])
+check("and still reports the next focus change",
+      read_lines(live.stdout, 1), ["focus 1"])
+live.terminate()
+live.wait(timeout=10)
+live.stdout.close()
+live.stderr.close()
+fake.close()
+
+try:
+    for name in os.listdir(tmp):
+        os.unlink(os.path.join(tmp, name))
+    os.rmdir(tmp)
+except OSError:
+    pass
 
 print()
 print(f"{'PASS' if FAILURES == 0 else 'FAIL'} — {FAILURES} failure(s)")

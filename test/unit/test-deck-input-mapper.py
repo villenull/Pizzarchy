@@ -867,5 +867,211 @@ check("_match returns None when only Steam's pad is present",
 check("_match with a selector still excludes Steam's pad",
       m._match([FakeDev("Microsoft X-Box 360 pad 0")], "x-box"), None)
 
+# --- auto-show: this end of the focus watcher's pipe (T8 step 8) -------------
+#
+# The watcher itself is a separate program with its own suite, driven against a
+# fake compositor. THIS is the half that lives in the only input path on the
+# device, so everything below is about what happens when the far side
+# misbehaves: partial lines, several changes in one read, junk, and death.
+
+import os          # noqa: E402
+import select      # noqa: E402
+import subprocess  # noqa: E402
+
+# Loaded the way the mapper loads it, which also pins that it is findable where
+# the mapper looks -- a module the mapper cannot find is auto-show that never
+# starts.
+focus_mod = m._load_module("deck_osk_focus")
+check("the mapper can find the focus watcher module", focus_mod is not None, True)
+
+
+class FakeStdout:
+    """A pipe's read end, shaped like Popen.stdout."""
+
+    def __init__(self, fd):
+        self._fd = fd
+        self.closed = False
+
+    def fileno(self):
+        return self._fd
+
+    def close(self):
+        self.closed = True
+
+
+class PipeProc:
+    """A process-shaped object whose stdout is a real pipe the test writes into.
+
+    Real fds and real os.read -- only the far end is under the test's control,
+    which is what makes partial reads and batching assertable at all.
+    """
+
+    def __init__(self, status=None):
+        self.read_fd, self.write_fd = os.pipe()
+        self.stdout = FakeStdout(self.read_fd)
+        self.status = status
+        self.waits = 0
+
+    def wait(self, timeout=None):
+        self.waits += 1
+        if self.status is None:
+            raise subprocess.TimeoutExpired("watcher", timeout)
+        return self.status
+
+    def write(self, data):
+        os.write(self.write_fd, data)
+
+    def eof(self):
+        os.close(self.write_fd)
+
+
+def attach(status=None):
+    """An AutoShow already 'started', wired to a pipe. Returns (auto, proc, log)."""
+    log = []
+    auto = m.AutoShow(focus_mod, ["/nonexistent"], log=log.append)
+    proc = PipeProc(status)
+    auto.proc = proc
+    auto.enabled = True
+    return auto, proc, log
+
+
+def readable(fd, timeout=5.0):
+    return bool(select.select([fd], [], [], timeout)[0])
+
+
+auto, proc, log = attach()
+proc.write(b"focus 1\n")
+check("`focus 1` asks for the keyboard", auto.pump(False), True)
+proc.write(b"focus 0\n")
+check("`focus 0` asks for it to go away", auto.pump(True), False)
+
+# ⚠️ Idempotence, and it is not cosmetic. For the layer backend a redundant
+# "show" re-enters osk_layer_start, and a redundant "hide" would kill and
+# re-spawn a GTK process for a state it is already in.
+proc.write(b"focus 1\n")
+check("a change to the state we are already in asks for nothing",
+      auto.pump(True), None)
+proc.write(b"focus 0\n")
+check("and neither does the other one", auto.pump(False), None)
+
+# ⚠️ A PIPE READ IS NOT A LINE BOUNDARY.
+auto, proc, log = attach()
+proc.write(b"focus ")
+check("half a line asks for nothing yet", auto.pump(False), None)
+proc.write(b"1\n")
+check("and the rest of it completes the change", auto.pump(False), True)
+
+# ⚠️ LAST ONE WINS. Focus leaving one field and entering another arrives as two
+# changes in one read; obeying each in turn hides and re-shows the keyboard.
+auto, proc, log = attach()
+proc.write(b"focus 1\nfocus 0\n")
+check("two changes that cancel out ask for nothing", auto.pump(False), None)
+auto, proc, log = attach()
+proc.write(b"focus 0\nfocus 1\n")
+check("two changes that land somewhere new ask for the LAST one",
+      auto.pump(False), True)
+auto, proc, log = attach()
+proc.write(b"focus 1\nfocus 0\nfocus 1\n")
+check("three of them too", auto.pump(False), True)
+
+# Junk crosses a process boundary; it must be ignored, counted, and mentioned
+# once -- never fatal, and never silent either.
+auto, proc, log = attach()
+proc.write(b"deck-osk-focus: something went wrong\n")
+check("a line that is not a focus line asks for nothing", auto.pump(False), None)
+check("it is counted", auto.ignored, 1)
+check("and reported once", len(log), 1)
+check("quoting what it actually said",
+      "something went wrong" in log[0], True)
+proc.write(b"more junk\n")
+check("a second one is counted", (auto.pump(False), auto.ignored), (None, 2))
+check("but not reported again", len(log), 1)
+proc.write(b"junk\nfocus 1\n")
+check("junk in the same read does not swallow a real change",
+      auto.pump(False), True)
+
+# --- the watcher dying: loud, named, and never fatal -------------------------
+
+auto, proc, log = attach(status=focus_mod.EXIT_SEAT_TAKEN)
+proc.eof()
+check("EOF asks for no change", auto.pump(False), None)
+check("auto-show turns itself off", auto.enabled, False)
+check("the watcher's own exit code becomes a sentence",
+      "waylandim" in log[-1], True)
+check("and the chord is named as still working", "STEAM+X" in log[-1], True)
+check("the pipe is closed rather than left readable forever",
+      proc.stdout.closed, True)
+check("pumping a dead watcher is a no-op, not a crash", auto.pump(False), None)
+
+auto, proc, log = attach(status=focus_mod.EXIT_NO_CONNECTION)
+proc.eof()
+auto.pump(False)
+check("a different exit gets a different sentence",
+      "no Wayland connection" in log[-1], True)
+
+# An exit code nobody has a sentence for must still be reported.
+auto, proc, log = attach(status=99)
+proc.eof()
+auto.pump(False)
+check("an unrecognised exit is still reported", len(log), 1)
+check("without inventing a reason for it", "waylandim" in log[-1], False)
+
+# A watcher that has hit EOF but not yet exited: the wait times out, and that
+# must not become an exception in the input loop.
+auto, proc, log = attach(status=None)
+proc.eof()
+check("a watcher that has not exited yet is still handled", auto.pump(False), None)
+check("it was waited for exactly once", proc.waits, 1)
+check("and auto-show is off either way", auto.enabled, False)
+
+# A broken fd is the same story from the other direction.
+auto, proc, log = attach(status=None)
+proc.stdout = FakeStdout(-1)
+check("a read that fails asks for no change", auto.pump(False), None)
+check("and turns auto-show off", auto.enabled, False)
+check("naming the pipe", "pipe" in log[-1], True)
+
+# --- a REAL subprocess: start, fileno, a real exit status, stop ---------------
+
+STUB = ("import sys, time\n"
+        "sys.stdout.write('focus 1\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(0.2)\n"
+        "sys.exit(5)\n")
+log = []
+auto = m.AutoShow(focus_mod, [sys.executable, "-c", STUB], log=log.append)
+check("a real watcher starts", auto.start(), True)
+# The main loop stops selecting on the pipe the moment this goes false, so a
+# watcher that started without it is a watcher nobody ever reads.
+check("and says it is enabled", auto.enabled, True)
+check("and offers an fd to select on", isinstance(auto.fileno(), int), True)
+check("its output is readable without waiting for it to exit",
+      readable(auto.fileno()), True)
+check("a real `focus 1` over a real pipe asks for the keyboard",
+      auto.pump(False), True)
+check("its exit closes the pipe", readable(auto.fileno(), 5.0), True)
+check("which is read as EOF", auto.pump(True), None)
+check("the REAL exit status is turned into the REAL reason",
+      "waylandim" in log[-1], True)
+
+log = []
+auto = m.AutoShow(focus_mod, ["/nonexistent/deck_osk_focus"], log=log.append)
+check("a watcher that cannot start says so", auto.start(), False)
+check("and stays off", auto.enabled, False)
+check("naming what failed", "could not start" in log[0], True)
+check("a watcher that never started has no fd", auto.fileno(), None)
+check("stopping one that never started is a no-op", auto.stop(), None)
+
+log = []
+auto = m.AutoShow(focus_mod,
+                  [sys.executable, "-c", "import time; time.sleep(30)"],
+                  log=log.append)
+auto.start()
+live = auto.proc
+auto.stop()
+check("stop() ends a live watcher", live.poll() is not None, True)
+check("and forgets it", auto.fileno(), None)
+check("stop() twice is still a no-op", auto.stop(), None)
+
 print(f"\n{'PASS' if FAILURES == 0 else 'FAILED'} — {FAILURES} failure(s)")
 sys.exit(1 if FAILURES else 0)

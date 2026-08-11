@@ -30,6 +30,12 @@ DESKTOP MODE ADDS TWO BUTTONS (docs/PROGRESS.md §5.23)
     Both need lizard_mode=N, or the firmware swallows the presses and no evdev
     node ever sees them. Startup says which of those is in force.
 
+    --osk-auto-show   additionally opens the keyboard when a text field takes
+                      focus, and closes it when focus leaves. OFF by default:
+                      it needs the Wayland input-method seat, which costs
+                      fcitx5 its Wayland-native clients (R-51). The chord works
+                      with or without it, and outlives it if it fails.
+
     Text entry is DELIBERATELY absent: free text comes from an on-screen
     keyboard (squeekboard) under a compositor, or from a TUI-native picker --
     that fork is exactly what FINDING-T2-gamepad-spike.md decides. A nav-only
@@ -697,6 +703,154 @@ def run_menu_action(action: str, dry_run: bool = False) -> bool:
     return True
 
 
+# --- focus-triggered auto-show (T8 step 8) -----------------------------------
+
+
+def say(message: str) -> None:
+    """One line to the journal, prefixed the way everything else here is."""
+    print(f"deck-input-mapper: {message}", file=sys.stderr, flush=True)
+
+
+class AutoShow:
+    """Show the keyboard when a text field takes focus, hide it when it leaves.
+
+    STEAM+X summons the keyboard by hand and always will; this is the other
+    half, and it is the one regression step 7 shipped -- squeekboard auto-shows
+    on focus (§5.20) and ours did not.
+
+    WHERE THE FOCUS SIGNAL COMES FROM, and why it is a whole process
+        Only `zwp_input_method_v2` knows that a text field took focus: it is
+        client-internal state, surfaced by no window manager IPC. R-50 ruled out
+        Hyprland's IPC (its events are about windows) and fcitx5's DBus object
+        (three methods, no signals -- the inbound direction only). So we bind
+        the input method ourselves, in `deck_osk_focus.py`.
+
+        ⚠️ THAT MEANS TAKING THE SEAT, and the seat is single-occupancy. R-51
+        measured the cost exactly: fcitx5 launched with `--disable waylandim`
+        keeps XIM, IBus and `/virtualkeyboard` untouched and loses only its
+        WAYLAND-NATIVE clients. Cheap for a Latin-script Deck, real for someone
+        typing CJK into a Wayland-native application -- so this is opt-in
+        (`--osk-auto-show`), never a silent default.
+
+    ⚠️ A SEPARATE PROCESS, for the same reason the layer-shell overlay is one:
+        with lizard_mode=N this mapper is the only input path on the device
+        (§5.9). A protocol bug, a compositor restart, or a seat we are refused
+        must cost auto-show and nothing else. Everything below degrades: it
+        reports, disables itself, and leaves the chord working.
+    """
+
+    def __init__(self, module, argv: list[str], log=say) -> None:
+        self.module = module        # deck_osk_focus: it owns the line protocol
+        self.argv = list(argv)
+        self.log = log
+        self.proc = None
+        self.buffer = b""
+        self.ignored = 0
+        self.enabled = False
+
+    def start(self) -> bool:
+        """Spawn the watcher. False (loudly) if it could not start."""
+        try:
+            # stderr is INHERITED on purpose: the watcher explains itself there
+            # -- no compositor, no protocol, seat taken -- and that belongs in
+            # the same journal as everything else this service says.
+            self.proc = subprocess.Popen(
+                self.argv, stdout=subprocess.PIPE, bufsize=0)
+        except OSError as exc:
+            self.proc = None
+            self.log(f"could not start the focus watcher ({exc}); auto-show is "
+                     "DISABLED, the STEAM+X chord still works")
+            return False
+        self.enabled = True
+        return True
+
+    def fileno(self) -> int | None:
+        if self.proc is None or self.proc.stdout is None:
+            return None
+        return self.proc.stdout.fileno()
+
+    def pump(self, visible: bool) -> bool | None:
+        """Read what the watcher has said. Returns the visibility it asks for,
+        or None for "nothing to do".
+
+        ⚠️ LAST ONE WINS. Several changes can arrive in one read -- focus moves
+        out of one field and into another in a few milliseconds -- and only the
+        final state matters. Acting on each in turn would hide and re-show the
+        keyboard, which for the layer backend means killing and re-spawning a
+        GTK process for a state we are about to leave.
+        """
+        if self.proc is None or self.proc.stdout is None:
+            return None
+        try:
+            chunk = os.read(self.proc.stdout.fileno(), 4096)
+        except (BlockingIOError, InterruptedError):
+            return None
+        except OSError as exc:
+            self._die(f"the focus watcher's pipe failed ({exc})")
+            return None
+        if not chunk:
+            self._die("the focus watcher exited")
+            return None
+        lines, self.buffer = self.module.split_lines(self.buffer + chunk)
+        want = None
+        for line in lines:
+            value = self.module.parse_focus_line(line)
+            if value is None:
+                # Not fatal -- this crosses a process boundary -- but not
+                # silent either. Once, so a chatty producer cannot flood the
+                # journal.
+                self.ignored += 1
+                if self.ignored == 1:
+                    self.log(f"the focus watcher said {line!r}, which is not a "
+                             "focus line; ignoring it and any like it")
+                continue
+            want = value
+        if want is None or want == visible:
+            return None
+        return want
+
+    def _die(self, detail: str) -> None:
+        """Disable auto-show, naming the watcher's own reason if it has one."""
+        status = None
+        if self.proc is not None:
+            try:
+                # It has hit EOF, so it has exited or is a breath away from it.
+                # The wait is what turns a bare "it stopped" into "the seat was
+                # taken" -- worth a bounded pause, once, in a lifetime.
+                status = self.proc.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                status = None
+        reason = self.module.EXIT_REASONS.get(status)
+        self.log(f"{detail}"
+                 + (f": {reason}" if reason else "")
+                 + "; auto-show is DISABLED, the STEAM+X chord still works")
+        self._close()
+
+    def _close(self) -> None:
+        self.enabled = False
+        proc, self.proc = self.proc, None
+        if proc is not None and proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+
+    def stop(self) -> None:
+        """Shut the watcher down. Idempotent: called on every exit path."""
+        proc = self.proc
+        self._close()
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def read_lizard_mode(path: str = LIZARD_MODE_PATH) -> str | None:
     """`Y`, `N`, or None when the knob cannot be read (no hid_steam, not a Deck)."""
     try:
@@ -921,6 +1075,15 @@ def main() -> None:
     ap.add_argument("--osk-top-row", type=int, default=0, metavar="N",
                     help="1-based console row for the keyboard's first line; "
                          "0 means 'as low as it fits' (default)")
+    ap.add_argument("--osk-auto-show", action="store_true",
+                    help="also show the keyboard when a text field takes focus, "
+                         "and hide it when focus leaves. ⚠️ Needs the Wayland "
+                         "input-method seat, which costs fcitx5 its "
+                         "Wayland-native clients (R-51) -- opt in deliberately")
+    ap.add_argument("--osk-focus-watcher", metavar="PATH", default=None,
+                    help="the program whose stdout carries `focus 0`/`focus 1` "
+                         "(default: deck_osk_focus.py beside the other OSK "
+                         "modules)")
     args = ap.parse_args()
 
     if args.list:
@@ -1230,6 +1393,24 @@ def main() -> None:
             print(f"deck-input-mapper: queued action {action!r} has no handler; "
                   "nothing happened", file=sys.stderr, flush=True)
 
+    # --- auto-show: the keyboard appears when a text field takes focus -------
+    #
+    # Off unless asked for. It takes the Wayland input-method seat away from
+    # fcitx5 (R-51), which is a trade the operator makes, not one we make for
+    # them -- and in the installer there is no compositor to ask at all.
+    auto = None
+    if args.osk_auto_show:
+        watcher_path = args.osk_focus_watcher or _find_module_path("deck_osk_focus")
+        focus_module = _load_module("deck_osk_focus")
+        if watcher_path is None or focus_module is None:
+            say("--osk-auto-show needs deck_osk_focus.py in "
+                f"{', '.join(str(d) for d in OSK_SEARCH_DIRS)}; auto-show is "
+                "DISABLED, the STEAM+X chord still works")
+        else:
+            auto = AutoShow(focus_module, [sys.executable, str(watcher_path)])
+            if not auto.start():
+                auto = None
+
     if args.grab:
         pad.grab()
     print(f"deck-input-mapper: reading {pad.path} ({pad.name})", file=sys.stderr, flush=True)
@@ -1238,13 +1419,33 @@ def main() -> None:
 
     sel = selectors.DefaultSelector()
     sel.register(pad.fd, selectors.EVENT_READ)
+    auto_fd = auto.fileno() if auto is not None else None
+    if auto_fd is not None:
+        sel.register(auto_fd, selectors.EVENT_READ)
     try:
         while True:
             deadline = mapper.next_deadline()
             timeout = max(0.0, deadline - time.monotonic()) if deadline is not None else None
             ready = sel.select(timeout)
             now = time.monotonic()
-            if ready:
+            ready_fds = {key.fd for key, _ in ready}
+            # ⚠️ DISPATCH BY FD, never "something was ready so read the pad".
+            # evdev opens the device non-blocking, so a read on a quiet pad
+            # raises BlockingIOError -- which, once a second fd is in this
+            # selector, is no longer a theoretical branch.
+            if auto_fd is not None and auto_fd in ready_fds:
+                want = auto.pump(osk_visible)
+                if want is not None:
+                    set_osk_visible(want)
+                if not auto.enabled:
+                    # It reported why on its way out. Stop selecting on a pipe
+                    # that will be ready with EOF forever.
+                    try:
+                        sel.unregister(auto_fd)
+                    except (KeyError, ValueError, OSError):
+                        pass
+                    auto_fd = None
+            if pad.fd in ready_fds:
                 # Pointer deltas accumulate across ONE report and are emitted
                 # together on SYN_REPORT. A real mouse sends REL_X and REL_Y in
                 # a single report; emitting them as two separate syn'd events
@@ -1334,6 +1535,8 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        if auto is not None:
+            auto.stop()
         if args.grab:
             pad.ungrab()
         # Erase the keyboard before leaving. A mapper that exits with its own
