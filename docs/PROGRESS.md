@@ -230,9 +230,17 @@ proprietary, so Valve's keyboard is unavailable there at any price.
 
 **What this decision requires:**
 
-1. **Steam autostarts in Desktop Mode.** It does not today. `~/.config/autostart/`
-   is already the mechanism in use on this Deck (fcitx5 uses it), so this is one
-   `.desktop` entry with `Exec=steam -silent`.
+1. **Steam autostarts in Desktop Mode**, as `Exec=steam -silent`, via
+   `~/.config/autostart/` (already the mechanism in use here — fcitx5 uses it).
+   **Validated end to end, R-39:** `-silent` yields 11 processes and **zero
+   windows**, Steam registers a tray item, closing a window does **not** quit
+   it, and STEAM+X summons the keyboard with no window ever shown.
+   ⚠️ **The tray host is load-bearing:** without a StatusNotifier host, closing
+   Steam's window *quits* it and Desktop Mode loses its keyboard. Omarchy
+   supplies one through the `omarchy.tray` bar widget, so **a bar layout that
+   drops that widget silently removes the keyboard.**
+   ⚠️ The **STEAM button alone opens Big Picture**, so a mis-timed chord gets
+   Big Picture rather than the keyboard. Stock Deck behaviour, not ours.
 2. **The mapper must not bind Steam's virtual pad** (R-37). With Steam running it
    currently re-binds to `Microsoft X-Box 360 pad 0` and injects keystrokes on
    top of Steam's own input handling. Needed regardless of this decision.

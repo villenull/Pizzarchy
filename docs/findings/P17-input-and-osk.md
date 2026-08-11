@@ -1,4 +1,4 @@
-# Session 17 — the input path, seen on a screen for the first time (R-29…R-38)
+# Session 17 — the input path, seen on a screen for the first time (R-29…R-40)
 
 **2026-08-10, OLED Deck, operator present and holding the device.** Session 16
 closed with the honest admission that *"nothing here was seen on a screen"*.
@@ -399,6 +399,65 @@ watching two consecutive idle cycles rather than trusting the property:**
 **T5 owes the image this setting**, and it is not a GSettings — it is
 `~/.config/omarchy/shell.json`, a per-user dotfile, so it has the same
 "absent from a built image" problem as the rotation.
+
+## R-39 — the SteamOS Desktop Mode model, validated end to end
+
+**Operator direction:** *"steam is launched immediately when entering desktop
+mode in steam os … it keeps operating in the bg even when you close the window.
+we should do the exact same."* Tested rather than assumed, and it works.
+
+| Claim | Result |
+|---|---|
+| Steam runs in the Omarchy desktop | ✅ via XWayland — 11 processes, three windows |
+| A tray host exists to minimise into | ✅ quickshell provides **both** `org.kde.StatusNotifierWatcher` and a `StatusNotifierHost` |
+| Steam registers a tray item | ✅ `:1.xxxx/org/ayatana/NotificationItem/steam` |
+| Closing the window keeps Steam alive | ✅ window closed, **all processes survived**, tray item still registered |
+| `steam -silent` gives a windowless, resident Steam | ✅ **11 processes, 0 windows**, tray item registered |
+| STEAM+X summons the keyboard with no window ever shown | ✅ **confirmed on screen** |
+
+**So the shipping form of §2.6's requirement 1 is `steam -silent`** in
+`~/.config/autostart/`. It is the closest match to SteamOS: Steam resident from
+the moment Desktop Mode starts, nothing on screen, keyboard one chord away.
+
+⚠️ **The tray host is load-bearing and easy to lose.** On Linux, Steam only
+minimises to tray when a StatusNotifier host accepts its item; without one,
+closing the window **quits Steam** and takes the keyboard with it. Omarchy's bar
+supplies it via the `omarchy.tray` widget in `shell.json`. **A bar layout that
+drops `omarchy.tray` silently removes Desktop Mode's keyboard.** Worth a
+conformance check.
+
+⚠️ **The STEAM button alone opens Big Picture Mode**, so a mis-timed STEAM+X
+gets Big Picture instead of the keyboard; exiting it returns to the main Steam
+window, which reads as "the window I closed came back". This is stock Deck
+behaviour, not something this project introduced — recorded because it looks
+like a bug.
+
+Also confirmed: Steam knows the hardware (`"IsSteamDeck_01" "1"` in
+`config.vdf`).
+
+## R-40 — the mapper's Steam-wait had a second door, found by running it
+
+R-37's fix worked in the exact case it was written for: with Steam owning the
+pad the service sat `active`, logging *"Steam owns the controller … waiting for
+the native pad"*. But `NRestarts=4`.
+
+**Steam's takeover has a window where NO pad exists at all** — the native node
+is already gone and the virtual pad has not appeared. That hit the deliberately
+loud "no gamepad at all" branch, and a single Steam start/stop cycle burned
+**4 of the unit's 5 `StartLimitBurst` restarts**. One more and the mapper would
+have been permanently dead — precisely the outcome the wait was written to
+prevent, reached through a different door.
+
+Fixed with a **bounded** grace window (`NO_PAD_GRACE_SECONDS = 30`): the
+enumeration gap is absorbed, a pad that never arrives still exits loudly, and
+the window re-arms rather than carrying a spent allowance into a later gap.
+Verified against a fake clock — exits only after the grace, returns the pad the
+moment it enumerates, never exits while Steam holds the controller — and on
+hardware, where the counter now stays at **`NRestarts=0`**.
+
+**The lesson is the one this session keeps repeating**: the fix was correct
+about the case it modelled and wrong about the system. Only running it under a
+real Steam start/stop showed the second path.
 
 ## State on exit
 

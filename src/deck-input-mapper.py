@@ -282,6 +282,19 @@ def _match(candidates: list[InputDevice], selector: str | None) -> InputDevice |
 # How long to wait between rescans while Steam owns the controller.
 STEAM_RESCAN_INTERVAL = 5.0
 
+# How long to tolerate NO pad at all before giving up and exiting.
+#
+# Measured 2026-08-10: while Steam takes the controller over there is a window
+# where neither pad exists -- the native node is already gone and Steam's
+# virtual pad has not appeared yet. Exiting immediately on that gap burned 4 of
+# the unit's 5 StartLimitBurst restarts during a single Steam start/stop cycle.
+# One more and the mapper would have been permanently dead, which is exactly
+# what pick_device's wait was written to prevent.
+#
+# Bounded, not infinite: a pad that never appears is still a real failure and
+# must still exit loudly. This only absorbs the enumeration gap.
+NO_PAD_GRACE_SECONDS = 30.0
+
 
 def pick_device(selector: str | None) -> InputDevice:
     """Find the pad, WAITING (not exiting) while Steam owns the controller.
@@ -302,6 +315,7 @@ def pick_device(selector: str | None) -> InputDevice:
         return InputDevice(selector)
 
     announced_wait = False
+    no_pad_deadline: float | None = None
     while True:
         candidates = [InputDevice(p) for p in list_devices()]
         dev = _match(candidates, selector)
@@ -310,9 +324,27 @@ def pick_device(selector: str | None) -> InputDevice:
 
         steam_pads = [d.name for d in candidates if is_steam_virtual_pad(d)]
         if not steam_pads:
+            # No pad of any kind. Usually the enumeration gap during Steam's
+            # takeover, so absorb it briefly -- but keep it bounded, because a
+            # pad that never arrives is a genuine failure.
+            now = time.monotonic()
+            if no_pad_deadline is None:
+                no_pad_deadline = now + NO_PAD_GRACE_SECONDS
+                print(
+                    f"deck-input-mapper: no gamepad present; waiting up to "
+                    f"{NO_PAD_GRACE_SECONDS:.0f}s for one to enumerate",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            if now < no_pad_deadline:
+                time.sleep(1.0)
+                continue
             names = ", ".join(f"{d.path}:{d.name}" for d in candidates) or "none"
             sys.exit(f"deck-input-mapper: no gamepad matched {selector!r}. Devices: {names}")
 
+        # A pad reappeared (Steam's). Re-arm the grace window so a later gap
+        # gets its own full allowance rather than inheriting a spent one.
+        no_pad_deadline = None
         if not announced_wait:
             # Say it once, then stay quiet -- this can last for hours.
             print(
