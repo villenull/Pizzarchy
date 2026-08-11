@@ -248,11 +248,15 @@ QEMU; nobody has looked.**)**
 | **`python-evdev`** | ❌ **absent, and unfetchable** — the live `pacman.conf` declares one offline repo and nothing else, so `pacman -Sy python-evdev` returns "target not found" with working internet **(MEASURED: P15 R-9/R-10)**. → patch P2 |
 | `src/deck-input-mapper.py` + `deck_osk_layout.py` + `deck_osk_tty.py` | ❌ additive overlay files, `/usr/local/bin` + `/usr/local/lib/deck-osk/` (mirror `stage-input-mapper`'s layout so the shipped path is the tested path) |
 
-⚠️ `docs/tasks/T5-iso-and-payload.md` lines 88 and 235 still say **squeekboard**
-is the live ISO's keyboard. That is stale — `docs/findings/T2-gamepad-spike.md`
-§4 and `docs/PROGRESS.md` §2.6 replaced it with T8's own OSK, because the live
-environment has no compositor and **no `libwayland` at all**
-(`docs/findings/T9-iso-comparison.md` §5a). Do not ship squeekboard in the ISO.
+✅ **Fixed 2026-08-11, shortly after this spec was written.**
+`docs/tasks/T5-iso-and-payload.md` used to say **squeekboard** was the live
+ISO's keyboard, in three places. It cannot be: the live environment has no
+compositor and **no `libwayland` at all**
+(`docs/findings/T2-gamepad-spike.md` §4, `docs/findings/T9-iso-comparison.md`
+§5a), and §2.6 assigned that job to T8's own OSK. That file now names
+`src/deck_osk_tty.py` + `src/deck-input-mapper.py` + `python-evdev`, and scopes
+the two GSettings to the installed system. **Do not ship squeekboard in the
+ISO.**
 
 ### 2.5 Console geometry and orientation
 

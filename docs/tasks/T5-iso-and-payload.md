@@ -85,7 +85,24 @@ available at install time most packages can be pulled — but anything needed
 - **The Deck's Wi-Fi firmware, in the live image's own filesystem.** Not just
   in the package mirror — a different and less obvious change. This is
   `docs/PROGRESS.md` §5.1 and it is the single largest risk in this task.
-- `squeekboard` and the input mapper, for the controller-driven Wi-Fi screen.
+- ~~`squeekboard` and the input mapper, for the controller-driven Wi-Fi
+  screen.~~ **SUPERSEDED 2026-08-11.** squeekboard **cannot run in the live
+  ISO** — that environment has no Wayland compositor, and re-measured inside
+  the beta 2 image, **no `libwayland-*.so` at all**
+  (`docs/findings/T2-gamepad-spike.md` §4, `docs/findings/T9-iso-comparison.md`
+  §5a). The live-ISO keyboard is **ours**, and it is already built and
+  hardware-proven (`docs/tasks/T8-onscreen-keyboard.md`):
+
+  | Ships in the live image | What it is |
+  |---|---|
+  | `src/deck_osk_tty.py` | T8's OSK drawn on the **bare console** — the installer's keyboard |
+  | `src/deck-input-mapper.py` | pad → keys/pointer, and the chord that raises the OSK |
+  | `src/deck_osk_layout.py` | the layout core both renderers share |
+  | 🔴 **`python-evdev`** | **absent from the offline mirror today, and unfetchable** — the live `pacman.conf` declares only `[offline]` (R-9), so it cannot be pulled at install time (R-10). **Bake it into the payload, or rewrite the mapper against raw `struct`-parsed evdev**, which R-8's `evmon.py` proved practical |
+
+  *(§2.6 is the decision this follows: **our OSK in the installer, squeekboard
+  on the desktop.** It was revised twice on 2026-08-10 — an earlier version of
+  this file had the two swapped.)*
 
 Then, for the installed system:
 
@@ -145,6 +162,11 @@ in `docs/PROGRESS.md`.
 - **Assuming the live ISO can do what the installed system can.** All Deck
   Wi-Fi evidence so far comes from a system already running Valve's kernel
   and firmware. The live image runs neither.
+  ⚠️ **This file committed that exact error against itself** — three passages
+  specified squeekboard, and its two GSettings, for an environment with no
+  compositor and no `libwayland`. Corrected 2026-08-11 and left visible in §2
+  and §4. A warning in a "failure modes" list did not stop the file making the
+  mistake elsewhere in the same document.
 - **Silently shipping NVIDIA drivers.** See §2. Read a dry run; nothing errors.
 - **Re-adding the offline requirement by habit.** It is retired. If a design
   decision only makes sense under "no network at install," re-check it.
@@ -232,8 +254,27 @@ session *file*. Full data: `docs/findings/P16-repo-overlap-audit.md`.
 Added session 17, **scoped by §2.6's decision** — which splits these across two
 different images rather than one.
 
-**In the LIVE ISO (the installer), squeekboard is the keyboard**, and it needs
-both of these or it silently never appears:
+> ⛔ **CORRECTED 2026-08-11.** This section used to open *"In the LIVE ISO (the
+> installer), squeekboard is the keyboard"* and presented the two GSettings
+> below as a **live-ISO** requirement. **Both halves were wrong**, and they
+> survived here from the *first* version of §2.6, which was revised twice on
+> 2026-08-10:
+>
+> - **squeekboard cannot run in the live ISO at all** — no Wayland compositor,
+>   and no `libwayland-*.so` in the image (`docs/findings/T2-gamepad-spike.md`
+>   §4, `docs/findings/T9-iso-comparison.md` §5a). The installer's keyboard is
+>   **T8's own**, drawn on the bare console — see §2's payload table.
+> - **The two GSettings therefore belong to the INSTALLED system only**, where
+>   squeekboard actually runs. `docs/tasks/T5-fork-plan.md` §5.3 already scopes
+>   them that way; this file now agrees with it.
+>
+> Left visible rather than deleted because the mistake is instructive: a
+> keyboard was specified for an environment that cannot host it, and the error
+> outlived two corrections to the decision it came from.
+
+**On the INSTALLED system, squeekboard is the desktop's keyboard** (until T8's
+layer-shell renderer replaces it), and it needs both of these or it silently
+never appears:
 
 | Setting | Why it is load-bearing | Ships as |
 |---|---|---|
@@ -243,8 +284,19 @@ both of these or it silently never appears:
 Both are **GSettings in a dconf database**, so "install a file" is not enough —
 they need a dconf default (`/etc/dconf/db/local.d/`) or a first-boot step, and
 the choice must survive a *new* user account, not just the one on the test Deck.
+⚠️ Verify them with `dconf read -d`, never `gsettings get`: a plain read returns
+the *user's* value and passes while the site default is missing (§5.20).
 
-**On the INSTALLED system, squeekboard is NOT shipped at all** (§2.6). Instead:
+⚠️ **And the live ISO needs neither of them.** Nothing in that environment reads
+GSettings — there is no dconf-consuming keyboard there, because there is no
+compositor. Shipping them into the live image is wasted work that reads like
+coverage.
+
+~~**On the INSTALLED system, squeekboard is NOT shipped at all** (§2.6).~~
+**Also wrong, and the exact inverse of the truth** — the other half of the same
+superseded §2.6-v1 text corrected above. squeekboard **ships on the installed
+system** and is the desktop's keyboard today; it is the *live ISO* that cannot
+have it. The rest of this table stands on its own evidence:
 
 | Requirement | Why |
 |---|---|
@@ -252,10 +304,14 @@ the choice must survive a *new* user account, not just the one on the test Deck.
 | `~/.config/omarchy/shell.json` → `"idle": {"screensaver": 150, "lock": 86400}` | R-38. Omarchy locks at 300 s with a password prompt no available keyboard can reach. ⚠️ **`lock: 0` locks INSTANTLY** — there is no off sentinel — and values past ~24.8 days overflow a QML int32 timer |
 | `~/.config/hypr/monitors.lua` rotation | §5.11 — the desktop renders sideways without it. Baked, not per-user |
 
-⚠️ **The accepted risk that follows** (§2.6): with no squeekboard fallback, a
+~~⚠️ **The accepted risk that follows** (§2.6): with no squeekboard fallback, a
 Desktop Mode where Steam is not running has **no text entry at all**. Recovery is
-SSH or a USB keyboard. This was chosen deliberately; do not "fix" it by adding
-squeekboard back without raising it as a scope change.
+SSH or a USB keyboard.~~ **Also superseded — third and last remnant of §2.6-v1
+in this file.** That risk described a plan where Steam supplied the desktop's
+keyboard; R-42 killed it (Steam drives XTEST, which reaches nothing under
+Wayland, and a resident Steam takes the controller entirely). **Desktop Mode's
+text entry today is T8's layer-shell OSK, hardware-proven at R-43, with
+squeekboard installed as the automatic fallback** — two keyboards, not none.
 
 ⚠️ **The general trap:** all of these were discovered by something failing on
 screen, not by anything failing a check. Nothing in the current test suite would
