@@ -263,3 +263,55 @@ collides, so it coexists happily. **A full-screen curses TUI like archinstall's
 menu will draw over the keyboard**, and the two will fight on redraw. That is a
 design fork — a relay through a smaller pty, or a keyboard that hides while a
 full-screen screen is up — and it needs deciding before the installer ships.
+
+## R-50 — auto-show: Hyprland IPC and fcitx5 are BOTH ruled out. The seat contest is unavoidable.
+
+Step 7 left our keyboard summon-only where squeekboard auto-shows on focus.
+Fixing that needs a focus signal from somewhere. Three candidates; two are now
+dead by enumeration rather than by argument.
+
+**1. Hyprland IPC — no.** Its event vocabulary is about windows, not text
+fields: `activewindow`, `activewindowv2`, `windowtitle`, `windowtitlev2`,
+`focusedmon`, `focusedmonv2`, `activelayout`, `submap`, `openwindow`. Nothing
+about a text field taking focus, which is a client-internal state surfaced only
+through the text-input protocol. (`TextInputV1`/`TextInputV3` do appear in the
+binary — they are the protocol *implementations*, not IPC events. Easy to
+misread as a hit.)
+
+**2. fcitx5 telling us — no, and it looks like a yes at first.** fcitx5 does
+publish `org.fcitx.Fcitx.VirtualKeyboard1` at `/virtualkeyboard`, on this
+machine **and on the Deck**, which reads like exactly the hook needed. It is
+not:
+
+```
+.HideVirtualKeyboard    method
+.ShowVirtualKeyboard    method
+.ToggleVirtualKeyboard  method
+```
+
+**Three methods, no signals.** That is the INBOUND direction — a way to tell
+fcitx5 to show a keyboard, not a way to be told that focus moved. Across every
+object fcitx5 exports (`/controller`, `/virtualkeyboard`,
+`/org/freedesktop/portal/inputmethod`) the only signals are
+`InputMethodGroupsChanged` and the generic `PropertiesChanged`; neither is about
+focus. There is no `VirtualKeyboardBackend` interface in the binary either — no
+register-and-be-told seam to plug into.
+
+**3. Bind the input method ourselves — the only path left**, and it means
+displacing an occupant. R-50's measurement from the watcher stands: the seat is
+held by **fcitx5**, always, and by **squeekboard** whenever it runs.
+
+### What that costs, stated rather than assumed
+
+fcitx5 is Omarchy's input method for every other language. Taking the Wayland
+seat from it is a real trade and it is the operator's call, not a detail:
+
+- ⚠️ **Unmeasured:** whether fcitx5 keeps serving XWayland clients through its
+  XIM/IBus interfaces while the Wayland seat belongs to someone else. If it
+  does, the cost is smaller than it looks. **Measure this before deciding** —
+  it is the single fact that determines whether this is cheap or expensive.
+- The fallback survives either way: squeekboard's `SetVisible` over DBus does
+  not need the input-method seat, so R-48's safety net is unaffected.
+
+**Recommendation: do not take the seat until that one measurement is in.**
+Summon-only via STEAM+X works today and costs nothing.
