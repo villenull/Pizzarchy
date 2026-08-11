@@ -1,6 +1,6 @@
 # T5 — the `omarchy-iso` fork: strategy, fork point, and the bake-in list
 
-**Written 2026-08-11 (session 20), after operator decision §5.25 #8 made the ISO
+**Written 2026-08-11 (session 19), after operator decision §5.25 #8 made the ISO
 build the next major piece.** This is the plan; `docs/tasks/T5-iso-and-payload.md`
 remains the requirements list and is unchanged by this file except where noted.
 

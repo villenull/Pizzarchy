@@ -9,7 +9,7 @@
 > its own installer calls — a fork taken at the wrong point calls a binary that
 > no longer exists.
 >
-> 🔴 **And the git pin is only half of it — measured 2026-08-11 (session 20).**
+> 🔴 **And the git pin is only half of it — measured 2026-08-11 (session 19).**
 > The `edge` channel has **already moved past our runtime pin**: it serves
 > `omarchy-dev-4.0.0.r1652.g1c9dfc5-1` today, 35 commits past `6d7826d` and 18
 > commits past the rename. `builder/build-iso.sh` downloads the runtime package

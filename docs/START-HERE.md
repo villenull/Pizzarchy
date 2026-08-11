@@ -3,9 +3,9 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
-> ## Where things stand (updated 2026-08-11, END of session 20)
+> ## Where things stand (updated 2026-08-11, END of session 19)
 >
-> ### 🚩 READ THIS FIRST — session 20 was large, and it closed a phase
+> ### 🚩 READ THIS FIRST — session 19 was large, and it closed a phase
 >
 > **Phase 2.9 is DONE.** It began as "rebase onto the new 4.0 beta 2" and
 > measurement showed **we were already on it** — same commit, same channel,
@@ -15,13 +15,13 @@ work without waiting for further instruction.**
 > **The single most important thing on this page:** 🔴 **the power button locks
 > the Deck into a password screen with no password field** (§5.24). Live today,
 > nothing to do with the upstream delta, and the fix is approved and waiting for
-> a Deck session (`docs/tasks/P20-deck-session-runbook.md`).
+> a Deck session (`docs/tasks/P2.9-deck-session-runbook.md`).
 >
 > **The next action is that runbook.** Five approved changes plus one read-only
 > check, ordered by blast radius, with rollbacks. Everything else is queued
 > behind it or independent of it.
 >
-> #### What landed in session 20
+> #### What landed in session 19
 >
 > | | |
 > |---|---|
@@ -50,7 +50,7 @@ work without waiting for further instruction.**
 >    one is expressible in git (§3.10a). Forking `omarchy-iso` at the commit our
 >    own ISO came from, and building today, yields an installer that calls a
 >    binary the runtime no longer has.
-> 4. ⚠️ **Session 20's real theme: four times a measurement TOOL lied, not the
+> 4. ⚠️ **Session 19's real theme: four times a measurement TOOL lied, not the
 >    code** — `grep` in a UTF-8 locale against CP437 glyphs, a console width
 >    cached across a mode change, `hyprctl layers`, and `grep -c shift` on a
 >    keyboard that had been destroyed. Each was caught by checking the
@@ -61,7 +61,7 @@ work without waiting for further instruction.**
 >
 > 1. Read `docs/PROGRESS.md` §1 (state), **§5.24** (the live lock defect),
 >    **§5.25** (twelve settled decisions — do not re-litigate), §5.26/§5.27.
-> 2. Then `docs/tasks/P20-deck-session-runbook.md` — that is the next action and
+> 2. Then `docs/tasks/P2.9-deck-session-runbook.md` — that is the next action and
 >    it needs the operator.
 > 3. Deck-free work if the operator is unavailable: T5's fork (`T5-fork-plan.md`,
 >    start at its slice 1) or T4's screens (`T4-screen-spec.md`, whose test tier
@@ -556,7 +556,7 @@ it.
 | `docs/PROGRESS.md` | **Every session start. This is the authoritative state.** Scope, findings, open issues, and **55** facts not to re-derive. |
 | `docs/SESSIONS.md` | Usage-limit budgeting and the block schedule. |
 | `docs/PLAN.md` | **Frozen and partly superseded.** Read the banner at the top first. Good for §6.1a (installer screens), §8 (bug hypotheses), §9 (test tiers), §11 (maintenance risks). |
-| `docs/tasks/` | One file per work block. **Start with `P20-deck-session-runbook.md`** — it is the next action. |
+| `docs/tasks/` | One file per work block. **Start with `P2.9-deck-session-runbook.md`** — it is the next action. |
 | `docs/findings/` | Research outputs. Evidence behind the decisions in `docs/PROGRESS.md`. |
 | `docs/drafts/` | Staged upstream report. **Nothing sent. Do not send.** |
 | `src/omarchy-deck-kernel.sh` | T1's deliverable. Ten idempotent stages, VM-tested and hardware-validated. |
@@ -627,7 +627,7 @@ between 2 and 3.** Task-to-phase mapping:
 | T4 | `docs/tasks/T4-installer-ui.md` | Sonnet | ⬜ **unblocked, re-scoped by §5.9** → P2.5–P2.6 |
 | T5 | `docs/tasks/T5-iso-and-payload.md` | Sonnet/Opus | ⬜ P2.7–P2.8, now with §5.12/§5.13 constraints |
 | T6 | `docs/tasks/T6-integration-release.md` | **Opus** | ⬜ phase 3 |
-| T9 | `docs/tasks/T9-beta2-rebase.md` | **Opus** | ✅ **phase 2.9 DONE (session 20).** We were already on beta 2 — measured from inside both ISOs. The block's value was the delta *ahead* of us, the substrate now pinned to the shipped channel, and four VM suites green on it. **Left:** P2.9e/f, folded into `docs/tasks/P20-deck-session-runbook.md` |
+| T9 | `docs/tasks/T9-beta2-rebase.md` | **Opus** | ✅ **phase 2.9 DONE (session 19).** We were already on beta 2 — measured from inside both ISOs. The block's value was the delta *ahead* of us, the substrate now pinned to the shipped channel, and four VM suites green on it. **Left:** P2.9e/f, folded into `docs/tasks/P2.9-deck-session-runbook.md` |
 | T8 | `docs/tasks/T8-onscreen-keyboard.md` | Sonnet/**Opus** | ✅ **DONE (session 18) — all seven steps, hardware-proven (R-43) and console-sharing proven in QEMU (R-47).** Was P2.4b. Input half was already done in the mapper, chord included |
 | T7 | `docs/tasks/T7-enablement-layer.md` | **Opus** | ⬜ **phase 4 — NEW.** Generalise into a Deck enablement layer so the next distro is ~a day. Deliberately after phase 3: abstracting from one *finished* example is engineering, from one unfinished example is guessing |
 
@@ -638,7 +638,7 @@ are done as far as a script can verify them. Sensible entry points:
   (T4's installer screens; text entry is the real gap) or **P2.7/P2.8** (T5's
   `omarchy-iso` fork, which now carries six recorded constraints — see above).
   Either is days of work and needs no hardware.
-- ✅ *(Retired — P2.9a–P2.9d are done, session 20.)* The Deck-free half of
+- ✅ *(Retired — P2.9a–P2.9d are done, session 19.)* The Deck-free half of
   phase 2.9 is complete: pin measured, delta classified, substrate rebuilt on
   the `edge` channel with the boot chain asserted, all four VM suites green.
 

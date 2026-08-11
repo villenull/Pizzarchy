@@ -71,7 +71,7 @@ It opened **§5.15** (Steam's whole privileged-helper surface is missing — thi
 now the widest gap, and it owns Gaming Mode's brightness slider) and **§5.16**
 (the switch could permanently kill sddm; mitigated, root cause open).
 
-**Next action: `docs/tasks/P20-deck-session-runbook.md`.** One operator session,
+**Next action: `docs/tasks/P2.9-deck-session-runbook.md`.** One operator session,
 five approved changes plus one read-only check, ordered by blast radius, with
 rollbacks and a stop-early table. 🔴 It opens with the §5.26 gate — one line,
 run from a **booted USB**, that decides whether T4 has a keyboard at all.
@@ -699,7 +699,7 @@ them. Expect mapping-table entries to change; the mechanism will not.
 
 ### 3.10a 🔴 THE FOURTH GOTCHA, and the biggest: the ref and the channel are TWO pins
 
-**Measured 2026-08-11 (session 20).** §3.10 item 1 said the ref and the mirror
+**Measured 2026-08-11 (session 19).** §3.10 item 1 said the ref and the mirror
 "must agree". That understates it. `builder/build-iso.sh` downloads the Omarchy
 runtime **from the package channel at build time**, so a build is pinned by two
 independent things and **only one of them is expressible in git**:
@@ -1040,7 +1040,7 @@ comes up rotated again.
 
 ### 5.12a 🔴 Turning encryption off DELETES autologin — they are one change
 
-**Measured 2026-08-11 (session 20), reading upstream's installer.**
+**Measured 2026-08-11 (session 19), reading upstream's installer.**
 `configure_login` writes `autologin.conf` **only `if ctx.encrypt`** — on an
 encrypted install LUKS is the authentication boundary, so SDDM is allowed to
 log straight in. Turn encryption off, as §5.12 requires, and **autologin
@@ -2044,7 +2044,7 @@ the owner is named.
 | # | Decision | Owner |
 |---|---|---|
 | 1 | 🔴 **Fix both lock causes** (§5.24): the `above_lock = 2` layer rule for `deck-osk`, **and** mask `omarchy-sleep-lock.service`. The power button must stop producing an unanswerable password screen | Deck |
-| 2 | ✅ **BUILT (session 20).** `stage-lizard-mode` ties the knob to the mapper's lifetime — `ExecStartPost` off, `ExecStopPost` on, **plus `OnFailure=` on a separate unit** for the cgroup-kill path where `ExecStopPost` is itself killed. **All eight kill paths verified on systemd 261**; the no-input window went from *until the next boot* to **≤106 ms**. Left: confirm on hardware (runbook §2.1) | Deck |
+| 2 | ✅ **BUILT (session 19).** `stage-lizard-mode` ties the knob to the mapper's lifetime — `ExecStartPost` off, `ExecStopPost` on, **plus `OnFailure=` on a separate unit** for the cgroup-kill path where `ExecStopPost` is itself killed. **All eight kill paths verified on systemd 261**; the no-input window went from *until the next boot* to **≤106 ms**. Left: confirm on hardware (runbook §2.1) | Deck |
 | 3 | **Measure QAM's evdev code** — one press with lizard mode off. The binding is written and deliberately inert until this exists (§5.23) | Deck |
 | 4 | **Run `stage-default-session`** — the Deck starts booting to Gaming Mode | Deck |
 | 5 | **Apply BOTH rotations**: Limine `interface_rotation: 270` and the TTY's `fbcon=rotate:1`. Boot-chain, hence the explicit approval | Deck |
@@ -2080,7 +2080,7 @@ boot resets the parameter to `Y`, so it self-heals.
 
 ### 5.25a Three defects found while making the stages testable — deliberately NOT fixed
 
-Found 2026-08-11 (session 20) by the agent implementing decisions 9 and 10.
+Found 2026-08-11 (session 19) by the agent implementing decisions 9 and 10.
 Each was left alone because "production behaviour must not change" outranked
 it in that task. They are real and they are now written down.
 
@@ -2107,7 +2107,7 @@ it in that task. They are real and they are now written down.
 
 ### 5.26 🔴 T4's design gate: nobody has read the lizard-mode knob IN THE LIVE ISO
 
-**Found 2026-08-11 (session 20) while specifying T4** —
+**Found 2026-08-11 (session 19) while specifying T4** —
 `docs/tasks/T4-screen-spec.md` §8, unknown **U6**. It is one line to check and
 it decides whether T4 has a product.
 
@@ -2158,7 +2158,7 @@ be reached by someone who cannot recover from it.
 
 ### 5.27 🆕 OSK auto-show is built but NOT SHIPPED — two hand-offs
 
-Built 2026-08-11 (session 20). `src/deck_osk_focus.py` is now a shippable
+Built 2026-08-11 (session 19). `src/deck_osk_focus.py` is now a shippable
 program, `AutoShow` in the mapper consumes it, and `--osk-auto-show` turns it
 on. **Default is OFF, deliberately:** taking the Wayland input-method seat
 costs `fcitx5` its Wayland clients (R-50/R-51), which is the operator's call,
@@ -2518,7 +2518,7 @@ backup rescue (the rebuild wipes both).
 
 One line each. Detail lives in git history and in the `FINDING-*.md` files.
 
-| 20 | **The largest session so far, 2026-08-11 — phase 2.9 opened and closed in one day.** It began "rebase onto the new 4.0 beta 2" and **measurement showed we were already on it**: same `6d7826d`, same `edge` channel, same builder as upstream's published ISO, differing only in 7 stock Arch rebuilds we carried the *newer* of. So the block's value was elsewhere — the delta **ahead** of us classified (1 BREAKS US / 27 RE-VERIFY / 37 NO IMPACT), the QEMU substrate rebuilt on the channel we actually ship with its boot chain **asserted**, and all four VM suites green on it for the first time. **Twelve operator decisions settled** (§5.25). 🔴 **Found the biggest live defect of the project so far: the power button locks the Deck into a password screen with no password field** (§5.24) — and inverted the delta's scariest row while finding it. Built `stage-lizard-mode` with a fallback whose safety argument I got **wrong twice**, corrected both times by measurement (§5.25). Shipped five new test suites; 15 total. Wrote T4's screen spec and **proved its automated test tier viable**, T5's fork plan (whose first finding was that the obvious fork point is *broken*), the P20 Deck runbook, and RECOVERY's one-command escape from a stranded lock. ⚠️ **The session's real theme: four times a measurement TOOL lied rather than the code** — `grep` against CP437 glyphs, a cached console width, `hyprctl layers`, and `grep -c shift` on a destroyed keyboard. Each was caught by checking the instrument, not the reading. |
+| 19 | **The largest session so far, 2026-08-11 — phase 2.9 opened and closed in one day.** It began "rebase onto the new 4.0 beta 2" and **measurement showed we were already on it**: same `6d7826d`, same `edge` channel, same builder as upstream's published ISO, differing only in 7 stock Arch rebuilds we carried the *newer* of. So the block's value was elsewhere — the delta **ahead** of us classified (1 BREAKS US / 27 RE-VERIFY / 37 NO IMPACT), the QEMU substrate rebuilt on the channel we actually ship with its boot chain **asserted**, and all four VM suites green on it for the first time. **Twelve operator decisions settled** (§5.25). 🔴 **Found the biggest live defect of the project so far: the power button locks the Deck into a password screen with no password field** (§5.24) — and inverted the delta's scariest row while finding it. Built `stage-lizard-mode` with a fallback whose safety argument I got **wrong twice**, corrected both times by measurement (§5.25). Shipped five new test suites; 15 total. Wrote T4's screen spec and **proved its automated test tier viable**, T5's fork plan (whose first finding was that the obvious fork point is *broken*), the P2.9 Deck runbook, and RECOVERY's one-command escape from a stranded lock. ⚠️ **The session's real theme: four times a measurement TOOL lied rather than the code** — `grep` against CP437 glyphs, a cached console width, `hyprctl layers`, and `grep -c shift` on a destroyed keyboard. Each was caught by checking the instrument, not the reading. |
 | # | What happened |
 |---|---|
 | 1 | Bootstrap; T0 §1 harness + libraries + unit tests; T0 §2–6 (Ventoy doc, override loader, `tools/deck-sync.sh`, CI, shellcheck baseline) |
