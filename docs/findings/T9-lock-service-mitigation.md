@@ -633,3 +633,350 @@ ours: `src/deck-session.sh`, `src/deck-input-mapper.py`, `src/deck_osk_wayland.p
 (`BUTTON_MAP`, `HAT_MAP`, `EMITTED_KEYS`, `OSK_CHORD_HOLD`) are the durable
 reference. `T9-delta-classification.md`'s citation of `:133-159` had already
 gone stale by this reading (`BUTTON_MAP` is at `:141`).
+
+---
+
+# Tier 0 results — the §4.1 procedure, actually run
+
+**Run 2026-08-11 ~12:30–12:45 on the dev machine.** Everything in §§1–7 above was
+*read*; this section is what happened when it was *executed*. Nothing above has
+been rewritten — where this contradicts it, the correction is called out
+explicitly and marked 🔧.
+
+New tag in this section: **OBSERVED** = it was rendered on a screen, captured,
+and the pixels were counted. **READ**/**INFERRED**/**UNVERIFIED** keep their
+meanings from the top of this file.
+
+**Headline: `above_lock = 2` works exactly as §2.4 predicted it would. The OSK
+draws over a live `ext-session-lock` surface, and keystrokes still land in the
+password field underneath it. The recommendation in §5 survives contact.**
+
+## T0.1 What was actually run
+
+| Thing | Value |
+|---|---|
+| Compositor under test | **nested Hyprland `0.56.0-2`** (dev machine's package), Wayland backend |
+| Lock client | **`hyprlock 0.9.6-1`** — any `ext-session-lock-v1` client, per §4.1 step 3 |
+| OSK | **`src/deck_osk_wayland.py` unmodified**, `--demo --no-exclusive` |
+| Control OSK | scratch copy, identical but for namespace + anchor (see T0.4) |
+| Pixels | `grim` inside the nested session + Pillow colour counts |
+| Outer session | `wayland-1`, sig `36b2e0c…_1786457507_283568505` — **untouched, verified at start and end** |
+
+Nothing under `src/`, `test/` or `tools/` was modified. The only repo write is
+this section.
+
+### 🛑 The safety rail, and a real hazard found while building it
+
+§4.1 says a nested Hyprland "gives a nested compositor in a window" because
+`AQ_BACKEND_WAYLAND` is the fallback. **That is true but it is not the whole
+story, and the gap is dangerous.** Reading aquamarine `v0.13.0` **(READ)**:
+
+- `CBackend::create()` builds **every** requested backend, and `CBackend::start()`
+  then **starts every one it built** — `AQ_BACKEND_REQUEST_FALLBACK` is not
+  first-wins. So DRM starting does not stop Wayland from starting, or vice versa.
+- `CDRMBackend::attempt()` calls `CSession::attempt()` **unconditionally**;
+  `CSession::attempt()` calls `libseat_open_seat()` and, on success, also builds
+  a **libinput** context over udev. **There is no nesting guard anywhere in that
+  path.**
+
+So a nested Hyprland that manages to open a seat can take DRM master on the real
+panel *and* grab every `/dev/input` node out from under the running session. The
+probe therefore forced the failure deterministically rather than hoping:
+
+```
+LIBSEAT_BACKEND=deliberately-invalid-no-seat-for-nested-probe   # no impl matches -> NULL
+AQ_DRM_DEVICES=/nonexistent/t9-tier0-probe-must-not-take-drm    # belt and braces
+```
+
+and asserted the result from the nested compositor's own log before touching
+anything **(OBSERVED)**:
+
+```
+[libseat] No backend matched name 'deliberately-invalid-no-seat-for-nested-probe'
+libseat: failed to open a seat
+Failed to open a session
+DRM Backend failed
+Starting the Wayland backend!
+Connected to a wayland compositor: Hyprland
+```
+
+`hyprctl devices` on the nested instance then lists **only `wl_pointer` and
+`wl_keyboard`** — no kernel devices at all **(OBSERVED)**. The launcher also
+hard-aborts and kills the compositor if `drm: Registered gpu` ever appears.
+
+**Anyone repeating this must set those two variables.** Add them to §4.1's
+recipe. Without them the experiment can take over the machine it is run on.
+
+## T0.2 🔧 §6.6's version gap is CLOSED — 0.56.0 results do transfer to 0.56.2
+
+§6.6 listed the dev machine being on `0.56.0-2` while the ISO carries `v0.56.2`
+as an open risk, "cheap to close: diff the three files across the two tags".
+Done, via `gh api …/contents/…?ref=` blob SHAs **(READ)**:
+
+| File | v0.56.0 vs v0.56.2 |
+|---|---|
+| `managers/SessionLockManager.cpp` | **identical blob** |
+| `config/lua/bindings/LuaBindingsConfigRules.cpp` | **identical blob** |
+| `desktop/rule/layerRule/LayerRuleEffectContainer.cpp` | **identical blob** |
+| `render/Renderer.cpp` | differs — `.round()` on two clip boxes, IME popups moved into a new `renderIME()` |
+| `desktop/state/ViewHitTester.cpp` | differs — **adds** `layerPopupSurfaceAt()`; `layerSurfaceAt()` unchanged |
+| `managers/input/InputManager.cpp` | differs — IME popup hit-test reordering |
+
+**The two guards this whole document turns on are byte-identical in both tags**
+**(READ)** — `Renderer.cpp:943-945` is at the *same line numbers* in each:
+
+```cpp
+if ((pLayer->m_ruleApplicator->aboveLock().valueOrDefault() && !lockscreen && …isSessionLocked()) ||
+    (lockscreen && !pLayer->m_ruleApplicator->aboveLock().valueOrDefault()))
+    return;
+```
+
+and the hit-test skip `(aboveLockscreen && ls->m_ruleApplicator->aboveLock().valueOrDefault() != 2)`
+is character-for-character the same (only its line number moves, 332 → 349,
+because of the added function above it). The `isSessionLocked()` keyboard-focus
+block in `InputManager.cpp` (§2.3) is also untouched. **§6.6 item 6 can be struck
+for the lock paths specifically.**
+
+## T0.3 The sensor, the strand, and the restore — §4.1 steps 2–5
+
+`bin/omarchy-hyprland-session-locked` is not on this machine (it does not exist
+at `6d7826d`, §1.2 condition 3), so its documented logic was applied directly:
+`LOCK` present in any monitor's `solitaryBlockedBy` → exit 0.
+
+| Step | Assertion | Result |
+|---|---|---|
+| 2 — baseline | no `LOCK`, exit 1 | `['WINDOWED','CANDIDATE']` → **exit 1** ✅ **OBSERVED** |
+| 3 — lock | `LOCK` present, exit 0 | `['LOCK','WINDOWED','CANDIDATE']` → **exit 0** ✅ **OBSERVED** |
+| 4 — `kill -9` the client | still exit 0 | `['LOCK','WINDOWED','CANDIDATE']` → **exit 0** ✅ **OBSERVED** |
+| 5 — second lock client | not denied | `hyprlock: "Locking session" → "onLockLocked called"`, and the recovered frame is **pixel-identical** to the original locked frame ✅ **OBSERVED** |
+
+**§1.3 is confirmed on real Hyprland: the failsafe outlives its client, and
+`allow_session_lock_restore = true` really does let a second client take over a
+stranded lock.** That is `recoverStrandedLock()`'s entire premise, and it now
+holds by observation rather than by reading `SessionLockManager.cpp:52-59`.
+
+## T0.4 🔥 The decisive result: `above_lock = 2` renders over the lock
+
+The rule was applied **verbatim as §5.1 recommends it**, in a Lua config:
+
+```lua
+hl.layer_rule({ match = { namespace = "deck-osk" }, above_lock = 2 })
+```
+
+To remove every alternative explanation, the "with rule" run put **two** layer
+surfaces on screen **in the same locked frame**: the real
+`src/deck_osk_wayland.py` (namespace `deck-osk`, bottom, rule matches) and a
+control copy (namespace `ctrl-osk`, top, rule does not match). Same compositor,
+same lock, same frame — the only variable is whether the rule applies.
+
+Counting non-black pixels in each surface's own band **(OBSERVED)**:
+
+| Run | State | Band | Non-black px | Verdict |
+|---|---|---|---|---|
+| no rule | **locked** | `deck-osk` | **0 / 250 488 (0.0 %)** | **not drawn** |
+| rule | **locked** | `deck-osk` | **250 488 / 250 488 (100 %)** | **DRAWN over the lock** |
+| rule | **locked** | `ctrl-osk` | **0 / 127 800 (0.0 %)** | not drawn (control) |
+| rule | unlocked | `ctrl-osk` | 127 800 / 127 800 (100 %) | drawn (control is healthy) |
+
+And the ruled band while locked is **pixel-identical to the same band rendered
+while unlocked** — it is not a dimmed or partial composite, it is the full
+keyboard **(OBSERVED)**.
+
+In every one of those states `hyprctl layers` listed **both** surfaces at
+`a: 1` with unchanged geometry, locked or not. That is §2.4's "mapped, alive,
+and not drawn", now observed rather than predicted — **and it is exactly why
+`hyprctl layers` must never be used as the evidence that this works.** The layer
+list is identical in the working and non-working cases. Only pixels distinguish
+them.
+
+> **Answer to the question this exercise existed to ask: YES. `above_lock = 2`
+> puts our keyboard above a live session-lock surface.**
+
+## T0.5 🔥 And input still reaches the lock surface underneath it
+
+With the lock live and the `above_lock` OSK drawn on top, five characters were
+injected into the nested session's seat. The password field went from the
+`Enter Password` placeholder to **exactly five dots** **(OBSERVED)**.
+
+So the two properties hold **simultaneously**, which is the entire point:
+
+- the OSK is **visible** over the lock, and
+- it does **not** take focus — the keystrokes land in the lock surface's
+  password field, not in the overlay.
+
+That confirms §2.3's compositor half (`InputManager.cpp`'s "regardless of
+layers") and the `KeyboardMode.NONE` design in `src/deck_osk_wayland.py:274`,
+together, on a real lock.
+
+⚠️ **What this does NOT prove, stated plainly.** The keystrokes were injected
+through the *nested compositor's seat*, **not** through `/dev/uinput`.
+`/dev/uinput` *is* writable here (ACL grants `huyke` rw; a device was created
+and enumerated as `/dev/input/event7` — **OBSERVED**), but a uinput device is a
+**kernel** device, and the nested compositor deliberately has no libinput
+session, so it cannot see one (T0.1). Routing uinput keys into the nested lock
+would require the *outer* compositor to forward them — i.e. typing into the
+operator's own session — so it was not done. **The mapper→uinput→libinput link
+remains UNVERIFIED against a lock surface** (§6 item 3 stands, narrowed): what is
+now settled is the part after it, that a keystroke arriving at a locked
+compositor reaches the lock surface and not the OSK.
+
+## T0.6 §2.4's "sharp edge" is confirmed — and it is the load-bearing caveat
+
+With the rule active, the lock was stranded (`kill -9` the client). The
+`above_lock` OSK **stopped being drawn**: 0 key-face pixels in its band, while
+`hyprctl layers` still listed it at `a: 1` **(OBSERVED)**.
+
+**So the mitigation is only as good as the thing that replaces a dead lock
+client.** `above_lock` buys nothing in the stranded state — precisely as §2.4
+warned from `Renderer.cpp:1684-1698`. This is now observed, and it is the
+strongest argument in this document for treating the `recoverStrandedLock()`
+delta as a **fix**: without a live lock surface, an `above_lock` OSK is invisible.
+
+## T0.7 🔧 Correction to §2.1 — what the stranded screen *actually* says
+
+§2.1 predicts "a `lockdead.png` splash with 'Running on tty 2' and no password
+field", and §2.5 step 5 says the escape is "hold power ~10 s". The first half is
+right. The rest is materially incomplete. What Hyprland `0.56.0` actually
+renders **(OBSERVED, captured twice)**:
+
+- `Running on tty unknown` top-left — *nested artefact; on the Deck's real DRM
+  session this is the tty number, as §2.1 says.*
+- the `lockdead.png` artwork, and
+- **a block of instructional text §2.1 does not mention at all**, including
+  verbatim:
+  - *"Oopsie daisy, it looks like you locked your screen but the lockscreen app died :("*
+  - `hyprctl --instance 0 eval 'hl.clear_crashed_lockscreen()'`
+  - `killall -9 hyprlock`, then the eval again
+  - how to get back with `ctrl+alt+F[N]`
+
+**§2.1's "There is no password field in that state" is CORRECT and unchanged.**
+
+🔧 **But "the *only* recorded escapes are a VT switch, SSH, or a power cycle" is
+now wrong, and usefully so.** There is a fourth, and it works:
+
+```
+hyprctl eval 'hl.clear_crashed_lockscreen()'
+```
+
+Run against the stranded instance, this cleared the lock outright:
+`solitaryBlockedBy` went `['LOCK','WINDOWED','CANDIDATE']` → `['WINDOWED','CANDIDATE']`,
+the sensor flipped to exit 1, and the desktop rendered again **(OBSERVED)**. **No
+reboot, no VT switch, no power cycle.**
+
+For a Deck that has no keyboard, the VT-switch route was always unreachable
+(§2.1: "our mapper emits no modifiers at all"). This one is a single command
+over SSH. **It belongs in `docs/RECOVERY.md`** as the first thing to try on a
+stranded lock, ahead of the 10-second power hold. ⚠️ Untested on the Deck itself
+and it is a **Hyprland** name on Hyprland's schedule, same class of coupling as
+`above_lock`.
+
+## T0.8 §5's residual-risk mitigation survives — and is better than §5 claims
+
+§5 hangs G's safety on *"assert the rule took, don't assume it"*, with
+`hyprctl configerrors` as the loud check, against the risk that Hyprland renames
+the effect. That was tested directly by shipping a config with the effect
+renamed to `above_lock_RENAMED` **(OBSERVED)**:
+
+- `luac -p` **passes** — the file is valid Lua, so the existing
+  `deck-session.sh` gate would not catch this. As expected, and worth stating.
+- `hyprctl configerrors` returns, with file, line **and** the offending field:
+  `lockprobe-typo.lua:16: hl.layer_rule: unknown field 'above_lock_RENAMED'`
+- Hyprland **also draws a red on-screen error banner** carrying the same text.
+- **The rest of the config still applied** (`misc:allow_session_lock_restore`
+  etc. all still `true`).
+
+That last point matters and is a genuine distinction this repo already half-knows
+(`src/deck-session.sh`'s greeter-config comment, ~`:1673`):
+
+> **A Lua *syntax* error silently discards the whole file. An *unknown field* does
+> not — it is reported loudly by name and the rest of the config still loads.**
+
+Two different failure modes needing two different gates: `luac -p` for the first
+(already in place), `hyprctl configerrors` for the second. **§5's proposed check
+is the right one and it is precise.** A unit test asserting the exact rule string
+is in the file we write, plus a `configerrors` assertion after applying it,
+closes G's residual risk.
+
+## T0.9 One correction to the recommended rule string — it is safe as written
+
+`match` takes a **regex** (upstream's own example uses `namespace = "^my-overlay$"`),
+while §5.1 recommends the unanchored `namespace = "deck-osk"`. That raised an
+obvious question: would it also match some *other* surface whose namespace merely
+contains `deck-osk`?
+
+Tested with a control surface named `zz-deck-osk-zz` against the unanchored rule
+**(OBSERVED)**: while locked it drew **0** key-face pixels; unlocked, the same
+surface drew 73 869. So the surface was healthy and **the rule did not match it**.
+Hyprland matches the namespace as a **whole string**, not a substring.
+
+**§5.1's rule string is correct as written and needs no change.** Anchoring it to
+`"^deck-osk$"` would be equivalent and marginally more self-documenting; it is a
+style choice, not a fix.
+
+## T0.10 Where this leaves §5, and what is still unverified
+
+**The §5 recommendation stands, unchanged, with one strengthened claim and one
+sharpened caveat.**
+
+- **G (`above_lock = 2`) is no longer a source-read.** It is observed to render
+  the OSK over a live lock *and* observed not to steal the keystrokes. Its
+  rot-detection story is observed to be loud and precise (T0.8). Its exact rule
+  string is observed to be correct (T0.9).
+- **G's dependence on the delta is now observed, not inferred** (T0.6): an
+  `above_lock` OSK is invisible in the stranded state, so §0.3's "the delta is an
+  improvement, not a regression" is on much firmer ground than when it was
+  written.
+- **F (mask `omarchy-sleep-lock.service`) is untouched by this tier.** Tier 0
+  tests Hyprland's half; F is a systemd/Omarchy question and still needs §4.3.
+
+Still **UNVERIFIED** after this tier — §6's list, re-scored:
+
+| §6 item | Status after Tier 0 |
+|---|---|
+| 1. Has this Deck ever locked? | **unchanged** — needs §4.3, one journal grep |
+| 2. Does `/etc/pam.d/omarchy-lock-password` exist? | **unchanged** — needs §4.3 |
+| 3. Does a **uinput** keystroke reach a lock surface? | **narrowed** — the compositor half is now OBSERVED (T0.5); the mapper→uinput→libinput half is still untested and cannot be tested in this harness |
+| 4. Does `above_lock = 2` draw over the lock? | ✅ **ANSWERED — YES, OBSERVED** (T0.4) |
+| 5. Does `above_lock` parse in a 4.0 Lua config? | ✅ **ANSWERED — yes**, accepted with no config error; and a renamed key is reported loudly (T0.8) |
+| 6. Version gap 0.56.0 vs 0.56.2 | ✅ **CLOSED for the lock paths** (T0.2) |
+| 7. Is `omarchy-sleep-lock.service` enabled on the Deck? | **unchanged** — needs §4.3 |
+
+⚠️ Two honest limits on everything above. **(a)** This is Hyprland `0.56.0` on a
+**Wayland** backend, not `0.56.2` on the Deck's DRM backend — T0.2 closes the
+version half by source diff, but "DRM backend behaves like the Wayland backend
+here" is **INFERRED** (the `above_lock` guard sits in `renderLayer()`, above any
+backend concern). **(b)** `hyprlock` is not Quickshell. Steps 3–6 were always
+about Hyprland's half; whether *Omarchy's* `Service.qml` calls `beginLock()` on
+our config is still §4.2/tier 1, and this tier deliberately did not touch it.
+
+## T0.11 Reproduce
+
+```bash
+# 1. Capture the outer session FIRST and refuse to proceed if anything matches it.
+echo "$WAYLAND_DISPLAY" "$HYPRLAND_INSTANCE_SIGNATURE"
+
+# 2. Nested compositor that CANNOT take the panel or the input devices (T0.1).
+env -u HYPRLAND_INSTANCE_SIGNATURE \
+    LIBSEAT_BACKEND=deliberately-invalid-no-seat-for-nested-probe \
+    AQ_DRM_DEVICES=/nonexistent/probe \
+    Hyprland -c ./lockprobe.lua &
+#    then ASSERT in its log: "libseat: failed to open a seat" + "DRM Backend failed"
+#    + "Starting the Wayland backend!", and abort if "drm: Registered gpu" appears.
+
+# 3. Everything below runs with WAYLAND_DISPLAY / HYPRLAND_INSTANCE_SIGNATURE
+#    pointed at the NESTED instance, re-checked against the outer pair every time.
+python3 src/deck_osk_wayland.py --demo --no-exclusive &
+hyprlock -c ./hyprlock-probe.conf &
+
+# 4. Evidence is PIXELS, not `hyprctl layers` -- the layer list is identical
+#    in the working and non-working cases (T0.4).
+grim shot.png && python3 -c "from PIL import Image; im=Image.open('shot.png').convert('RGB').crop((0,406,852,700)); print(sum(n for n,c in im.getcolors(300000) if c!=(0,0,0)))"
+
+# 5. Stranded state, and the escape that actually works (T0.7).
+kill -9 "$(pgrep hyprlock)"
+hyprctl eval 'hl.clear_crashed_lockscreen()'
+```
+
+Captures kept for this run: unlocked baseline, locked-without-rule,
+locked-with-rule (both surfaces), locked-with-rule after typing, stranded
+(twice), cleared, and the config-error banner.
