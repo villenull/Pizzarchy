@@ -8,6 +8,11 @@ Omarchy. That is reversible — Valve publishes an official recovery image that
 restores the device to factory SteamOS — but you should know how before you
 start, not after something goes wrong.
 
+> 🔑 **Stuck on a lock screen with nothing to type into?** You almost certainly
+> do **not** need this page. Skip to
+> [Locked out of the screen](#locked-out-of-the-screen-with-nothing-to-type-into)
+> — it is one command, and nothing is lost.
+
 > ⚠️ **Status: drafted from Valve's published instructions, NOT yet exercised by
 > this project.** `docs/ROADMAP.md` P3.1 performs a real factory reset and will
 > replace this with a first-hand account. Until then, treat Valve's own page as
@@ -69,6 +74,54 @@ SteamOS update on first connection.
   genuine floor rather than a hope.
 - **BIOS/firmware is untouched** by this project, so recovery does not need to
   repair it.
+
+## Locked out of the screen, with nothing to type into
+
+**This is not a reason to reinstall anything.** A locked Deck looks
+catastrophic and usually is not.
+
+**What you see:** artwork, the words *"Running on tty 2"* (or another number),
+possibly a message beginning *"Oopsie daisy, it looks like you locked your
+screen but the lockscreen app died"* — and **no password field at all**. There
+is nothing to type into, so a keyboard would not help even if you had one.
+
+**Why it happens:** Omarchy locks the session when the device sleeps, so
+**pressing the power button can lock it**. If the program that draws the lock
+screen is not running or has died, the compositor keeps the lock but nothing
+renders a way out of it.
+
+**The escape, if you can reach the Deck over SSH:**
+
+```bash
+hyprctl eval 'hl.clear_crashed_lockscreen()'
+```
+
+That clears the lock outright — the desktop comes straight back, with no
+reboot and nothing lost. If it does not take, kill the lock program first and
+run it again:
+
+```bash
+killall -9 hyprlock && hyprctl eval 'hl.clear_crashed_lockscreen()'
+```
+
+**If you cannot reach it over SSH**, hold Power for about ten seconds to force
+a shutdown, then power on normally. You lose whatever was unsaved, and nothing
+else — this does not damage the install and is not a reason to reimage.
+
+> **Provenance, stated plainly.** ⚠️ **Measured in a nested Hyprland 0.56.0 on
+> a development machine, and NOT yet on a Steam Deck.** In that test the lock
+> cleared, the desktop returned, and the compositor's own lock state went from
+> blocked to clear. Hyprland prints this same command on the stranded screen
+> itself, which is where it was found.
+>
+> Two honest caveats: `hl.clear_crashed_lockscreen()` is **Hyprland's name on
+> Hyprland's schedule** and can be renamed upstream; and **SSH has to be
+> reachable**, which on a stock install of this project it may not be. The
+> ten-second power hold is the floor that needs nothing.
+>
+> *(Being fixed at the source: the lock-on-sleep behaviour is scheduled to be
+> turned off, and the on-screen keyboard taught to draw above a lock screen, so
+> this state stops being reachable — `docs/PROGRESS.md` §5.24.)*
 
 ## If you are mid-install and it went wrong
 
