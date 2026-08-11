@@ -9,7 +9,9 @@
 #   IMG_ESP_MB         default 1024
 #   IMG_NEPTUNE_SERIES default 611  (pre-installed into the image)
 #   IMG_DOCKER_IMAGE   default archlinux/archlinux:latest
-#   IMG_OMARCHY_SERVER default https://pkgs.omarchy.org/stable/$arch
+#   IMG_OMARCHY_SERVER default https://pkgs.omarchy.org/edge/$arch
+#   IMG_LIMINE_PIN     default 'limine=12.5.2-1 limine-mkinitcpio-hook=1.37.1-1
+#                      limine-snapper-sync=1.31.0-1'; 'any' skips the check
 #
 # WHY THIS EXISTS
 #
@@ -29,8 +31,11 @@
 # It is deliberately NOT a claim to be an Omarchy Quattro system. The
 # properties it does reproduce, because they are the ones the boot chain
 # depends on, are:
-#   1. limine + limine-mkinitcpio-hook (same version stream as Quattro's,
-#      from Omarchy's own package repo).
+#   1. limine + limine-mkinitcpio-hook from Omarchy's own package repo, on the
+#      channel the product's ISO carries (`edge`), at versions ASSERTED against
+#      a pin after install -- see LIMINE_PIN below. This line used to claim
+#      "same version stream as Quattro's" while pulling from `stable`, which
+#      was 606 commits behind, and nothing checked it.
 #   2. /etc/default/limine with ENABLE_UKI=yes and CUSTOM_UKI_NAME="omarchy",
 #      which is what makes the UKIs `omarchy_<pkgbase>.efi` rather than
 #      `<machine-id>_<pkgbase>.efi`.
@@ -85,7 +90,33 @@ ESP_MB=${IMG_ESP_MB:-1024}
 SERIES=${IMG_NEPTUNE_SERIES:-611}
 DOCKER_IMAGE=${IMG_DOCKER_IMAGE:-archlinux/archlinux:latest}
 # shellcheck disable=SC2016 # $arch is pacman's variable and must stay unexpanded
-OMARCHY_SERVER=${IMG_OMARCHY_SERVER:-'https://pkgs.omarchy.org/stable/$arch'}
+OMARCHY_SERVER=${IMG_OMARCHY_SERVER:-'https://pkgs.omarchy.org/edge/$arch'}
+
+# ⚠️ THE BOOT-CHAIN PIN. Read this before changing either line above.
+#
+# This substrate exists to reproduce the boot chain the product runs. Until
+# 2026-08-11 it pulled the limine stack from the `stable` channel while the
+# header below claimed "same version stream as Quattro's" -- and nothing
+# enforced the claim. Measured that day: `stable` was 606 commits behind
+# `quattro`, and the product's own ISO carries channel `edge`
+# (docs/findings/T9-iso-comparison.md). So every VM suite could pass green
+# against a Limine stack the product would never run -- green for the wrong
+# reason, which this project has hit three times in its own checks.
+#
+# Two changes fix that. The server above now defaults to `edge`, matching the
+# ISO. And the versions below are ASSERTED after pacstrap, so a drift is a loud
+# failure rather than a silent one.
+#
+# These are not "install exactly this" -- a rolling repo may no longer carry an
+# older build, and pretending otherwise would just fail differently. They are
+# "this is what the product was measured to run; tell me when what I got stops
+# matching." Values measured inside the beta 2 ISO, 2026-08-11.
+#
+#   IMG_LIMINE_PIN='pkg=ver ...'  re-pin deliberately, after checking the
+#                                 product actually moved too
+#   IMG_LIMINE_PIN=any            skip the check entirely -- for a deliberate
+#                                 "what does upstream have now?" run, never CI
+LIMINE_PIN=${IMG_LIMINE_PIN:-'limine=12.5.2-1 limine-mkinitcpio-hook=1.37.1-1 limine-snapper-sync=1.31.0-1'}
 
 log() { printf '[vm-neptune-image] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -113,6 +144,7 @@ SERIES=$3
 OMARCHY_SERVER=$4
 HOST_UID=$5
 HOST_GID=$6
+LIMINE_PIN=$7
 
 IMG=/out/disk.raw
 KERNEL_PKG="linux-neptune-${SERIES}"
@@ -188,6 +220,53 @@ pacstrap -c /mnt \
   btrfs-progs snapper limine-snapper-sync \
   sudo which findutils psmisc dosfstools e2fsprogs less vim ||
   die "pacstrap failed"
+
+# --- the boot-chain pin, asserted -------------------------------------------
+#
+# The whole point of this substrate is that its limine stack matches the
+# product's. Nothing enforced that until 2026-08-11; see the note beside
+# LIMINE_PIN in the outer script. Assert it here, where the packages have just
+# landed, rather than discovering a mismatch as a mysterious VM-suite result.
+if [[ $LIMINE_PIN == any ]]; then
+  printf '[build] ⚠️  IMG_LIMINE_PIN=any -- boot-chain versions NOT checked\n' >&2
+  arch-chroot /mnt pacman -Q limine limine-mkinitcpio-hook limine-snapper-sync >&2 ||
+    die "could not query the limine stack"
+else
+  step "verify the boot-chain pin"
+  pin_drift=""
+  for spec in $LIMINE_PIN; do
+    pin_pkg=${spec%%=*}
+    pin_want=${spec#*=}
+    [[ $pin_pkg != "$spec" && -n $pin_want ]] ||
+      die "IMG_LIMINE_PIN entry '${spec}' is not pkg=version"
+    # `pacman -Q` prints "<name> <version>" and exits non-zero when the package
+    # is not installed -- which, right after pacstrap in a root we just built,
+    # means the pacstrap set and the pin disagree. Keep that case separate from
+    # a parse failure so the message points at the real cause; piping straight
+    # into awk would swallow the distinction under `pipefail` and report every
+    # absent package as a broken query.
+    if ! pin_line=$(arch-chroot /mnt pacman -Q "$pin_pkg" 2>/dev/null); then
+      die "${pin_pkg} is not installed in the new root, but the pin names it. Either the pacstrap set above no longer installs it, or the pin is stale."
+    fi
+    pin_got=$(awk '{print $2}' <<<"$pin_line")
+    [[ -n $pin_got ]] ||
+      die "could not parse a version out of 'pacman -Q ${pin_pkg}' -- got '${pin_line}'"
+    [[ $pin_got == "$pin_want" ]] ||
+      pin_drift+="  ${pin_pkg}: pinned ${pin_want}, got ${pin_got}"$'\n'
+  done
+  if [[ -n $pin_drift ]]; then
+    printf '[build] FAIL: the boot-chain stack drifted from the pin:\n%s' "$pin_drift" >&2
+    die "the substrate would test a boot chain the product does not run. Check whether the PRODUCT moved too (the ISO's own versions, docs/findings/T9-iso-comparison.md); if it did, re-pin with IMG_LIMINE_PIN and say so in PROGRESS.md. IMG_LIMINE_PIN=any bypasses this, deliberately and never in CI."
+  fi
+  printf '[build] boot-chain pin OK: %s\n' "$LIMINE_PIN" >&2
+fi
+# --- end boot-chain pin ---
+#
+# ⚠️ That marker and the one above are load-bearing: test/unit/test-vm-limine-pin.sh
+# extracts everything between them and RUNS it against a stubbed `arch-chroot`,
+# because this block lives inside a heredoc shipped into a container and cannot
+# be sourced. Renaming either marker makes the extraction return nothing --
+# which the suite treats as a failure, not as "no tests to run".
 
 # A stable machine-id: normally generated on first boot, but
 # limine-snapper-sync namespaces its ESP history directory by machine-id at
@@ -428,7 +507,7 @@ docker run --rm \
   -v "$WORK:/out" \
   "$DOCKER_IMAGE" \
   /out/build-in-container.sh \
-  "$SIZE_GB" "$ESP_MB" "$SERIES" "$OMARCHY_SERVER" "$(id -u)" "$(id -g)" ||
+  "$SIZE_GB" "$ESP_MB" "$SERIES" "$OMARCHY_SERVER" "$(id -u)" "$(id -g)" "$LIMINE_PIN" ||
   fail "the in-container build failed (work dir preserved: $WORK)"
 
 [[ -f "$WORK/disk.raw" ]] || fail "the container reported success but produced no disk.raw (work dir: $WORK)"

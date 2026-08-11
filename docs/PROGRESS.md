@@ -115,8 +115,8 @@ grep patterns, an intentional `A && B || C`) and now carry narrow
 mapfile -t files < <(git ls-files '*.sh'); shellcheck -x "${files[@]}"
 ```
 
-Now: **11 suites and that command exit 0** — six shell (`test-deck-session.sh` 70,
-`test-osk-install-layout.sh` 19, four VM-helper suites) and five Python
+Now: **12 suites and that command exit 0** — seven shell (`test-deck-session.sh` 70,
+`test-osk-install-layout.sh` 19, `test-vm-limine-pin.sh` 12, four VM-helper suites) and five Python
 (`test-deck-input-mapper.py` 106, `test-deck-osk-layout.py` 134,
 `test-deck-osk-tty.py` 54, `test-deck-osk-wayland.py` 47,
 `test-deck-osk-focus.py` 37). ⚠️ The Python ones are not in the `test-*.sh` glob;
@@ -1783,6 +1783,42 @@ has no row in the table at all. The greeter's `default/sddm/hyprland.lua`
 `steamos|gamescope|steam` and `squeekboard|osk`: **zero hits.** Both OSK
 GSettings: clear — though still verify with `dconf read -d`, since a package
 outside this range can ship a new default.
+
+### ✅ Fixed the same day: the substrate tested a boot chain the product never runs
+
+`test/images/vm-neptune-image.sh` pulled the limine stack from
+**`pkgs.omarchy.org/stable`, unpinned**, while its own header claimed *"same
+version stream as Quattro's"*. `stable` was measured **606 commits behind**, and
+the product's ISO carries **`edge`** — so every VM suite could pass green
+against a Limine stack the product would never boot. Nothing enforced the claim.
+
+**Two changes, 2026-08-11.** The channel now defaults to `edge`, matching the
+ISO. And the versions measured *inside beta 2* — `limine 12.5.2-1`,
+`limine-mkinitcpio-hook 1.37.1-1`, `limine-snapper-sync 1.31.0-1` — are
+**asserted after pacstrap**, so drift is a loud failure naming both sides and
+saying how to re-pin. `IMG_LIMINE_PIN=any` bypasses it deliberately (and prints
+what it found); `IMG_LIMINE_PIN='pkg=ver …'` re-pins.
+
+⚠️ It is an assertion, **not** an attempt to install exact versions — a rolling
+repo may no longer carry an older build, and pretending otherwise would just
+fail differently. It says *"this is what the product was measured to run; tell
+me when what I got stops matching."*
+
+**New suite: `test/unit/test-vm-limine-pin.sh`, 12 assertions, 9/9 mutations
+caught.** The check lives inside a heredoc shipped into Docker and cannot be
+sourced, so the suite **extracts the block between two marker comments and runs
+it** against a stubbed `arch-chroot` — and refuses to run if that extraction
+comes back empty, because a renamed marker would otherwise make every case pass
+while asserting nothing. ⚠️ Renaming either marker breaks the suite loudly, by
+design.
+
+**Writing the test found a defect in the fix**: an absent pinned package died
+with *"could not query"* — a pipeline under `pipefail` swallowing the
+distinction — which reads like a broken chroot rather than a stale pin. The code
+was corrected, not the test. *(One mutation initially "survived" and was a
+testing artifact, not a gap: it edited the header comment rather than the
+assignment. Re-targeted, it was caught. **Check what a mutation actually
+changed before recording a survivor.**)*
 
 ⚠️ **One row lands on phase 3, not here:** `omarchy-system-factory-reset` **deleted
 its degraded path — a machine without a `@factory` snapshot is now refused.**
