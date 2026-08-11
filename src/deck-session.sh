@@ -247,6 +247,60 @@ readonly MAPPER_UNIT=/etc/systemd/user/deck-input-mapper.service
 # which this project forbids. Omarchy 4.0 drives Hyprland through uwsm, whose
 # real target is this one.
 readonly MAPPER_WANTED_BY=wayland-session@hyprland.desktop.target
+
+# --- Lizard mode: the controller firmware's own input emulation -----------
+#
+# PROGRESS.md 5.21 is the defect, 5.9 / R-29 the measurements, and operator
+# decision 2 in 5.25 the approval -- which grants persisting `N` only WITH the
+# fallback, and calls the fallback the non-negotiable half.
+#
+# /sys/module/hid_steam/parameters/lizard_mode is a MODULE PARAMETER: it is Y
+# at every boot and a reboot resets it. What each value costs was measured on
+# hardware, not reasoned:
+#
+#   Y  the firmware emits its own pointer, Enter, Esc, Tab and arrows -- and
+#      SWALLOWS X, Y, L1, R1, STEAM and QAM entirely. Those six reach no evdev
+#      node at all, so deck-input-mapper.py is a complete no-op, STEAM+X cannot
+#      be detected, and there is no Space for archinstall's multi-select. The
+#      device is degraded, and always usable.
+#   N  those six appear on the pad node and the firmware's pointer disappears,
+#      which makes the mapper the ONLY input path on the device.
+#
+# THE INVARIANT THIS INSTALLS: lizard mode is off IF AND ONLY IF the mapper is
+# running. No persistence file, no modprobe.d option, no boot-time flag -- the
+# knob's lifetime is bound to the service's, by that service's own
+# ExecStartPost=/ExecStopPost=. Boot leaves Y, so a mapper that never starts
+# leaves a usable device, and ExecStopPost= hands input back to the firmware
+# when it dies. The worst case is losing STEAM+X, not losing input.
+#
+# ⚠️ WITH ONE MEASURED EXCEPTION -- see render_lizard_dropin. A SIGKILL of the
+# whole cgroup takes ExecStopPost= with it, and lizard mode stays off until the
+# next boot. Measured on systemd 261, not inferred.
+#
+# EXPLICITLY REJECTED: a modprobe.d drop-in setting the parameter at module
+# load. It applies before any userspace check can run, so a boot where the
+# mapper cannot start would present a handheld with no pointer and no keys --
+# the exact failure the fallback exists to prevent, made unconditional.
+#
+# (The rejected directive is deliberately not quoted verbatim anywhere in this
+# repo: test/unit/test-deck-session.sh greps src/ for it with no carve-out for
+# comments, and a carve-out is how that check would come to pass for the wrong
+# reason.)
+readonly LIZARD_SYSFS=/sys/module/hid_steam/parameters/lizard_mode
+readonly LIZARD_HELPER=/usr/local/sbin/deck-lizard-mode
+readonly LIZARD_SUDOERS=/etc/sudoers.d/99-deck-lizard-mode
+
+# Derived from MAPPER_UNIT, not spelled out: a drop-in is only a drop-in if it
+# sits in `<unit path>.d`, and a file in the wrong directory is inert -- valid,
+# installed, and doing nothing. The two must not be able to drift.
+readonly LIZARD_DROPIN="${MAPPER_UNIT}.d/50-deck-lizard-mode.conf"
+
+# The absolute sudo, for the drop-in's Exec lines. systemd runs Exec= without a
+# shell and wants an absolute path for the first token. NOT the same thing as
+# this script's own ${SUDO}, which is "sudo" or the empty string depending on
+# whether we are already root.
+readonly SUDO_BIN=/usr/bin/sudo
+
 readonly STATE_FILE=/var/lib/deck-session/next-session
 
 # Steam resolves its privileged helpers by ABSOLUTE path, not through PATH --
@@ -387,6 +441,11 @@ readonly -a INSTALL_STAGES=(
   stage-sddm-resilience
   stage-return-icon
   stage-input-mapper
+  # Immediately after the mapper, and the adjacency is the point: this stage
+  # turns lizard mode off only for as long as deck-input-mapper.service runs,
+  # so it installs a drop-in for a unit that must already exist. Ordering it
+  # before the mapper would install a fallback for nothing.
+  stage-lizard-mode
   stage-desktop-settings
 )
 
@@ -2004,6 +2063,453 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# LIZARD MODE -- PROGRESS.md 5.21, and the one stage that can cost the operator
+# their only input device. Read the LIZARD_* constants above before editing.
+# ---------------------------------------------------------------------------
+
+# The lizard-mode helper's body, written to stdout. Split out for the same
+# reason render_update_stub is -- see the note above that function.
+#
+# The sysfs node is a PARAMETER, baked in at render time, for the reason set out
+# in "THE VERIFICATION SEAM" above verify_update_stub: production passes nothing
+# and gets ${LIZARD_SYSFS}. It is emphatically NOT taken from the helper's own
+# argv, because the sudoers grant covers this file and a caller-supplied path
+# would turn that grant into "write Y or N to any file, as root".
+render_lizard_helper() {
+  local node=${1:-$LIZARD_SYSFS}
+  cat <<EOF
+#!/usr/bin/env bash
+#
+# deck-lizard-mode -- turn the Steam Deck controller firmware's own input
+# emulation ("lizard mode") on or off.
+${INSTALL_MARKER}
+#
+# THE ARGUMENT NAMES LIZARD MODE, NOT THE MAPPER. Reading it the other way round
+# is the whole hazard, so it is spelled out here and in every message below:
+#
+#   on   -> ${node}=Y
+#           The FIRMWARE provides input: pointer, Enter, Esc, Tab, arrows. It
+#           also swallows X, Y, L1, R1, STEAM and QAM entirely, so
+#           deck-input-mapper is a no-op. This is the SAFE value -- degraded,
+#           but a device a human can always drive.
+#   off  -> ${node}=N
+#           Those six buttons reach the pad node and the firmware's own pointer
+#           disappears. The mapper becomes the ONLY input path on the device.
+#
+# ONLY deck-input-mapper.service should call this. Its ExecStartPost= says
+# \`off\` and its ExecStopPost= says \`on\`; that pair is what binds lizard mode's
+# lifetime to the mapper's. Run by hand, \`off\` will happily leave a handheld
+# with no input at all, and \`${LIZARD_HELPER} on\` is the way back -- over SSH,
+# because by then nothing else works.
+#
+# WHY THERE IS NO EUID CHECK IN HERE: the node is root-writable and world-
+# readable, so an unprivileged caller already gets a loud EACCES from the write
+# below. Duplicating the check would add nothing except a second place for the
+# two to disagree, and it would stop the unit suite from running this exact
+# file against a sandboxed node with no root at all.
+#
+set -euo pipefail
+
+NODE=${node}
+
+note() {
+  printf 'deck-lizard-mode: %s\n' "\$1" >&2
+  command -v logger >/dev/null 2>&1 && logger -t deck-lizard-mode -- "\$1"
+  return 0
+}
+
+# STRICT argv: exactly one argument, exactly 'on' or 'off'. An unrecognised verb
+# is refused rather than guessed at, because both guesses are wrong in a way
+# that ends with a device nobody can drive -- guess 'on' and the mapper is
+# silently a no-op, guess 'off' and a machine with no mapper has no input.
+# Extra arguments are refused too: this file sits behind a sudo grant, and
+# "arguments we ignored" is not a property worth having there.
+if [[ \$# -ne 1 ]]; then
+  note "expected exactly one argument, 'on' or 'off'; got \$# (\${*:-<none>})"
+  exit 2
+fi
+
+case \$1 in
+  on)  want=Y ;;
+  off) want=N ;;
+  *)
+    note "unknown argument '\$1' -- expected 'on' (the firmware provides input) or 'off' (deck-input-mapper does)"
+    exit 2
+    ;;
+esac
+
+if [[ ! -e \$NODE ]]; then
+  note "\${NODE} does not exist. hid_steam is not loaded, or this kernel's build has no lizard_mode parameter. NOT reporting success: something has to notice."
+  exit 3
+fi
+
+if ! printf '%s\n' "\$want" >"\$NODE"; then
+  note "could not write '\${want}' to \${NODE}. This has to run as root; deck-input-mapper.service reaches it through sudo (see ${LIZARD_SUDOERS})."
+  exit 4
+fi
+
+# READ BACK, and fail if the value did not take. A successful write is not proof
+# for a module parameter: the write lands in the kernel's setter, and a value it
+# declined leaves the node reading what it read before, with exit 0 here. That
+# is the silent-success shape this project exists to attack, and it is the one
+# failure that would make everything downstream believe input had moved when it
+# had not.
+if ! got=\$(cat "\$NODE"); then
+  note "wrote '\${want}' to \${NODE} but could not read it back to confirm it"
+  exit 5
+fi
+
+if [[ \$got != "\$want" ]]; then
+  note "wrote '\${want}' to \${NODE} but it reads back '\${got}' -- lizard mode is NOT '\$1'. Treat input as being wherever '\${got}' says it is."
+  exit 5
+fi
+
+printf 'deck-lizard-mode: lizard mode is now %s (%s=%s)\n' "\$1" "\$NODE" "\$got"
+EOF
+}
+
+# The systemd drop-in that makes the invariant true. Written to stdout, split
+# out for the same reason render_update_stub is.
+#
+# ===========================================================================
+# DOES ExecStopPost= REALLY RUN ON EVERY FAILURE PATH? -- MEASURED, systemd 261
+# ===========================================================================
+#
+# The whole safety argument rests on this, so it was probed with a real user
+# unit rather than read off systemd.service(5). Every row is "did the
+# ExecStopPost= actually run":
+#
+#   systemctl stop                                  ran
+#   main process exits non-zero                     ran
+#   main process SIGKILLed (kill -9 $MAINPID)       ran
+#   ExecStart= binary missing (status 203)          ran
+#   ExecStartPost= fails                            ran
+#   Restart= start limit exhausted                  ran, once per REAL start
+#                                                   attempt. The refused start
+#                                                   starts nothing, so there is
+#                                                   nothing left to hand back
+#   ----------------------------------------------------------------------
+#   WHOLE CGROUP SIGKILLed                          STARTED, THEN KILLED
+#
+# 🔴 THE LAST ROW IS A REAL HOLE and it is the one case this design does not
+# cover. systemd spawns ExecStopPost= INTO the unit's own cgroup, so a
+# cgroup-wide SIGKILL kills it too. From the journal of the probe:
+#
+#   lzprobe.service: Killed unit cgroup '...' with SIGKILL on client request
+#   lzprobe.service: Main process exited, code=killed, status=9/KILL
+#   lzprobe.service: Control process exited, code=killed, status=9/KILL  <- us
+#   lzprobe.service: Failed with result 'signal'
+#
+# Reachable three ways: `systemctl kill` (whose DEFAULT --kill-whom is NOT
+# main), `--kill-whom=all|cgroup`, and systemd-oomd, which kills by writing
+# cgroup.kill. In that case lizard mode stays off with no mapper running -- a
+# Deck with no pointer and no keys until the next boot, where the module
+# parameter resets to Y. A ~10s power-button hold is the recovery that needs no
+# keyboard, which is why this is a bad day and not a brick.
+#
+# NOT mitigated here, deliberately. The fix is an `OnFailure=` unit, which runs
+# in its OWN cgroup and therefore survives; that is a fourth installed file and
+# a change to the design rather than an implementation detail, so it is
+# reported rather than smuggled in. systemd-oomd is disabled and inactive on
+# Omarchy today, which is what makes recording this acceptable for now.
+render_lizard_dropin() {
+  cat <<EOF
+${INSTALL_MARKER}
+#
+# Binds lizard mode's lifetime to deck-input-mapper.service's, which is the
+# whole safety argument for turning it off at all (PROGRESS.md 5.21, operator
+# decision 2 in 5.25):
+#
+#   * Boot leaves the module parameter at Y, so a mapper that never starts
+#     leaves a device the firmware still drives.
+#   * ExecStopPost= runs on a clean stop, when the service exits unexpectedly,
+#     and when the service FAILED TO START and is being shut down again --
+#     systemd.service(5), and measured rather than taken on trust: see the
+#     table above render_lizard_dropin in ${PROG}.sh.
+#   * Worst case is losing STEAM+X until the next start. Not losing input.
+#
+# 🔴 ONE MEASURED EXCEPTION: a SIGKILL of the WHOLE CGROUP (\`systemctl kill\`
+# with its default --kill-whom, or systemd-oomd) kills this ExecStopPost= too,
+# because systemd spawns it into the unit's own cgroup. Lizard mode then stays
+# off until the next boot. The table above render_lizard_dropin has the journal
+# extract and the reason it is recorded rather than fixed.
+#
+# NEITHER LINE IS PREFIXED WITH '-', deliberately. If lizard mode cannot be
+# turned off then the mapper is a no-op anyway, and a loud failure that leaves
+# the firmware in charge is the correct outcome -- '-' would make it a silent
+# one, and this unit would then run as a process that reads a permanently
+# silent device.
+#
+# ⚠️ ExecStartPost= for Type=simple runs as soon as the mapper is FORKED, not
+# once it is reading. There is a short window -- one process start -- where
+# lizard mode is off and the mapper has not opened the pad yet. It is bounded
+# by ExecStopPost=: if the mapper dies in that window the service fails and
+# lizard mode goes straight back on. Closing it properly needs Type=notify and
+# an sd_notify() in deck-input-mapper.py.
+[Service]
+ExecStartPost=${SUDO_BIN} -n ${LIZARD_HELPER} off
+ExecStopPost=${SUDO_BIN} -n ${LIZARD_HELPER} on
+EOF
+}
+
+# Run the helper one way and prove the node moved. Not folded into
+# verify_lizard_helper because both directions need identical treatment, and a
+# copy-pasted second half is how the two drift.
+lizard_expect() {   # lizard_expect <helper> <node> <on|off> <Y|N>
+  local helper=$1 node=$2 verb=$3 want=$4 got
+  $SUDO "$helper" "$verb" ||
+    fail "'${helper} ${verb}' failed. Lizard mode cannot be controlled on this machine, so the mapper would either be a no-op (if it stayed on) or the only input path with no way back (if it stayed off). Neither is shippable."
+  got=$(cat "$node") ||
+    fail "could not read ${node} after '${helper} ${verb}'"
+  [[ $got == "$want" ]] ||
+    fail "'${helper} ${verb}' reported success but ${node} reads '${got}', expected '${want}'. The helper is not verifying its own write."
+  log "verified: '${helper} ${verb}' left ${node} at ${want}"
+}
+
+# Put the node back the way this stage found it, THROUGH THE HELPER, so the
+# restore is itself verified rather than assumed.
+#
+# Warns and returns non-zero rather than calling `fail`: its main caller is an
+# EXIT trap, where the process is already on its way out with a status that
+# means something, and a second exit would hide the first failure.
+lizard_restore() {   # lizard_restore <helper> <node> <Y|N>
+  local helper=$1 node=$2 want=$3 verb got
+  case $want in
+    Y) verb=on ;;
+    N) verb=off ;;
+    *) warn "cannot restore lizard mode to '${want}': not a value the node takes"; return 1 ;;
+  esac
+  if ! $SUDO "$helper" "$verb"; then
+    warn "COULD NOT RESTORE lizard mode to '${want}'. If it is currently N and deck-input-mapper is not running, this device has NO pointer and NO keys -- run 'sudo ${LIZARD_HELPER} on' over SSH."
+    return 1
+  fi
+  if ! got=$(cat "$node"); then
+    warn "ran '${helper} ${verb}' to restore lizard mode but could not re-read ${node} to confirm it"
+    return 1
+  fi
+  if [[ $got != "$want" ]]; then
+    warn "tried to restore lizard mode to '${want}' but ${node} reads '${got}'. If that is N and deck-input-mapper is not running, run 'sudo ${LIZARD_HELPER} on' over SSH."
+    return 1
+  fi
+  log "restored lizard mode to ${want} -- the value this stage found"
+  return 0
+}
+
+# Exercise the installed helper BOTH WAYS and leave the machine as it was found.
+# Takes the helper and the node for the reason set out in "THE VERIFICATION
+# SEAM" above verify_update_stub.
+#
+# ⚠️ THE RESTORE IS THE POINT, not politeness. A stage that returned 0 having
+# left lizard mode off, with no mapper running, would itself be the hazard the
+# whole design exists to avoid: a handheld with no input, installed by the thing
+# that was supposed to make input safe.
+verify_lizard_helper() {
+  local helper=${1:-$LIZARD_HELPER}
+  local node=${2:-$LIZARD_SYSFS}
+
+  # World-readable 0644, so this needs no privilege -- and reading it directly
+  # rather than through ${SUDO} keeps the check honest on a machine where sudo
+  # is the thing that is broken.
+  [[ -e $node ]] ||
+    fail "${node} does not exist, so lizard mode cannot be exercised. hid_steam is not loaded, or this is not a Deck. Refusing to install a fallback that has never been run."
+
+  local before
+  before=$(cat "$node") || fail "could not read ${node}"
+  case $before in
+    Y|N) ;;
+    *) fail "${node} reads '${before}', which is neither Y nor N. Something other than this project is driving that parameter; stopping rather than guessing what to put back." ;;
+  esac
+  log "lizard mode is ${before} right now; this check restores that value before it returns"
+
+  # From here to `trap - EXIT` the node may be at a value the machine did not
+  # start with, and every `fail` below is an exit. So the restore is a TRAP, not
+  # a line at the bottom: a line at the bottom is unreachable from exactly the
+  # paths that need it most.
+  #
+  # shellcheck disable=SC2064  # expanded NOW on purpose: the trap has to carry
+  # this call's own helper, node and pre-run value, not whatever those names
+  # happen to mean at exit time.
+  trap "lizard_restore $(printf '%q %q %q' "$helper" "$node" "$before") || true" EXIT
+
+  # OFF first, then ON, so the last thing this does before restoring is hand
+  # input back to the firmware. If the process is killed between the two, the
+  # device is left usable.
+  #
+  # ⚠️ The 'off' step opens a window -- one `cat` long -- where lizard mode is
+  # off and no mapper is running, i.e. the device has no input. It is
+  # unavoidable: "exercise the helper both ways" and "never leave input in an
+  # unproven state" cannot both be had without turning it off once. Keep the
+  # window this short.
+  lizard_expect "$helper" "$node" off N
+  lizard_expect "$helper" "$node" on  Y
+
+  trap - EXIT
+  lizard_restore "$helper" "$node" "$before" ||
+    fail "could not restore lizard mode to '${before}' after verifying it. Do not reboot expecting this to clear if it is N and the mapper is not running -- run 'sudo ${LIZARD_HELPER} on' now."
+
+  log "verified: the helper drives ${node} both ways, reads back, and the value it started at (${before}) is restored"
+}
+
+# Prove the sudoers grant works, without running the helper again.
+#
+# Takes the helper for the same seam reason; ${LIZARD_HELPER} is never executed
+# here, only asked about.
+verify_lizard_grant() {
+  local helper=${1:-$LIZARD_HELPER}
+  [[ $EUID -ne 0 ]] || return 0   # already root; nothing to prove
+
+  # -K first, for the reason verify_nopasswd documents: a probe that passes on a
+  # warm credential cache proves nothing about the drop-in.
+  sudo -K 2>/dev/null || true
+
+  local verb
+  for verb in off on; do
+    # `sudo -n -l <cmd> <args>` asks whether the grant covers this exact
+    # invocation WITHOUT running it. The args matter here: the grant names
+    # 'on' and 'off' explicitly, so asking about the bare path would answer a
+    # question nobody asks.
+    sudo -n -l "$helper" "$verb" >/dev/null 2>&1 ||
+      fail "installed ${LIZARD_SUDOERS} but sudo will not run '${helper} ${verb}' without a password. deck-input-mapper.service is a USER unit, so its ExecStartPost=/ExecStopPost= run as the desktop user and would hang or fail. Inspect that drop-in."
+  done
+
+  # Honesty check, same as verify_nopasswd's and for the same reason: this Deck
+  # carries /etc/sudoers.d/99-deck-testing (PROGRESS.md 5.17), under which the
+  # probe above passes no matter what we wrote.
+  if sudo -n -l /usr/bin/true >/dev/null 2>&1; then
+    warn "this user already has broad passwordless sudo, so the check above does NOT prove ${LIZARD_SUDOERS} is what granted it. The grant is installed but unverified."
+  else
+    log "verified: the desktop user may run the helper 'on' and 'off' with no password, via ${LIZARD_SUDOERS}"
+  fi
+
+  if [[ $INTERACTIVE -eq 1 ]]; then
+    sudo -v 2>/dev/null || true
+  fi
+}
+
+stage_lizard_mode() {
+  # Installs the three pieces that make "lizard mode is off IF AND ONLY IF the
+  # mapper is running" true, and nothing else:
+  #
+  #   1. ${LIZARD_HELPER}   validates, writes, reads back, fails loudly
+  #   2. ${LIZARD_SUDOERS}  the desktop user may run exactly that, both ways
+  #   3. ${LIZARD_DROPIN}   deck-input-mapper.service's own ExecStartPost=/
+  #                         ExecStopPost= turn it off and back on
+  #
+  # It deliberately does NOT start, restart or enable anything. Starting the
+  # mapper from here would turn lizard mode off on a live machine on the
+  # strength of a service nobody has watched work, which is precisely the
+  # decision 5.25 says belongs to the operator, in front of the Deck.
+  #
+  # THE DESTINATION AND THE SYSFS NODE ARE PARAMETERS -- see "THE VERIFICATION
+  # SEAM" above verify_update_stub. Production passes nothing and gets
+  # ${LIZARD_HELPER} and ${LIZARD_SYSFS}.
+  local helper=${1:-$LIZARD_HELPER}
+  local node=${2:-$LIZARD_SYSFS}
+
+  assert_ours_or_absent "$helper" "something else"
+  assert_ours_or_absent "$LIZARD_DROPIN" "something else"
+  assert_ours_or_absent "$LIZARD_SUDOERS" "another package's sudoers drop-in"
+
+  # A drop-in for a unit that does not exist is inert: installed, valid, and
+  # doing nothing. stage-input-mapper runs immediately before this one in
+  # INSTALL_STAGES, but a single-stage run can reach here without it.
+  $SUDO test -f "$MAPPER_UNIT" ||
+    fail "${MAPPER_UNIT} is not installed, so ${LIZARD_DROPIN} would never apply and lizard mode would be turned off by nothing and back on by nothing. Run 'stage-input-mapper' first."
+
+  # --- 1. the helper ---
+  log "installing the lizard-mode helper: ${helper}"
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$helper")" ||
+    fail "could not create $(dirname "$helper")"
+
+  local tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_lizard_helper "$node" >"$tmp" ||
+    fail "could not render the lizard-mode helper"
+  $SUDO install -m 0755 -o root -g root "$tmp" "$helper" ||
+    fail "could not install ${helper}"
+  rm -f "$tmp"
+
+  # --- 2. the sudoers grant ---
+  #
+  # deck-input-mapper.service is a USER unit (/etc/systemd/user), so its
+  # ExecStartPost= and ExecStopPost= run as the desktop user. Something has to
+  # bridge that to a root-only sysfs write, and this is the same narrow-sudoers
+  # tradeoff the header of this file already argues for ${SELECT_BIN}.
+  local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
+  [[ -n $invoking_user && $invoking_user != root ]] ||
+    fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
+
+  log "granting ${invoking_user} NOPASSWD on '${LIZARD_HELPER} on|off' only"
+  tmp=$(mktemp) || fail "mktemp failed"
+  cat >"$tmp" <<EOF
+${INSTALL_MARKER}
+# Installed by ${PROG}.sh. Lets deck-input-mapper.service -- a USER unit, so its
+# ExecStartPost=/ExecStopPost= run unprivileged -- turn the controller
+# firmware's lizard mode off while it is running and back on when it stops.
+#
+# Scoped to one absolute path AND to its two legal arguments. The helper
+# validates its own argv and refuses everything else, so this is a second,
+# independent boundary rather than the only one. The node it writes is baked
+# into the helper at install time and is not reachable from its argv, so this
+# grant cannot become "write Y or N to an arbitrary file as root".
+#
+# The helper is root-owned 0755: a user who could rewrite it already has root.
+${invoking_user} ALL=(root) NOPASSWD: ${LIZARD_HELPER} on, ${LIZARD_HELPER} off
+EOF
+
+  # A malformed sudoers file breaks sudo for every user on the machine. Never
+  # install one unvalidated -- check the candidate before it is in place.
+  $SUDO visudo -c -f "$tmp" >/dev/null ||
+    fail "generated sudoers snippet failed validation -- refusing to install it. Candidate left at ${tmp}"
+  $SUDO install -m 0440 -o root -g root "$tmp" "$LIZARD_SUDOERS" ||
+    fail "could not install ${LIZARD_SUDOERS}"
+  rm -f "$tmp"
+
+  # --- 3. the drop-in ---
+  log "installing the systemd drop-in: ${LIZARD_DROPIN}"
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$LIZARD_DROPIN")" ||
+    fail "could not create $(dirname "$LIZARD_DROPIN")"
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_lizard_dropin >"$tmp" ||
+    fail "could not render the lizard-mode drop-in"
+  $SUDO install -m 0644 -o root -g root "$tmp" "$LIZARD_DROPIN" ||
+    fail "could not install ${LIZARD_DROPIN}"
+  rm -f "$tmp"
+
+  # A drop-in on disk is not a drop-in systemd has read.
+  local unit_name=${MAPPER_UNIT##*/}
+  if systemctl --user daemon-reload 2>/dev/null; then
+    log "reloaded this user's systemd manager so ${unit_name} picks the drop-in up"
+  else
+    warn "could not reload this user's systemd manager. Over SSH with no session that is normal and the drop-in applies from the next desktop session; inside the desktop it means ${unit_name} is still running without its fallback."
+  fi
+
+  # Ask systemd what it actually parsed, when there is a manager to ask. This is
+  # the only check that can see the '-' prefix question at all: `ignore_errors`
+  # is systemd's own report of whether a failure here would be swallowed, and a
+  # swallowed ExecStartPost= is a mapper running against a silent device.
+  local parsed
+  parsed=$(systemctl --user show "$unit_name" -p ExecStopPost --value 2>/dev/null) || parsed=""
+  if [[ -z $parsed ]]; then
+    warn "this user's systemd manager cannot report ${unit_name}'s ExecStopPost=, so the drop-in was verified as FILE CONTENT only. Re-check inside a desktop session with 'systemctl --user show ${unit_name} -p ExecStopPost'."
+  else
+    [[ $parsed == *"${LIZARD_HELPER} on"* ]] ||
+      fail "systemd parsed ${unit_name} with ExecStopPost=${parsed}, which does not run '${LIZARD_HELPER} on'. Without it a mapper that dies leaves lizard mode off, and the device with no input."
+    [[ $parsed != *"ignore_errors=yes"* ]] ||
+      fail "systemd parsed ${unit_name}'s ExecStopPost= with ignore_errors=yes -- something prefixed it with '-'. A silently ignored failure here is exactly the fallback not working, on the one path that has to."
+    log "verified: systemd parses ${unit_name} with an ExecStopPost= that restores lizard mode and does not ignore errors"
+  fi
+
+  verify_lizard_grant "$helper"
+  verify_lizard_helper "$helper" "$node"
+
+  log "stage-lizard-mode: ok"
+  log "NOTE: nothing was started. Lizard mode is still whatever it was, and goes"
+  log "      off only when deck-input-mapper.service next starts -- and back on"
+  log "      when it stops, crashes or is killed. A reboot restores it too."
+}
+
+# ---------------------------------------------------------------------------
 
 render_dconf_site_file() {
   cat <<EOF
@@ -2373,6 +2879,10 @@ Stages also cover Gaming Mode / display defects (PROGRESS.md 5.11, 5.14, 5.15):
                            The user's desktop needs a matching transform in
                            ~/.config/hypr/monitors.lua; the Limine menu and
                            the TTY are NOT covered here.
+  stage-lizard-mode        binds the controller firmware's lizard mode to
+                           deck-input-mapper.service: off while it runs, on
+                           again when it stops, crashes or is killed. Nothing
+                           persists it -- a reboot restores it too, on purpose.
 
 Exit codes: 0 success, 1 stage failure, 2 usage error.
 EOF

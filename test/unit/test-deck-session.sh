@@ -926,4 +926,280 @@ pass "IDLE_LOCK_SECONDS is under the ~24.8-day QML int32 timer ceiling"
   fail_test "the screensaver must still fire, and before the lock" "it is the OLED burn-in protection; only the LOCK is the thing no on-screen keyboard can reach"
 pass "the screensaver still fires (${IDLE_SCREENSAVER_SECONDS}s) and precedes the lock (${IDLE_LOCK_SECONDS}s)"
 
+# ===========================================================================
+# 8. deck-lizard-mode -- the helper that can cost the operator their input
+# ===========================================================================
+#
+# PROGRESS.md 5.21, and operator decision 2 in 5.25. lizard_mode is a MODULE
+# PARAMETER on the Deck's controller firmware driver:
+#
+#   Y  the firmware emits pointer/Enter/Esc/Tab/arrows and SWALLOWS X, Y, L1,
+#      R1, STEAM and QAM -- they reach no evdev node, so deck-input-mapper.py
+#      is a complete no-op. Degraded, always usable.
+#   N  those six appear and the firmware's pointer disappears, so the mapper is
+#      the ONLY input path on the device.
+#
+# Which means every assertion below is about a handheld that either works or
+# cannot be driven at all. Three properties carry that weight:
+#
+#   the ARGUMENT NAMES LIZARD MODE      'off' must write N, not Y. Inverting the
+#                                       two produces a helper that runs, exits
+#                                       0, logs success, and does the opposite.
+#   the READ-BACK                       a successful write to a module parameter
+#                                       is not proof the kernel took the value.
+#   the STRICT argv                     this file sits behind a sudo grant.
+#
+# ⚠️ NOTHING HERE TOUCHES /sys. render_lizard_helper takes the node as an
+# argument, defaulting to the real constant, and every case below passes a path
+# under $work -- which is also why the write path can be exercised at all
+# without root.
+
+lz_node="$work/lizard_mode"
+lz_helper="$work/deck-lizard-mode"
+render_lizard_helper "$lz_node" >"$lz_helper"
+chmod +x "$lz_helper"
+
+bash -n "$lz_helper" 2>"$work/stderr" ||
+  fail_test "render_lizard_helper emits syntactically valid bash" "$(cat "$work/stderr")"
+pass "render_lizard_helper emits syntactically valid bash (checked nowhere else -- it is generated)"
+
+grep -qF -- "$INSTALL_MARKER" "$lz_helper" ||
+  fail_test "the rendered lizard helper carries the '#'-commented marker" "expected: $INSTALL_MARKER"
+pass "the rendered lizard helper carries '${INSTALL_MARKER}' -- so a re-run may replace its own output"
+
+# The node is BAKED IN, and that is a security property rather than a style
+# choice: the sudoers grant covers this file, so a node taken from argv would
+# turn that grant into "write Y or N to any file, as root".
+grep -qx "NODE=${lz_node}" "$lz_helper" ||
+  fail_test "the rendered helper hardcodes the sysfs node it writes" "expected a line 'NODE=${lz_node}'; without it the node is coming from somewhere a caller controls"
+pass "the sysfs node is baked into the helper at render time, not taken from its argv"
+
+# And the default really is the real node, so a production render is not
+# quietly pointed somewhere harmless.
+render_lizard_helper >"$work/lizard-default"
+grep -qx "NODE=${LIZARD_SYSFS}" "$work/lizard-default" ||
+  fail_test "render_lizard_helper defaults to the real sysfs node" "a render with no argument must bake in ${LIZARD_SYSFS}; the parameter is a test seam, not configuration"
+pass "render_lizard_helper with no argument bakes in ${LIZARD_SYSFS}"
+
+lz_rc=0
+run_lz() {
+  lz_rc=0
+  PATH="$fake_bin:$PATH" "$lz_helper" "$@" >"$work/stdout" 2>"$work/stderr" || lz_rc=$?
+}
+
+# --- the direction. 'off' means lizard mode off, i.e. N -------------------
+#
+# The single assertion an inverted helper cannot survive. Both values are
+# checked from the node itself rather than from the helper's own output,
+# because its output is one of the things that would be lying.
+
+printf 'Y\n' >"$lz_node"
+run_lz off
+[[ $lz_rc -eq 0 ]] || fail_test "'off' succeeds" "exited ${lz_rc}: $(cat "$work/stderr")"
+[[ $(cat "$lz_node") == N ]] ||
+  fail_test "'off' writes N -- lizard mode OFF, mapper in charge" \
+    "node reads '$(cat "$lz_node")'. The argument names LIZARD MODE, not the mapper: 'off' must disable the firmware's emulation, and an inverted helper exits 0 while doing the opposite"
+pass "'off' writes N -- the firmware's emulation is disabled and the mapper becomes the input path"
+
+run_lz on
+[[ $lz_rc -eq 0 ]] || fail_test "'on' succeeds" "exited ${lz_rc}: $(cat "$work/stderr")"
+[[ $(cat "$lz_node") == Y ]] ||
+  fail_test "'on' writes Y -- the firmware provides input again" \
+    "node reads '$(cat "$lz_node")'; this is the value every failure path has to land on"
+pass "'on' writes Y -- the safe value, the one ExecStopPost= restores"
+
+# --- strict argv ----------------------------------------------------------
+#
+# Exit 2 AND a message, for every shape. A helper behind a sudo grant that
+# accepted an argument it then ignored would be the wrong thing to have there,
+# and one that refused silently would leave the operator with no way to tell a
+# rejected call from a call that never happened.
+
+printf 'Y\n' >"$lz_node"
+run_lz
+[[ $lz_rc -eq 2 ]] || fail_test "no argument exits 2" "got ${lz_rc}"
+[[ -s $work/stderr ]] || fail_test "a missing argument is not refused silently" "stderr was empty"
+[[ $(cat "$lz_node") == Y ]] || fail_test "a refused call writes nothing" "the node moved to '$(cat "$lz_node")'"
+pass "no argument exits 2, says so, and leaves the node alone"
+
+for bad in lizard Y N '' 0 1 ON OFF --off on=1; do
+  run_lz "$bad"
+  [[ $lz_rc -eq 2 ]] ||
+    fail_test "an unrecognised verb exits 2" "got ${lz_rc} for '${bad}'"
+  grep -q "unknown argument" "$work/stderr" ||
+    fail_test "the unrecognised-verb branch is what refused it" "got: $(cat "$work/stderr") for '${bad}'"
+  [[ $(cat "$lz_node") == Y ]] ||
+    fail_test "an unrecognised verb writes nothing" "'${bad}' moved the node to '$(cat "$lz_node")'"
+done
+pass "every unrecognised verb (including 'Y', 'N', 'ON' and '1') exits 2 by name and writes nothing"
+
+# EXTRA arguments, checked separately from unrecognised ones: a helper that
+# validated only $1 would pass every case above.
+lz_stray="$work/stray-target"
+rm -f "$lz_stray"
+for extra in "on off" "off on" "off ${lz_stray}" "on --force" "off off"; do
+  # shellcheck disable=SC2086  # deliberately splitting: these ARE two argv words.
+  run_lz $extra
+  [[ $lz_rc -eq 2 ]] ||
+    fail_test "extra arguments exit 2" "got ${lz_rc} for '${extra}'"
+  grep -q "exactly one argument" "$work/stderr" ||
+    fail_test "the arity check is what refused it, not the verb check" "got: $(cat "$work/stderr") for '${extra}'"
+  [[ $(cat "$lz_node") == Y ]] ||
+    fail_test "a call with extra arguments writes nothing" "'${extra}' moved the node to '$(cat "$lz_node")'"
+done
+[[ ! -e $lz_stray ]] ||
+  fail_test "a second argument is never treated as a path to write" "${lz_stray} was created; the node must not be reachable from argv, or the sudo grant becomes a root write primitive"
+pass "extra arguments exit 2 by arity, write nothing, and a second argument is never used as a path"
+
+# --- the node is missing --------------------------------------------------
+#
+# On the Deck this means hid_steam is not loaded. Reporting success here would
+# make everything downstream believe input had moved when it had not.
+
+render_lizard_helper "$work/no-such-node" >"$work/lizard-missing"
+chmod +x "$work/lizard-missing"
+lz_rc=0
+PATH="$fake_bin:$PATH" "$work/lizard-missing" off >"$work/stdout" 2>"$work/stderr" || lz_rc=$?
+[[ $lz_rc -eq 3 ]] ||
+  fail_test "a missing sysfs node exits 3" "got ${lz_rc}; a helper that answered 0 here would report lizard mode off with the firmware still in charge"
+grep -q "does not exist" "$work/stderr" ||
+  fail_test "the missing-node failure names the node" "got: $(cat "$work/stderr")"
+pass "a missing sysfs node exits 3 and names it -- no success reported for a write that never happened"
+
+# --- the READ-BACK --------------------------------------------------------
+#
+# The check that separates "the write call returned 0" from "the kernel took
+# the value". A module parameter's setter can decline a value and leave the
+# node reading what it read before, with the write still succeeding.
+#
+# /dev/null stands in for exactly that: writable, and it reads back nothing.
+if [[ -w /dev/null ]]; then
+  ln -sf /dev/null "$work/sink"
+  render_lizard_helper "$work/sink" >"$work/lizard-sink"
+  chmod +x "$work/lizard-sink"
+  lz_rc=0
+  PATH="$fake_bin:$PATH" "$work/lizard-sink" off >"$work/stdout" 2>"$work/stderr" || lz_rc=$?
+  [[ $lz_rc -eq 5 ]] ||
+    fail_test "a write that does not read back exits 5" "got ${lz_rc}; without the read-back this helper reports success for a value the kernel never took"
+  grep -q "reads back" "$work/stderr" ||
+    fail_test "the read-back failure says what it read instead" "got: $(cat "$work/stderr")"
+  pass "a value that does not read back exits 5 and reports what the node actually says"
+else
+  printf 'note - skipping the read-back case: /dev/null is not writable here\n'
+fi
+
+# A write that fails outright is a different exit code from one that fails to
+# stick, so the journal line distinguishes "not root" from "the kernel said no".
+if [[ -w /dev/full ]]; then
+  ln -sf /dev/full "$work/full"
+  render_lizard_helper "$work/full" >"$work/lizard-full"
+  chmod +x "$work/lizard-full"
+  lz_rc=0
+  PATH="$fake_bin:$PATH" "$work/lizard-full" off >"$work/stdout" 2>"$work/stderr" || lz_rc=$?
+  [[ $lz_rc -eq 4 ]] ||
+    fail_test "a failed write exits 4, distinct from a failed read-back" "got ${lz_rc}"
+  grep -q "could not write" "$work/stderr" ||
+    fail_test "the failed write says so" "got: $(cat "$work/stderr")"
+  pass "a write that fails exits 4 -- a different code from a write that does not stick"
+else
+  printf 'note - skipping the failed-write case: /dev/full is not available here\n'
+fi
+
+# ---------------------------------------------------------------------------
+# 8a. the systemd drop-in -- the half that makes the invariant true
+#
+# The design is "lizard mode is off IF AND ONLY IF the mapper is running", and
+# these two lines are the entire mechanism. ExecStopPost= is the fallback:
+# systemd.service(5) runs it on a clean stop, on an unexpected exit (crash or
+# SIGKILL), and when the service failed to start and is being shut down again.
+
+lz_dropin="$work/50-deck-lizard-mode.conf"
+render_lizard_dropin >"$lz_dropin"
+
+grep -qF -- "$INSTALL_MARKER" "$lz_dropin" ||
+  fail_test "the rendered drop-in carries the '#'-commented marker" "expected: $INSTALL_MARKER"
+pass "the rendered drop-in carries '${INSTALL_MARKER}'"
+
+grep -qx '\[Service\]' "$lz_dropin" ||
+  fail_test "the drop-in declares [Service]" "ExecStartPost=/ExecStopPost= outside a section are ignored, and systemd logs nothing useful"
+pass "the drop-in puts its Exec lines under [Service]"
+
+# EXACT lines. A substring match would pass with a '-' prefix in front of the
+# path, which is the one edit that turns a loud failure into a silent one.
+grep -qx "ExecStartPost=${SUDO_BIN} -n ${LIZARD_HELPER} off" "$lz_dropin" ||
+  fail_test "ExecStartPost= turns lizard mode OFF when the mapper starts" \
+    "expected exactly 'ExecStartPost=${SUDO_BIN} -n ${LIZARD_HELPER} off'; file:"$'\n'"$(cat "$lz_dropin")"
+pass "ExecStartPost= runs '${LIZARD_HELPER} off' -- the mapper takes over only once it is started"
+
+grep -qx "ExecStopPost=${SUDO_BIN} -n ${LIZARD_HELPER} on" "$lz_dropin" ||
+  fail_test "ExecStopPost= turns lizard mode back ON when the mapper stops" \
+    "expected exactly 'ExecStopPost=${SUDO_BIN} -n ${LIZARD_HELPER} on'. THIS IS THE FALLBACK: without it a mapper that crashes leaves a handheld with no pointer and no keys, recoverable only over SSH. (It does not cover a cgroup-wide SIGKILL -- measured; see the table above render_lizard_dropin.) File:"$'\n'"$(cat "$lz_dropin")"
+pass "ExecStopPost= runs '${LIZARD_HELPER} on' -- the path back for a stop, a crash, a SIGKILLed main process and a failed start alike"
+
+# The '-' prefix, asserted as its own property rather than left to the exact
+# matches above. systemd's '-' means "ignore a failure from this command", and
+# on ExecStopPost= that is the fallback silently not happening.
+! grep -qE '^Exec(Start|Stop)Post=-' "$lz_dropin" ||
+  fail_test "neither Exec line is prefixed with '-'" \
+    "a '-' makes systemd ignore the failure. If lizard mode cannot be turned off the mapper is a no-op anyway, and if it cannot be turned back on the device has no input -- both must be loud. File:"$'\n'"$(cat "$lz_dropin")"
+pass "neither ExecStartPost= nor ExecStopPost= is prefixed with '-' -- a failure in either is loud"
+
+# The drop-in has to land in the mapper unit's own .d directory. A drop-in
+# anywhere else is inert: installed, valid, and doing nothing.
+[[ $LIZARD_DROPIN == "${MAPPER_UNIT}.d/"* ]] ||
+  fail_test "the drop-in path is derived from MAPPER_UNIT" \
+    "LIZARD_DROPIN is '${LIZARD_DROPIN}', which is not under '${MAPPER_UNIT}.d/' -- systemd would never read it and nothing would report that"
+pass "LIZARD_DROPIN sits in ${MAPPER_UNIT}.d, the only directory systemd reads it from"
+
+# ---------------------------------------------------------------------------
+# 8b. where the stage sits in the run
+#
+# A stage that is not in INSTALL_STAGES never runs in a full install: the fault
+# is invisible, because every single-stage invocation still works. And a stage
+# that runs BEFORE stage-input-mapper installs a drop-in for a unit that does
+# not exist yet -- which its own precondition would refuse, so the whole install
+# would stop at a stage ordering error rather than at anything real.
+
+lz_stage_at=-1
+lz_mapper_at=-1
+for i in "${!INSTALL_STAGES[@]}"; do
+  [[ ${INSTALL_STAGES[$i]} == stage-lizard-mode ]] && lz_stage_at=$i
+  [[ ${INSTALL_STAGES[$i]} == stage-input-mapper ]] && lz_mapper_at=$i
+done
+
+[[ $lz_stage_at -ge 0 ]] ||
+  fail_test "stage-lizard-mode is registered in INSTALL_STAGES" \
+    "a full install would silently skip it, and every single-stage run would still work -- so nothing would notice. Stages: ${INSTALL_STAGES[*]}"
+pass "stage-lizard-mode is in INSTALL_STAGES, so a full install actually runs it"
+
+[[ $lz_mapper_at -ge 0 && $lz_stage_at -gt $lz_mapper_at ]] ||
+  fail_test "stage-lizard-mode runs AFTER stage-input-mapper" \
+    "mapper at index ${lz_mapper_at}, lizard at ${lz_stage_at}. The drop-in extends the mapper's unit; installed first it would refuse, because a drop-in for a unit that does not exist is inert"
+
+pass "stage-lizard-mode runs after stage-input-mapper -- the unit it extends exists by then"
+
+declare -F stage_lizard_mode >/dev/null ||
+  fail_test "the INSTALL_STAGES entry resolves to a function" "run_stage maps 'stage-lizard-mode' to stage_lizard_mode, which does not exist"
+pass "stage-lizard-mode resolves to stage_lizard_mode(), the name run_stage derives"
+
+# Nothing may PERSIST the value. The whole safety argument is that boot leaves
+# Y, so a mapper that never starts leaves a usable device -- a modprobe.d option
+# applying N at module load would remove exactly that guarantee, before any
+# userspace check could run.
+#
+# Checked on the PATH rather than the word: `/etc/modprobe.d` is what an install
+# needs, and deck-session.sh's own comment rejecting the idea says "modprobe.d"
+# in prose. A word match would fire on the comment that exists to forbid it.
+! grep -rq '/etc/modprobe\.d' "$REPO_ROOT/src" ||
+  fail_test "nothing in src/ installs into /etc/modprobe.d" \
+    "modprobe.d applies at MODULE LOAD, before any userspace check can run: a boot where the mapper cannot start would present a handheld with no input at all. Found:"$'\n'"$(grep -rn '/etc/modprobe\.d' "$REPO_ROOT/src")"
+pass "nothing in src/ writes /etc/modprobe.d -- boot always leaves lizard mode on, which is the fallback's whole basis"
+
+# The same property from the other side: this script installs no file whose
+# content sets the parameter at load time.
+! grep -rq 'options[[:space:]]\+hid_steam' "$REPO_ROOT/src" ||
+  fail_test "nothing in src/ emits a modprobe 'options hid_steam' line" \
+    "that is the boot-time form of the same hazard, and it does not need a /etc/modprobe.d path in this repo to end up in one. Found:"$'\n'"$(grep -rn 'options[[:space:]]\+hid_steam' "$REPO_ROOT/src")"
+pass "no 'options hid_steam ...' line is generated anywhere in src/"
+
 echo "all deck-session.sh tests passed"

@@ -79,6 +79,11 @@
 #                                   without a file that sha256s to
 #                                   UPSTREAM_GREETER_SHA256. The drift WARNING
 #                                   is covered; the silent arm is not.
+#          stage-lizard-mode        full (§11), including the restore, both
+#                                   trap paths and the sudoers grant. It has a
+#                                   SIXTH gate of its own: the real
+#                                   ${LIZARD_SYSFS} is read before and after
+#                                   the section and must not have moved.
 #
 # NOT COVERED, and why:
 #
@@ -372,7 +377,17 @@ if [[ -n ${FAKE_SYSTEMCTL_FAIL:-} && "$*" == *"${FAKE_SYSTEMCTL_FAIL}"* ]]; then
   printf 'systemctl: injected failure: %s\n' "$*" >&2
   exit 1
 fi
-if [[ ${1-} == show ]]; then
+# The VERB, not $1: stage_lizard_mode asks a USER manager
+# (`systemctl --user show ...`), so the verb is not always the first word. An
+# earlier version tested $1 and answered nothing for every --user query, which
+# made that stage's check look like "no user manager here" on a machine that
+# had one -- a stub passing for the wrong reason.
+verb=""
+for a in "$@"; do
+  case $a in -*) continue ;; *) verb=$a; break ;; esac
+done
+
+if [[ $verb == show ]]; then
   prop="" want=0
   for a in "$@"; do
     if [[ $want -eq 1 ]]; then prop=$a; want=0; continue; fi
@@ -625,6 +640,37 @@ seam_check verify_update_stub               UPDATE_STUB
 seam_check verify_timezone_helper           TIMEZONE_HELPER
 seam_check verify_priv_write_helper         PRIV_WRITE_HELPER
 seam_check verify_greeter_compositor_command SDDM_GREETER_DROPIN
+seam_check verify_lizard_helper             LIZARD_HELPER
+seam_check verify_lizard_grant              LIZARD_HELPER
+
+# --- GATE 4b ---------------------------------------------------------------
+#
+# The SECOND seam argument, which only stage-lizard-mode has, and which carries
+# more risk than any other path in this suite: it is a /sys node. If
+# verify_lizard_helper or stage_lizard_mode ignored $2 and used ${LIZARD_SYSFS},
+# a run of §11 on a machine with hid_steam loaded -- any dev box with a Steam
+# Controller plugged in, not just a Deck -- would WRITE REAL SYSFS and change
+# where that machine's input comes from. Static, and first, for exactly the
+# reason GATE 4 is.
+node_seam_check() {   # node_seam_check <function> <positional number>
+  local fn=$1 pos=$2 body
+  declare -F "$fn" >/dev/null ||
+    fail_test "${fn} exists in deck-session.sh" "the sysfs seam is gone"
+  body=$(declare -f "$fn")
+  grep -q "\${${pos}:-" <<<"$body" ||
+    fail_test "${fn} takes the sysfs node to write as \$${pos}" \
+      "no '\${${pos}:-...}' in its body, so §11 could not keep it off real /sys"
+  # shellcheck disable=SC2016  # a grep PATTERN matching the literal text
+  # "$LIZARD_SYSFS" in the function's own source; expanding it would search for
+  # this shell's value of that constant instead.
+  ! grep -qE '"\$LIZARD_SYSFS"' <<<"$body" ||
+    fail_test "${fn} does not use \$LIZARD_SYSFS directly" \
+      "it names the real /sys node in a position the argument cannot override:"$'\n'"${body}"
+  pass "${fn} takes the sysfs node from \$${pos} and never names \$LIZARD_SYSFS directly"
+}
+node_seam_check verify_lizard_helper  2
+node_seam_check stage_lizard_mode     2
+node_seam_check render_lizard_helper  1
 
 # ===========================================================================
 # THE STAGE RUNNER
@@ -1659,7 +1705,353 @@ ok_in_err "Something sorts after 'zy-'" \
 ok_file "$SDDM_GREETER_DROPIN" "our drop-in was still written -- 'installed' and 'winning' are different questions"
 
 # ===========================================================================
-# 11. The harness's own safety invariant
+# 11. stage-lizard-mode -- the stage that can cost the operator their input
+# ===========================================================================
+#
+# PROGRESS.md 5.21, operator decision 2 in 5.25. lizard_mode is a MODULE
+# PARAMETER: Y at every boot, and with Y the controller firmware swallows X, Y,
+# L1, R1, STEAM and QAM entirely, so deck-input-mapper.py is a complete no-op.
+# With N those six appear and the firmware's own pointer disappears -- the
+# mapper is then the ONLY input path on the device.
+#
+# The design under test is "lizard mode is off IF AND ONLY IF the mapper is
+# running": a helper, a narrow sudo grant, and the mapper unit's own
+# ExecStartPost=/ExecStopPost=. Three properties are load-bearing and each has
+# its own case below:
+#
+#   the DIRECTION      'off' must write N. Inverted, the helper exits 0, logs
+#                      success, and leaves the device in the opposite state.
+#   the FALLBACK       ExecStopPost= is what makes a crashed mapper survivable.
+#                      Delete it and a mapper that dies leaves a handheld with
+#                      no pointer and no keys, recoverable only over SSH.
+#   the RESTORE        the stage exercises the helper BOTH ways, so it passes
+#                      through "lizard mode off, no mapper running" on purpose.
+#                      A stage that returned 0 having left it there would be
+#                      the hazard the whole design exists to remove.
+#
+# --- GATE 6, this section's own ---------------------------------------------
+#
+# GATE 4b proved statically that the seams take the node from an argument.
+# This proves it dynamically, and it is cheap: read the REAL node before and
+# after, and require it not to have moved. On this dev machine it is absent and
+# stays absent; on a machine with hid_steam loaded (a Steam Controller is
+# enough) a regression that reached real sysfs would show up here as a changed
+# value rather than as a mysteriously repointed input stack.
+lz_real_before="<absent>"
+[[ ! -e $LIZARD_SYSFS ]] || lz_real_before=$(cat "$LIZARD_SYSFS" 2>/dev/null || printf '<unreadable>')
+note "the real ${LIZARD_SYSFS} reads '${lz_real_before}' before §11; it must read the same after"
+
+lz_node=$(sandboxed "$work/lizard_mode")
+lz_dest=$(sandboxed "${root}${LIZARD_HELPER}")
+
+# reset_root plus the two things this stage needs that no other does: the mapper
+# unit it hangs a drop-in on, and a node with a known value in it.
+lz_setup() {   # lz_setup <Y|N>
+  reset_root
+  mkdir -p "$root$(dirname "$MAPPER_UNIT")"
+  printf '%s\n[Unit]\nDescription=stand-in for the mapper unit\n' "$INSTALL_MARKER" \
+    >"$root$MAPPER_UNIT"
+  printf '%s\n' "$1" >"$lz_node"
+}
+
+lz_setup Y
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_rc 0 "stage-lizard-mode completes against a fake root"
+
+# --- 1. the helper ---
+ok_file "$LIZARD_HELPER" "it installs ${LIZARD_HELPER}"
+ok_mode "$LIZARD_HELPER" 755 "the helper is mode 0755"
+ok_in_file "$LIZARD_HELPER" "$INSTALL_MARKER" "the installed helper carries the install marker"
+[[ -d "$root/usr/local/sbin" ]] ||
+  fail_test "the stage creates /usr/local/sbin itself" \
+    "it is NOT in STOCK_DIRS on purpose: a stage that stopped calling 'install -d' would fail here rather than on the Deck"
+pass "the stage creates /usr/local/sbin itself rather than assuming a stock install has it"
+
+# --- 2. the sudoers grant ---
+ok_file "$LIZARD_SUDOERS" "it installs ${LIZARD_SUDOERS}"
+ok_mode "$LIZARD_SUDOERS" 440 "${LIZARD_SUDOERS} is mode 0440 -- sudo ignores a drop-in with any other mode"
+ok_line "$LIZARD_SUDOERS" "decktester ALL=(root) NOPASSWD: ${LIZARD_HELPER} on, ${LIZARD_HELPER} off" \
+  "the grant names the helper's PRODUCTION absolute path and its two legal arguments, and nothing else -- it is not repointed by the test seam"
+ok_called "visudo -c -f" "the sudoers candidate is validated with 'visudo -c -f'"
+ok_before "visudo -c -f" "install -m 0440" \
+  "validation happens BEFORE the drop-in is installed -- a malformed sudoers file breaks sudo for every user"
+
+lz_grant=$(grep -v '^#' "$root$LIZARD_SUDOERS" | grep -v '^[[:space:]]*$' | head -1)
+! sudoers_line_is_blanket "$lz_grant" ||
+  fail_test "the lizard grant is scoped, not blanket" "sudoers_line_is_blanket flagged: ${lz_grant}"
+sudoers_line_is_nopasswd "$lz_grant" ||
+  fail_test "the lizard grant is passwordless" \
+    "ExecStartPost=/ExecStopPost= have no terminal to answer a password prompt on; got: ${lz_grant}"
+pass "the lizard drop-in reads as scoped-and-passwordless to the release check's own predicate"
+
+# The grant must not name a path under the test's fake root. That would mean the
+# seam had leaked into the thing that ships.
+! grep -qF -- "$work" "$root$LIZARD_SUDOERS" ||
+  fail_test "no test path leaked into the sudoers grant" \
+    "the grant mentions ${work}; the seam repoints where the helper is INSTALLED, never what the grant permits"
+pass "the sudoers grant carries no test path -- the seam does not leak into the shipped grant"
+
+# --- 3. the drop-in ---
+ok_file "$LIZARD_DROPIN" "it installs ${LIZARD_DROPIN}"
+ok_mode "$LIZARD_DROPIN" 644 "the drop-in is mode 0644"
+ok_in_file "$LIZARD_DROPIN" "$INSTALL_MARKER" "the drop-in carries the install marker"
+ok_line "$LIZARD_DROPIN" "[Service]" "the drop-in declares [Service] -- Exec lines outside a section are ignored"
+ok_line "$LIZARD_DROPIN" "ExecStartPost=${SUDO_BIN} -n ${LIZARD_HELPER} off" \
+  "ExecStartPost= turns lizard mode OFF, and only once the mapper has been started"
+ok_line "$LIZARD_DROPIN" "ExecStopPost=${SUDO_BIN} -n ${LIZARD_HELPER} on" \
+  "ExecStopPost= turns it back ON -- THE FALLBACK. Measured, systemd 261: it runs on a clean stop, on a non-zero exit, on a SIGKILLed main process, on a missing ExecStart= and on a failed ExecStartPost=. NOT on a cgroup-wide SIGKILL, which is recorded above render_lizard_dropin"
+! grep -qE '^Exec(Start|Stop)Post=-' "$root$LIZARD_DROPIN" ||
+  fail_test "neither Exec line is prefixed with '-'" \
+    "'-' makes systemd ignore the failure: on ExecStartPost= that is a mapper reading a device the firmware still owns, and on ExecStopPost= it is the fallback silently not happening"
+pass "neither Exec line is prefixed with '-' -- a failure in either is loud, which is the whole point"
+
+# --- the stage's own verification ran, both ways, and put the node back ---
+ok_in_out "verified: '${root}${LIZARD_HELPER} off' left ${lz_node} at N" \
+  "the stage proved the OFF direction by running the helper and re-reading the node itself"
+ok_in_out "verified: '${root}${LIZARD_HELPER} on' left ${lz_node} at Y" \
+  "and the ON direction, which is the one every failure path depends on"
+[[ $(cat "$lz_node") == Y ]] ||
+  fail_test "the stage leaves the node at the value it found (Y)" \
+    "it reads '$(cat "$lz_node")'. A stage that returns 0 having left lizard mode off, with no mapper running, IS the hazard this design exists to remove"
+pass "the stage restored the node to Y -- the value it found before it started"
+
+# The stage must not START anything. Turning lizard mode off for real is the
+# operator's call, in front of the Deck, and this stage installs a fallback
+# rather than exercising it on a live session.
+! grep -qE 'systemctl .*(--user |--global )?(start|restart|enable) .*deck-input-mapper' "$calls" ||
+  fail_test "the stage starts, restarts or enables nothing" \
+    "it would turn lizard mode off on a live machine on the strength of a service nobody has watched work. calls:"$'\n'"$(cat "$calls")"
+pass "the stage starts nothing -- the drop-in applies when the mapper next starts, not now"
+
+# --- the restore is not hardcoded to Y ------------------------------------
+#
+# The mutation this kills: a restore that always writes Y. On a Deck where the
+# mapper is already running (lizard mode N), that silently turns the device's
+# real input path off while the mapper keeps reading a node that has gone quiet.
+lz_setup N
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_rc 0 "stage-lizard-mode completes when the node starts at N"
+[[ $(cat "$lz_node") == N ]] ||
+  fail_test "the stage restores N when it found N" \
+    "it reads '$(cat "$lz_node")' -- a restore hardcoded to Y would pass the Y case above and break every machine where the mapper is already running"
+pass "the stage restores N when it found N -- the restore reads the pre-run value rather than assuming one"
+ok_in_out "restored lizard mode to N" "and it says which value it put back"
+
+# --- idempotent re-run -----------------------------------------------------
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_rc 0 "a second run of stage-lizard-mode succeeds"
+ok_line "$LIZARD_DROPIN" "ExecStopPost=${SUDO_BIN} -n ${LIZARD_HELPER} on" \
+  "the fallback survives a re-run rather than being replaced by something weaker"
+
+# --- what systemd says it parsed ------------------------------------------
+#
+# The only check that can see the '-' question in the form that matters: a file
+# on disk is not a file systemd has read, and `ignore_errors` is systemd's own
+# report of whether a failure here would be swallowed.
+lz_setup Y
+export FAKE_SYSTEMCTL_SHOW_ExecStopPost="{ path=${SUDO_BIN} ; argv[]=${SUDO_BIN} -n ${LIZARD_HELPER} on ; ignore_errors=no }"
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_rc 0 "the stage accepts an ExecStopPost= that systemd parsed as expected"
+ok_in_out "does not ignore errors" "it says it checked what systemd parsed, not merely what was written"
+
+lz_setup Y
+export FAKE_SYSTEMCTL_SHOW_ExecStopPost="{ path=${SUDO_BIN} ; argv[]=${SUDO_BIN} -n ${LIZARD_HELPER} on ; ignore_errors=yes }"
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_failed "an ExecStopPost= systemd parsed with ignore_errors=yes fails the stage"
+ok_in_err "prefixed it with '-'" "the failure names the cause, not just the symptom"
+[[ $(cat "$lz_node") == Y ]] ||
+  fail_test "even that failure leaves the node where it was" "it reads '$(cat "$lz_node")'"
+pass "a stage that fails on the parsed drop-in still leaves lizard mode as it found it"
+
+lz_setup Y
+export FAKE_SYSTEMCTL_SHOW_ExecStopPost="{ path=/bin/true ; argv[]=/bin/true ; ignore_errors=no }"
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_failed "an ExecStopPost= that does not run the helper fails the stage"
+ok_in_err "leaves lizard mode off, and the device with no input" \
+  "the failure says what the missing fallback costs"
+
+unset FAKE_SYSTEMCTL_SHOW_ExecStopPost
+lz_setup Y
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_rc 0 "with no user manager to ask, the stage still completes"
+ok_in_err "verified as FILE CONTENT only" \
+  "it SAYS the parsed-drop-in check did not run rather than reporting a pass it did not earn"
+
+# --- the preconditions it refuses on --------------------------------------
+lz_setup Y
+rm -f "$root$MAPPER_UNIT"
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_failed "no mapper unit means no drop-in -- the stage refuses"
+ok_in_err "would never apply" \
+  "a drop-in for a unit that does not exist is inert: installed, valid, and doing nothing"
+
+lz_setup Y
+# mkdir first: /usr/local/sbin is deliberately absent from STOCK_DIRS (the stage
+# creates it), so the redirect below would fail before the case could run.
+mkdir -p "$root$(dirname "$LIZARD_HELPER")"
+printf '#!/bin/sh\n# somebody else owns this\n' >"$root$LIZARD_HELPER"
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_failed "a foreign file at ${LIZARD_HELPER} stops the stage"
+ok_in_err "was not written by deck-session.sh" "the refusal explains whose file is in the way"
+
+lz_setup Y
+mkdir -p "$root$(dirname "$LIZARD_DROPIN")"
+printf '[Service]\nExecStopPost=/bin/true\n' >"$root$LIZARD_DROPIN"
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_failed "a foreign drop-in at ${LIZARD_DROPIN} stops the stage"
+ok_absent "$LIZARD_HELPER" "and it refuses BEFORE installing the helper, so a foreign fallback is never half-replaced"
+
+lz_setup Y
+printf '%s ALL=(ALL) NOPASSWD: ALL\n' decktester >"$root$LIZARD_SUDOERS"
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_failed "a foreign sudoers file at ${LIZARD_SUDOERS} stops the stage"
+ok_in_err "was not written by deck-session.sh" "the refusal names the file rather than overwriting a grant we did not write"
+
+# --- the node itself is missing -------------------------------------------
+lz_setup Y
+rm -f "$lz_node"
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_failed "an absent sysfs node fails the stage"
+ok_in_err "Refusing to install a fallback that has never been run" \
+  "the files may be on disk, but a fallback nobody has exercised is not one this project ships"
+
+# --- the sudo grant, proved rather than assumed ---------------------------
+lz_setup Y
+export FAKE_SUDO_LIST_DENY=deck-lizard-mode
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_failed "a grant sudo will not honour fails the stage"
+ok_in_err "is a USER unit" \
+  "the failure explains why it matters: ExecStartPost=/ExecStopPost= run as the desktop user, with no terminal to answer a prompt"
+
+lz_setup Y
+export FAKE_SUDO_LIST_DENY=/usr/bin/true
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_rc 0 "with no blanket grant in the way, the stage completes"
+ok_in_out "may run the helper 'on' and 'off' with no password" \
+  "and claims the grant is verified only when it is not standing on somebody else's blanket NOPASSWD"
+
+unset FAKE_SUDO_LIST_DENY
+lz_setup Y
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_in_err "already has broad passwordless sudo" \
+  "under a blanket grant it says the check proves nothing -- the honesty check PROGRESS.md 5.17 exists for"
+
+# --- verify_lizard_helper, against helpers that misbehave one way each -----
+#
+# The stage above ran the REAL helper. These drive the verifier itself, which is
+# where the restore and its trap live.
+reset_root
+lz_probe=$(sandboxed "$work/fake-lizard-mode")
+
+write_program "$lz_probe" >/dev/null <<'SH'
+#!/usr/bin/env bash
+# Correct: writes exactly what the verb means.
+case ${1-} in
+  on)  v=Y ;;
+  off) v=N ;;
+  *)   exit 2 ;;
+esac
+[[ ${FAKE_LZ_FAIL_ON:-} != "${1-}" ]] || exit "${FAKE_LZ_FAIL_RC:-1}"
+printf '%s\n' "${FAKE_LZ_FORCE_VALUE:-$v}" >"$FAKE_LZ_NODE"
+SH
+export FAKE_LZ_NODE="$lz_node"
+
+printf 'Y\n' >"$lz_node"
+run_stage_body verify_lizard_helper "$lz_probe" "$lz_node"
+ok_rc 0 "verify-lizard-helper passes a helper that drives the node both ways"
+[[ $(cat "$lz_node") == Y ]] || fail_test "and leaves it at Y" "it reads '$(cat "$lz_node")'"
+pass "verify-lizard-helper leaves the node at the value it found"
+
+printf 'N\n' >"$lz_node"
+run_stage_body verify_lizard_helper "$lz_probe" "$lz_node"
+ok_rc 0 "it passes with the node starting at N too"
+[[ $(cat "$lz_node") == N ]] ||
+  fail_test "and restores N, not Y" "it reads '$(cat "$lz_node")'"
+pass "the restore puts N back when N is what it found -- the mapper's own running state is not disturbed"
+
+# A helper that lies: exits 0, changes nothing. This is the one the read-back
+# exists for, and an exit-code-only verifier would pass it.
+printf 'Y\n' >"$lz_node"
+write_program "$work/fake-lizard-liar" >/dev/null <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+run_stage_body verify_lizard_helper "$(sandboxed "$work/fake-lizard-liar")" "$lz_node"
+ok_failed "a helper that exits 0 without moving the node fails verification"
+ok_in_err "reported success but" \
+  "the verifier re-reads the node itself rather than trusting the helper's exit code"
+
+# A helper that writes the wrong value for the verb -- the inversion, caught
+# from outside the helper.
+printf 'Y\n' >"$lz_node"
+export FAKE_LZ_FORCE_VALUE=Y
+run_stage_body verify_lizard_helper "$lz_probe" "$lz_node"
+ok_failed "a helper whose 'off' leaves the node at Y fails verification"
+ok_in_err "expected 'N'" "the failure names the value it wanted, so an inverted helper cannot pass"
+unset FAKE_LZ_FORCE_VALUE
+
+# --- the trap: what happens when the check itself dies halfway -------------
+#
+# Between 'off' and 'on' the node is at N with no mapper running. Every `fail`
+# in there is an exit, so the restore has to be a trap rather than a line at the
+# bottom -- these two cases are what that trap is for.
+
+# (a) it can restore: the node started at N, so putting it back needs 'off',
+#     which this helper still does.
+printf 'N\n' >"$lz_node"
+export FAKE_LZ_FAIL_ON=on
+run_stage_body verify_lizard_helper "$lz_probe" "$lz_node"
+ok_failed "a helper that cannot turn lizard mode back on fails verification"
+ok_in_out "restored lizard mode to N" \
+  "and the TRAP still ran the restore -- without it the check would exit leaving a value nobody chose"
+[[ $(cat "$lz_node") == N ]] ||
+  fail_test "the trap left the node at the value the stage found" "it reads '$(cat "$lz_node")'"
+pass "a mid-check failure still leaves the node where the stage found it"
+
+# (b) it cannot restore: the node started at Y, restoring needs 'on', and 'on'
+#     is exactly what is broken. The device is left at N with no mapper -- the
+#     genuinely bad state -- so the message has to be unmissable and has to name
+#     the command that fixes it.
+printf 'Y\n' >"$lz_node"
+run_stage_body verify_lizard_helper "$lz_probe" "$lz_node"
+ok_failed "a helper broken in the ON direction fails verification"
+ok_in_err "COULD NOT RESTORE" \
+  "when the restore itself cannot work, that is said loudly rather than swallowed"
+ok_in_err "sudo ${LIZARD_HELPER} on" \
+  "and the message carries the exact command that gets input back, because by then nothing on the device can type it"
+
+# A helper broken in the OFF direction never leaves the safe value at all.
+printf 'Y\n' >"$lz_node"
+export FAKE_LZ_FAIL_ON=off
+run_stage_body verify_lizard_helper "$lz_probe" "$lz_node"
+ok_failed "a helper broken in the OFF direction fails verification"
+[[ $(cat "$lz_node") == Y ]] ||
+  fail_test "and the node never left Y" "it reads '$(cat "$lz_node")'"
+pass "a helper that cannot turn lizard mode off never moves the device off its safe value"
+unset FAKE_LZ_FAIL_ON
+
+# A node reading something that is neither Y nor N: stop rather than guess what
+# to put back.
+printf 'maybe\n' >"$lz_node"
+run_stage_body verify_lizard_helper "$lz_probe" "$lz_node"
+ok_failed "a node reading neither Y nor N fails before anything is written"
+ok_in_err "neither Y nor N" "the refusal says why it will not guess a value to restore"
+[[ $(cat "$lz_node") == maybe ]] ||
+  fail_test "and nothing was written to it" "it reads '$(cat "$lz_node")'"
+pass "an unrecognised current value stops the check before it changes anything"
+
+unset FAKE_LZ_NODE
+
+# --- GATE 6, the other half ------------------------------------------------
+lz_real_after="<absent>"
+[[ ! -e $LIZARD_SYSFS ]] || lz_real_after=$(cat "$LIZARD_SYSFS" 2>/dev/null || printf '<unreadable>')
+[[ $lz_real_after == "$lz_real_before" ]] ||
+  fail_test "§11 did not touch the real ${LIZARD_SYSFS}" \
+    "it read '${lz_real_before}' before and '${lz_real_after}' after -- a seam reverted to the constant and this run changed where this machine's input comes from"
+pass "the real ${LIZARD_SYSFS} is unchanged by §11 (still '${lz_real_after}')"
+
+# ===========================================================================
+# 12. The harness's own safety invariant
 # ===========================================================================
 #
 # Everything above is only trustworthy if none of it touched the real system.
