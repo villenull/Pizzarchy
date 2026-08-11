@@ -859,4 +859,62 @@ sudoers_line_is_blanket   "deck ALL=(ALL) NOPASSWD: ALL" &&
   fail_test "99-deck-testing's real line classifies as blanket AND passwordless"
 pass "the two real drop-ins on the Deck (03_deck, 99-deck-testing) classify as intended -- only the second is a release failure"
 
+# ---------------------------------------------------------------------------
+# 6. stage-desktop-settings -- the dconf site defaults (PROGRESS.md 5.20, R-38)
+#
+# These three values decide whether the on-screen keyboard works at all and
+# whether an idle Deck can lock itself out, and every one of them was found by
+# something failing on a screen rather than by a check failing. They are also
+# the reason the stage exists: until it did, they were hand edits that a built
+# image would simply not have.
+
+dconf_file="$work/50-deck-desktop"
+render_dconf_site_file >"$dconf_file"
+
+grep -qF -- "$INSTALL_MARKER" "$dconf_file" ||
+  fail_test "the rendered dconf defaults carry the '#'-commented marker" "expected: $INSTALL_MARKER"
+pass "the rendered dconf defaults carry '${INSTALL_MARKER}'"
+
+# The gate. squeekboard ships with auto-show off, and PROGRESS.md 5.20 was
+# first recorded as "focus-triggered show does not work" purely because of it.
+grep -qx "screen-keyboard-enabled=true" "$dconf_file" ||
+  fail_test "the OSK auto-show gate must be enabled" "without screen-keyboard-enabled=true the keyboard never appears on text focus, and nothing logs a reason"
+pass "the dconf defaults enable screen-keyboard-enabled -- the gate that hid 5.20"
+
+grep -q "^\[org/gnome/desktop/a11y/applications\]" "$dconf_file" ||
+  fail_test "screen-keyboard-enabled must sit under its own dconf group" "a key outside its [group] is silently ignored by dconf compile"
+pass "screen-keyboard-enabled is under [org/gnome/desktop/a11y/applications]"
+
+# Without a layout squeekboard runs, warns 'No system layout', and draws
+# nothing -- which looks exactly like the keyboard being broken.
+grep -q "^sources=\[('xkb','us')\]" "$dconf_file" ||
+  fail_test "an input source must be set" "squeekboard warns 'No system layout' and has no keys to draw without one"
+grep -q "^\[org/gnome/desktop/input-sources\]" "$dconf_file" ||
+  fail_test "sources must sit under its own dconf group" "a key outside its [group] is silently ignored"
+pass "the dconf defaults set an xkb input source under [org/gnome/desktop/input-sources]"
+
+# ---------------------------------------------------------------------------
+# 6a. the idle policy constants -- lock: 0 is a TRAP
+#
+# IdleModel.secondsFromConfig only rejects negative and non-finite values, so 0
+# is accepted, and lockDelaySeconds === 0 is the fire-IMMEDIATELY branch.
+# Disabling the lock means a LARGE timeout, not zero.
+
+[[ $IDLE_LOCK_SECONDS -gt 0 ]] ||
+  fail_test "IDLE_LOCK_SECONDS must not be 0" "lock:0 does not disable the lock -- secondsFromConfig accepts it and lockDelaySeconds===0 is the fire-immediately branch, so the Deck would lock the instant it idled"
+pass "IDLE_LOCK_SECONDS is not 0 -- the value that would lock instantly rather than never"
+
+# lockDelaySeconds*1000 feeds a QML Timer.interval, a 32-bit int. Past that the
+# multiplication overflows and the timer can fire at once -- so "disable it with
+# a huge number" is its own trap.
+[[ $IDLE_LOCK_SECONDS -lt 2147483 ]] ||
+  fail_test "IDLE_LOCK_SECONDS must stay under the QML int32 timer ceiling" "lockDelaySeconds*1000 feeds a 32-bit Timer.interval; beyond ~2147483s it overflows and may fire immediately"
+pass "IDLE_LOCK_SECONDS is under the ~24.8-day QML int32 timer ceiling"
+
+# The screensaver must still fire: it is the OLED burn-in protection, and
+# R-41's lockout made it tempting to disable the wrong one.
+[[ $IDLE_SCREENSAVER_SECONDS -gt 0 && $IDLE_SCREENSAVER_SECONDS -lt $IDLE_LOCK_SECONDS ]] ||
+  fail_test "the screensaver must still fire, and before the lock" "it is the OLED burn-in protection; only the LOCK is the thing no on-screen keyboard can reach"
+pass "the screensaver still fires (${IDLE_SCREENSAVER_SECONDS}s) and precedes the lock (${IDLE_LOCK_SECONDS}s)"
+
 echo "all deck-session.sh tests passed"

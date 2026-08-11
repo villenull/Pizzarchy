@@ -153,6 +153,49 @@ readonly STEAM_RUNTIME_PATH=/usr/bin:/bin
 readonly SUDOERS_FILE=/etc/sudoers.d/99-deck-session-select
 readonly RETURN_DESKTOP_FILE=/usr/share/applications/deck-return-to-gaming.desktop
 
+# --- Desktop session settings (PROGRESS.md §5.20, §2.6, R-38) -------------
+#
+# Three values that decide whether the shipped device works and which lived,
+# until this stage existed, only as hand edits on the test Deck -- exactly the
+# "absent from a built image, and no test notices" problem T5 records. Every one
+# was found by something failing on a screen, never by a check failing.
+#
+# The two GSettings go in a dconf SYSTEM database rather than a user's dconf,
+# because the image creates a user we have never met: a `gsettings set` run
+# during install writes one account's database and a later account gets the
+# broken default back.
+readonly DCONF_PROFILE=/etc/dconf/profile/user
+# `install -D` creates db/local.d, so the directory needs no constant of its own.
+readonly DCONF_SITE_FILE=/etc/dconf/db/local.d/50-deck-desktop
+
+# squeekboard's auto-show gate. Ships `false`; with it unset the on-screen
+# keyboard NEVER appears on text focus no matter what else is correct, which is
+# how §5.20 was first mis-recorded as "focus-triggered show does not work".
+readonly OSK_KEY=/org/gnome/desktop/a11y/applications/screen-keyboard-enabled
+
+# squeekboard warns `No system layout` and draws no keys without an input
+# source. Empty by default on this Deck.
+readonly INPUT_SOURCES_KEY=/org/gnome/desktop/input-sources/sources
+
+# --- Omarchy idle policy (R-38) -------------------------------------------
+#
+# Omarchy ships screensaver=150s and lock=300s. The LOCK is the problem: it is a
+# password prompt, autologin does not cover it, and on a keyboard-less handheld
+# no available on-screen keyboard can reach a layer-shell lock surface. Five
+# idle minutes would lock the device out of itself.
+#
+# ⚠️ `lock: 0` does NOT disable it -- IdleModel.secondsFromConfig only rejects
+# negative and non-finite values, so 0 is accepted and `lockDelaySeconds === 0`
+# is the fire-immediately branch. Disabling means a LARGE timeout.
+#
+# ⚠️ And that timeout has a ceiling: lockDelaySeconds*1000 feeds a QML
+# Timer.interval, a 32-bit int, so anything past ~2147483s (~24.8 days)
+# overflows. A day is effectively never for a handheld and is nowhere near it.
+readonly OMARCHY_SHELL_JSON_REL=.config/omarchy/shell.json
+readonly OMARCHY_SHELL_JSON_DEFAULTS=/usr/share/omarchy/config/omarchy/shell.json
+readonly IDLE_SCREENSAVER_SECONDS=150
+readonly IDLE_LOCK_SECONDS=86400
+
 # --- Desktop-mode input mapper (ROADMAP P2.1, T3 §4) ----------------------
 readonly MAPPER_SRC_NAME=deck-input-mapper.py
 readonly MAPPER_BIN=/usr/local/bin/deck-input-mapper
@@ -300,6 +343,7 @@ readonly -a INSTALL_STAGES=(
   stage-sddm-resilience
   stage-return-icon
   stage-input-mapper
+  stage-desktop-settings
 )
 
 log()  { printf '[%s] %s\n' "$PROG" "$*"; }
@@ -1738,6 +1782,168 @@ EOF
   log "stage-input-mapper: ok"
   log "NOTE: it starts with the NEXT desktop session. Button-mapping correctness"
   log "      cannot be checked from here -- it needs someone pressing buttons."
+}
+
+# ---------------------------------------------------------------------------
+
+render_dconf_site_file() {
+  cat <<EOF
+${INSTALL_MARKER}
+#
+# Site defaults for the Deck. These are DEFAULTS, not locks: a user may still
+# change them, and a user-level value shadows everything here.
+
+[org/gnome/desktop/a11y/applications]
+# squeekboard's auto-show gate. Ships false; without it the on-screen keyboard
+# never appears on text focus, and nothing logs a reason.
+screen-keyboard-enabled=true
+
+[org/gnome/desktop/input-sources]
+# squeekboard warns 'No system layout' and has no keys to draw without this.
+sources=[('xkb','us')]
+EOF
+}
+
+stage_desktop_settings() {
+  # Installs the three settings that decide whether the on-screen keyboard
+  # works and whether an idle Deck can lock itself out. See the constants above
+  # for why each one exists; all three were discovered by something failing on a
+  # screen, and none of them fails a test today.
+  command -v dconf >/dev/null 2>&1 ||
+    fail "dconf not found; the on-screen keyboard's defaults cannot be installed"
+  command -v python3 >/dev/null 2>&1 ||
+    fail "python3 not found; ${OMARCHY_SHELL_JSON_REL} must be edited as JSON, not by regex"
+
+  # --- 1. the dconf profile ---
+  #
+  # Without a profile naming a system-db, dconf reads ONLY the user database and
+  # every default below is inert. The file is absent on a stock Omarchy install,
+  # so this is a creation, not an edit.
+  if [[ -e $DCONF_PROFILE ]]; then
+    if grep -qx "system-db:local" "$DCONF_PROFILE"; then
+      log "dconf profile already reads the site database"
+    else
+      # Appending blind could reorder somebody else's profile, and profile order
+      # is precedence. Refuse rather than guess.
+      fail "${DCONF_PROFILE} exists but does not list 'system-db:local'; merge it by hand -- profile order is precedence and this stage will not guess"
+    fi
+  else
+    log "creating ${DCONF_PROFILE} so site defaults are read at all"
+    local tmp
+    tmp=$(mktemp) || fail "mktemp failed"
+    printf 'user-db:user\nsystem-db:local\n' >"$tmp"
+    $SUDO install -D -m 0644 -o root -g root "$tmp" "$DCONF_PROFILE" ||
+      fail "could not install ${DCONF_PROFILE}"
+    rm -f "$tmp"
+  fi
+
+  # --- 2. the site defaults ---
+  assert_ours_or_absent "$DCONF_SITE_FILE" "another package's dconf defaults"
+
+  log "installing site defaults: ${DCONF_SITE_FILE}"
+  local tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_dconf_site_file >"$tmp" || fail "could not render the dconf site defaults"
+  $SUDO install -D -m 0644 -o root -g root "$tmp" "$DCONF_SITE_FILE" ||
+    fail "could not install ${DCONF_SITE_FILE}"
+  rm -f "$tmp"
+
+  # dconf keyfiles do nothing until compiled into the binary database.
+  $SUDO dconf update || fail "dconf update failed; the site defaults are on disk but not compiled"
+
+  # --- verify the DEFAULT, not the effective value ---
+  #
+  # This is the whole reason `-d` is here. `gsettings get` (or a plain
+  # `dconf read`) returns the USER's value when one exists, so on any machine
+  # where someone once ran `gsettings set` by hand -- this test Deck, for
+  # instance -- the check would pass while the site default was missing or
+  # wrong. That is precisely the "passes for the wrong reason" failure this
+  # project keeps finding. `-d` ignores the user database.
+  local got
+  got=$(dconf read -d "$OSK_KEY" 2>/dev/null || true)
+  [[ $got == "true" ]] ||
+    fail "site default for ${OSK_KEY} reads '${got:-<empty>}', not 'true' -- the OSK would never auto-show for a new user"
+  got=$(dconf read -d "$INPUT_SOURCES_KEY" 2>/dev/null || true)
+  [[ $got == *"'xkb'"* && $got == *"'us'"* ]] ||
+    fail "site default for ${INPUT_SOURCES_KEY} reads '${got:-<empty>}' -- squeekboard would have no layout to draw"
+  log "verified: both on-screen-keyboard defaults are set in the SITE database"
+
+  # A user-level value shadows the site default. Warn only when it actually
+  # DISAGREES: an override that matches changes nothing, and warning about it
+  # would fire on every run and teach the operator to ignore the message.
+  #
+  # ⚠️ Compare effective against default -- do NOT test "does a user value
+  # exist". A plain `dconf read` resolves through the whole profile, so it
+  # returns the site default too and would report an override for every user.
+  # Isolating the user database by pointing DCONF_PROFILE at a nonexistent file
+  # does not work either: dconf then reads NO database and always returns empty,
+  # which is a check that cannot fail. Both were tried on hardware.
+  local eff dflt
+  eff=$(dconf read "$OSK_KEY" 2>/dev/null || true)
+  dflt=$(dconf read -d "$OSK_KEY" 2>/dev/null || true)
+  [[ $eff == "$dflt" ]] ||
+    warn "${OSK_KEY} resolves to '${eff}' for this user but the site default is '${dflt}'. A user-level value is shadowing it, and the on-screen keyboard follows the user value -- 'dconf reset ${OSK_KEY}' to fall back to the default this stage installs."
+
+  # --- 3. Omarchy's idle policy ---
+  local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
+  [[ -n $invoking_user && $invoking_user != root ]] ||
+    fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
+  local home
+  home=$(getent passwd "$invoking_user" | cut -d: -f6) ||
+    fail "could not resolve ${invoking_user}'s home directory"
+  [[ -n $home ]] || fail "empty home directory for ${invoking_user}"
+  local shell_json="${home}/${OMARCHY_SHELL_JSON_REL}"
+
+  # A user shell.json REPLACES Omarchy's defaults rather than merging with them,
+  # so writing a file containing only an idle block would silently strip the
+  # bar. Seed from the shipped defaults when absent, and patch in place
+  # otherwise.
+  if [[ ! -e $shell_json ]]; then
+    [[ -e $OMARCHY_SHELL_JSON_DEFAULTS ]] ||
+      fail "${shell_json} is absent and ${OMARCHY_SHELL_JSON_DEFAULTS} does not exist to seed from; writing an idle-only file would strip the bar"
+    log "seeding ${shell_json} from Omarchy's shipped defaults"
+    $SUDO -u "$invoking_user" install -D -m 0644 "$OMARCHY_SHELL_JSON_DEFAULTS" "$shell_json" ||
+      fail "could not seed ${shell_json}"
+  fi
+
+  log "setting Omarchy idle policy: screensaver=${IDLE_SCREENSAVER_SECONDS}s lock=${IDLE_LOCK_SECONDS}s"
+  $SUDO -u "$invoking_user" python3 - "$shell_json" "$IDLE_SCREENSAVER_SECONDS" "$IDLE_LOCK_SECONDS" <<'PY' ||
+import json, sys, pathlib
+path, screensaver, lock = pathlib.Path(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+try:
+    cfg = json.loads(path.read_text())
+except (OSError, ValueError) as exc:
+    sys.exit(f"could not parse {path} as JSON: {exc}")
+if not isinstance(cfg, dict):
+    sys.exit(f"{path} is not a JSON object")
+# Patch only the idle block. Everything else -- bar layout, plugins, version --
+# belongs to the user and a rewrite would silently drop it.
+idle = cfg.setdefault("idle", {})
+idle["screensaver"], idle["lock"] = screensaver, lock
+path.write_text(json.dumps(cfg, indent=2) + "\n")
+PY
+    fail "could not patch the idle policy into ${shell_json}"
+
+  # Re-read as the shell will, rather than trusting the write.
+  local check
+  check=$($SUDO -u "$invoking_user" python3 - "$shell_json" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+idle = cfg.get("idle", {})
+print(idle.get("screensaver"), idle.get("lock"), len(cfg))
+PY
+  ) || fail "could not re-read ${shell_json} after writing it"
+  local want="${IDLE_SCREENSAVER_SECONDS} ${IDLE_LOCK_SECONDS}"
+  [[ $check == "$want "* ]] ||
+    fail "${shell_json} reads back as '${check}', expected '${want} ...' -- the idle policy did not take"
+  [[ ${check##* } -gt 1 ]] ||
+    fail "${shell_json} now has only ${check##* } top-level key(s); the rest of the config was lost, which would strip the bar"
+  log "verified: ${shell_json} carries the idle policy and kept ${check##* } top-level keys"
+
+  log "stage-desktop-settings: ok"
+  log "NOTE: Omarchy re-reads shell.json live (FileView watchChanges), but the"
+  log "      dconf defaults apply to sessions started AFTER this, and any"
+  log "      user-level value keeps shadowing them until it is reset."
 }
 
 # ---------------------------------------------------------------------------
