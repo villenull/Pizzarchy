@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# iso/bin/build -- the T5 fork's single build entry point.
+#
+# docs/tasks/T5-fork-plan.md §1: "bin/build does, in order: verify the
+# submodule is exactly at UPSTREAM (refuse otherwise); rsync overlay/ over a
+# scratch copy of it; git apply --3way the patches, failing loudly on any
+# reject; run the guards in §6; then omarchy-iso-make's work with the three
+# §3.10 fixes intact."
+#
+# This slice (T5a) ships an EMPTY overlay/ -- no configs/airootfs content, no
+# patches. Its only job is to prove the pipeline reproduces the known-good
+# ISO before anything gets added on top (§7: "Do not start T5c before T5a
+# proves parity").
+#
+# --------------------------------------------------------------------------
+# Why this does not just exec upstream's own bin/omarchy-iso-make
+# --------------------------------------------------------------------------
+#
+# omarchy-iso-make (iso/upstream/bin/omarchy-iso-make) does two things this
+# project's CLAUDE.md forbids doing to the DEV MACHINE, unconditionally, on
+# every invocation:
+#
+#   1. `sudo rm -rf /var/cache/pacman/pkg/*` on the HOST, before Docker even
+#      starts. On this dev machine that cache holds 2700+ packages
+#      (docs/PROGRESS.md §3.10 item 3 / §7). There is no flag to skip this.
+#   2. Bind-mounts the (now-emptied) host cache read-write into a --privileged
+#      container.
+#
+# That is guard 6.3 (docs/tasks/T5-fork-plan.md §6.3): "Do not inherit the
+# pacman-cache rm -rf... bin/build points the container at a scratch dir
+# under iso/.cache/ instead -- same rebuild speed, no blast radius." The only
+# way to get that is to stop calling omarchy-iso-make and drive
+# builder/build-iso.sh's Docker invocation ourselves, keeping everything else
+# (image, --privileged, the env vars build-iso.sh reads) identical.
+#
+# Guard 6.1 (ref/mirror agreement) is handled the same way: hard-coded here,
+# with the environment refused rather than silently overridden if it disagrees.
+#
+# --------------------------------------------------------------------------
+# Where things land
+# --------------------------------------------------------------------------
+#
+# Never in this repo. All scratch state -- the overlaid upstream checkout,
+# the pacman package cache, the offline-mirror download cache, and the built
+# ISO itself -- lives under $OMARCHY_DECK_ISO_BUILD_DIR (default
+# ~/.cache/omarchy-deck/iso-build), a sibling of the repo, not a subdirectory
+# of it. Multi-gigabyte artifacts belong outside version control
+# (docs/PROGRESS.md §1.1) and outside this worktree.
+#
+# Usage:
+#   iso/bin/build
+#   OMARCHY_DECK_ISO_BUILD_DIR=/some/scratch/dir iso/bin/build
+#
+# Env vars:
+#   OMARCHY_DECK_ISO_BUILD_DIR   scratch root (default: see above)
+#   OMARCHY_INSTALL_DEBUG        passed through to build-iso.sh unchanged
+#   OMARCHY_DECK_ISO_NO_NETWORK_HOST
+#                                 unset by default. build-iso.sh downloads
+#                                 hundreds of packages; Docker's default
+#                                 bridge network is throttled to ~2 KB/s on
+#                                 this dev machine (docs/PROGRESS.md §7), so
+#                                 `docker run --network host` is the default.
+#                                 Set this to 1 to fall back to Docker's
+#                                 normal bridge network instead.
+#
+# Exit codes: 0 success. Any failure below is fail-loud (set -euo pipefail
+# plus explicit checks) -- CLAUDE.md: "never silently swallow a failure."
+
+set -euo pipefail
+
+BUILD_PROG=iso-build
+build_log()  { printf '[%s] %s\n' "$BUILD_PROG" "$*"; }
+build_fail() { printf '[%s] ERROR: %s\n' "$BUILD_PROG" "$*" >&2; exit 1; }
+
+ISO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+REPO_ROOT=$(cd -- "$ISO_ROOT/.." && pwd)
+
+# ---------------------------------------------------------------------------
+# 1. Verify the submodule is exactly at UPSTREAM. Refuse otherwise.
+# ---------------------------------------------------------------------------
+
+[[ -f "$ISO_ROOT/UPSTREAM" ]] || build_fail "missing $ISO_ROOT/UPSTREAM"
+
+upstream_line=$(head -n1 "$ISO_ROOT/UPSTREAM")
+# Expected shape: owner/repo@shortsha
+[[ $upstream_line =~ ^([^/]+/[^@]+)@([0-9a-f]{7,40})$ ]] ||
+  build_fail "$ISO_ROOT/UPSTREAM does not look like 'owner/repo@sha': '$upstream_line'"
+UPSTREAM_SLUG=${BASH_REMATCH[1]}
+UPSTREAM_PIN=${BASH_REMATCH[2]}
+
+UPSTREAM_DIR="$ISO_ROOT/upstream"
+[[ -e "$UPSTREAM_DIR/.git" ]] ||
+  build_fail "$UPSTREAM_DIR is not a checked-out submodule. Run: git -C '$REPO_ROOT' submodule update --init iso/upstream"
+
+upstream_head=$(git -C "$UPSTREAM_DIR" rev-parse HEAD) ||
+  build_fail "could not read HEAD of $UPSTREAM_DIR"
+
+case $upstream_head in
+  "$UPSTREAM_PIN"*) ;;
+  *) build_fail "iso/upstream is at $upstream_head, but iso/UPSTREAM pins $UPSTREAM_SLUG@$UPSTREAM_PIN. Refusing to build from an unpinned checkout -- run 'git -C iso/upstream checkout $UPSTREAM_PIN' (or update UPSTREAM if the pin is meant to move) and re-run." ;;
+esac
+
+upstream_dirty=$(git -C "$UPSTREAM_DIR" status --porcelain)
+[[ -z $upstream_dirty ]] ||
+  build_fail "iso/upstream has local modifications; a dirty pinned checkout is not 'exactly at UPSTREAM'. git -C iso/upstream status:\n$upstream_dirty"
+
+build_log "upstream pin OK: $UPSTREAM_SLUG@$upstream_head"
+
+if [[ -f "$ISO_ROOT/RUNTIME" ]]; then
+  build_log "runtime pin (not yet enforced by this slice -- T5b wires --local-source): $(head -n1 "$ISO_ROOT/RUNTIME")"
+fi
+
+# ---------------------------------------------------------------------------
+# Guard 6.1 -- ref and mirror must agree, and this build sets them itself.
+#
+# omarchy-iso-make's own defaults disagree (OMARCHY_ISO_REF=quattro,
+# OMARCHY_MIRROR=stable -- docs/tasks/T5-fork-plan.md §6.1), and the known-
+# good ISO this slice must reproduce (docs/PROGRESS.md §1.1,
+# docs/findings/T9-iso-comparison.md §2) was built with quattro/edge. Refuse
+# to run under any other combination rather than silently overriding one a
+# caller has already exported -- a caller who set OMARCHY_MIRROR=stable
+# expecting it to take effect must be told no, not built a different ISO
+# than they asked for.
+# ---------------------------------------------------------------------------
+
+BUILD_ISO_REF=quattro
+BUILD_MIRROR=edge
+
+if [[ -n ${OMARCHY_ISO_REF:-} && $OMARCHY_ISO_REF != "$BUILD_ISO_REF" ]]; then
+  build_fail "OMARCHY_ISO_REF=$OMARCHY_ISO_REF is set in the environment, but this fork is pinned to ref '$BUILD_ISO_REF' (guard 6.1, T5-fork-plan.md §6.1). Unset it or bring it into agreement."
+fi
+if [[ -n ${OMARCHY_MIRROR:-} && $OMARCHY_MIRROR != "$BUILD_MIRROR" ]]; then
+  build_fail "OMARCHY_MIRROR=$OMARCHY_MIRROR is set in the environment, but this fork is pinned to mirror '$BUILD_MIRROR' (guard 6.1, T5-fork-plan.md §6.1). Unset it or bring it into agreement."
+fi
+
+build_log "guard 6.1 OK: OMARCHY_ISO_REF=$BUILD_ISO_REF OMARCHY_MIRROR=$BUILD_MIRROR (agree)"
+
+# ---------------------------------------------------------------------------
+# 2. Scratch locations -- all outside this repo (docs/PROGRESS.md §1.1).
+# ---------------------------------------------------------------------------
+
+SCRATCH_ROOT=${OMARCHY_DECK_ISO_BUILD_DIR:-"$HOME/.cache/omarchy-deck/iso-build"}
+case $SCRATCH_ROOT in
+  "$REPO_ROOT"|"$REPO_ROOT"/*)
+    build_fail "OMARCHY_DECK_ISO_BUILD_DIR ($SCRATCH_ROOT) is inside this repo. The ISO and its build cache must never land in git-tracked space -- point it elsewhere." ;;
+esac
+
+SCRATCH_SRC="$SCRATCH_ROOT/src"
+# Guard 6.3: a SCRATCH pacman cache, never the host's /var/cache/pacman/pkg.
+# Persisted across runs deliberately (unlike omarchy-iso-make, which deletes
+# and re-mounts the host's every time) -- this is the "same rebuild speed"
+# half of the guard's promise.
+PACMAN_CACHE_DIR="$SCRATCH_ROOT/pacman-cache"
+OFFLINE_MIRROR_CACHE_DIR="$SCRATCH_ROOT/offline-mirror-cache"
+RELEASE_DIR="$SCRATCH_ROOT/release"
+
+mkdir -p "$SCRATCH_ROOT" "$PACMAN_CACHE_DIR" "$OFFLINE_MIRROR_CACHE_DIR" "$RELEASE_DIR"
+build_log "scratch root: $SCRATCH_ROOT (outside the repo)"
+
+# ---------------------------------------------------------------------------
+# 3. Fresh scratch clone of the pinned submodule.
+#
+# A fresh local clone every run (rather than reusing/resetting one in place)
+# is what makes this idempotent and re-runnable (CLAUDE.md) without needing
+# to reason about what a previous run's `git apply` or rsync left behind.
+# --local hardlinks objects from iso/upstream's own object store, so this is
+# cheap; it is not pushed anywhere and never leaves the scratch root.
+# ---------------------------------------------------------------------------
+
+build_log "cloning pinned upstream into scratch ($SCRATCH_SRC)..."
+rm -rf "$SCRATCH_SRC"
+git clone --quiet --local --no-hardlinks "$UPSTREAM_DIR" "$SCRATCH_SRC"
+git -C "$SCRATCH_SRC" checkout --quiet "$upstream_head"
+
+# archiso is itself a submodule of omarchy-iso (configs/profiledef.sh's
+# buildmodes need it; bin/omarchy-iso-make's own first step is
+# `git submodule update --init --recursive`). Populate it the same way here.
+build_log "populating omarchy-iso's own archiso submodule..."
+git -C "$SCRATCH_SRC" submodule update --init --recursive --jobs=8 --quiet ||
+  build_fail "could not initialize $SCRATCH_SRC's archiso submodule"
+
+# ---------------------------------------------------------------------------
+# 4. rsync overlay/ over the scratch copy.
+#
+# T5a's overlay is deliberately empty (.gitkeep placeholders only, excluded
+# below) -- content is a later slice's job (T5-fork-plan.md §7). This step
+# still runs unconditionally so that an empty overlay build and a populated
+# one go through the exact same code path; that is what makes the parity
+# proof in this slice meaningful for the ones after it.
+# ---------------------------------------------------------------------------
+
+build_log "applying overlay/configs/ ..."
+rsync -a --exclude='.gitkeep' "$ISO_ROOT/overlay/configs/" "$SCRATCH_SRC/configs/"
+
+# ---------------------------------------------------------------------------
+# 5. git apply --3way the patches. Fail loudly on any reject.
+# ---------------------------------------------------------------------------
+
+shopt -s nullglob
+patches=("$ISO_ROOT"/overlay/patches/*.patch)
+shopt -u nullglob
+
+if [[ ${#patches[@]} -eq 0 ]]; then
+  build_log "no patches in overlay/patches/ (expected for T5a's empty overlay)"
+else
+  for p in "${patches[@]}"; do
+    build_log "applying patch: $(basename -- "$p")"
+    git -C "$SCRATCH_SRC" apply --3way "$p" ||
+      build_fail "patch $(basename -- "$p") did not apply cleanly (git apply --3way left a reject or conflict). Upstream moved under this patch -- do not silently paper over it; rebase the patch by hand."
+  done
+fi
+
+# ---------------------------------------------------------------------------
+# 6. The guards. 6.1 already ran above (it gates which env vars reach Docker
+#    at all, so it has to run before this point). 6.3 is structural -- it is
+#    the scratch PACMAN_CACHE_DIR set up in step 2 and the absence, anywhere
+#    in this script, of `sudo rm -rf` against a host path. Recorded here so
+#    a reader looking for "guard 6.3" finds this comment.
+# ---------------------------------------------------------------------------
+
+build_log "guard 6.3 OK: pacman cache is scratch ($PACMAN_CACHE_DIR), host cache untouched"
+
+# ---------------------------------------------------------------------------
+# 7. The build. Mirrors iso/upstream/bin/omarchy-iso-make's docker invocation
+#    of builder/build-iso.sh, minus the two things guard 6.3 forbids (see the
+#    file header) and minus the interactive "boot it?" prompt at the end.
+# ---------------------------------------------------------------------------
+
+command -v docker >/dev/null 2>&1 || build_fail "docker is required and not on PATH"
+
+NETWORK_ARGS=(--network host)
+if [[ ${OMARCHY_DECK_ISO_NO_NETWORK_HOST:-} == 1 ]]; then
+  NETWORK_ARGS=()
+  build_log "OMARCHY_DECK_ISO_NO_NETWORK_HOST=1: using Docker's default bridge network (slower on this dev machine -- docs/PROGRESS.md §7)"
+else
+  build_log "using --network host (docs/PROGRESS.md §7: the default bridge is throttled to ~2 KB/s here)"
+fi
+
+DOCKER_ARGS=(
+  --rm
+  --privileged
+  "${NETWORK_ARGS[@]}"
+  -e "OMARCHY_ISO_REF=$BUILD_ISO_REF"
+  -e "OMARCHY_MIRROR=$BUILD_MIRROR"
+  -e "OMARCHY_INSTALL_DEBUG=${OMARCHY_INSTALL_DEBUG:-}"
+  -e "HOST_UID=$(id -u)"
+  -e "HOST_GID=$(id -g)"
+  -v "$RELEASE_DIR/:/out/"
+  -v "$SCRATCH_SRC/builder/build-iso.sh:/build-iso.sh:ro"
+  -v "$SCRATCH_SRC/archiso:/archiso:ro"
+  -v "$SCRATCH_SRC/builder:/builder:ro"
+  -v "$SCRATCH_SRC/configs:/configs:ro"
+  # Guard 6.3: scratch caches, never the host's.
+  -v "$PACMAN_CACHE_DIR:/var/cache/pacman/pkg"
+  -v "$OFFLINE_MIRROR_CACHE_DIR:/var/cache/airootfs/var/cache/omarchy"
+)
+
+build_log "starting docker build (this downloads hundreds of packages; can take a long time on first run)..."
+docker run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /build-iso.sh
+
+# ---------------------------------------------------------------------------
+# 8. Name and report the result. Matches omarchy-iso-make's own
+#    <name>-<ref>.iso convention so the artifact is unambiguous about which
+#    ref/mirror pair produced it.
+# ---------------------------------------------------------------------------
+
+shopt -s nullglob
+built_isos=("$RELEASE_DIR"/*.iso)
+shopt -u nullglob
+[[ ${#built_isos[@]} -ge 1 ]] ||
+  build_fail "docker build reported success but no .iso appeared in $RELEASE_DIR"
+
+# Newest first; mkarchiso writes exactly one per run, but be explicit rather
+# than assume. find -printf avoids ls's non-alphanumeric-filename footguns.
+latest_iso=$(find "${built_isos[@]}" -maxdepth 0 -printf '%T@ %p\n' | sort -rn | head -n1 | cut -d' ' -f2-)
+case $latest_iso in
+  *-"$BUILD_ISO_REF".iso) final_iso=$latest_iso ;;
+  *) final_iso="${latest_iso%.*}-$BUILD_ISO_REF.iso"; mv -f "$latest_iso" "$final_iso" ;;
+esac
+
+build_log "build complete: $final_iso"
+build_log "$(du -h "$final_iso" | cut -f1) -- $(sha256sum "$final_iso")"
