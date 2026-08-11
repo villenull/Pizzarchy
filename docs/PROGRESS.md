@@ -2088,6 +2088,48 @@ it in that task. They are real and they are now written down.
    a comment that matched them would keep the sibling suite green with the code
    deleted — §7's artifact, manufactured on purpose.
 
+### 5.26 🔴 T4's design gate: nobody has read the lizard-mode knob IN THE LIVE ISO
+
+**Found 2026-08-11 (session 20) while specifying T4** —
+`docs/tasks/T4-screen-spec.md` §8, unknown **U6**. It is one line to check and
+it decides whether T4 has a product.
+
+**Every lizard-mode measurement this project owns was taken on the INSTALLED
+system, running Valve's Neptune kernel.** The live ISO boots a different kernel
+(`linux-t2`). R-8 proved lizard mode is *active* in the live environment — it
+did **not** prove the module parameter exists or is writable there.
+
+If `/sys/module/hid_steam/parameters/lizard_mode` is absent or read-only under
+the ISO's kernel, **text-entry mode cannot be entered at all**: the Wi-Fi
+passphrase screen and the account screen have no keyboard, and the
+controller-only install — the entire point of the project — has no mechanism.
+
+➡️ **Add to the next Deck session, before anything else on the list:**
+
+```bash
+ls -l /sys/module/hid_steam/parameters/lizard_mode; cat /sys/module/hid_steam/parameters/lizard_mode
+```
+
+…run **from the live ISO**, not from the installed system. Four more unknowns
+are ranked beside it in that spec; **U2** (does the QEMU credential-injection
+tier work against archiso at all) should be settled *before* any screen is
+written, because the whole automated-verification tier depends on it.
+
+### 5.26a Three defects in upstream's installer that strand a keyboard-less device
+
+Read out of the dashboard while specifying T4. None is ours; all three land on
+our users, and T4's wrap must handle them:
+
+1. 🔴 **`failure_menu`'s Esc fallback is "Drop to shell."** Pressing **B** on a
+   failed install lands a keyboard-less handheld at a bash prompt.
+2. **"View full log" runs `less`**, which exits only on character keys the
+   screen cannot produce.
+3. **All 18 progress tips name keyboard shortcuts** (`Super + Space` …) on a
+   device with no keyboard.
+
+⚠️ **§6.1a never specified a Failure screen.** It is the screen most likely to
+be reached by someone who cannot recover from it.
+
 ---
 
 ## 6. Blocked on human
@@ -2104,6 +2146,11 @@ it in that task. They are real and they are now written down.
 - ✅ *(Retired 2026-08-11 — both answered, see §5.25.)* ~~Approval to download
   the beta 2 ISO~~ (granted; done, and it proved we were already on beta 2).
   ~~Rebase now or wait for stable?~~ **Wait.**
+- 🆕 **FIRST, from the live ISO, before the five below** (§5.26): read
+  `/sys/module/hid_steam/parameters/lizard_mode` under the ISO's own kernel.
+  One line, and it gates whether T4 has a product at all. It must be done from
+  the **booted ISO**, so it belongs to a session that boots the USB — not to
+  the installed-system session below.
 - 🆕 **ONE Deck session, five approved items batched** (§5.25 rows 1–5): the
   lock fix, `lizard_mode` persistence + fallback, QAM's evdev code,
   `stage-default-session`, and both rotations. ⚠️ **Row 2's fallback must be
