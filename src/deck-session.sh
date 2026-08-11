@@ -191,6 +191,16 @@ readonly INPUT_SOURCES_KEY=/org/gnome/desktop/input-sources/sources
 # ⚠️ And that timeout has a ceiling: lockDelaySeconds*1000 feeds a QML
 # Timer.interval, a 32-bit int, so anything past ~2147483s (~24.8 days)
 # overflows. A day is effectively never for a handheld and is nowhere near it.
+#
+# 🔴 THIS COVERS THE IDLE PRODUCER ONLY, AND THAT IS NOT THE ONLY ONE.
+# Measured 2026-08-11 (docs/findings/T9-lock-service-mitigation.md): Omarchy
+# also ships `omarchy-sleep-lock.service`, a systemd-inhibit on logind's
+# PrepareForSleep that runs `omarchy-shell lock lock` -- so **the power button
+# locks this device**, no idle involved -- and a `system.lock` row in the same
+# menu our Desktop Mode row lives in. Nothing in this file touches either.
+# An earlier version of this comment claimed the settings below mean the
+# handheld "can never be shown an unanswerable password prompt". That was
+# false when it was written. The settings below are necessary, not sufficient.
 readonly OMARCHY_SHELL_JSON_REL=.config/omarchy/shell.json
 readonly OMARCHY_SHELL_JSON_DEFAULTS=/usr/share/omarchy/config/omarchy/shell.json
 readonly IDLE_SCREENSAVER_SECONDS=150

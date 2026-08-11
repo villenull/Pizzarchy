@@ -1914,6 +1914,67 @@ Deck-free and can be written and tested before the hands-on pass.
 
 ---
 
+## 5.24 🔴 NEW — the POWER BUTTON locks this Deck, and the lock is unanswerable
+
+**Found 2026-08-11 while designing a defence against something else.** Full
+trace: **`docs/findings/T9-lock-service-mitigation.md`**. This is a live defect
+on the operator's Deck today, at `6d7826d`, with nothing from the upstream
+delta involved.
+
+**There are three lock producers upstream. §5.20's idle neutering covers one.**
+
+| Producer | Status on our Deck |
+|---|---|
+| Idle timeout (`shell.json` `idle.lock`) | ✅ neutered to 86400 s by `stage-desktop-settings` |
+| 🔴 **`omarchy-sleep-lock.service`** — `systemd-inhibit` on logind's `PrepareForSleep` → `omarchy-shell lock lock` | **LIVE.** Enabled by upstream's `install/user/first-run/enable-user-units.sh`, byte-identical at `6d7826d` and `quattro`. **Press the power button and it locks.** |
+| 🔴 `system.lock` row in `omarchy-menu.jsonc:32` | **LIVE** — in the same menu our Desktop Mode row lives in |
+
+**What the user sees.** With Quickshell's lock UI absent or stranded, Hyprland
+renders `renderSessionLockMissing()` — `lockdead.png` and *"Running on tty 2"*,
+**no password field at all**, unanswerable on any hardware. Escape is a
+ten-second power hold. Even with the real lock screen, our OSK is invisible
+beneath it (`Renderer.cpp:943` skips layers without `above_lock`), and after a
+reboot `lizard_mode` is back to `Y` (§5.21), so the pad emits no letters
+anyway.
+
+⚠️ **`src/deck-session.sh`'s own comment claimed the idle settings mean this
+handheld "can never be shown an unanswerable password prompt." That was false
+when it was written** — it covers the idle producer only. Corrected 2026-08-11;
+`src/` still has zero references to `sleep-lock`, `pam.d` or suspend.
+
+### 🔁 And it inverts §5.22's BREAKS US verdict
+
+`recoverStrandedLock()` **cannot lock an unlocked machine.**
+`omarchy-hyprland-session-locked` exits 0 only when Hyprland's
+`solitaryBlockedBy` carries `LOCK`, whose sole producer is a direct read of the
+lock manager (`Monitor.cpp:1834`, traced at the 0.56.2 we run). The recovery
+attaches a password prompt to a lock that **already exists**. On our
+configuration the delta is the only thing that turns an *undismissable splash*
+into a *dismissable prompt*. **Reclassify that row from BREAKS US to
+RE-VERIFY; it is not a reason to hold back from edge or stable.**
+
+### Recommendation — needs operator approval, it touches the Deck
+
+1. `hl.layer_rule({ match = { namespace = "deck-osk" }, above_lock = 2 })` so
+   our keyboard renders *and* hit-tests above a lock surface. `above_lock` is a
+   first-class Hyprland layer rule and the Lua binding exists at 0.56.2.
+2. `systemctl --user mask omarchy-sleep-lock.service` — stop creating locks
+   nobody asked for.
+3. Keep `idle.lock = 86400`. It is necessary, just not sufficient.
+
+Rejected, with reasons: removing PAM or shadowing the sensor both leave the
+compositor lock in place while deleting the only UI that can dismiss it —
+they make it *unrecoverable* — and both rot silently. Owning the lock surface
+ourselves is weeks of work on a security boundary that fails open.
+
+⚠️ **Unverified and worth knowing: upstream has never provoked this either.**
+Its `test/shell.d/lock-stranded-recovery-test.sh` is 13 regexes over the QML
+text, and the sensor's test runs against a fake `hyprctl`. The findings file
+carries a three-tier provocation plan; tier 0 is a nested Hyprland and needs
+neither Omarchy nor the Deck.
+
+---
+
 ## 6. Blocked on human
 
 - **`docs/ROADMAP.md` P1.4 — Ventoy on the test USB + the stock Omarchy 4.0 beta

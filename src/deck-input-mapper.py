@@ -21,6 +21,15 @@ THE INSTALLER PROFILE (deliberately small)
     L1 / R1              PageUp/Down  long lists
     Start / Select       Enter / Esc  mirrors, controller-menu convention
 
+DESKTOP MODE ADDS TWO BUTTONS (docs/PROGRESS.md §5.23)
+    STEAM (tap, no chord)  `omarchy-menu toggle apps`  the apps menu
+    STEAM + X              the on-screen keyboard      (unchanged)
+    QAM                    `omarchy-menu toggle`       Omarchy's own menu
+                           -- INERT until QAM's evdev code is measured
+
+    Both need lizard_mode=N, or the firmware swallows the presses and no evdev
+    node ever sees them. Startup says which of those is in force.
+
     Text entry is DELIBERATELY absent: free text comes from an on-screen
     keyboard (squeekboard) under a compositor, or from a TUI-native picker --
     that fork is exactly what FINDING-T2-gamepad-spike.md decides. A nav-only
@@ -218,6 +227,60 @@ TRIGGER_BUTTON_MAP: dict[int, int] = {
 OSK_CHORD_HOLD = e.BTN_MODE
 OSK_CHORD_PRESS = e.BTN_NORTH  # physical X
 
+# --- Omarchy's menus on STEAM and QAM (docs/PROGRESS.md §5.23 item 3) --------
+#
+# Operator request, 2026-08-11, for Desktop Mode: STEAM opens the apps menu and
+# QAM opens Omarchy's own menu -- the one at the top-left of the bar.
+#
+# ⚠️ EXEC'd DIRECTLY, NOT SYNTHESISED AS A KEY CHORD. Emitting SUPER+ALT+SPACE
+# would work only while the user's keybinds still say what upstream's defaults
+# say, and upstream edited those bindings in this very release cycle; a stale
+# binding then does nothing at all, with nothing to read anywhere. Exec'ing
+# couples us to `omarchy-menu`'s SUBCOMMAND NAMES instead, which is a narrower
+# surface and a loud one -- a wrong subcommand exits non-zero and says so.
+#
+# Both commands were measured from upstream quattro's
+# default/hypr/bindings/utilities.lua on 2026-08-11:
+#
+#     apps menu             omarchy-menu toggle apps   (stock SUPER + ALT + SPACE)
+#     the bar's own menu    omarchy-menu toggle        (stock SUPER + SPACE)
+#
+# Nothing here adds a keycode, so EMITTED_KEYS is deliberately untouched: these
+# buttons spawn a process, they do not type.
+OMARCHY_MENU = "omarchy-menu"
+MENU_ACTIONS: dict[str, list[str]] = {
+    "menu-apps": [OMARCHY_MENU, "toggle", "apps"],
+    "menu-root": [OMARCHY_MENU, "toggle"],
+}
+
+# 🔴 QAM'S EVDEV CODE HAS NEVER BEEN MEASURED. DELIBERATELY UNSET -- DO NOT GUESS.
+#
+# Every record this project has says only that lizard mode swallows QAM
+# (docs/PROGRESS.md §7); no capture with lizard_mode=N has ever named its code.
+# A guess binds a button we cannot see to a menu we cannot test, and both ways
+# it fails silently: either QAM does nothing, or some OTHER button opens the
+# menu and nobody knows which press did it.
+#
+# While this is None the QAM binding is INERT, and menu_binding_report() says so
+# at every startup rather than leaving a dead button to be rediscovered.
+#
+# ONE PRESS FILLS IT IN. On the Deck, at a shell: this turns lizard mode off so
+# QAM reaches an evdev node at all, then prints the code of every button pressed
+# until Ctrl-C -- press QAM and read the name off the last line.
+#
+#   sudo sh -c 'echo N >/sys/module/hid_steam/parameters/lizard_mode' && sudo python3 -c "import sys;from evdev import InputDevice,ecodes as e;d=InputDevice(sys.argv[1]);print('now press QAM');[print(x.code, e.bytype[e.EV_KEY].get(x.code)) for x in d.read_loop() if x.type==e.EV_KEY and x.value==1]" "$(sudo deck-input-mapper --list | awk '/\[gamepad\]/{print $1; exit}')"
+#
+# python3-evdev is a hard dependency of this script, so it is certainly present;
+# `sudo evtest DEVICE` prints the same thing IF evtest happens to be installed,
+# which on a stock Deck it is not. Then set QAM_BUTTON to that code and record
+# the measurement in docs/PROGRESS.md §7 beside the other button facts.
+QAM_BUTTON: int | None = None
+
+# Where the knob that makes STEAM and QAM exist at all lives. Read only to
+# REPORT it (docs/PROGRESS.md §5.21 owns setting it); with lizard mode on, both
+# buttons reach no evdev node and neither binding can possibly fire.
+LIZARD_MODE_PATH = "/sys/module/hid_steam/parameters/lizard_mode"
+
 # The Deck's d-pad arrives as DISCRETE BUTTONS. `hid-steam` advertises
 # ABS_HAT0X/Y *and* BTN_DPAD_*, and (as above) those axes are the left
 # trackpad, so the buttons are the only d-pad input there is. Before this table
@@ -312,6 +375,12 @@ class Mapper:
 
     # STEAM (BTN_MODE) held, for the STEAM+X chord.
     mode_held: bool = False
+    # Whether anything was pressed DURING this hold of STEAM. STEAM is both the
+    # chord's hold key and a button of its own (it opens the apps menu), so the
+    # two are told apart on release: a hold that had a partner was a chord and
+    # fires nothing, a clean tap fires the menu. Armed on every STEAM press --
+    # a chord must not poison the tap that follows it.
+    mode_chorded: bool = False
     # Actions the caller should perform, drained by main(). Kept as data rather
     # than executed here so the whole chord is unit-testable without a DBus
     # session or a subprocess.
@@ -461,13 +530,41 @@ class Mapper:
         if etype == e.EV_KEY:
             # STEAM+X toggles the on-screen keyboard. Checked before every
             # other key path so the X in the chord does not also type Tab.
+            #
+            # ⚠️ STEAM IS RESOLVED ON RELEASE, and it has to be. It is the
+            # chord's hold key AND the apps-menu button, so firing on the press
+            # would open the menu underneath every STEAM+X the operator makes --
+            # and STEAM+X is hardware-proven (R-43) and relied on.
             if code == OSK_CHORD_HOLD:
-                if value in (0, 1):
-                    self.mode_held = bool(value)
+                if value == 1:
+                    self.mode_held = True
+                    self.mode_chorded = False
+                elif value == 0:
+                    # `mode_held` as well as `mode_chorded`: a release we never
+                    # saw the press for (re-binding to a pad mid-hold) is not a
+                    # tap the user made.
+                    tap = self.mode_held and not self.mode_chorded
+                    self.mode_held = False
+                    if tap:
+                        self.pending_actions.append("menu-apps")
                 return []
+            # Any button pressed while STEAM is down makes this hold a CHORD.
+            # Deliberately EVERY button, not just X: STEAM+A still emits Enter
+            # underneath, and letting go afterwards must not also open a menu the
+            # user never asked for. Axes are excluded on purpose -- a thumb
+            # resting on a trackpad is not a chord partner.
+            if self.mode_held and value == 1:
+                self.mode_chorded = True
             if code == OSK_CHORD_PRESS and self.mode_held:
                 if value == 1:
                     self.pending_actions.append("toggle-osk")
+                return []
+            # QAM opens Omarchy's own menu. INERT while QAM_BUTTON is unset,
+            # which is its shipped state -- see the constant. No chord to
+            # disambiguate here, so it fires on the press.
+            if QAM_BUTTON is not None and code == QAM_BUTTON:
+                if value == 1:
+                    self.pending_actions.append("menu-root")
                 return []
         # ⚠️ AFTER the chord, BEFORE everything else. The chord has to keep
         # working while the keyboard is up -- it is how a user dismisses one
@@ -522,6 +619,131 @@ class Mapper:
     def next_deadline(self) -> float | None:
         deadlines = [s.next_repeat for s in self.hats.values() if s.active_key is not None]
         return min(deadlines) if deadlines else None
+
+
+# --- spawning helpers, and what the menu buttons will actually do ------------
+
+
+# Children we have started and not yet reaped.
+#
+# ⚠️ A Popen nobody waits on becomes a ZOMBIE and holds its PID until the parent
+# reaps it. That was survivable while the only spawn was the occasional
+# squeekboard toggle; STEAM and QAM make spawning a per-button-press action in a
+# service that runs for the life of the session, so "never reap" would leak a
+# PID every time the user opens a menu. Reaping is done here rather than with a
+# SIGCHLD handler because this module is imported by a unit suite that must not
+# install process-wide signal handlers, and because a handler would also reap
+# `osk_layer_proc`, which main() polls itself.
+_spawned: list = []
+
+
+def reap_spawned() -> int:
+    """Drop children that have exited. Returns how many were reaped.
+
+    `poll()` is what actually releases the zombie; keeping the object in a list
+    and polling later is the whole mechanism.
+    """
+    before = len(_spawned)
+    _spawned[:] = [proc for proc in _spawned if proc.poll() is None]
+    return before - len(_spawned)
+
+
+def spawn_detached(argv: list[str], what: str) -> bool:
+    """Start a helper process and never wait for it. True if it started.
+
+    `start_new_session=True` puts the helper in its own session, so a signal
+    aimed at this process's group (a Ctrl-C in a foreground debug run) does not
+    also kill the menu the user just opened. It does NOT survive the service
+    being stopped -- systemd kills the whole control group -- and it is not
+    meant to.
+
+    ⚠️ NEITHER BLOCKING NOR FATAL, AND NEVER SILENT. Popen without a wait, so a
+    helper that hangs cannot freeze the input loop -- with lizard_mode=N this
+    process is the only input path on the device (docs/PROGRESS.md §5.9), and a
+    frozen loop is a handheld with no pointer and no keys. A helper that is
+    missing entirely raises OSError here, which must cost that one button and
+    nothing else; it is reported loudly because a button that silently does
+    nothing is indistinguishable from lizard mode swallowing the press.
+    """
+    reap_spawned()
+    try:
+        proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+    except OSError as exc:
+        print(f"deck-input-mapper: could not {what}: {exc}",
+              file=sys.stderr, flush=True)
+        return False
+    _spawned.append(proc)
+    return True
+
+
+def run_menu_action(action: str, dry_run: bool = False) -> bool:
+    """Open one of Omarchy's menus. Returns True if the helper was started."""
+    argv = MENU_ACTIONS.get(action)
+    if argv is None:
+        # Unreachable from translate(), which queues only these two names --
+        # which is exactly why it is loud rather than an ignored default branch.
+        print(f"deck-input-mapper: unknown menu action {action!r}; nothing opened",
+              file=sys.stderr, flush=True)
+        return False
+    if dry_run:
+        print(f"menu -> {' '.join(argv)}", file=sys.stderr, flush=True)
+        return True
+    if not spawn_detached(argv, f"run `{' '.join(argv)}`"):
+        print(f"deck-input-mapper: that button does nothing until {OMARCHY_MENU} "
+              "is installed and on PATH; the rest of the mapper is unaffected",
+              file=sys.stderr, flush=True)
+        return False
+    return True
+
+
+def read_lizard_mode(path: str = LIZARD_MODE_PATH) -> str | None:
+    """`Y`, `N`, or None when the knob cannot be read (no hid_steam, not a Deck)."""
+    try:
+        return pathlib.Path(path).read_text().strip()
+    except OSError:
+        return None
+
+
+def menu_binding_report(lizard: str | None) -> list[str]:
+    """What the menu buttons will and will not do, said once at startup.
+
+    ⚠️ THE JOURNAL IS THE POINT. The overwhelmingly likely field report about
+    either of these buttons is "I pressed it and nothing happened", and there
+    are three different causes: lizard mode is on so the press reaches no evdev
+    node at all (§5.9, §5.21), QAM's code has never been measured so its binding
+    is inert (see QAM_BUTTON), or `omarchy-menu` is not installed. Each is
+    named here, so whoever reads the log does not have to rediscover them.
+    """
+    lines = [
+        f"STEAM (tap, no chord) -> `{' '.join(MENU_ACTIONS['menu-apps'])}`; "
+        "STEAM+X still toggles the on-screen keyboard",
+    ]
+    if QAM_BUTTON is None:
+        lines.append(
+            f"QAM -> `{' '.join(MENU_ACTIONS['menu-root'])}` is INERT: QAM_BUTTON "
+            "is unset because QAM's evdev code has never been measured. One "
+            "press fills it in -- see the comment beside QAM_BUTTON in this "
+            "script for the exact command")
+    else:
+        name = e.bytype[e.EV_KEY].get(QAM_BUTTON, QAM_BUTTON)
+        if isinstance(name, (list, tuple)):
+            name = "/".join(name)
+        lines.append(f"QAM ({name}) -> `{' '.join(MENU_ACTIONS['menu-root'])}`")
+    if lizard is None:
+        lines.append(
+            f"could not read {LIZARD_MODE_PATH}, so this cannot tell you whether "
+            "lizard mode is on -- and with it on, STEAM and QAM reach no evdev "
+            "node and NEITHER binding above can fire")
+    elif lizard.strip().upper() == "N":
+        lines.append(f"lizard_mode is {lizard}: STEAM and QAM reach this process")
+    else:
+        lines.append(
+            f"lizard_mode is {lizard}, so the firmware SWALLOWS STEAM and QAM "
+            "entirely -- they reach no evdev node and NEITHER binding above can "
+            f"fire. `echo N | sudo tee {LIZARD_MODE_PATH}` re-enables them, and "
+            "does not survive a reboot (docs/PROGRESS.md §5.21)")
+    return [f"deck-input-mapper: {line}" for line in lines]
 
 
 # --- device plumbing ---------------------------------------------------------
@@ -953,13 +1175,9 @@ def main() -> None:
         if ui is None:
             return
         argv = OSK_TOGGLE_ARGV_SHOW if visible else OSK_TOGGLE_ARGV_HIDE
-        try:
-            subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except OSError as exc:
-            # Loud, but not fatal: losing the OSK toggle must not take the
-            # pointer down with it.
-            print(f"deck-input-mapper: could not toggle the OSK: {exc}",
-                  file=sys.stderr, flush=True)
+        # Loud, but not fatal: losing the OSK toggle must not take the pointer
+        # down with it. Same contract as every other helper we spawn.
+        spawn_detached(argv, "toggle the OSK")
 
     def set_osk_visible(visible: bool) -> None:
         nonlocal osk_visible
@@ -992,14 +1210,31 @@ def main() -> None:
 
     def run_pending(actions: list[str]) -> None:
         """Perform queued side effects. Never blocks the input loop: a DBus
-        call that hangs must not freeze the pointer."""
+        call, or a menu that takes a moment to draw, must not freeze the
+        pointer."""
         while actions:
-            if actions.pop(0) == "toggle-osk":
+            action = actions.pop(0)
+            if action == "toggle-osk":
                 set_osk_visible(not osk_visible)
+                continue
+            if action in MENU_ACTIONS:
+                if args.verbose and ui is not None:
+                    print(f"menu -> {' '.join(MENU_ACTIONS[action])}",
+                          file=sys.stderr, flush=True)
+                # --dry-run reports instead of spawning, exactly as the emitters
+                # above print instead of injecting.
+                run_menu_action(action, dry_run=ui is None)
+                continue
+            # An action queued by translate() and handled by nobody is a bug
+            # that would otherwise present as a dead button.
+            print(f"deck-input-mapper: queued action {action!r} has no handler; "
+                  "nothing happened", file=sys.stderr, flush=True)
 
     if args.grab:
         pad.grab()
     print(f"deck-input-mapper: reading {pad.path} ({pad.name})", file=sys.stderr, flush=True)
+    for line in menu_binding_report(read_lizard_mode()):
+        print(line, file=sys.stderr, flush=True)
 
     sel = selectors.DefaultSelector()
     sel.register(pad.fd, selectors.EVENT_READ)

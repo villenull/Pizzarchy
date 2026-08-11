@@ -248,7 +248,333 @@ mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
 mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.1)
 check("X after STEAM is released is Tab again",
       mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.2), [(e.KEY_TAB, 1)])
-check("no toggle queued once STEAM is released", mm.pending_actions, [])
+# ⚠️ NOT `pending_actions == []` any more. That bare press-and-release is now a
+# TAP, and a tap queues the apps menu (§5.23, covered in its own section below).
+# What must stay true here is that the CHORD is disarmed -- X arriving after the
+# release must not toggle the keyboard.
+check("no OSK toggle queued once STEAM is released",
+      "toggle-osk" in mm.pending_actions, False)
+
+# --- STEAM taps and QAM open Omarchy's menus (docs/PROGRESS.md §5.23) --------
+#
+# Operator request: STEAM -> the apps menu, QAM -> the menu at the bar's
+# top-left. The menus are EXEC'd rather than synthesised as SUPER+ALT+SPACE,
+# because a synthesised chord only works while the user's keybinds still say
+# what upstream's defaults say -- and upstream edited those bindings in this
+# release cycle. What that costs is a coupling to `omarchy-menu`'s subcommand
+# NAMES, which is what the argv assertions below pin.
+#
+# STEAM is already the OSK chord's hold key, so a tap is only a tap if nothing
+# was pressed during the hold -- which is why it resolves on RELEASE.
+#
+# ⚠️ NOTHING HERE STARTS A PROCESS. translate() only queues an action name; the
+# spawn is stubbed (FakeSubprocess) so this suite still needs no Omarchy, no
+# compositor, no DBus and no root.
+
+import contextlib  # noqa: E402 -- the suite is a script; these are block-local
+import io  # noqa: E402
+import subprocess as _subprocess  # noqa: E402
+import tempfile  # noqa: E402
+
+check("the apps menu is exactly upstream's command",
+      m.MENU_ACTIONS["menu-apps"], ["omarchy-menu", "toggle", "apps"])
+check("the bar's own menu is the ROOT command, with no subcommand",
+      m.MENU_ACTIONS["menu-root"], ["omarchy-menu", "toggle"])
+
+# Fire on RELEASE, not on press: firing on the press would open the apps menu
+# underneath every STEAM+X the operator makes, and STEAM+X is hardware-proven.
+mm = fresh()
+check("STEAM pressed emits nothing", mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0), [])
+check("and queues nothing yet -- a tap is not decided until the release",
+      mm.pending_actions, [])
+check("STEAM released emits no keystroke either",
+      mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.1), [])
+check("a clean STEAM tap queues the APPS menu", mm.pending_actions, ["menu-apps"])
+
+# The chord must be untouched: it is hardware-proven (R-43) and relied on.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("X under STEAM still does not type Tab",
+      mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.1), [])
+mm.translate(e.EV_KEY, e.BTN_NORTH, 0, 0.2)
+check("releasing STEAM after the chord emits nothing",
+      mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.3), [])
+check("STEAM+X toggles the OSK and opens NO menu", mm.pending_actions, ["toggle-osk"])
+
+# Any partner disarms the tap, not just X: STEAM+A still sends Enter underneath,
+# and letting go afterwards must not also open a menu nobody asked for.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("A pressed under STEAM still sends Enter",
+      mm.translate(e.EV_KEY, e.BTN_SOUTH, 1, 0.1), [(e.KEY_ENTER, 1)])
+mm.translate(e.EV_KEY, e.BTN_SOUTH, 0, 0.2)
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.3)
+check("STEAM+A is a chord, not a tap: no menu", mm.pending_actions, [])
+
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_KEY, e.BTN_TR2, 1, 0.1)          # a trigger click counts too
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.2)
+check("a trigger click under STEAM also disarms the tap", mm.pending_actions, [])
+
+# Only presses that START during the hold count. A button already down when
+# STEAM goes down, and let go during it, is not a chord the user performed.
+# ⚠️ `value in (0, 1)` here -- a plausible copy-paste from the branch above --
+# swallows that tap, and this is the only assertion that catches it
+# (mutation-tested: without it, that fault survives the whole suite).
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_SOUTH, 1, 0.0)     # A is already held
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.1)
+mm.translate(e.EV_KEY, e.BTN_SOUTH, 0, 0.2)     # and released during the hold
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.3)
+check("a button released -- not pressed -- during the hold still leaves a tap",
+      mm.pending_actions, ["menu-apps"])
+
+# A resting thumb is NOT a chord partner, or the tap would be unusable on a
+# handheld where both pads are under the thumbs.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_ABS, e.ABS_HAT1X, 20000, 0.1)    # right trackpad
+mm.translate(e.EV_ABS, e.ABS_Y, 25000, 0.15)       # and the stick
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.2)
+check("pad and stick movement during the hold still leaves a tap",
+      mm.pending_actions, ["menu-apps"])
+
+# The partner flag is armed on every PRESS, so a chord cannot poison the tap
+# that follows it -- the failure mode of clearing it only on release.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.1)
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.2)
+mm.pending_actions.clear()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 1.0)
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 1.1)
+check("a chord does not poison the tap after it", mm.pending_actions, ["menu-apps"])
+
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.1)
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.5)
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.6)
+check("two taps in a row fire twice", mm.pending_actions, ["menu-apps", "menu-apps"])
+
+# A release whose press we never saw -- the pad re-binding mid-hold does this
+# (the ENODEV path re-enters pick_device) -- is not a tap the user made.
+mm = fresh()
+check("a STEAM release with no press emits nothing",
+      mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.0), [])
+check("and is not treated as a tap", mm.pending_actions, [])
+
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("the pad's own autorepeat on STEAM emits nothing",
+      mm.translate(e.EV_KEY, e.BTN_MODE, 2, 0.1), [])
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.2)
+check("and does not count as a chord partner", mm.pending_actions, ["menu-apps"])
+
+# 🔴 QAM ships INERT. Its evdev code has never been measured -- every record
+# says only that lizard mode swallows it -- and a guessed code binds a button
+# we cannot see to a menu we cannot test, failing silently either way.
+
+check("QAM_BUTTON ships unset, because the code has never been measured",
+      m.QAM_BUTTON, None)
+mm = fresh()
+check("with QAM_BUTTON unset, an unbound button queues nothing",
+      (mm.translate(e.EV_KEY, e.BTN_TRIGGER_HAPPY1, 1, 0.0), mm.pending_actions),
+      ([], []))
+
+_saved_qam = m.QAM_BUTTON
+m.QAM_BUTTON = e.BTN_TRIGGER_HAPPY1   # stands in for the code one press will name
+mm = fresh()
+check("with a code set, QAM queues the ROOT menu on the press",
+      (mm.translate(e.EV_KEY, m.QAM_BUTTON, 1, 0.0), mm.pending_actions),
+      ([], ["menu-root"]))
+check("and the release does not queue it a second time",
+      (mm.translate(e.EV_KEY, m.QAM_BUTTON, 0, 0.1), mm.pending_actions),
+      ([], ["menu-root"]))
+m.QAM_BUTTON = _saved_qam
+check("QAM_BUTTON is left unset for the rest of the suite", m.QAM_BUTTON, None)
+
+
+# --- the spawn: loud, non-blocking, never fatal ------------------------------
+#
+# The mapper spawns and forgets, exactly as it does for squeekboard's busctl
+# call. Two properties matter more than the argv: it must never WAIT (with
+# lizard_mode=N this process is the only input path, so a blocked loop is a
+# handheld with no pointer and no keys), and a missing `omarchy-menu` must cost
+# that one button loudly rather than killing the process.
+
+
+class FakeProc:
+    """A spawned process that records whether anyone waited on it.
+
+    `exits_after` is how many poll() calls it survives: 0 means "already gone",
+    None means "still running forever", which is the default because most cases
+    here care about the spawn, not the reap.
+    """
+
+    def __init__(self, exits_after=None):
+        self.waited = False
+        self.polls = 0
+        self.exits_after = exits_after
+
+    def wait(self, timeout=None):
+        self.waited = True
+        return 0
+
+    def poll(self):
+        self.polls += 1
+        if self.exits_after is None:
+            return None
+        return 0 if self.polls > self.exits_after else None
+
+
+class FakeSubprocess:
+    """Stands in for the `subprocess` module inside the mapper. Nothing in this
+    suite may start a real process: CI has no Omarchy, no compositor, no DBus."""
+
+    DEVNULL = _subprocess.DEVNULL
+
+    def __init__(self, error=None):
+        self.calls = []
+        self.procs = []
+        self.error = error
+
+    def Popen(self, argv, **kwargs):
+        self.calls.append((list(argv), kwargs))
+        if self.error is not None:
+            raise self.error
+        proc = FakeProc()
+        self.procs.append(proc)
+        return proc
+
+
+def with_fake_subprocess(fn, error=None):
+    """Run fn() with the mapper's `subprocess` stubbed out.
+
+    Returns (result, fake, stderr). The stub is restored in a finally: a leaked
+    one would silently disarm every later spawn assertion.
+    """
+    fake = FakeSubprocess(error)
+    real = m.subprocess
+    m.subprocess = fake
+    captured = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(captured):
+            result = fn()
+    finally:
+        m.subprocess = real
+    return result, fake, captured.getvalue()
+
+
+_result, _fake, _err = with_fake_subprocess(lambda: m.run_menu_action("menu-apps"))
+check("running the apps menu spawns exactly upstream's argv",
+      [argv for argv, _kw in _fake.calls], [["omarchy-menu", "toggle", "apps"]])
+check("and reports that it started", _result, True)
+check("nothing waits on it -- a slow menu must never freeze the input loop",
+      [p.waited for p in _fake.procs], [False])
+check("its output is discarded rather than mixed into our journal",
+      (_fake.calls[0][1].get("stdout"), _fake.calls[0][1].get("stderr")),
+      (_subprocess.DEVNULL, _subprocess.DEVNULL))
+check("and it is an argv, never a shell string -- nothing here goes through sh",
+      _fake.calls[0][1].get("shell"), None)
+check("a successful spawn says nothing on stderr", _err, "")
+
+_result, _fake, _err = with_fake_subprocess(lambda: m.run_menu_action("menu-root"))
+check("the root menu spawns the bare `toggle`",
+      [argv for argv, _kw in _fake.calls], [["omarchy-menu", "toggle"]])
+
+# A missing binary is the likeliest failure of all -- the installer has no
+# `omarchy-menu`, and neither does a Deck mid-install.
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_menu_action("menu-apps"),
+    error=FileNotFoundError(2, "No such file or directory", "omarchy-menu"))
+check("a missing omarchy-menu does not raise", _result, False)
+check("it is LOUD about it", "could not run" in _err, True)
+check("and names the command it tried", "omarchy-menu toggle apps" in _err, True)
+check("and says the rest of the mapper is unaffected",
+      "the rest of the mapper is unaffected" in _err, True)
+mm = fresh()
+check("and the mapper still translates afterwards",
+      mm.translate(e.EV_KEY, e.BTN_SOUTH, 1, 0.0), [(e.KEY_ENTER, 1)])
+
+_result, _fake, _err = with_fake_subprocess(lambda: m.run_menu_action("menu-nope"))
+check("an unknown menu action spawns nothing", _fake.calls, [])
+check("and is reported rather than ignored",
+      ("unknown menu action" in _err, _result), (True, False))
+
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_menu_action("menu-apps", dry_run=True))
+check("--dry-run reports the menu instead of spawning it",
+      (_fake.calls, "omarchy-menu toggle apps" in _err, _result), ([], True, True))
+
+# End to end, the way main() drives it: translate queues a NAME, the dispatcher
+# resolves it to an argv. This is the pair that catches a button wired to the
+# wrong menu -- either half alone still passes if they are swapped.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.1)
+_result, _fake, _err = with_fake_subprocess(
+    lambda: [m.run_menu_action(a) for a in mm.pending_actions])
+check("a STEAM tap runs the APPS menu end to end",
+      [argv for argv, _kw in _fake.calls], [["omarchy-menu", "toggle", "apps"]])
+
+m.QAM_BUTTON = e.BTN_TRIGGER_HAPPY1
+mm = fresh()
+mm.translate(e.EV_KEY, m.QAM_BUTTON, 1, 0.0)
+m.QAM_BUTTON = _saved_qam
+_result, _fake, _err = with_fake_subprocess(
+    lambda: [m.run_menu_action(a) for a in mm.pending_actions])
+check("a QAM press runs the ROOT menu end to end",
+      [argv for argv, _kw in _fake.calls], [["omarchy-menu", "toggle"]])
+
+
+# --- what startup says, so a dead button is never a mystery ------------------
+#
+# ⚠️ Both buttons exist only with lizard_mode=N (§5.9, §5.21), and QAM's binding
+# is inert until its code is measured. Three different causes, one symptom --
+# "I pressed it and nothing happened" -- so the journal has to name which is in
+# force. An inert binding that says nothing is exactly the silent failure
+# CLAUDE.md forbids.
+
+_report_n = "\n".join(m.menu_binding_report("N"))
+check("startup names the apps-menu command",
+      "omarchy-menu toggle apps" in _report_n, True)
+check("startup says STEAM+X still works, so nobody thinks the tap replaced it",
+      "STEAM+X" in _report_n, True)
+check("startup ANNOUNCES the inert QAM binding rather than omitting it",
+      "INERT" in _report_n, True)
+check("and names the constant to fill in", "QAM_BUTTON" in _report_n, True)
+check("with lizard_mode=N it says the presses reach us",
+      "reach this process" in _report_n, True)
+check("every line is prefixed, so it is greppable in a journal",
+      all(line.startswith("deck-input-mapper: ") for line in m.menu_binding_report("N")),
+      True)
+
+_report_y = "\n".join(m.menu_binding_report("Y"))
+check("with lizard mode ON it says the presses never arrive",
+      "SWALLOWS" in _report_y, True)
+check("and gives the knob that fixes it", m.LIZARD_MODE_PATH in _report_y, True)
+check("and warns it does not survive a reboot",
+      "does not survive a reboot" in _report_y, True)
+check("an unreadable knob is reported, never assumed to be fine",
+      "could not read" in "\n".join(m.menu_binding_report(None)), True)
+
+m.QAM_BUTTON = e.BTN_TRIGGER_HAPPY1
+_report_set = "\n".join(m.menu_binding_report("N"))
+m.QAM_BUTTON = _saved_qam
+check("once a code is measured the report names the button instead of INERT",
+      ("BTN_TRIGGER_HAPPY1" in _report_set, "INERT" in _report_set), (True, False))
+check("QAM_BUTTON is still unset after the report checks", m.QAM_BUTTON, None)
+
+check("an unreadable lizard_mode knob reads as None rather than raising",
+      m.read_lizard_mode("/nonexistent/hid_steam/lizard_mode"), None)
+with tempfile.NamedTemporaryFile("w", suffix=".lizard_mode") as _fh:
+    _fh.write("N\n")
+    _fh.flush()
+    # The trailing newline matters: menu_binding_report compares against "N".
+    check("a readable knob is reported with its whitespace stripped",
+          m.read_lizard_mode(_fh.name), "N")
 
 # --- the pointer, from the RIGHT trackpad -----------------------------------
 #
@@ -416,6 +742,19 @@ mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
 check("STEAM+X still queues a toggle while the keyboard is up",
       (mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.1), mm.pending_actions),
       ([], ["toggle-osk"]))
+check("and releasing STEAM after that chord opens no menu",
+      (mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.2), mm.pending_actions),
+      ([], ["toggle-osk"]))
+
+# A STEAM tap does the SAME thing with the keyboard up as with it down --
+# deliberately, and for the same reason the chord is checked before the OSK
+# branch: a button whose meaning depends on invisible state is worse than one
+# that opens a menu over a keyboard the user can dismiss.
+mm = osk_mapper()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("a STEAM tap still opens the apps menu with the keyboard up",
+      (mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.1), mm.pending_actions),
+      ([], ["menu-apps"]))
 
 # --- and none of that may happen with the OSK DOWN ---------------------------
 
