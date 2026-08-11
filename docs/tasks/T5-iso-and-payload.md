@@ -227,7 +227,7 @@ the choice must survive a *new* user account, not just the one on the test Deck.
 
 | Requirement | Why |
 |---|---|
-| `~/.config/autostart/steam.desktop` with `Exec=steam -silent` | R-39, validated end to end. Valve's keyboard lives inside the Steam client; no Steam, no keyboard. `-silent` starts it resident with **zero windows**. ⚠️ Also requires a **StatusNotifier tray host** (the `omarchy.tray` bar widget) — without one, closing Steam's window quits it and Desktop Mode loses its keyboard |
+| `~/.config/autostart/steam.desktop` with `Exec=steam -silent` | 🐞 **BLOCKED by R-41** — a resident Steam removes lizard mode's mouse/keyboard nodes, leaving no pointer. Resolve before shipping. R-39, validated end to end. Valve's keyboard lives inside the Steam client; no Steam, no keyboard. `-silent` starts it resident with **zero windows**. ⚠️ Also requires a **StatusNotifier tray host** (the `omarchy.tray` bar widget) — without one, closing Steam's window quits it and Desktop Mode loses its keyboard |
 | `~/.config/omarchy/shell.json` → `"idle": {"screensaver": 150, "lock": 86400}` | R-38. Omarchy locks at 300 s with a password prompt no available keyboard can reach. ⚠️ **`lock: 0` locks INSTANTLY** — there is no off sentinel — and values past ~24.8 days overflow a QML int32 timer |
 | `~/.config/hypr/monitors.lua` rotation | §5.11 — the desktop renders sideways without it. Baked, not per-user |
 

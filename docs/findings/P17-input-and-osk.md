@@ -1,4 +1,4 @@
-# Session 17 — the input path, seen on a screen for the first time (R-29…R-40)
+# Session 17 — the input path, seen on a screen for the first time (R-29…R-41)
 
 **2026-08-10, OLED Deck, operator present and holding the device.** Session 16
 closed with the honest admission that *"nothing here was seen on a screen"*.
@@ -458,6 +458,62 @@ hardware, where the counter now stays at **`NRestarts=0`**.
 **The lesson is the one this session keeps repeating**: the fix was correct
 about the case it modelled and wrong about the system. Only running it under a
 real Steam start/stop showed the second path.
+
+## R-41 — 🐞 A RESIDENT STEAM LEAVES THE DESKTOP WITH NO POINTER AND NO KEYBOARD
+
+**Found by the operator being unable to dismiss the screensaver.** This
+invalidates part of R-39 and is the most serious defect this session found,
+because it is a *lockout* rather than a missing feature.
+
+Steam taking the controller does not only swap the gamepad node. It removes
+**lizard mode's emulation nodes as well**:
+
+| | Steam not running | Steam resident (`-silent`) |
+|---|---|---|
+| `Valve Software Steam Controller` (mouse, `event5`) | present | **gone** |
+| `Valve Software Steam Controller` (kbd, `event6`) | present | **gone** |
+| `Steam Deck` (gamepad) | present | **gone** |
+| `Microsoft X-Box 360 pad 0` | — | present |
+
+So with Steam resident the Deck has **a gamepad and nothing else** — no pointer,
+no keystrokes. Our mapper is deliberately inert in that state (R-37), and
+correctly so, since Steam owns the pad.
+
+On stock SteamOS this is invisible because Steam Input immediately applies a
+**Desktop layout** that synthesises mouse and keyboard from the trackpads and
+buttons. Started with `-silent` and never brought to the foreground, Steam here
+did not — leaving a device whose every physical control produced Xbox gamepad
+events that nothing was listening for.
+
+**The failure the operator hit:** the screensaver appeared at 150 s and no input
+existed that could dismiss it. Recovered over SSH by killing
+`foot --app-id=org.omarchy.screensaver` and shutting Steam down, after which
+both emulation nodes returned immediately.
+
+⚠️ **This is exactly the lockout §2.6 was told it had avoided.** Disabling the
+idle lock (R-38) removed the *password* trap; it did not remove this one,
+because the screensaver alone is enough when there is no input device capable
+of dismissing it.
+
+### What it means for §2.6
+
+Requirement 1 — "Steam autostarts with `-silent`" — is **not sufficient as
+written, and is unsafe on its own.** R-39's checks were all true and all
+insufficient: Steam resident ✅, tray item ✅, survives window close ✅, STEAM+X
+summons the keyboard ✅ — and the device was uncontrollable the whole time.
+**Every one of those checks passed while the desktop had no pointer.**
+
+Before this ships, one of these has to be established:
+
+1. **Steam Input applies a Desktop layout when Steam is resident**, restoring
+   mouse and keyboard from the trackpads — the stock SteamOS behaviour, and the
+   thing to verify first. If it needs Steam to have been foregrounded once, or a
+   per-user config, that is a first-boot step the image must perform.
+2. Or Desktop Mode keeps a non-Steam input path alive (the mapper with
+   `lizard_mode=N`, or squeekboard plus lizard mode) — which reopens §2.6.
+
+⚠️ **Do not treat "STEAM+X shows the keyboard" as evidence the desktop is
+usable.** It was true here while nothing could move a cursor or press a key.
 
 ## State on exit
 

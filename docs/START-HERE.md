@@ -35,11 +35,13 @@ work without waiting for further instruction.**
 > - **Gaming Mode was confirmed usable by the operator** (R-38), closing P16's
 >   caveat that the session was only ever known to *exist*.
 > - 🆕 **§2.6 decides the keyboard: squeekboard for the INSTALLER, Steam's own
->   thereafter.** Validated end to end (R-39): `steam -silent` autostarts
->   resident with **zero windows**, closing a window does not quit it, and
->   STEAM+X summons Valve's keyboard. **The idle lock had to be disabled** to
->   make that safe (R-38) — no available keyboard can reach a layer-shell lock
->   screen.
+>   thereafter** — but its Desktop Mode half is 🐞 **BLOCKED by R-41**. A
+>   resident Steam removes lizard mode's **mouse and keyboard** nodes with the
+>   gamepad, leaving the desktop with **no pointer and no keystrokes**; the
+>   operator hit it as an unexitable screensaver. **R-39's checks all passed
+>   while the device was uncontrollable** — "STEAM+X shows the keyboard" is not
+>   evidence the desktop is usable. The idle lock is also disabled (R-38), which
+>   removed the *password* trap but not this one.
 >
 > Full evidence: **`docs/findings/P17-input-and-osk.md`** (R-29…R-36).
 >
