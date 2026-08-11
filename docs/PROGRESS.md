@@ -69,24 +69,34 @@ Deck-free work: **§5.13**'s repo-precedence audit, **P2.5** (T4 installer
 screens) or **P2.7** (T5 ISO fork). T5 also inherits a new obligation from
 §5.11: the desktop rotation currently lives in one user's dotfile.
 
-**Session 17 (2026-08-10) was the eyes-and-hands pass for input**, the first
-time any of this was seen on a screen. It found the input mapper was a
-**complete no-op** on the desktop (bound to a node lizard mode keeps silent),
-and two defects beneath that: the d-pad emitted nothing at all, and a resting
-analog stick cancelled every held direction within ~10 ms. Both are fixed,
-deployed, and **verified on hardware by pressing the buttons**. It also answered
-the OSK question (§5.20) and fixed a generated file that executed a command at
-render time (§R-36). Findings: `docs/findings/P17-input-and-osk.md` (R-29…R-36).
+**Session 17 (2026-08-10) was the eyes-and-hands pass**, the first time any of
+this was seen on a screen. **Nine defects, none visible to any check in this
+repo**, plus two recorded "facts" corrected — one of them written by this same
+session hours earlier. Findings: `docs/findings/P17-input-and-osk.md`
+(R-29…R-42).
 
-**Git state:** `main` and `origin/main` were level at the start of session 17
-(verify with `git rev-list --left-right --count origin/main...main`, never by
-trusting this line). Session 17's work is on **`p17-input-and-osk`**.
+The mapper was a **complete no-op** on the desktop, and under it the d-pad
+emitted nothing and a resting stick cancelled every held direction in ~10 ms.
+It then grew into the **full input layer** (pointer, clicks, STEAM+X) so the
+operator's requested chord could work at all — which surfaced four more bugs,
+the worst being that **diagonal pointer movement emitted nothing** while every
+single-axis test passed.
 
-⚠️ **CI was RED and this file said otherwise.** `shellcheck -x` exited 1 on
-`src/deck-session.sh` (SC2006), and CI's shellcheck step has no `|| true`. The
-old claim that "five bash suites and `shellcheck -x` over 21 scripts pass
-locally" was stale. Fixed in session 17; shellcheck now exits 0 and all five
-bash suites plus both Python suites pass.
+It also: answered §5.20 (the OSK works; one GSettings key gated it), fixed a
+generated file **executing a command as root** at render time which had left
+**CI red**, shipped `stage-desktop-settings`, confirmed Gaming Mode usable,
+and **revised §2.6** after proving Steam cannot drive a Wayland desktop (R-42).
+New task: **T8**, the on-screen keyboard we draw ourselves.
+
+**Git state:** session 17's work is merged to **`main`** and **pushed** to
+`origin`. Verify with `git rev-list --left-right --count origin/main...main`,
+never by trusting this line — it has been stale before.
+
+✅ **CI is green again.** It was RED while this file claimed otherwise:
+`shellcheck -x` exited 1 on `src/deck-session.sh` (SC2006) and CI's shellcheck
+step has no `|| true`. Fixed in session 17. Now: **5 shell suites (70 assertions
+in `test-deck-session.sh`), the mapper suite at 81 assertions, and
+`shellcheck` exit 0.**
 
 ### 1.1 Artifacts that live OUTSIDE this repo
 
@@ -1603,6 +1613,6 @@ One line each. Detail lives in git history and in the `FINDING-*.md` files.
 | 7 | First physical hardware run; two real bugs found; R1 §10.3 resolved; Steam/gamescope installed; prior-art check done |
 | 8 | First Gaming Mode boot, via a DeckShift hybrid splice (since reversed — §2.3) |
 | 15 | **Phase 2 opener, 2026-08-10.** §5.10 closed — Steam's own Switch-to-Desktop works, with **two** causes not one (OOBE, plus the runtime narrowing PATH to `/usr/bin:/bin`, which made the `/usr/local/bin` shim unreachable all along). §5.14 closed with a stub, after learning its exit codes are a protocol: apply exiting 0 made Steam **reboot the Deck**. §5.11's greeter + desktop fixed — transform is **3**, not the recorded 1, and Omarchy's `auto` scale left a 640×400 desktop. A `#` marker in a Lua file taught us Hyprland **silently discards** an unparseable config. Opened §5.15 (the whole polkit-helper surface, incl. brightness) and §5.16 (the switch latched sddm into permanent failure). |
-| 17 | **The eyes-and-hands pass for input, 2026-08-10 — the first time any of this was seen on a screen.** Found the input mapper was a **complete no-op** on the desktop: `active`, correctly bound to `event7` by capability, and that node is **silent** because lizard mode routes buttons to the emulated nodes. P2.1's "verified on hardware" was true in every particular and proved nothing (4th instance of P16 §7's pattern). Underneath it, two real defects, each found only by correlating a human's press against what the kernel emitted: the **d-pad emitted nothing** (`hid-steam` advertises `ABS_HAT0*` and only ever sends `BTN_DPAD_*`, so the suite passed against a device model this hardware never produces), and **a resting analog stick cancelled every held direction in ~10ms**, killing auto-repeat, because two input sources shared one state slot. Both fixed, deployed and **verified by pressing the buttons** — hold tracks the physical button across 3.4s and auto-repeat measures exactly `REPEAT_DELAY`/`REPEAT_INTERVAL`. Measured the **full lizard-mode map**: it swallows X/Y/L1/R1/STEAM/QAM entirely and provides **no Space**, which archinstall needs (§5.9). Found `hid_steam`'s `lizard_mode` knob, so §5.9's "unverified" suppression question is answered. **§5.20 closed:** the OSK works on focus — but was **first recorded here as a negative** after four experiments that all sat downstream of one unexamined GSettings gate; a `WAYLAND_DEBUG` trace showed the protocol chain had been working the whole time. Also fixed an unquoted heredoc that **executed `uwsm start ... Hyprland` as root** at render time and had left **CI red** while this file claimed shellcheck passed. Reverted session 16's display-always-on. |
+| 17 | **The eyes-and-hands pass, 2026-08-10 — the first time any of this was seen on a screen.** Nine defects, **none visible to any check in this repo**, and two recorded "facts" corrected, one written by this session hours earlier. **The mapper was a complete no-op** on the desktop: `active`, correctly bound, and its node silent under lizard mode — P2.1's "verified on hardware" was true in every particular and proved nothing. Under it: the **d-pad emitted nothing** (`hid-steam` advertises `ABS_HAT0*` and only sends `BTN_DPAD_*`, so the suite passed against a device model this hardware lacks) and **a resting stick cancelled every held direction in ~10 ms**. The mapper then became the **full input layer** — pointer, clicks, and the operator's requested **STEAM+X** chord, which is only detectable with `lizard_mode=N` — surfacing four more bugs, the worst being that **diagonal pointer movement emitted nothing at all** while every single-axis test passed. Also: **§5.20 answered** (the OSK works; one GSettings key gated it, and it was *first recorded here as a negative* after four experiments that all sat downstream of that gate); an unquoted heredoc **executing `uwsm start ... Hyprland` as root** at render time, which had left **CI red** while §1 claimed it passed; **`stage-desktop-settings`** shipped, turning three hand edits into dconf site defaults; **Gaming Mode confirmed usable** by the operator (R-38); **the idle lock disabled** because no available keyboard can reach a layer-shell lock screen, and `lock: 0` locks *instantly* rather than disabling. **§2.6 was decided and then FORCED to change**: Steam cannot drive a Wayland desktop (XTEST under XWayland — R-42) and a resident Steam is *actively harmful*, removing the desktop's only input path, so the plan is now squeekboard everywhere except Gaming Mode with Steam **not** autostarted. Opened **T8** (the OSK we draw ourselves — squeekboard cannot do dual-cursor selection at any configuration). Findings: `docs/findings/P17-input-and-osk.md` (R-29…R-42). |
 | 16 | **P2.0b + P2.0c, 2026-08-10.** `steamos-set-timezone` + `steamos-priv-write` shipped as two new `deck-session.sh` stages, both signatures **read from Steam's log** rather than inferred, both hardware-verified with a real change and restore. Operator skipped `jupiter-hw-support`. Corrected §5.15: the brightness slider **works** on this Deck — Steam falls back to `sudo -n tee` and then `sudo -n chmod a+w`, which is also what makes those sysfs nodes 666. Opened §5.17 (`99-deck-testing`'s blanket NOPASSWD masks privilege defects and must not ship). Then **P2.0c**: §5.16's real cause was the **stop timing out** (`TimeoutStopSec=5`, teardown 5.008s → SIGKILL → start 3ms later), not the retry spacing — R-26's `RestartSec` rationale was wrong, and it fired at **boot**, not only on switches. Fixed with `TimeoutStopSec=30` + stop→settle→start in a `systemd-run` transient unit; **20/20 soak clean**. The soak also found **§5.18**: a dead session lands on a password greeter, because SDDM ships `Relogin=false`. Then **P2.0e/§5.13**: the repo overlap was **audited** (101 collisions, Valve older in 50 -> reordering rejected; the fix is `pacman -S jupiter-staging/gamescope`), and the suite's last blind spot closed. Two defects were introduced by this session's own fixes and caught by mutation testing and soaking, not review -- a settle gate matching the comm name `gamescope`, which no process has. Unit suite 17 -> **62 assertions**, mutation-tested **39/39**. Closed 5.11/5.13/5.16/5.18, answered 5.5/5.17, shipped P2.1 + P2.2's programmatic half, drafted `docs/RECOVERY.md`. **Operator added phase 4** (the enablement layer) and a Deck-specific flasher was considered and reframed. |
 | 9 | **One long session, 2026-08-09/10 — the scope reset and all of phase 1's non-hardware work.** Five scope decisions (§2): the ISO is the deliverable again, network-at-install is fine, target 4.0, DeckShift dropped, Deck rebuilds allowed. Docs consolidated (`PROGRESS` 1403→~600 lines, `WHERE-WE-ARE` folded in, `PLAN` frozen with a known-wrong-sections banner); `docs/ROADMAP.md` written (three phases); dead drafts removed. **P1.1:** `stage-default-entry` with the path form *proven by boot*, substrate rebuilt with real snapper snapshots (which immediately caught the hook test's own substring miscount), three deliberate-failure tests. **P1.2–P1.3:** T2 spike resolved — a gamepad drives `gum` and `archinstall` at the kernel input layer, so T4 is days not weeks. **P1.4 (half):** 4.0 beta ISO built; static inspection decided T4's OSK question and found the OLED Deck's `nfa765` Wi-Fi firmware present (§5.1). Repo reorganized out of the flat layout (a root `*.sh` glob had silently gone from checking every script to none). |

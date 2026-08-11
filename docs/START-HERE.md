@@ -8,45 +8,95 @@ work without waiting for further instruction.**
 > ### 🆕 SESSION 17 WAS THE FIRST TIME ANY OF THIS WAS SEEN ON A SCREEN — read this first
 >
 > Session 16 ended admitting *"nothing here was seen on a screen."* Session 17
-> put the operator in front of the Deck for the **input** half. What a passing
-> unit suite and `systemctl is-active` had been hiding:
+> put the operator in front of the Deck. **Nine defects, none of which any check
+> in this repo could see**, and two recorded "facts" corrected — including one
+> this session wrote itself, hours earlier.
 >
-> - **The input mapper was a COMPLETE NO-OP on the desktop.** It was `active`
->   and correctly bound to `event7`, and that node is **silent** — lizard mode
->   routes the buttons to the emulated nodes instead. P2.1's "verified on
->   hardware" was true in every particular and proved nothing.
-> - **The d-pad emitted nothing**, because the Deck sends `BTN_DPAD_*` buttons
->   and the mapper only handled `ABS_HAT0*` axes — which `hid-steam`
->   *advertises and never sends*. The suite passed because it drove a device
->   model this hardware does not use.
-> - **A resting analog stick cancelled every held direction in ~10 ms**, killing
+> **Full evidence: `docs/findings/P17-input-and-osk.md` (R-29…R-42).**
+>
+> **The input mapper was a COMPLETE NO-OP on the desktop.** `active`, correctly
+> bound to `event7`, and that node is **silent** — lizard mode routes buttons to
+> the emulated nodes. P2.1's "verified on hardware" was true in every particular
+> and proved nothing. Under it, two more:
+>
+> - **The d-pad emitted nothing.** The Deck sends `BTN_DPAD_*`; the mapper only
+>   handled `ABS_HAT0*`, which `hid-steam` *advertises and never sends*.
+> - **A resting stick cancelled every held direction in ~10 ms**, killing
 >   auto-repeat, because two input sources shared one state slot.
-> - Both are **fixed, deployed, and verified by pressing the buttons.** Hold and
->   auto-repeat now measure exactly `REPEAT_DELAY`/`REPEAT_INTERVAL`.
-> - **CI was RED** — `shellcheck` exit 1 — while `docs/PROGRESS.md` claimed it
->   passed. Cause: an unquoted heredoc that **executed `uwsm start ... Hyprland`
->   as root** at file-generation time. Fixed.
-> - **The OSK works on text focus** (§5.20), gated by one GSettings key that
->   ships `false`: `org.gnome.desktop.a11y.applications screen-keyboard-enabled`.
->   It was first recorded here as a *negative* after four failing experiments —
->   all of which sat downstream of that one gate. **Four experiments sharing a
->   hidden precondition are one experiment**; a `WAYLAND_DEBUG=1` trace found it
->   in minutes and needed no operator.
-> - **Gaming Mode was confirmed usable by the operator** (R-38), closing P16's
->   caveat that the session was only ever known to *exist*.
-> - 🆕 **§2.6 decides the keyboard: squeekboard for the INSTALLER, Steam's own
->   thereafter** — **REVISED by R-42, and the revision is forced.** Steam
->   **cannot** drive a Wayland desktop: it uses **XTEST**, which under XWayland
->   reaches neither the compositor's pointer nor Wayland clients. Resetting the
->   Desktop layout changed nothing and Steam never created a virtual
->   mouse/keyboard. A resident Steam is also **actively harmful** — it takes the
->   controller and removes lizard mode's pointer/keys (R-41), which the operator
->   hit as an unexitable screensaver. **So: squeekboard everywhere except Gaming
->   Mode, and Steam is NOT autostarted.** R-39's checks all passed while the
->   device was uncontrollable — "STEAM+X shows the keyboard" was never evidence
->   the desktop was usable.
 >
-> Full evidence: **`docs/findings/P17-input-and-osk.md`** (R-29…R-36).
+> **Then the mapper became the full input layer** — pointer from the right
+> trackpad, clicks from the triggers, and **STEAM+X toggling the OSK**. Four
+> more bugs, all found by the operator moving the cursor and saying how it felt:
+>
+> - **Diagonal movement emitted NOTHING.** Re-baselining replaced the whole
+>   baseline dict, so X and Y wiped each other every report; the pointer worked
+>   only for pure-horizontal or pure-vertical strokes. **Every pointer test drove
+>   one axis, which is exactly why the suite stayed green while the cursor was
+>   unusable.**
+> - Floor division made leftward movement ~2× faster than rightward.
+> - The sub-pixel remainder was discarded each step, so slow motion stuttered.
+> - `REL_X`/`REL_Y` were emitted as separate syn'd events, staircasing the cursor.
+>
+> **CI was RED and `docs/PROGRESS.md` said it passed.** An unquoted heredoc was
+> **executing `uwsm start ... Hyprland` as root** at file-generation time. Fixed;
+> `shellcheck` exits 0 now.
+>
+> **The OSK works on text focus** (§5.20) — gated by one GSettings key shipping
+> `false`. It was first recorded *here* as a negative after four failing
+> experiments that **all sat downstream of that one gate**. Four experiments
+> sharing a hidden precondition are one experiment; a `WAYLAND_DEBUG=1` trace
+> settled it in minutes and needed no operator.
+>
+> **Gaming Mode was confirmed usable by the operator** (R-38), closing P16's
+> caveat that the session was only ever known to *exist*.
+>
+> ### ⚠️ §2.6 was decided and then FORCED to change — read before touching the keyboard
+>
+> The operator chose "squeekboard for the installer, Steam's own keyboard
+> thereafter". **R-42 killed the Desktop Mode half**, by measurement:
+>
+> - **Steam cannot drive a Wayland desktop.** It uses **XTEST** (`libXtst` is
+>   mapped into the process), which under XWayland reaches neither the
+>   compositor's pointer nor Wayland clients. Steam holds `/dev/uinput` but
+>   creates **only** the virtual gamepad — never a mouse or keyboard. Resetting
+>   the Desktop layout to Valve's default changed nothing.
+> - **A resident Steam is actively HARMFUL**, not neutral: it takes the
+>   controller and leaves the desktop with **no input at all** (R-41). The
+>   operator hit it as an unexitable screensaver. Every R-39 check passed while
+>   the device was uncontrollable — **"STEAM+X shows the keyboard" is not
+>   evidence the desktop is usable.**
+> - Steam's desktop window is **not controller-navigable** on any platform; only
+>   Big Picture is.
+>
+> **Current decision: squeekboard everywhere except Gaming Mode. Steam is NOT
+> autostarted.** T8 (below) replaces squeekboard eventually.
+>
+> ### 🆕 The mapper is now the whole input path — and it needs `lizard_mode=N`
+>
+> `src/deck-input-mapper.py` emits pointer, clicks, keys and the STEAM+X chord.
+> **`BTN_MODE` (STEAM) is only visible with `lizard_mode=N`**, so the chord costs
+> you lizard mode — which is why the mapper had to grow a pointer at all.
+>
+> ⚠️ **`/sys/module/hid_steam/parameters/lizard_mode` is a MODULE PARAMETER: a
+> reboot resets it to `Y`**, and nothing persists it yet. On the test Deck it is
+> currently **`N`**. If the Deck reboots, STEAM+X and Space stop working until
+> something sets it again. **Never set it to `N` where the mapper is not proven
+> working** — the pointer and every key come from the mapper alone at that point.
+>
+> ### Measured hardware facts — do not re-derive, and do not trust the names
+>
+> | Control | Reports as |
+> |---|---|
+> | **Left trackpad** | `ABS_HAT0X/Y` — **called a hat, is a trackpad** |
+> | **Right trackpad** | `ABS_HAT1X/Y` (drives the pointer) |
+> | Triggers | `ABS_HAT2X`=R2, `ABS_HAT2Y`=L2, plus `BTN_TR2`/`BTN_TL2` |
+> | D-pad | `BTN_DPAD_*` — **never** the hat axes |
+> | STEAM | `BTN_MODE`, lizard-off only |
+> | Rear paddles | `BTN_TRIGGER_HAPPY1..4` — unused, available |
+> | Pad sample rate | **250 Hz** steady; lift reports **0 (centre)** |
+>
+> Lizard mode swallows **X, Y, L1, R1, STEAM and QAM entirely** — no evdev node
+> sees them — and provides **no Space**, which archinstall's multi-select needs.
 >
 > ⚠️ **Three things are load-bearing and silently break the product if lost:**
 > the **`omarchy.tray` bar widget** (without a StatusNotifier host, closing
@@ -75,6 +125,14 @@ work without waiting for further instruction.**
 > **`ssh steamdeck`** (key-based, passwordless sudo). **7 snapshots** — #1–#3
 > P1.5, #4 pre-15, #5 `P2.0 complete`, #6/#7 session 16. Left **on the desktop**;
 > `stage-default-session` (boot straight to Gaming Mode) is deliberately not run.
+>
+> **State at the end of session 17:** `lizard_mode=`**`N`** (non-persistent —
+> see above), mapper **active** with the full input layer, **squeekboard
+> running**, **Steam not running**, screensaver 150 s, **idle lock effectively
+> off** (86400 s), and session 16's display-always-on **reverted**. The two OSK
+> GSettings are installed as **dconf site defaults** by
+> `stage-desktop-settings`, and the Deck's user-level overrides were reset, so
+> the site default is what actually takes effect.
 >
 > Installed by session 16 and not in any earlier notes: three helpers in
 > `/usr/bin/steamos-polkit-helpers/`, the input mapper as a `--user` service
@@ -138,9 +196,9 @@ work without waiting for further instruction.**
 > of them from session 15.** Read it before trusting §5.15 or §5.16.
 >
 > Then read, in this order:
-> 1. `docs/PROGRESS.md` §1 (state) and §2 (the five scope decisions) — these
->    reversed several earlier ones, and a session that misses them will build
->    the wrong thing
+> 1. `docs/PROGRESS.md` §1 (state) and §2 (the scope decisions) — **§2.6 is new
+>    and was already revised once by measurement**; a session that misses it will
+>    build the wrong keyboard
 > 2. `docs/PROGRESS.md` **§5.9–§5.20** — the open issues. §5.10/§5.13/§5.14/
 >    §5.16/§5.18/**§5.20** are now closed; **§5.17 is the live one**, and
 >    **§5.9 gained session 17's measured lizard-mode map**
@@ -161,9 +219,11 @@ work without waiting for further instruction.**
 > ```
 >
 > (That glob is the 5 shell suites; `test/unit/test-deck-input-mapper.py` is a
-> sixth and is **not** in it — run it separately.)
+> sixth and is **not** in it — run it separately. It is now **81 assertions**,
+> and session 17 rewrote a chunk of it: the old d-pad tests asserted a device
+> model this hardware does not have.)
 >
-> `test/unit/test-deck-session.sh` is now **63 assertions** covering all five
+> `test/unit/test-deck-session.sh` is now **70 assertions** covering all five
 > generated files — the `steamos-update` stub's exit-code protocol, the
 > install-marker contract, both polkit helpers' argument validation, the sddm
 > restart helper's shape, and Steam's shim. It has teeth: **mutation-tested,
@@ -240,7 +300,7 @@ work without waiting for further instruction.**
 > **Phase 4 comes AFTER phase 3, deliberately.** Abstracting from one *finished,
 > soak-proven* example is engineering; from an unfinished one it is guessing.
 > P4.2 proves the extraction by making Omarchy consume the core with the
-> existing **63 assertions and the soak unchanged** — if those need editing, the
+> existing **70 assertions and the soak unchanged** — if those need editing, the
 > seam is wrong.
 >
 > ### ⛔ A Deck-specific USB flasher was considered and REFRAMED — don't re-propose it cold
@@ -278,8 +338,14 @@ work without waiting for further instruction.**
 >
 > ### Good work available *without* the Deck
 >
-**These two are the bulk of what is left in phase 2**, and neither needs the
-> Deck:
+> ⚠️ **T8 (the on-screen keyboard) is now the largest remaining phase-2 piece**,
+> specified in full: `docs/tasks/T8-onscreen-keyboard.md`. squeekboard **cannot**
+> do dual-trackpad letter selection at any configuration — Valve's keyboard runs
+> two cursors and Wayland gives one pointer per seat — and the live ISO has no
+> compositor at all, so T2 §4 had already chosen a mapper-drawn OSK for the
+> installer. **The input half already exists**, chord included.
+>
+> **These two also remain, and neither needs the Deck:**
 >
 > - **T4's installer screens (P2.5/P2.6)**, re-scoped by §5.9 — lizard mode
 >   already makes the installer navigable, so the real gap is **text entry**.
