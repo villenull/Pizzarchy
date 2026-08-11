@@ -109,6 +109,16 @@ def _load_module(name: str):
     return None
 
 
+def _find_module_path(name: str) -> pathlib.Path | None:
+    """Where an OSK module lives, or None. Used for the ones we RUN rather than
+    import -- the layer-shell renderer is a separate process on purpose."""
+    for directory in OSK_SEARCH_DIRS:
+        path = directory / f"{name}.py"
+        if path.is_file():
+            return path
+    return None
+
+
 def _load_osk_layout():
     """The layout core. Loaded at import time: it decides EMITTED_KEYS."""
     return _load_module("deck_osk_layout")
@@ -677,10 +687,12 @@ def main() -> None:
     ap.add_argument("--list", action="store_true", help="list input devices and exit")
     ap.add_argument("--type", metavar="TEXT",
                     help="type TEXT through the OSK layout and exit (no pad needed)")
-    ap.add_argument("--osk-backend", choices=("dbus", "tty", "none"), default="dbus",
-                    help="what STEAM+X opens: squeekboard over DBus (default, "
-                         "Desktop Mode), the TTY keyboard we draw (the installer, "
-                         "which has no compositor), or nothing")
+    ap.add_argument("--osk-backend", choices=("dbus", "tty", "layer", "none"),
+                    default="dbus",
+                    help="what STEAM+X opens: squeekboard over DBus (default), the "
+                         "TTY keyboard we draw (the installer, which has no "
+                         "compositor), our layer-shell overlay (Desktop Mode), "
+                         "or nothing")
     ap.add_argument("--osk-tty", metavar="PATH", default="/dev/tty",
                     help="where the tty backend draws (default /dev/tty)")
     ap.add_argument("--osk-top-row", type=int, default=0, metavar="N",
@@ -748,6 +760,27 @@ def main() -> None:
     # the point.
     osk_tty = None
     osk_stream = None
+    osk_layer_proc = None
+    # Both of our own backends share the routing: pads become cursors, triggers
+    # press. Only the DRAWING differs -- characters on a console, or a
+    # layer-shell surface. That is the seam T8 asked for, and it is why
+    # `mapper.osk_active` is set the same way for both.
+    osk_drawn_here = args.osk_backend in ("tty", "layer")
+    osk_layer_script = _find_module_path("deck_osk_wayland")
+    if args.osk_backend == "layer":
+        if osk_layout is None or osk_layer_script is None:
+            print("deck-input-mapper: --osk-backend=layer needs deck_osk_wayland.py "
+                  f"in {', '.join(str(d) for d in OSK_SEARCH_DIRS)}; the keyboard "
+                  "is DISABLED, navigation still works",
+                  file=sys.stderr, flush=True)
+            osk_drawn_here = False
+        else:
+            pad_abs = dict(pad.capabilities().get(e.EV_ABS, []))
+            mapper.osk = osk_layout.OnScreenKeyboard()
+            mapper.cursors = osk_layout.Cursors(ranges={
+                code: (ai.min, ai.max) for code, ai in pad_abs.items()
+                if code in osk_layout.PAD_AXES
+            })
     if args.osk_backend == "tty":
         osk_tty = _load_module("deck_osk_tty")
         if osk_layout is None or osk_tty is None:
@@ -797,6 +830,57 @@ def main() -> None:
             top = max(1, height - len(rows) + 1)
         osk_tty.clear_at(osk_stream, rows, top)
 
+    def osk_layer_start() -> None:
+        """Spawn the overlay and give it the current state.
+
+        A SEPARATE PROCESS on purpose: with lizard_mode=N this mapper is the
+        only input path on the device, so a GTK crash or a compositor restart
+        must not be able to take it down. The cost is a pipe.
+        """
+        nonlocal osk_layer_proc
+        if osk_layer_proc is not None and osk_layer_proc.poll() is None:
+            return
+        try:
+            osk_layer_proc = subprocess.Popen(
+                [sys.executable, str(osk_layer_script)],
+                stdin=subprocess.PIPE, text=True,
+            )
+        except OSError as exc:
+            print(f"deck-input-mapper: could not start the OSK overlay: {exc}",
+                  file=sys.stderr, flush=True)
+            osk_layer_proc = None
+            return
+        osk_layer_send()
+
+    def osk_layer_send() -> None:
+        """One state line. A dead overlay is reported, never fatal."""
+        nonlocal osk_layer_proc
+        if osk_layer_proc is None or osk_layer_proc.stdin is None:
+            return
+        try:
+            osk_layer_proc.stdin.write(
+                osk_layout.format_state_line(mapper.osk, mapper.cursors))
+            osk_layer_proc.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            print(f"deck-input-mapper: the OSK overlay went away ({exc})",
+                  file=sys.stderr, flush=True)
+            osk_layer_proc = None
+
+    def osk_layer_stop() -> None:
+        nonlocal osk_layer_proc
+        if osk_layer_proc is None:
+            return
+        try:
+            if osk_layer_proc.stdin is not None:
+                osk_layer_proc.stdin.close()   # EOF is the overlay's exit signal
+        except OSError:
+            pass
+        try:
+            osk_layer_proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            osk_layer_proc.kill()
+        osk_layer_proc = None
+
     def set_osk_visible(visible: bool) -> None:
         nonlocal osk_visible
         osk_visible = visible
@@ -809,6 +893,14 @@ def main() -> None:
                 osk_draw()
             else:
                 osk_erase()
+            return
+        if args.osk_backend == "layer" and osk_drawn_here:
+            mapper.osk_active = visible
+            if visible:
+                mapper.osk.closed = False
+                osk_layer_start()
+            else:
+                osk_layer_stop()
             return
         if args.osk_backend != "dbus" or ui is None:
             return
@@ -875,11 +967,13 @@ def main() -> None:
                 # Redraw once per batch, not per event: the pads run at 250 Hz
                 # and a redraw per sample would spend the whole loop writing
                 # escape sequences.
-                if osk_visible and osk_tty is not None:
+                if osk_visible and osk_drawn_here:
                     if mapper.osk.closed:
                         set_osk_visible(False)
-                    else:
+                    elif osk_tty is not None:
                         osk_draw()
+                    else:
+                        osk_layer_send()
             for key, value in mapper.due_repeats(now):
                 emit(key, value)
     except KeyboardInterrupt:
@@ -897,6 +991,8 @@ def main() -> None:
                 pass
         if osk_stream is not None:
             osk_stream.close()
+        if osk_layer_proc is not None:
+            osk_layer_stop()
         if ui is not None:
             ui.close()
 

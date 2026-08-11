@@ -155,9 +155,13 @@ grep -q 'for osk_module in "\${OSK_MODULES\[@\]}"' <<<"$stage_body" ||
   fail "the stage loops over OSK_MODULES rather than naming one file" "$stage_body"
 pass "the stage ships the whole OSK_MODULES set, not just the core"
 
-grep -q 'import deck_osk_layout, deck_osk_tty' <<<"$stage_body" ||
-  fail "the stage verifies the RENDERER imports too -- it is not on the --type path" "$stage_body"
-pass "the stage verifies the renderer imports from the installed directory"
+grep -q 'import deck_osk_layout, deck_osk_tty, deck_osk_wayland' <<<"$stage_body" ||
+  fail "the stage verifies BOTH renderers import -- neither is on the --type path" "$stage_body"
+pass "the stage verifies both renderers import from the installed directory"
+
+[[ ${#osk_modules[@]} -eq 3 ]] ||
+  fail "OSK_MODULES carries the core and both renderers" "${osk_modules[*]}"
+pass "OSK_MODULES carries the core and both renderers"
 
 # Match the INVOCATION, not the string "--type": the failure message beside it
 # also contains "--type", so a looser grep passes with the check deleted.

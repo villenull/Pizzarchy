@@ -211,7 +211,7 @@ readonly OSK_LIB_DIR=/usr/local/lib/deck-osk
 # renderer only by --osk-backend=tty, which is the installer's keyboard. They
 # ship as a set because a half-installed pair is the failure that degrades
 # silently -- the mapper starts, navigation works, and the keyboard is missing.
-OSK_MODULES=("$OSK_SRC_NAME" deck_osk_tty.py)
+OSK_MODULES=("$OSK_SRC_NAME" deck_osk_tty.py deck_osk_wayland.py)
 readonly OSK_MODULES
 # /etc/systemd/user, not ~/.config: this is installed by an installer and has to
 # apply to whatever user the image creates, so T5 can bake it in unchanged.
@@ -1755,14 +1755,16 @@ stage_input_mapper() {
     fail "${MAPPER_BIN} resolved no shift modifier for 'A'; ${OSK_LIB_DIR}/${OSK_SRC_NAME} is not the file the mapper imported. Output: ${probe}"
   log "verified: the mapper imports the OSK layout core and resolves shifted characters"
 
-  # The renderer is not on the --type path, so it needs its own check: without
-  # it --osk-backend=tty comes up with no keyboard and one warning line. Import
-  # them from the INSTALLED directory, which is what the mapper will do.
+  # The renderers are not on the --type path, so they need their own check:
+  # without them --osk-backend=tty/layer comes up with no keyboard and one
+  # warning line. Imported from the INSTALLED directory, which is what the
+  # mapper does. deck_osk_wayland imports `gi` inside main(), so importing it
+  # here needs no GTK and no display.
   local osk_import
   osk_import=$(python3 -c "
 import sys
 sys.path.insert(0, '${OSK_LIB_DIR}')
-import deck_osk_layout, deck_osk_tty
+import deck_osk_layout, deck_osk_tty, deck_osk_wayland
 print(len(deck_osk_tty.render(deck_osk_layout.OnScreenKeyboard(), deck_osk_layout.Cursors())))
 " 2>&1) ||
     fail "the OSK modules in ${OSK_LIB_DIR} do not import. The installer's keyboard would be missing. Output: ${osk_import}"

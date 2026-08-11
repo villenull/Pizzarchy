@@ -231,11 +231,12 @@ work without waiting for further instruction.**
 > for f in test/unit/test-*.sh; do ./"$f"; done; for f in test/unit/test-*.py; do python3 "$f"; done
 > ```
 >
-> **9 suites, seconds, no VM.** ⚠️ That is *two* globs — the shell one alone
-> misses all three Python suites, which is where the input layer's coverage
+> **10 suites, seconds, no VM.** ⚠️ That is *two* globs — the shell one alone
+> misses all four Python suites, which is where the input layer's coverage
 > lives. Six shell (`test-deck-session.sh` **70**, `test-osk-install-layout.sh`
-> **16**, four VM-helper suites) and three Python (`test-deck-input-mapper.py`
-> **106**, `test-deck-osk-layout.py` **134**, `test-deck-osk-tty.py` **49**).
+> **16**, four VM-helper suites) and four Python (`test-deck-input-mapper.py`
+> **106**, `test-deck-osk-layout.py` **134**, `test-deck-osk-tty.py` **49**,
+> `test-deck-osk-wayland.py` **47**).
 >
 > ⚠️ **A tenth suite is NOT in either glob, on purpose.**
 > `test/osk-tty-e2e.py` drives the on-screen keyboard end to end — virtual pad →

@@ -108,10 +108,10 @@ grep patterns, an intentional `A && B || C`) and now carry narrow
 mapfile -t files < <(git ls-files '*.sh'); shellcheck -x "${files[@]}"
 ```
 
-Now: **9 suites and that command exit 0** — six shell (`test-deck-session.sh` 70,
+Now: **10 suites and that command exit 0** — six shell (`test-deck-session.sh` 70,
 `test-osk-install-layout.sh` 16, four VM-helper suites) and three Python
 (`test-deck-input-mapper.py` 106, `test-deck-osk-layout.py` 134,
-`test-deck-osk-tty.py` 49). ⚠️ The Python ones are not in the `test-*.sh` glob;
+`test-deck-osk-tty.py` 49, `test-deck-osk-wayland.py` 47). ⚠️ The Python ones are not in the `test-*.sh` glob;
 run both globs. A tenth, `test/osk-tty-e2e.py`, is in **neither** — it needs
 `/dev/uinput` and is run by hand, because a suite that skips itself when a
 device is missing reports green while asserting nothing.
@@ -124,17 +124,32 @@ claims went with it (see the §2.6 note and `docs/findings/P17-input-and-osk.md`
 and **§5.21 is new**: `lizard_mode=N` persists nowhere, so a reboot silently
 removes STEAM+X and Space.
 
-Then **T8 steps 1–4**: `src/deck_osk_layout.py` (two layers, split halves,
+Then **T8 steps 1–6**: `src/deck_osk_layout.py` (two layers, split halves,
 hit-testing, three shift states, `strokes_for_text()`, and **two absolute
-cursors** — one per trackpad), `src/deck_osk_tty.py` (**the installer's
-keyboard, drawn in text on a bare console**), the mapper declaring
-`OSK_KEYCODES` on its uinput device plus `--type` and `--osk-backend=tty`, and
-`stage-input-mapper` installing and **verifying** both modules by running them.
-**46/46 mutations caught**, and the whole chain driven end to end by a virtual
-pad (`test/osk-tty-e2e.py`).
-⚠️ **None of that has run on the Deck** — the stage now installs two extra
-modules and that has never executed on hardware. Also unproven: the keyboard
-and a TUI (`gum`, `archinstall`) sharing one console, which is what
+cursors** — one per trackpad), **both renderers** — `src/deck_osk_tty.py` for
+the installer's bare console and `src/deck_osk_wayland.py` as a **layer-shell
+overlay** for Desktop Mode — the mapper declaring `OSK_KEYCODES` on its uinput
+device plus `--type` and `--osk-backend {dbus,tty,layer,none}`, and
+`stage-input-mapper` installing and **verifying** all three modules by running
+them. **60/60 mutations caught.**
+
+The overlay is **verified on Hyprland** (dev machine, not the Deck): a real
+layer surface, `hyprctl activewindow` unchanged while it is up, and the whole
+chain driven from a virtual pad. It takes **no Wayland input at all** —
+`KeyboardMode.NONE` plus an empty input region — because the pad reaches the
+mapper over evdev, so the surface only ever draws. That is the property
+squeekboard structurally cannot have.
+
+⚠️ **`gtk4-layer-shell` must be loaded BEFORE `libwayland-client`, and under
+PyGObject it never is** — `import gi.repository.Gtk` pulls libwayland in first,
+and there is no link order to fix because nothing is linked. The failure is
+quiet: the process starts, GTK warns, and an ordinary **focusable window**
+appears. `deck_osk_wayland` re-execs itself once with `LD_PRELOAD` set. Found by
+running it; no test could have seen it.
+
+⚠️ **None of this has run on the Deck** — the stage now installs three modules
+and that has never executed on hardware. Also unproven: the TTY keyboard and a
+TUI (`gum`, `archinstall`) sharing one console, which is what
 `deck_osk_tty.write_at`'s TIOCSWINSZ note is about.
 
 ⚠️ **A stale `__pycache__` made one mutation run report failures against correct

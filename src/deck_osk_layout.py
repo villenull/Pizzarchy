@@ -481,3 +481,47 @@ def strokes_for_text(text: str) -> list[tuple[int, int]]:
         if shifted:
             out.append((SHIFT_CODE, 0))
     return out
+
+
+# --- the state protocol -------------------------------------------------------
+#
+# One line per update, written by the mapper to a renderer running in ANOTHER
+# PROCESS. It lives here rather than in a renderer because both sides speak
+# it and the mapper must not import anything GTK-adjacent to do so.
+#
+# Text on a pipe rather than a socket or DBus: trivially inspectable with
+# `tee`, needs no session bus (the installer has none), and a malformed line
+# can only be ignored -- this crosses a process boundary, so a parser that
+# raised would take the keyboard down with it.
+
+def parse_state_line(line: str) -> dict | None:
+    """`state <layer> <shift> <lx> <ly> <rx> <ry>` -> a dict, or None."""
+    parts = line.split()
+    if len(parts) != 7 or parts[0] != "state":
+        return None
+    _, layer, shift, lx, ly, rx, ry = parts
+    if layer not in LAYERS or shift not in ("off", "once", "locked"):
+        return None
+    try:
+        values = [float(v) for v in (lx, ly, rx, ry)]
+    except ValueError:
+        return None
+    if not all(0.0 <= v <= 1.0 for v in values):
+        return None
+    return {"layer": layer, "shift": shift,
+            "left": (values[0], values[1]), "right": (values[2], values[3])}
+
+
+def format_state_line(keyboard: OnScreenKeyboard, cursors: Cursors) -> str:
+    """The mapper's side of the same protocol."""
+    left, right = cursors.position("left"), cursors.position("right")
+    return (f"state {keyboard.layer_name} {keyboard.shift} "
+            f"{left[0]:.4f} {left[1]:.4f} {right[0]:.4f} {right[1]:.4f}\n")
+
+
+def apply_state(keyboard: OnScreenKeyboard, cursors: Cursors,
+                state: dict) -> None:
+    keyboard.layer_name = state["layer"]
+    keyboard.shift = state["shift"]
+    for half in ("left", "right"):
+        cursors.pos[half] = [state[half][0], state[half][1]]

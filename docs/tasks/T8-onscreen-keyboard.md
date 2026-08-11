@@ -1,7 +1,7 @@
 # T8 — the on-screen keyboard we draw ourselves
 
 **Model: Sonnet for the renderers, Opus for the input/layout core.**
-**Status: specified session 17. STEPS 1–4 DONE (session 18, 2026-08-10).**
+**Status: specified session 17. STEPS 1–6 DONE (session 18, 2026-08-10).**
 
 > ## Where this stands
 >
@@ -11,9 +11,9 @@
 > | 2. Character emission in the mapper | ✅ keycodes declared, `--type` types |
 > | 3. Absolute dual-cursor mapping from both pads | ✅ `Cursors`, same module |
 > | 4. TTY renderer (installer) | ✅ `src/deck_osk_tty.py` + `--osk-backend=tty` |
-> | 5. Layer-shell renderer (Desktop Mode) | ⬜ **next.** The remaining bulk |
-> | 6. Pointer suppression while the OSK is up | 🟡 answered for the **tty** backend |
-> | 7. Retire squeekboard from Desktop Mode | ⬜ gated on 5 being proven on hardware |
+> | 5. Layer-shell renderer (Desktop Mode) | ✅ `src/deck_osk_wayland.py` |
+> | 6. Pointer suppression while the OSK is up | ✅ both backends |
+> | 7. Retire squeekboard from Desktop Mode | ⬜ **next**, and it needs the Deck |
 >
 > **`src/deck_osk_layout.py`** — two layers (letters, symbols), split into two
 > halves, hit-testing in normalised 0..1 coordinates within a half, three shift
@@ -91,8 +91,42 @@
 > purpose:** it needs a writable `/dev/uinput`, and a test that skips itself
 > when a device is missing reports green while asserting nothing.
 >
-> **Totals: 134 + 106 + 49 + 16 unit assertions, plus 19 end-to-end.
-> 46/46 mutations caught.**
+> **`src/deck_osk_wayland.py`** (step 5) is the same core drawn on a
+> `zwlr_layer_shell_v1` surface via GTK4 + gtk4-layer-shell — **both already
+> installed on the Deck, both in Arch `extra`, neither in the AUR.**
+>
+> ✅ **T8's "escalate if" is designed away, not solved.** The concern was that
+> the overlay could not take input without stealing focus from the field being
+> typed into. It never takes input: the pad reaches the *mapper*, over evdev, so
+> the surface only ever draws. It asks the compositor for nothing —
+> `KeyboardMode.NONE` and an **empty input region**, so it cannot be focused and
+> cannot be clicked. **Verified on Hyprland:** with the overlay on screen,
+> `hyprctl activewindow` was unchanged. That is the property squeekboard
+> structurally cannot have — it *is* a surface being pointed at.
+>
+> ⚠️ **A separate process, deliberately.** The mapper spawns it and feeds state
+> on stdin. With `lizard_mode=N` the mapper is the only input path on the device,
+> so a GTK crash or a compositor restart must not be able to take it down.
+>
+> ⚠️ **THE LINKING TRAP — found by running it, invisible to every test.**
+> `gtk4-layer-shell` interposes on `libwayland-client` and must load first. Under
+> PyGObject it never does: `import gi.repository.Gtk` pulls libwayland in before
+> anything of ours runs, and there is no link order to fix because nothing here
+> is linked. The failure is quiet in the way that matters — the process starts,
+> GTK warns on stderr, and a **perfectly normal focusable window** appears,
+> destroying every property above. `deck_osk_wayland` now re-execs itself once
+> with `LD_PRELOAD` set. Confirmed fixed: `hyprctl layers` shows
+> `namespace: deck-osk` on the overlay layer, zero warnings.
+>
+> **Step 6 is closed.** Neither backend fights a system pointer: the right pad
+> stops feeding `pointer_delta` while the keyboard is up, so the motion is never
+> generated. The layer surface adds nothing to suppress, having no input region.
+>
+> **Totals: 134 + 106 + 49 + 47 + 16 unit assertions, plus 19 end-to-end.
+> 60/60 mutations caught.** ⚠️ One "SURVIVED" was spurious — the mutation's
+> anchor did not match, so nothing was mutated. A mutation that reports survival
+> without applying is a false negative; check the patch applied before believing
+> the result.
 >
 > ⚠️ **A stale `__pycache__` invalidated one mutation run.** Python validates
 > cached bytecode against the source's (mtime, size) at one-second granularity,
@@ -218,11 +252,11 @@ keyboard knows a controller exists — the property that makes one layer drive
    to type; what is NOT proven is the two of them sharing one console. The
    intended mechanism is shrinking the TUI's reported window (TIOCSWINSZ) so it
    stays above the keyboard — see `deck_osk_tty.write_at`. Nothing has tested it.
-5. Layer-shell renderer for Desktop Mode; STEAM+X opens **this**, not
-   squeekboard.
-6. Decide and implement pointer suppression while the OSK is visible.
-   🟡 Answered for the tty backend by never generating the motion; the
-   compositor case is still open.
+5. ✅ Layer-shell renderer for Desktop Mode; `--osk-backend=layer` opens
+   **this**, not squeekboard. Verified on Hyprland: real layer surface, focus
+   never moves, driven end to end from a virtual pad.
+6. ✅ Pointer suppression: the right pad stops feeding the pointer while the
+   keyboard is up, so there is no motion to suppress in either backend.
 7. Retire squeekboard from Desktop Mode **only once step 5 is proven on
    hardware** — it is the working fallback until then.
 
