@@ -281,9 +281,20 @@ pass for any other command whose output happened to be non-empty.
 | Mapper | fixed version deployed via `stage-input-mapper`, service **active** |
 | Probe scripts/logs | removed from the Deck's `/tmp` |
 
-⚠️ **Still in effect from session 16, and still not reverted:** the display
-never sleeps (idle/screensaver/lock disabled, sleep targets masked). This is an
-**OLED** panel. Revert with `sudo /usr/local/sbin/deck-always-on-revert.sh`.
+✅ **Session 16's display-always-on is REVERTED** (operator instruction, end of
+session 17). Verified: sleep/suspend/hibernate/hybrid-sleep targets back to
+`static`, the logind drop-in removed, the `stay-awake` state file gone, and the
+three remaining inhibitors are all `delay` mode (NetworkManager, UPower,
+Omarchy's lock-before-suspend) rather than blocking. Omarchy 4.0's idle lives in
+quickshell (`/usr/share/omarchy/shell/plugins/services/idle/Service.qml`), which
+is running — there is no `hypridle`/`swayidle` on this system, so do not go
+looking for one.
+
+⚠️ **Two GSettings values were left SET deliberately**, because they are product
+requirements rather than test scaffolding: `screen-keyboard-enabled=true` (R-35)
+and `input-sources=[('xkb','us')]`. `docs/START-HERE.md` previously told the next
+session to revert the second one, which would have silently broken the OSK
+again. Both are now T5 constraints.
 
 ## What this session did not cover
 
