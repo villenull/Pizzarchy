@@ -163,11 +163,10 @@ turned out upside down, so verify before shipping it.
 The TTY is a third surface (`fbcon=rotate:1` on the kernel cmdline) and is still
 awaiting operator approval as a boot-chain change.
 
-## The other three constraints, gathered here so this file is self-contained
+## The other four constraints, gathered here so this file is self-contained
 
-`docs/START-HERE.md` tells a new session that T5 carries five constraints. Two
-are written above; these are the other three, which until now lived only in
-`docs/PROGRESS.md` and the ROADMAP row.
+T5 carries **six** constraints. Two are written above; these are the other four,
+which until now lived only in `docs/PROGRESS.md` and the ROADMAP row.
 
 ### 1. Offline-only pacman during install (PROGRESS.md 3.10, 2.2)
 
@@ -206,3 +205,25 @@ pacman -S jupiter-staging/gamescope     # NOT: pacman -S gamescope
 Arch's `gamescope` is the bare compositor; Valve's ships the SteamOS session.
 Both are `3.16.25`, so no version check can tell them apart -- test for the
 session *file*. Full data: `docs/findings/P16-repo-overlap-audit.md`.
+
+### 4. Session settings that are load-bearing and currently live in ONE user's session
+
+Added session 17. Three values decide whether the shipped device works, and none
+of them is in a package or a repo file today -- they were set by hand on the
+test Deck and would simply be absent from a built image.
+
+| Setting | Why it is load-bearing | Ships as |
+|---|---|---|
+| `org.gnome.desktop.a11y.applications screen-keyboard-enabled` | **`false` by default.** squeekboard's auto-show gate -- with it unset, the on-screen keyboard never appears on text focus no matter what else is right (PROGRESS.md 5.20) | `true` |
+| `org.gnome.desktop.input-sources sources` | empty by default; squeekboard warns `No system layout` and has no keys to draw | `[('xkb','us')]` |
+| `~/.config/hypr/monitors.lua` rotation | 5.11 -- the desktop renders sideways without it | baked, not per-user |
+
+The first two are **GSettings in a user's dconf database**, so "install a file"
+is not enough -- they need a dconf default (`/etc/dconf/db/local.d/`) or a
+first-boot step, and the choice has to survive a *new* user account, not just
+the one on the test Deck.
+
+⚠️ **The general trap:** all three were discovered by something failing on
+screen, not by anything failing a check. Nothing in the current test suite would
+notice their absence, because every suite runs against the Deck where they are
+already set. A conformance check for these belongs in T6's release gate.

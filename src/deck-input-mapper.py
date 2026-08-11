@@ -70,6 +70,20 @@ HAT_MAP: dict[tuple[int, int], int] = {
     (e.ABS_HAT0Y, +1): e.KEY_DOWN,
 }
 
+# The Deck's d-pad arrives as DISCRETE BUTTONS, not as the hat axes above.
+# `hid-steam` advertises ABS_HAT0X/Y *and* BTN_DPAD_* but only ever sends the
+# buttons -- measured on hardware 2026-08-10 with lizard mode off, where
+# BTN_DPAD_UP appeared on the pad node and no ABS_HAT0Y event ever did. Before
+# this table the d-pad fell through BUTTON_MAP and emitted nothing at all.
+# Route it onto the same hat axes so a d-pad press and a stick push cannot
+# double-hold one direction.
+DPAD_BUTTON_MAP: dict[int, tuple[int, int]] = {
+    e.BTN_DPAD_UP: (e.ABS_HAT0Y, -1),
+    e.BTN_DPAD_DOWN: (e.ABS_HAT0Y, +1),
+    e.BTN_DPAD_LEFT: (e.ABS_HAT0X, -1),
+    e.BTN_DPAD_RIGHT: (e.ABS_HAT0X, +1),
+}
+
 STICK_AXES: dict[int, int] = {e.ABS_X: e.ABS_HAT0X, e.ABS_Y: e.ABS_HAT0Y}
 
 # Stick thresholds as fractions of half-range, with hysteresis so jitter at
@@ -90,10 +104,18 @@ EMITTED_KEYS = sorted(set(BUTTON_MAP.values()) | set(HAT_MAP.values()))
 class AxisState:
     """Per-directional-axis state: which key (if any) is held, and when it
     next auto-repeats. One instance per HAT axis; sticks resolve onto the
-    same instances so stick and d-pad cannot double-hold a direction."""
+    same instances so stick and d-pad cannot double-hold a direction.
+
+    Each INPUT SOURCE keeps its own current direction, and the emitted key is
+    derived from all of them. They cannot share one field: a resting stick
+    genuinely asserts "neutral", so folding it into the same slot as the d-pad
+    makes stick jitter cancel a d-pad press. That is a real measured failure,
+    not a hypothetical -- see _stick_direction."""
 
     active_key: int | None = None
     next_repeat: float = 0.0
+    hat_dir: int = 0  # from ABS_HAT0* events, for pads that send them
+    stick_dir: int = 0  # from the analog stick, after hysteresis
 
 
 @dataclass
@@ -108,6 +130,23 @@ class Mapper:
     hats: dict[int, AxisState] = field(
         default_factory=lambda: {e.ABS_HAT0X: AxisState(), e.ABS_HAT0Y: AxisState()}
     )
+    # Which d-pad buttons are physically down. The Deck lets you hold two
+    # opposing edges at once, so the direction is recomputed from the held
+    # set rather than from whichever event arrived last.
+    dpad_held: set[int] = field(default_factory=set)
+
+    def _dpad_direction(self, hat_axis: int) -> int:
+        """Resolve one axis from the held d-pad buttons. Opposing edges held
+        together cancel to neutral, which is the same thing a physical hat
+        does and keeps a stuck key impossible."""
+        directions = {
+            direction
+            for code, (axis, direction) in DPAD_BUTTON_MAP.items()
+            if axis == hat_axis and code in self.dpad_held
+        }
+        if len(directions) != 1:
+            return 0
+        return directions.pop()
 
     def _stick_direction(self, axis: int, value: int) -> int:
         lo, hi = self.axis_ranges.get(axis, (-32768, 32767))
@@ -115,14 +154,33 @@ class Mapper:
         half = (hi - lo) / 2 or 1
         frac = (value - mid) / half
         state = self.hats[STICK_AXES[axis]]
-        # Hysteresis: an engaged direction only releases under the lower bar.
-        if state.active_key is not None:
+        # Hysteresis keys off THE STICK's own engagement, not off active_key.
+        # Measured on hardware 2026-08-10: keying it off active_key meant that
+        # once the d-pad engaged a direction, the next resting-stick sample
+        # took the hysteresis branch, computed frac ~ 0 and reported neutral --
+        # releasing the d-pad's key within ~10ms and killing auto-repeat. The
+        # sticks emit jitter constantly, so a held d-pad direction never
+        # survived. Nothing in the suite caught it: it only ever pushed the
+        # stick to an ENGAGED position while a direction was held, never to
+        # rest.
+        if state.stick_dir != 0:
             return 0 if abs(frac) < STICK_RELEASE else (1 if frac > 0 else -1)
         if frac >= STICK_ENGAGE:
             return 1
         if frac <= -STICK_ENGAGE:
             return -1
         return 0
+
+    def _effective_direction(self, hat_axis: int) -> int:
+        """Combine the sources for one axis. Digital input wins over the
+        stick, so resting-stick neutrality can never cancel a held d-pad."""
+        state = self.hats[hat_axis]
+        dpad = self._dpad_direction(hat_axis)
+        if dpad:
+            return dpad
+        if state.hat_dir:
+            return state.hat_dir
+        return state.stick_dir
 
     def _hat_transition(self, hat_axis: int, direction: int, now: float) -> list[tuple[int, int]]:
         state = self.hats[hat_axis]
@@ -140,6 +198,15 @@ class Mapper:
 
     def translate(self, etype: int, code: int, value: int, now: float) -> list[tuple[int, int]]:
         if etype == e.EV_KEY:
+            if code in DPAD_BUTTON_MAP:
+                if value not in (0, 1):
+                    return []  # the pad's own autorepeat; we schedule our own
+                if value:
+                    self.dpad_held.add(code)
+                else:
+                    self.dpad_held.discard(code)
+                hat_axis = DPAD_BUTTON_MAP[code][0]
+                return self._hat_transition(hat_axis, self._effective_direction(hat_axis), now)
             key = BUTTON_MAP.get(code)
             if key is None:
                 return []
@@ -148,10 +215,12 @@ class Mapper:
             return []  # ignore the pad's own autorepeat; we schedule our own
         if etype == e.EV_ABS:
             if code in (e.ABS_HAT0X, e.ABS_HAT0Y):
-                direction = 0 if value == 0 else (1 if value > 0 else -1)
-                return self._hat_transition(code, direction, now)
+                self.hats[code].hat_dir = 0 if value == 0 else (1 if value > 0 else -1)
+                return self._hat_transition(code, self._effective_direction(code), now)
             if code in STICK_AXES:
-                return self._hat_transition(STICK_AXES[code], self._stick_direction(code, value), now)
+                hat_axis = STICK_AXES[code]
+                self.hats[hat_axis].stick_dir = self._stick_direction(code, value)
+                return self._hat_transition(hat_axis, self._effective_direction(hat_axis), now)
         return []
 
     def due_repeats(self, now: float) -> list[tuple[int, int]]:

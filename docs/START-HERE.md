@@ -3,7 +3,45 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
-> ## Where things stand (updated 2026-08-10, end of session 16)
+> ## Where things stand (updated 2026-08-10, end of session 17)
+>
+> ### 🆕 SESSION 17 WAS THE FIRST TIME ANY OF THIS WAS SEEN ON A SCREEN — read this first
+>
+> Session 16 ended admitting *"nothing here was seen on a screen."* Session 17
+> put the operator in front of the Deck for the **input** half. What a passing
+> unit suite and `systemctl is-active` had been hiding:
+>
+> - **The input mapper was a COMPLETE NO-OP on the desktop.** It was `active`
+>   and correctly bound to `event7`, and that node is **silent** — lizard mode
+>   routes the buttons to the emulated nodes instead. P2.1's "verified on
+>   hardware" was true in every particular and proved nothing.
+> - **The d-pad emitted nothing**, because the Deck sends `BTN_DPAD_*` buttons
+>   and the mapper only handled `ABS_HAT0*` axes — which `hid-steam`
+>   *advertises and never sends*. The suite passed because it drove a device
+>   model this hardware does not use.
+> - **A resting analog stick cancelled every held direction in ~10 ms**, killing
+>   auto-repeat, because two input sources shared one state slot.
+> - Both are **fixed, deployed, and verified by pressing the buttons.** Hold and
+>   auto-repeat now measure exactly `REPEAT_DELAY`/`REPEAT_INTERVAL`.
+> - **CI was RED** — `shellcheck` exit 1 — while `docs/PROGRESS.md` claimed it
+>   passed. Cause: an unquoted heredoc that **executed `uwsm start ... Hyprland`
+>   as root** at file-generation time. Fixed.
+> - **The OSK works on text focus** (§5.20), gated by one GSettings key that
+>   ships `false`: `org.gnome.desktop.a11y.applications screen-keyboard-enabled`.
+>   **T5 must bake it into the image.** It was first recorded here as a
+>   *negative* after four failing experiments — all of which sat downstream of
+>   that one gate. **Four experiments sharing a hidden precondition are one
+>   experiment**; a `WAYLAND_DEBUG=1` trace found it in minutes and needed no
+>   operator.
+>
+> Full evidence: **`docs/findings/P17-input-and-osk.md`** (R-29…R-36).
+>
+> ⚠️ **Lizard mode is the load-bearing fact for T4.** It swallows **X, Y, L1,
+> R1, STEAM and QAM entirely** — no evdev node sees them — and provides no
+> **Space**, which archinstall's multi-select needs. The knob that frees them,
+> `/sys/module/hid_steam/parameters/lizard_mode`, also removes the free pointer,
+> making the mapper the *only* input path. Do not set it to `N` anywhere until
+> the mapper is proven working, or the Deck is uncontrollable without SSH.
 >
 > ### ✅ PHASE 1 COMPLETE. Phase 2 is underway — the core promise now works.
 >
@@ -24,15 +62,27 @@ work without waiting for further instruction.**
 > (`deck-input-mapper.service`, active), plus `python-evdev` and `squeekboard`
 > from Arch `[extra]`.
 >
-> ⚠️ **TWO TEMPORARY CHANGES ARE STILL IN EFFECT on the Deck.** Neither is part
-> of the product; both were operator-requested for testing:
+> ⚠️ **ONE TEMPORARY CHANGE IS STILL IN EFFECT on the Deck**, operator-requested
+> for testing:
 >
 > 1. **The display never sleeps** — idle/screensaver/lock disabled, sleep
 >    targets masked. This is an **OLED** panel, so burn-in is the reason not to
 >    leave it. Revert: `sudo /usr/local/sbin/deck-always-on-revert.sh`.
-> 2. **A gsettings input source** was set (`org.gnome.desktop.input-sources`)
->    to silence squeekboard's "No system layout". Revert:
->    `gsettings reset org.gnome.desktop.input-sources sources`.
+>
+> 🆕 **Two GSettings values on the Deck are NOT temporary — they are product
+> requirements, and session 17 corrected an earlier note telling you to revert
+> one of them:**
+>
+> - `org.gnome.desktop.input-sources sources` = `[('xkb','us')]` — squeekboard
+>   has no keys to draw without it. *(Previously listed here as a temporary hack
+>   to undo. It is not.)*
+> - `org.gnome.desktop.a11y.applications screen-keyboard-enabled` = `true` —
+>   set by session 17. Ships `false`, and **the OSK never auto-shows without
+>   it** (§5.20).
+>
+> Both are T5 constraints now: they live in one user's dconf and would be
+> **absent from a built image**. No test would notice — every suite runs on the
+> Deck where they are already set.
 >
 > Also: the backlight sysfs node is deliberately left **0644**, not the 666
 > found. If it is 666 again, Steam fell back — which means a helper broke.
@@ -62,16 +112,18 @@ work without waiting for further instruction.**
 > 1. `docs/PROGRESS.md` §1 (state) and §2 (the five scope decisions) — these
 >    reversed several earlier ones, and a session that misses them will build
 >    the wrong thing
-> 2. `docs/PROGRESS.md` **§5.9–§5.18** — the open issues. §5.10/§5.13/§5.14/
->    §5.16/§5.18 are now closed; **§5.17 is the live one**
+> 2. `docs/PROGRESS.md` **§5.9–§5.20** — the open issues. §5.10/§5.13/§5.14/
+>    §5.16/§5.18/**§5.20** are now closed; **§5.17 is the live one**, and
+>    **§5.9 gained session 17's measured lizard-mode map**
 > 3. `docs/ROADMAP.md` — **four** phases now; phase 2 is the live work queue and
 >    **phase 4 is new** (the enablement layer)
-> 4. `docs/PROGRESS.md` §7 — 38 facts that each cost real time; do not
+> 4. `docs/PROGRESS.md` §7 — 45 facts that each cost real time; do not
 >    re-derive them
 >
 > Hardware evidence: `docs/findings/P15-live-iso-recon.md` (R-0…R-19, raw logs
-> in `P15-recon-raw/`) and
-> `docs/findings/P2-steam-integration-and-rotation.md` (R-20…**R-28**).
+> in `P15-recon-raw/`), `docs/findings/P2-steam-integration-and-rotation.md`
+> (R-20…**R-28**), and **`docs/findings/P17-input-and-osk.md` (R-29…R-36)** —
+> the only one so far where a human watched the screen.
 >
 > ### There are now unit tests. Run them before and after touching `src/`.
 >
@@ -82,7 +134,7 @@ work without waiting for further instruction.**
 > (That glob is the 5 shell suites; `test/unit/test-deck-input-mapper.py` is a
 > sixth and is **not** in it — run it separately.)
 >
-> `test/unit/test-deck-session.sh` is now **62 assertions** covering all five
+> `test/unit/test-deck-session.sh` is now **63 assertions** covering all five
 > generated files — the `steamos-update` stub's exit-code protocol, the
 > install-marker contract, both polkit helpers' argument validation, the sddm
 > restart helper's shape, and Steam's shim. It has teeth: **mutation-tested,
@@ -159,7 +211,7 @@ work without waiting for further instruction.**
 > **Phase 4 comes AFTER phase 3, deliberately.** Abstracting from one *finished,
 > soak-proven* example is engineering; from an unfinished one it is guessing.
 > P4.2 proves the extraction by making Omarchy consume the core with the
-> existing **62 assertions and the soak unchanged** — if those need editing, the
+> existing **63 assertions and the soak unchanged** — if those need editing, the
 > seam is wrong.
 >
 > ### ⛔ A Deck-specific USB flasher was considered and REFRAMED — don't re-propose it cold
@@ -205,11 +257,14 @@ work without waiting for further instruction.**
 >   Draw our own button glyphs; do not use Valve's artwork
 >   (`docs/findings/P16-redistribution-and-trademark.md`).
 > - **T5's ISO fork (P2.7/P2.8)**, `docs/tasks/T5-iso-and-payload.md`, which now
->   carries **five** recorded constraints: offline-only pacman · the encryption
+>   carries **six** recorded constraints: offline-only pacman · the encryption
 >   default (§5.12) · repo precedence (§5.13) · **baking in BOTH rotations**
 >   (desktop `monitors.lua` *and* Limine `interface_rotation`) · **excluding
->   `99-deck-testing`** (§5.17). Also decide **bundle vs fetch** — `steamdeck-dsp`
->   is `Proprietary`, so bundling redistributes it and fetching does not.
+>   `99-deck-testing`** (§5.17) · 🆕 **the three load-bearing session settings**
+>   (§5.20 — `screen-keyboard-enabled`, `input-sources`, rotation), which are
+>   GSettings in one user's dconf today and would be simply absent from a built
+>   image. Also decide **bundle vs fetch** — `steamdeck-dsp` is `Proprietary`,
+>   so bundling redistributes it and fetching does not.
 
 Layout is in `CLAUDE.md`. Paths below are repo-root-relative.
 
@@ -320,7 +375,7 @@ are done as far as a script can verify them. Sensible entry points:
 
 - **Without the Deck — this is where the remaining bulk is.** **P2.5/P2.6**
   (T4's installer screens; text entry is the real gap) or **P2.7/P2.8** (T5's
-  `omarchy-iso` fork, which now carries five recorded constraints — see above).
+  `omarchy-iso` fork, which now carries six recorded constraints — see above).
   Either is days of work and needs no hardware.
 - **With the Deck, needing a HUMAN present:** everything left on P2.1/P2.2/P2.4
   is a thing a script cannot check — does the OSK appear on text focus, are the

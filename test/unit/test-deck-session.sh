@@ -578,6 +578,20 @@ grep -qF -- "$INSTALL_MARKER" "$rs_helper" ||
   fail_test "the rendered restart helper carries the '#'-commented marker" "expected: $INSTALL_MARKER"
 pass "the rendered restart helper carries '${INSTALL_MARKER}'"
 
+# This body is an UNQUOTED heredoc, so every backtick and $( in it is live
+# command substitution at render time, running as root during a stage install.
+# One comment shipped with unescaped backticks and actually executed
+# `uwsm start ... Hyprland` on the Deck; the installed file carried the empty
+# result ("# session's  exit in ~1ms."). Found 2026-08-10 by shellcheck SC2006,
+# confirmed against the generated file on hardware.
+#
+# Assert on the literal text rather than on "no double space": the latter would
+# pass for any other command whose output happened to be non-empty.
+grep -qF -- 'uwsm start ... Hyprland' "$rs_helper" ||
+  fail_test "the helper's comments must survive the heredoc literally" \
+    "the backticks in that comment were substituted at render time instead of being escaped -- the unquoted heredoc executed them"
+pass "comment backticks are escaped, so nothing in the rendered body executes at render time"
+
 # The regression this file exists to prevent. `systemctl restart sddm` is
 # exactly what left the Deck with no session.
 grep -qE '^\s*(if !\s*)?systemctl restart sddm' "$rs_helper" &&

@@ -69,12 +69,24 @@ Deck-free work: **§5.13**'s repo-precedence audit, **P2.5** (T4 installer
 screens) or **P2.7** (T5 ISO fork). T5 also inherits a new obligation from
 §5.11: the desktop rotation currently lives in one user's dotfile.
 
-**Git state (end of session 15):** all phase-1 and P2.0 work is merged into
-**`main`**, with `p15-deck-recon` at the same commit. **Nothing is
-pushed** — `main` is ahead of `origin/main` by all of it
-(`github.com/villenull/Pizzarchy`), and pushing is an operator decision.
-`src/deck-session.sh` now has unit coverage (`test/unit/test-deck-session.sh`);
-CI's five bash suites and `shellcheck -x` over 21 scripts pass locally.
+**Session 17 (2026-08-10) was the eyes-and-hands pass for input**, the first
+time any of this was seen on a screen. It found the input mapper was a
+**complete no-op** on the desktop (bound to a node lizard mode keeps silent),
+and two defects beneath that: the d-pad emitted nothing at all, and a resting
+analog stick cancelled every held direction within ~10 ms. Both are fixed,
+deployed, and **verified on hardware by pressing the buttons**. It also answered
+the OSK question (§5.20) and fixed a generated file that executed a command at
+render time (§R-36). Findings: `docs/findings/P17-input-and-osk.md` (R-29…R-36).
+
+**Git state:** `main` and `origin/main` were level at the start of session 17
+(verify with `git rev-list --left-right --count origin/main...main`, never by
+trusting this line). Session 17's work is on **`p17-input-and-osk`**.
+
+⚠️ **CI was RED and this file said otherwise.** `shellcheck -x` exited 1 on
+`src/deck-session.sh` (SC2006), and CI's shellcheck step has no `|| true`. The
+old claim that "five bash suites and `shellcheck -x` over 21 scripts pass
+locally" was stale. Fixed in session 17; shellcheck now exits 0 and all five
+bash suites plus both Python suites pass.
 
 ### 1.1 Artifacts that live OUTSIDE this repo
 
@@ -596,6 +608,29 @@ operable at all. Text entry (the Wi-Fi passphrase) remains the real gap.
 cannot express, or suppress it (via `hid-steam`'s hidraw behavior —
 unverified) and lose the free mouse/keyboard. Recommendation in the finding:
 use it.
+
+> ### 🆕 Session 17 measured the whole map, on the installed system, with a human
+>
+> `docs/findings/P17-input-and-osk.md` R-29…R-31. Three things this section could
+> not say:
+>
+> 1. **Lizard mode holds on the installed system too**, not just the live ISO —
+>    and it swallows **X, Y, L1, R1, STEAM and QAM entirely**. Those six report
+>    on **no evdev node at all**, so no user-space program can recover them.
+> 2. **It gives Enter, Esc, Tab, arrows and both mouse buttons — but NO Space.**
+>    `Y → KEY_SPACE` (archinstall's multi-select toggle) is precisely what the
+>    mapper exists to add, so "already navigable" is true for movement and
+>    confirmation and **false for toggling**.
+> 3. **The suppression question is answered and no longer "unverified":**
+>    `/sys/module/hid_steam/parameters/lizard_mode` is a documented, writable
+>    module parameter. `N` silences the emulated nodes and makes `event7` fully
+>    live, including the six swallowed buttons. It does **not** persist across a
+>    reboot.
+>
+> So the decision above is now a real trade with both sides measured: keep
+> lizard mode and lose Space, or drop it and lose the free pointer, making the
+> mapper the *only* input path. **The mapper must be proven working before
+> anything sets `lizard_mode=N`,** or the device is uncontrollable without SSH.
 
 ### 5.10 ✅ Steam's "Switch to Desktop" menu item — **RESOLVED 2026-08-10, proven on hardware**
 
@@ -1211,6 +1246,52 @@ thing here is the **controller-only install** and the layer beneath it.
 
 ---
 
+## 5.20 ✅ The OSK works on text focus — RESOLVED 2026-08-10, one GSettings key
+
+**Answered on hardware (session 17), seen on the screen.**
+`docs/findings/P17-input-and-osk.md` R-35. This was session 16's open
+"needs eyes" item.
+
+```bash
+gsettings set org.gnome.desktop.a11y.applications screen-keyboard-enabled true
+```
+
+Ships **`false`**. `squeekboard` uses it as its auto-show gate, so nothing else
+being correct matters until it is set. With it `true`, focusing a text field
+pops the keyboard.
+
+**T5 must bake this into the image**, alongside the rotation and the
+`org.gnome.desktop.input-sources` setting — three GSettings/dotfile values that
+currently live in one user's session and are all load-bearing.
+
+⚠️ **This was first recorded here as a NEGATIVE ("does not appear on focus"),
+and that was wrong.** Four conditions were tested — stock session, `fcitx5`
+stopped, startup ordering corrected, `GTK_IM_MODULE=wayland` — and all of them
+sat downstream of the same unexamined gate. **Four experiments sharing a hidden
+precondition are one experiment.** A `WAYLAND_DEBUG=1` trace showed the whole
+chain had been working the entire time: GTK binds `zwp_text_input_manager_v3`
+and calls `enable()`, Hyprland sends `enter`, and squeekboard receives
+`zwp_input_method_v2.activate()`. The trace cost minutes, needed no operator,
+and should have come before the fourth button-press experiment.
+
+Two facts recorded on the way:
+
+- **Omarchy 4.0 ships and runs `fcitx5`** (`INPUT_METHOD`/`XMODIFIERS`/
+  `QT_IM_MODULE` = `fcitx`). It does **not** block squeekboard, and it
+  **respawns within a second of being killed** — anything assuming it stays
+  dead is wrong.
+- **`sm.puri.OSK0`'s `SetVisible` also works**, so explicit show/hide is
+  available where a screen wants it rather than focus.
+
+**Steam's own OSK is not an alternative for the installer** (R-35b). Steam does
+not run in the desktop session here, its keyboard is rendered by the Steam
+client itself, and the live ISO has no Steam at all. Gaming Mode already has it
+for free because that is Valve's session. Desktop Mode could have it only by
+keeping Steam running in the background — untested, and a heavyweight
+dependency.
+
+---
+
 ## 6. Blocked on human
 
 - **`docs/ROADMAP.md` P1.4 — Ventoy on the test USB + the stock Omarchy 4.0 beta
@@ -1236,6 +1317,31 @@ backup rescue (the rebuild wipes both).
 
 ## 7. Don't re-derive — each of these cost real time
 
+- **The Deck's d-pad arrives as `BTN_DPAD_*` key events, never as `ABS_HAT0X/Y`.**
+  `hid-steam` *advertises* the hat axes and never sends them. Anything handling
+  only the axes silently ignores the d-pad — which is exactly what shipped
+  (§R-33). Check what a device **sends**, not what it advertises.
+- **`hid-steam` uses Nintendo-style button codes:** physical **X** is
+  `BTN_NORTH`, physical **Y** is `BTN_WEST`. The kernel's own aliases confirm it
+  (`BTN_NORTH/BTN_X`). This looks inverted beside the Xbox convention and will
+  invite a "fix" that breaks it.
+- **Lizard mode swallows X, Y, L1, R1, STEAM and QAM completely** — they appear
+  on no evdev node. It provides Enter, Esc, Tab, arrows and both mouse buttons,
+  but **no Space**. Suppress it with
+  `/sys/module/hid_steam/parameters/lizard_mode` (writable, non-persistent).
+- **An evdev node can be enumerated and permanently silent.** Counting nodes,
+  `systemctl is-active`, and a log line naming the bound device all reported
+  health while the mapper delivered nothing for an entire session (§R-31).
+- **When probing input by hand, press a known-good button as a DELIMITER between
+  test buttons.** A silent button leaves no marker, so an undelimited batch
+  cannot attribute events to presses. A reliably emits `KEY_ENTER`.
+- **`pkill -f <pattern>` over SSH kills its own shell** when the pattern text
+  appears anywhere in the remote command line — including in a later argument.
+  The `[p]attern` bracket trick fails too if the plain name appears again. Kill
+  by PID, or put the `pkill` in its own invocation.
+- **Unquoted heredocs execute backticks and `$(...)` at render time, as root.**
+  `deck-session.sh` shipped a comment that really ran `uwsm start ... Hyprland`
+  during a stage install (§R-36). Escape them; `shellcheck` catches it (SC2006).
 - Docker's default bridge network is throttled to ~2 KB/s on the operator's dev
   machine. Use `--network host` for any Docker-based tooling there.
 - `mount -o remount` does **not** re-apply `fmask`/`dmask` on vfat. A full
@@ -1388,5 +1494,6 @@ One line each. Detail lives in git history and in the `FINDING-*.md` files.
 | 7 | First physical hardware run; two real bugs found; R1 §10.3 resolved; Steam/gamescope installed; prior-art check done |
 | 8 | First Gaming Mode boot, via a DeckShift hybrid splice (since reversed — §2.3) |
 | 15 | **Phase 2 opener, 2026-08-10.** §5.10 closed — Steam's own Switch-to-Desktop works, with **two** causes not one (OOBE, plus the runtime narrowing PATH to `/usr/bin:/bin`, which made the `/usr/local/bin` shim unreachable all along). §5.14 closed with a stub, after learning its exit codes are a protocol: apply exiting 0 made Steam **reboot the Deck**. §5.11's greeter + desktop fixed — transform is **3**, not the recorded 1, and Omarchy's `auto` scale left a 640×400 desktop. A `#` marker in a Lua file taught us Hyprland **silently discards** an unparseable config. Opened §5.15 (the whole polkit-helper surface, incl. brightness) and §5.16 (the switch latched sddm into permanent failure). |
+| 17 | **The eyes-and-hands pass for input, 2026-08-10 — the first time any of this was seen on a screen.** Found the input mapper was a **complete no-op** on the desktop: `active`, correctly bound to `event7` by capability, and that node is **silent** because lizard mode routes buttons to the emulated nodes. P2.1's "verified on hardware" was true in every particular and proved nothing (4th instance of P16 §7's pattern). Underneath it, two real defects, each found only by correlating a human's press against what the kernel emitted: the **d-pad emitted nothing** (`hid-steam` advertises `ABS_HAT0*` and only ever sends `BTN_DPAD_*`, so the suite passed against a device model this hardware never produces), and **a resting analog stick cancelled every held direction in ~10ms**, killing auto-repeat, because two input sources shared one state slot. Both fixed, deployed and **verified by pressing the buttons** — hold tracks the physical button across 3.4s and auto-repeat measures exactly `REPEAT_DELAY`/`REPEAT_INTERVAL`. Measured the **full lizard-mode map**: it swallows X/Y/L1/R1/STEAM/QAM entirely and provides **no Space**, which archinstall needs (§5.9). Found `hid_steam`'s `lizard_mode` knob, so §5.9's "unverified" suppression question is answered. **§5.20 closed:** the OSK works on focus — but was **first recorded here as a negative** after four experiments that all sat downstream of one unexamined GSettings gate; a `WAYLAND_DEBUG` trace showed the protocol chain had been working the whole time. Also fixed an unquoted heredoc that **executed `uwsm start ... Hyprland` as root** at render time and had left **CI red** while this file claimed shellcheck passed. Reverted session 16's display-always-on. |
 | 16 | **P2.0b + P2.0c, 2026-08-10.** `steamos-set-timezone` + `steamos-priv-write` shipped as two new `deck-session.sh` stages, both signatures **read from Steam's log** rather than inferred, both hardware-verified with a real change and restore. Operator skipped `jupiter-hw-support`. Corrected §5.15: the brightness slider **works** on this Deck — Steam falls back to `sudo -n tee` and then `sudo -n chmod a+w`, which is also what makes those sysfs nodes 666. Opened §5.17 (`99-deck-testing`'s blanket NOPASSWD masks privilege defects and must not ship). Then **P2.0c**: §5.16's real cause was the **stop timing out** (`TimeoutStopSec=5`, teardown 5.008s → SIGKILL → start 3ms later), not the retry spacing — R-26's `RestartSec` rationale was wrong, and it fired at **boot**, not only on switches. Fixed with `TimeoutStopSec=30` + stop→settle→start in a `systemd-run` transient unit; **20/20 soak clean**. The soak also found **§5.18**: a dead session lands on a password greeter, because SDDM ships `Relogin=false`. Then **P2.0e/§5.13**: the repo overlap was **audited** (101 collisions, Valve older in 50 -> reordering rejected; the fix is `pacman -S jupiter-staging/gamescope`), and the suite's last blind spot closed. Two defects were introduced by this session's own fixes and caught by mutation testing and soaking, not review -- a settle gate matching the comm name `gamescope`, which no process has. Unit suite 17 -> **62 assertions**, mutation-tested **39/39**. Closed 5.11/5.13/5.16/5.18, answered 5.5/5.17, shipped P2.1 + P2.2's programmatic half, drafted `docs/RECOVERY.md`. **Operator added phase 4** (the enablement layer) and a Deck-specific flasher was considered and reframed. |
 | 9 | **One long session, 2026-08-09/10 — the scope reset and all of phase 1's non-hardware work.** Five scope decisions (§2): the ISO is the deliverable again, network-at-install is fine, target 4.0, DeckShift dropped, Deck rebuilds allowed. Docs consolidated (`PROGRESS` 1403→~600 lines, `WHERE-WE-ARE` folded in, `PLAN` frozen with a known-wrong-sections banner); `docs/ROADMAP.md` written (three phases); dead drafts removed. **P1.1:** `stage-default-entry` with the path form *proven by boot*, substrate rebuilt with real snapper snapshots (which immediately caught the hook test's own substring miscount), three deliberate-failure tests. **P1.2–P1.3:** T2 spike resolved — a gamepad drives `gum` and `archinstall` at the kernel input layer, so T4 is days not weeks. **P1.4 (half):** 4.0 beta ISO built; static inspection decided T4's OSK question and found the OLED Deck's `nfa765` Wi-Fi firmware present (§5.1). Repo reorganized out of the flat layout (a root `*.sh` glob had silently gone from checking every script to none). |
