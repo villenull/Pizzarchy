@@ -690,6 +690,32 @@ Desktop Mode under Hyprland; the two contexts get different answers.
 used a virtual pad modelling the Linux gamepad ABI. P1.5's recon captures
 them. Expect mapping-table entries to change; the mechanism will not.
 
+### 3.10a 🔴 THE FOURTH GOTCHA, and the biggest: the ref and the channel are TWO pins
+
+**Measured 2026-08-11 (session 20).** §3.10 item 1 said the ref and the mirror
+"must agree". That understates it. `builder/build-iso.sh` downloads the Omarchy
+runtime **from the package channel at build time**, so a build is pinned by two
+independent things and **only one of them is expressible in git**:
+
+- `omarchy-iso` at a git SHA — pinnable, ours.
+- the `edge` channel's `omarchy-dev`, which is **whatever it serves that hour**.
+
+They already disagree. Our ISO and Omarchy's beta 2 were both cut at
+`omarchy-iso@a12bfea` with runtime `r1617.g6d7826d`, which ships
+`omarchy-setup-system`. **`edge` today serves `r1652.g1c9dfc5`, 18 commits past
+a rename to `omarchy-apply-system`.** So **forking at `a12bfea` and building
+today produces an installer that calls a binary the runtime no longer has** —
+and it dies at the fifth install phase, *after* partitioning and pacstrap.
+
+*(The rename pair, 27 seconds apart: `basecamp/omarchy@536fcd5c` 21:14:57Z →
+`omarchy-iso@d6cd2d30` 21:15:24Z. Upstream moved both halves together; anyone
+pinning only one half gets the mismatch.)*
+
+⚠️ **Consequence for reproducibility:** the beta 2 ISO on disk is a **time
+capsule**. It cannot be rebuilt from its own git SHA. Pin the runtime with
+`omarchy-iso-make --local-source` (upstream's own supported path) rather than
+trusting a channel.
+
 ### 3.10 Building the Omarchy 4.0 ISO — three gotchas for T5
 
 Found while producing a 4.0 beta ISO for P1.4 (`omarchy-iso` @ `a12bfea`).
@@ -1004,6 +1030,30 @@ same class of problem, same fix.
 is currently fixed only for `deck` on the test Deck. **T5 must bake it into the
 image** — `/etc/skel/.config/hypr/` or an Omarchy default — or a fresh install
 comes up rotated again.
+
+### 5.12a 🔴 Turning encryption off DELETES autologin — they are one change
+
+**Measured 2026-08-11 (session 20), reading upstream's installer.**
+`configure_login` writes `autologin.conf` **only `if ctx.encrypt`** — on an
+encrypted install LUKS is the authentication boundary, so SDDM is allowed to
+log straight in. Turn encryption off, as §5.12 requires, and **autologin
+disappears with it.**
+
+**That trades an unanswerable LUKS passphrase prompt for an unanswerable SDDM
+password prompt** — i.e. it re-creates §5.18, the defect that cost session 16
+a full debugging pass, by way of our own fix for a different defect.
+
+⚠️ **T5 must treat "encryption off" and "autologin on" as a single change with
+a single test.** Neither is safe alone on a keyboard-less handheld. Full detail
+and the verification tier: `docs/tasks/T5-fork-plan.md`.
+
+### 5.12b 🐞 `/etc/skel` is too late — the user already exists
+
+Upstream's `useradd` runs inside `arch_install_system`, **phases before** any
+post-finalizer hook. Anything seeded only into `/etc/skel` by a later hook
+reaches nobody. Every per-user file the image must ship — the rotation
+`monitors.lua`, `shell.json`'s idle policy — has to be written to **both**
+skel *and* the created user's home, **and the home copy is the one to verify.**
 
 ### 5.12 The 4.0 installer defaults to FULL-DISK ENCRYPTION
 

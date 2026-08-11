@@ -8,6 +8,20 @@
 > times a day and has already **renamed the `omarchy-apply-system` finalizer**
 > its own installer calls — a fork taken at the wrong point calls a binary that
 > no longer exists.
+>
+> 🔴 **And the git pin is only half of it — measured 2026-08-11 (session 20).**
+> The `edge` channel has **already moved past our runtime pin**: it serves
+> `omarchy-dev-4.0.0.r1652.g1c9dfc5-1` today, 35 commits past `6d7826d` and 18
+> commits past the rename. `builder/build-iso.sh` downloads the runtime package
+> from that channel at build time, so **forking at `a12bfea` and building today
+> yields an installer that calls `omarchy-setup-system` against a runtime that
+> ships only `omarchy-apply-system`** — and it dies at the fifth install phase,
+> after partitioning and pacstrap. The git ref and the package channel are two
+> independent pins and only one is expressible in git.
+>
+> ➡️ **Strategy, fork point, the seams, the six bake-ins with their checks, and
+> a sliced work programme: `docs/tasks/T5-fork-plan.md`.** Read that before
+> starting any step below.
 
 ## Objective
 

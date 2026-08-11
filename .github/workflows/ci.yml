@@ -40,7 +40,13 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y parted dosfstools mtools btrfs-progs jq openssl qemu-utils python3-evdev
+          # libarchive-tools provides bsdtar. test/unit/test-iso-payload-audit.sh
+          # HARD-FAILS without it rather than skipping: the package-archive half
+          # of tools/iso-payload-audit.sh is the most likely route by which a
+          # sudoers drop-in would reach the ISO (PROGRESS.md §5.17), so a run
+          # that quietly skipped it would be the check passing for the wrong
+          # reason. Keep this dependency; do not turn the test into a skip.
+          sudo apt-get install -y parted dosfstools mtools btrfs-progs jq openssl qemu-utils python3-evdev libarchive-tools
 
       # ⚠️ shellcheck is PINNED, and apt's is deliberately not used.
       #
