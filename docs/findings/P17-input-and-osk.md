@@ -1,4 +1,4 @@
-# Session 17 — the input path, seen on a screen for the first time (R-29…R-35)
+# Session 17 — the input path, seen on a screen for the first time (R-29…R-36)
 
 **2026-08-10, OLED Deck, operator present and holding the device.** Session 16
 closed with the honest admission that *"nothing here was seen on a screen"*.
