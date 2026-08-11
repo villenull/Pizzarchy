@@ -185,9 +185,11 @@ pass "the builder still defaults to the channel the product's ISO carries"
 
 grep -q "LIMINE_PIN=\${IMG_LIMINE_PIN:-" "$BUILDER" ||
   fail "the builder still declares a default pin"
+# shellcheck disable=SC2016 # the literal '$7' is the pattern; expanding it is the bug
 grep -q 'LIMINE_PIN=\$7' "$BUILDER" ||
   fail "the in-container script still receives the pin as \$7" \
     "the pin is passed positionally; adding an argument without updating both sides silently shifts them"
+# shellcheck disable=SC2016 # ditto: the literal '$(id -u)' text is what must appear in the builder
 grep -q '"\$(id -u)" "\$(id -g)" "\$LIMINE_PIN"' "$BUILDER" ||
   fail "the docker invocation still passes the pin" \
     "without it the in-container LIMINE_PIN is unset and the block dies on set -u"

@@ -112,8 +112,17 @@ grep patterns, an intentional `A && B || C`) and now carry narrow
 **Verify with CI's own command, not `shellcheck src/*.sh`:**
 
 ```bash
-mapfile -t files < <(git ls-files '*.sh'); shellcheck -x "${files[@]}"
+mapfile -t files < <(git ls-files --cached --others --exclude-standard '*.sh'); shellcheck -x "${files[@]}"
 ```
+
+⚠️ **`--others --exclude-standard` is the important part, added 2026-08-11 after
+this bit a third time.** CI runs the narrower `git ls-files '*.sh'`, which is
+correct *there* — CI checks out a commit, so everything is tracked. Locally it
+is a trap: **a brand-new suite is untracked, so the "CI's own command" check
+sails past it, and the file becomes lintable only once you commit it.** That is
+exactly how `test/unit/test-vm-limine-pin.sh` went in red in commit `e5a5540`
+after its author ran the lint and saw exit 0. **Use the command above before
+committing; CI's narrower one only agrees with it afterwards.**
 
 Now: **12 suites and that command exit 0** — seven shell (`test-deck-session.sh` 70,
 `test-osk-install-layout.sh` 19, `test-vm-limine-pin.sh` 12, four VM-helper suites) and five Python
@@ -1507,7 +1516,7 @@ Why a flasher was reframed rather than adopted:
 scaffolding around a distro-specific core (`pacman`, `jupiter-staging`,
 `limine`, `mkinitcpio`, `sddm`, `uwsm`). You would not port that core; you would
 rewrite it. What is genuinely portable is the five `render_*` helper bodies, the
-session-switch *policy*, the mapper, the probes — and §7's 49 facts, which are
+session-switch *policy*, the mapper, the probes — and §7's 50 facts, which are
 the single biggest accelerator and are not code at all.
 
 ⚠️ **"A day" buys ported-and-conformance-green, NOT shippable.** §5.18 surfaced
@@ -2113,6 +2122,15 @@ backup rescue (the rebuild wipes both).
   and the ETag is an S3 multipart hash, so a downloaded image cannot be checked
   against upstream. Also: a beta ISO is a *snapshot*, and `quattro`/`edge` run
   ahead of it — **`omarchy-update` does not put a machine on "the beta"**.
+- **`git ls-files '*.sh'` lists only TRACKED files, so running "CI's own
+  command" locally does NOT lint a file you have just created.** It becomes
+  lintable the moment you `git add` it — i.e. the check passes, you commit, and
+  CI goes red on the file you thought you had just verified. Measured
+  2026-08-11: `test/unit/test-vm-limine-pin.sh` shipped two SC2016 findings this
+  way in `e5a5540`, an hour after this file's own warning about "checking a
+  narrower set than CI does". **Locally use
+  `git ls-files --cached --others --exclude-standard '*.sh'`;** CI's narrower
+  form is correct only because CI checks out a commit.
 - **reddit.com is blocked by policy for WebFetch and for the in-app browser**
   (measured 2026-08-11 — `www.` and `old.` alike). Links to r/omarchy threads
   cannot be read from a session; ask the operator to paste, or find the
