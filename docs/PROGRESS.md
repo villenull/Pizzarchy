@@ -2299,6 +2299,23 @@ backup rescue (the rebuild wipes both).
   `BTN_NORTH`, physical **Y** is `BTN_WEST`. The kernel's own aliases confirm it
   (`BTN_NORTH/BTN_X`). This looks inverted beside the Xbox convention and will
   invite a "fix" that breaks it.
+- ✅ **QAM is `BTN_BASE` (294)**, measured on hardware 2026-08-11 with
+  `lizard_mode=N`, on `/dev/input/event7` ("Steam Deck"). STEAM is `BTN_MODE`
+  (316) on the same node. The capture bracketed two QAM presses between two
+  `BTN_SOUTH` presses — 304, **294**, **294**, 304, 316 — so the attribution is
+  evidence, not inference. ⚠️ **Another misleading name**, like the trackpads
+  that report as hats: `BTN_BASE` is nominally a joystick base button and says
+  nothing about a quick-access menu. Do not "correct" it.
+- ⚠️ **The Deck enumerates FOUR input nodes and two of them are silent.**
+  Measured 2026-08-11: `event5` and `event6` are both named
+  **"Valve Software Steam Controller"** and emitted nothing at all during a
+  75-second capture in which every button worked; `event7` ("Steam Deck") is the
+  one that speaks, and `event8` is Motion Sensors. **A probe that picks one node
+  and waits can therefore report a working button as dead** — which is R-29's
+  exact shape, and is what the one-liner in the P2.9 runbook (`pads[-1]`) risked.
+  Watch every candidate node at once and label the source; the working probe is
+  in the session scratch and the approach is worth rebuilding over trusting a
+  single pick.
 - **Lizard mode swallows X, Y, L1, R1, STEAM and QAM completely** — they appear
   on no evdev node. It provides Enter, Esc, Tab, arrows and both mouse buttons,
   but **no Space**. Suppress it with

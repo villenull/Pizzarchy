@@ -259,28 +259,23 @@ MENU_ACTIONS: dict[str, list[str]] = {
     "menu-root": [OMARCHY_MENU, "toggle"],
 }
 
-# 🔴 QAM'S EVDEV CODE HAS NEVER BEEN MEASURED. DELIBERATELY UNSET -- DO NOT GUESS.
+# ✅ MEASURED ON HARDWARE 2026-08-11: QAM is BTN_BASE (294), on the "Steam Deck"
+# node (/dev/input/event7), with lizard_mode=N.
 #
-# Every record this project has says only that lizard mode swallows QAM
-# (docs/PROGRESS.md §7); no capture with lizard_mode=N has ever named its code.
-# A guess binds a button we cannot see to a menu we cannot test, and both ways
-# it fails silently: either QAM does nothing, or some OTHER button opens the
-# menu and nobody knows which press did it.
+# The capture bracketed two QAM presses between two BTN_SOUTH presses, so the
+# attribution is not inference -- 304, 294, 294, 304, then 316 (BTN_MODE, STEAM).
+# docs/PROGRESS.md §7 carries the measurement beside the other button facts.
 #
-# While this is None the QAM binding is INERT, and menu_binding_report() says so
-# at every startup rather than leaving a dead button to be rediscovered.
+# ⚠️ The name is another entry in this hardware's list of misleading labels, like
+# the trackpads that report as hats. BTN_BASE is nominally a joystick base
+# button; nothing about the name says "quick access menu". Do not "correct" it.
 #
-# ONE PRESS FILLS IT IN. On the Deck, at a shell: this turns lizard mode off so
-# QAM reaches an evdev node at all, then prints the code of every button pressed
-# until Ctrl-C -- press QAM and read the name off the last line.
-#
-#   sudo sh -c 'echo N >/sys/module/hid_steam/parameters/lizard_mode' && sudo python3 -c "import sys;from evdev import InputDevice,ecodes as e;d=InputDevice(sys.argv[1]);print('now press QAM');[print(x.code, e.bytype[e.EV_KEY].get(x.code)) for x in d.read_loop() if x.type==e.EV_KEY and x.value==1]" "$(sudo deck-input-mapper --list | awk '/\[gamepad\]/{print $1; exit}')"
-#
-# python3-evdev is a hard dependency of this script, so it is certainly present;
-# `sudo evtest DEVICE` prints the same thing IF evtest happens to be installed,
-# which on a stock Deck it is not. Then set QAM_BUTTON to that code and record
-# the measurement in docs/PROGRESS.md §7 beside the other button facts.
-QAM_BUTTON: int | None = None
+# ⚠️ Two of the four enumerated nodes were COMPLETELY SILENT during that capture
+# (event5 and event6, both named "Valve Software Steam Controller"). A probe that
+# picks one node and waits would have reported QAM as dead. That is R-29's exact
+# failure shape; the probe that answered this watched every node at once and
+# labelled the source. Reuse that approach, not a single-node read.
+QAM_BUTTON: int | None = 294
 
 # Where the knob that makes STEAM and QAM exist at all lives. Read only to
 # REPORT it (docs/PROGRESS.md §5.21 owns setting it); with lizard mode on, both

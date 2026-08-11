@@ -372,19 +372,32 @@ check("the pad's own autorepeat on STEAM emits nothing",
 mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.2)
 check("and does not count as a chord partner", mm.pending_actions, ["menu-apps"])
 
-# 🔴 QAM ships INERT. Its evdev code has never been measured -- every record
-# says only that lizard mode swallows it -- and a guessed code binds a button
-# we cannot see to a menu we cannot test, failing silently either way.
+# ✅ QAM was MEASURED on hardware 2026-08-11: BTN_BASE (294), on the "Steam Deck"
+# node with lizard_mode=N, bracketed between two BTN_SOUTH delimiter presses so
+# the attribution is evidence rather than inference (docs/PROGRESS.md §7).
+#
+# The INERT path below is still exercised deliberately. It is reachable code --
+# a port to other hardware, or a future button whose code is unmeasured, lands
+# straight back in it -- and it is the branch that keeps a dead button from
+# being a silent mystery. Deleting its coverage because this one button is now
+# known would throw away the guard, not the obsolete part.
 
-check("QAM_BUTTON ships unset, because the code has never been measured",
-      m.QAM_BUTTON, None)
+check("QAM_BUTTON ships as the MEASURED code, not a guess and not unset",
+      m.QAM_BUTTON, e.BTN_BASE)
+check("and BTN_BASE is 294, so a rename upstream cannot silently move it",
+      m.QAM_BUTTON, 294)
+
+_saved_qam = m.QAM_BUTTON
+m.QAM_BUTTON = None
 mm = fresh()
 check("with QAM_BUTTON unset, an unbound button queues nothing",
       (mm.translate(e.EV_KEY, e.BTN_TRIGGER_HAPPY1, 1, 0.0), mm.pending_actions),
       ([], []))
+m.QAM_BUTTON = _saved_qam
 
-_saved_qam = m.QAM_BUTTON
-m.QAM_BUTTON = e.BTN_TRIGGER_HAPPY1   # stands in for the code one press will name
+# The stand-in code is deliberately NOT the real one: it proves the binding
+# follows the constant rather than a 294 baked into translate().
+m.QAM_BUTTON = e.BTN_TRIGGER_HAPPY1
 mm = fresh()
 check("with a code set, QAM queues the ROOT menu on the press",
       (mm.translate(e.EV_KEY, m.QAM_BUTTON, 1, 0.0), mm.pending_actions),
@@ -393,7 +406,15 @@ check("and the release does not queue it a second time",
       (mm.translate(e.EV_KEY, m.QAM_BUTTON, 0, 0.1), mm.pending_actions),
       ([], ["menu-root"]))
 m.QAM_BUTTON = _saved_qam
-check("QAM_BUTTON is left unset for the rest of the suite", m.QAM_BUTTON, None)
+check("QAM_BUTTON is restored to the measured code for the rest of the suite",
+      m.QAM_BUTTON, e.BTN_BASE)
+
+# And the real code, end to end -- the stand-in above cannot catch a 294 that
+# collides with something else this mapper already binds.
+mm = fresh()
+check("the REAL QAM code (294) queues the root menu and nothing else",
+      (mm.translate(e.EV_KEY, 294, 1, 0.0), mm.pending_actions),
+      ([], ["menu-root"]))
 
 
 # --- the spawn: loud, non-blocking, never fatal ------------------------------
@@ -542,9 +563,17 @@ check("startup names the apps-menu command",
       "omarchy-menu toggle apps" in _report_n, True)
 check("startup says STEAM+X still works, so nobody thinks the tap replaced it",
       "STEAM+X" in _report_n, True)
-check("startup ANNOUNCES the inert QAM binding rather than omitting it",
-      "INERT" in _report_n, True)
-check("and names the constant to fill in", "QAM_BUTTON" in _report_n, True)
+check("startup names the MEASURED QAM button rather than calling it inert",
+      ("BTN_BASE" in _report_n, "INERT" in _report_n), (True, False))
+
+# The inert announcement is still the guard against a silent dead button, so it
+# keeps its coverage -- forced, since the shipped constant is no longer None.
+m.QAM_BUTTON = None
+_report_inert = "\n".join(m.menu_binding_report("N"))
+m.QAM_BUTTON = _saved_qam
+check("with no code set, startup ANNOUNCES the inert binding rather than omitting it",
+      "INERT" in _report_inert, True)
+check("and names the constant to fill in", "QAM_BUTTON" in _report_inert, True)
 check("with lizard_mode=N it says the presses reach us",
       "reach this process" in _report_n, True)
 check("every line is prefixed, so it is greppable in a journal",
@@ -565,7 +594,8 @@ _report_set = "\n".join(m.menu_binding_report("N"))
 m.QAM_BUTTON = _saved_qam
 check("once a code is measured the report names the button instead of INERT",
       ("BTN_TRIGGER_HAPPY1" in _report_set, "INERT" in _report_set), (True, False))
-check("QAM_BUTTON is still unset after the report checks", m.QAM_BUTTON, None)
+check("QAM_BUTTON is still the measured code after the report checks",
+      m.QAM_BUTTON, e.BTN_BASE)
 
 check("an unreadable lizard_mode knob reads as None rather than raising",
       m.read_lizard_mode("/nonexistent/hid_steam/lizard_mode"), None)
