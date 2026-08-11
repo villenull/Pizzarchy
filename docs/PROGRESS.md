@@ -188,6 +188,28 @@ which already waits patiently for a pad to return.
 `test/mapper-pad-loss-e2e.py` destroys a pad underneath a live read and was
 verified to fail 5 assertions with the fix reverted.
 
+✅ **And T8 step 4's untested half is now answered in QEMU** (R-47…R-49,
+`test/vm/vm-osk-tty-test.sh`): the keyboard and a real installer TUI **do share
+one console**. `gum` is told via `stty rows` that the console is shorter than it
+is, lays out inside that, and the keyboard takes the rows underneath —
+`gum.received = hlH1`, mixed case and a digit, typed entirely with the
+trackpads and read back from **what gum wrote to a file**, not off the screen.
+Observed through `/dev/vcs2`, the kernel's own copy of the console; `tmux
+capture-pane` cannot answer this question because tmux would redraw over the
+very collision under test.
+
+🐞 **That suite found a second crash of the same family (R-48), now fixed:** a
+failed console write killed the whole mapper. `openvt` deallocates a VT when the
+program on it exits, so the moment `gum` submitted and quit, `/dev/tty2` stopped
+accepting writes and the next redraw was fatal — and **the installer is a
+sequence of screens that start and exit**, so it fires in normal use. Drawing a
+keyboard is optional; being the only input path is not.
+
+⚠️ **R-49 is OPEN:** `--osk-top-row` is not honoured, by five rows — the keyboard
+lands at `stty rows` − 4 rather than the requested top + 4. It does not overlap
+the TUI and stays inside the console, so the product requirement holds, but the
+cause is unexplained and it matters for the Deck's different geometry.
+
 ⚠️ **Still open by choice:** ours is **summon-only**; squeekboard's
 focus-triggered auto-show (§5.20) is still enabled and independent of the mapper,
 so both keyboards may appear. Decide after seeing summon-only in use. Also

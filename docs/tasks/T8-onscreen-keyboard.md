@@ -304,11 +304,11 @@ keyboard knows a controller exists — the property that makes one layer drive
 3. ✅ Absolute dual-cursor mapping from both pads, unit-tested against the
    measured ranges — including diagonals, which is where T8's first failure
    mode bites.
-4. ✅ TTY renderer, driven end to end by a virtual pad (`test/osk-tty-e2e.py`).
-   ⚠️ **Still owed: `iwctl`/`gum` in QEMU.** The keyboard is proven to draw and
-   to type; what is NOT proven is the two of them sharing one console. The
-   intended mechanism is shrinking the TUI's reported window (TIOCSWINSZ) so it
-   stays above the keyboard — see `deck_osk_tty.write_at`. Nothing has tested it.
+4. ✅ TTY renderer, driven end to end by a virtual pad (`test/osk-tty-e2e.py`)
+   **and by `gum` in QEMU** (`test/vm/vm-osk-tty-test.sh`, R-47): they share one
+   console, and `gum.received = hlH1` — typed with the trackpads, read back from
+   what gum wrote to a file. ⚠️ **R-49 open:** `--osk-top-row` lands five rows
+   off; no overlap, cause unexplained.
 5. ✅ Layer-shell renderer for Desktop Mode; `--osk-backend=layer` opens
    **this**, not squeekboard. Verified on Hyprland: real layer surface, focus
    never moves, driven end to end from a virtual pad.
