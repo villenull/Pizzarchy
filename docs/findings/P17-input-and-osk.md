@@ -1,4 +1,4 @@
-# Session 17 — the input path, seen on a screen for the first time (R-29…R-36)
+# Session 17 — the input path, seen on a screen for the first time (R-29…R-37)
 
 **2026-08-10, OLED Deck, operator present and holding the device.** Session 16
 closed with the honest admission that *"nothing here was seen on a screen"*.
@@ -223,27 +223,83 @@ like the rotation and input-source settings. It is off by default.
 `SetVisible` over `sm.puri.OSK0` also works and was seen on screen, so explicit
 show/hide remains available where a screen needs it.
 
-## R-35b — Steam's own OSK is available in Gaming Mode only
+## R-35b — Valve's OSK DOES work in Desktop Mode, via STEAM+X. Tested.
 
-Asked by the operator: can the SteamOS keyboard be used instead?
+Asked by the operator: can the SteamOS keyboard be used instead? Tested on
+hardware rather than reasoned about, and the answer is yes — with a real cost.
 
-**Steam is not running in the desktop session at all** — `pgrep steam` is empty
-and `steamwebhelper` is 0 — and Steam's on-screen keyboard is rendered *by the
-Steam client*, not by anything separable.
+**Steam runs fine in the Omarchy desktop session.** It came up on Hyprland
+through XWayland: 10 `steamwebhelper` processes and three windows (`Steam`,
+`Special Offers`, `Friends List`). With Steam up, **STEAM+X summoned Valve's own
+on-screen keyboard — seen on screen.**
 
-| Context | Steam's OSK |
-|---|---|
-| **Gaming Mode** | ✅ already there, for free — it is Valve's own session, which this project does not build |
-| **Desktop Mode** | ⬜ only if Steam is started and kept running in the background. Untested here, and it costs a heavyweight always-on dependency |
-| **The installer (live ISO)** | ❌ impossible — Steam is not present, and it is proprietary, so it cannot be carried |
+⚠️ **It is summon-only, not focus-triggered.** The operator's words: *"it showed
+up when i pressed steam+x (not before then)"*. Tapping a text field does
+nothing. That is the opposite of squeekboard's behaviour and changes which one
+suits which screen.
 
-So the installer's text entry (the Wi-Fi passphrase, the whole reason this
-matters) can **never** use Valve's keyboard. squeekboard is the answer there and
-is now proven to work.
+| Context | Valve's OSK | squeekboard |
+|---|---|---|
+| **Gaming Mode** | ✅ native and free — Valve's own session | n/a |
+| **Desktop Mode** | ✅ **works, STEAM+X, requires Steam running** | ✅ auto-shows on focus |
+| **The installer (live ISO)** | ❌ **impossible** — no Steam, and it is proprietary so it cannot be carried | ✅ the only option |
+
+So the installer's text entry — the Wi-Fi passphrase, the reason any of this
+matters — can **never** use Valve's keyboard.
+
+**Two startup traps, both of which cost time here:**
+
+- **Steam needs `DISPLAY`, not just `WAYLAND_DISPLAY`.** The client is X11-only
+  and runs under XWayland (`Xwayland :0`, and the session does set `DISPLAY=:0`).
+  Launching it with only the Wayland variables exported produces **zenity error
+  dialogs titled "Unable to open a connection to X"** and no Steam.
+- **Steam takes over a minute to show a window**, and its `-silent` form shows
+  none at all. A 25 s timeout looks exactly like a failure while the bootstrap
+  is running normally — check `~/.steam/steam/logs/bootstrap_log.txt` before
+  concluding anything.
+
+⚠️ **Unrelated landmine noticed while reading Valve's launcher.**
+`/usr/bin/steam-jupiter` (owned by `steam-jupiter-stable`, **not** this project)
+contains `rm -rf --one-file-system "$STEAM_DIR" "$STEAM_LINKS"`, guarded by a
+`# OOBE Inhibit` marker in `~/.local/share/Steam/Steam.cfg`. That file does not
+exist on this Deck, so the branch is unreachable and the signed-in state was
+verified intact. **Anything that creates that Steam.cfg wipes Steam's install**,
+including the login this project spent a session establishing.
 
 ⚠️ If the goal is for our keyboard to *look* like Valve's, that runs into
 `docs/findings/P16-redistribution-and-trademark.md`: draw our own, do not copy
 Valve's artwork. A comparable layout is fine; a visual imitation is not.
+
+## R-37 — running Steam on the desktop takes the controller, and the mapper follows it
+
+The cost of R-35b's answer, measured immediately after. With Steam running in
+the **desktop** session:
+
+- The native `Steam Deck` and `Steam Deck Motion Sensors` nodes **disappear**,
+  replaced by `Microsoft X-Box 360 pad 0` — the same hidraw takeover
+  `docs/findings/hardware-parity.md` recorded for Gaming Mode, now confirmed to
+  happen on the desktop too.
+- **`deck-input-mapper` re-bound itself to Steam's virtual pad.** Its device
+  vanished, the service restarted, and it now logs
+  `reading /dev/input/event7 (Microsoft X-Box 360 pad 0)`. Selecting by
+  `BTN_SOUTH` capability makes the virtual pad an equally valid match.
+
+So with Steam running on the desktop, **Steam processes the controller for its
+own UI while our mapper injects `KEY_ENTER`/`ESC`/`TAB`/`SPACE` on top of it** —
+double input, from one press.
+
+**This makes the Desktop Mode keyboard a real either/or**, not a free upgrade:
+
+| | Steam running on the desktop | No Steam on the desktop |
+|---|---|---|
+| Keyboard | Valve's, via STEAM+X (summon-only) | squeekboard, auto on focus |
+| Controller | Steam owns it; the mapper **should be disabled** | lizard mode; the mapper is a no-op unless `lizard_mode=N` |
+| Cost | a permanently running Steam client | none |
+
+**Open decision for T3/T4** — the mapper needs a policy for "Steam is running":
+either refuse to bind a device named like Steam's virtual pad, or have the unit
+stop when Steam is up. Binding it is almost certainly wrong, and nothing
+currently prevents it.
 
 ## R-36 — a generated file executed a command at render time
 
@@ -280,6 +336,8 @@ pass for any other command whose output happened to be non-empty.
 | squeekboard | stopped; it is not installed as an autostart |
 | Mapper | fixed version deployed via `stage-input-mapper`, service **active** |
 | Probe scripts/logs | removed from the Deck's `/tmp` |
+| Steam | started for the R-35b test, then **shut down** — the state it was found in. Input devices verified back to native `Steam Deck` and the mapper re-bound to it |
+| `screen-keyboard-enabled` | left **`true`** deliberately — it is a product requirement, not scaffolding |
 
 ✅ **Session 16's display-always-on is REVERTED** (operator instruction, end of
 session 17). Verified: sleep/suspend/hibernate/hybrid-sleep targets back to

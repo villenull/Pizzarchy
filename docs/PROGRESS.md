@@ -1283,12 +1283,18 @@ Two facts recorded on the way:
 - **`sm.puri.OSK0`'s `SetVisible` also works**, so explicit show/hide is
   available where a screen wants it rather than focus.
 
-**Steam's own OSK is not an alternative for the installer** (R-35b). Steam does
-not run in the desktop session here, its keyboard is rendered by the Steam
-client itself, and the live ISO has no Steam at all. Gaming Mode already has it
-for free because that is Valve's session. Desktop Mode could have it only by
-keeping Steam running in the background — untested, and a heavyweight
-dependency.
+**Valve's own OSK: tested, and it works in Desktop Mode** (R-35b). Steam runs
+fine on Hyprland via XWayland, and **STEAM+X summons Valve's keyboard** — seen
+on screen. But it is **summon-only, never focus-triggered**, and the live ISO
+has no Steam at all, so **the installer can never use it**. Gaming Mode already
+has it for free, being Valve's own session.
+
+⚠️ **It is an either/or, not a free upgrade** (R-37). Running Steam on the
+desktop makes Steam take the controller — the native pad node is replaced by
+`Microsoft X-Box 360 pad 0` — and **`deck-input-mapper` re-bound itself to that
+virtual pad**, so one press would drive Steam's UI *and* inject a keystroke.
+**T3/T4 owe the mapper a "Steam is running" policy**; nothing currently stops it
+binding Steam's virtual pad.
 
 ---
 
