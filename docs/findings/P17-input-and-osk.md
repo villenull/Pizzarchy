@@ -388,7 +388,13 @@ So the mechanism is a **large timeout**, set in `~/.config/omarchy/shell.json`:
 which is effectively never for a handheld and is nowhere near the bound.
 
 The shell picks the change up live: `shell.qml` reads the user config through a
-`FileView` with `watchChanges: true`, so no restart is needed.
+`FileView` with `watchChanges: true`, so no restart is needed. **Confirmed by
+watching two consecutive idle cycles rather than trusting the property:**
+
+```
+19:38:27  idle-cycle-start: screensaver=150 lock=300      # before
+19:42:19  idle-cycle-start: screensaver=150 lock=86400    # after, no restart
+```
 
 **T5 owes the image this setting**, and it is not a GSettings — it is
 `~/.config/omarchy/shell.json`, a per-user dotfile, so it has the same
