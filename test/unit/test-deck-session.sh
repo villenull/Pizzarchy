@@ -376,6 +376,8 @@ pass "an absolute path is refused rather than passed through as a zone name"
 # 'unexpected characters' pins the early guard, and also pins the DIAGNOSTIC:
 # telling a user their timezone is malformed is not the same as telling them
 # it does not exist on this system.
+# shellcheck disable=SC2016  # NOT expanding is the point: these are the literal
+# injection strings the guard must reject. Double quotes would run `id` here.
 for bad in 'Foo$(id)' 'Foo;id' 'Foo`id`' 'Foo id' 'Foo|id' $'Foo\nBar'; do
   run_tz "$bad"
   [[ $tz_rc -eq 3 ]] ||
@@ -515,6 +517,8 @@ pass "note: /sys/class/leds/*/brightness stays refused -- only led_brightness_mu
 #
 # Every whitelisted node takes an unsigned integer. The empty case is real,
 # not theoretical: Steam sends an empty value for /dev/drm_dp_aux0.
+# shellcheck disable=SC2016  # '$(id)' must stay literal -- it is the payload
+# the value guard has to reject, not something to evaluate here.
 for bad_value in "" "abc" "-1" "1.5" "12 34" '$(id)' "0x10" " 5"; do
   run_pw /sys/class/backlight/amdgpu_bl0/brightness "$bad_value"
   [[ $pw_rc -eq 4 ]] ||
@@ -671,6 +675,8 @@ grep -qE "[|']gamescope[|']" <<<"$pgrep_line" &&
   fail_test "the gate must not match on bare 'gamescope'" "no process has that comm -- the compositor is 'gamescope-wl'. A bare 'gamescope' alternative is the no-op that shipped and had to be corrected. pgrep line: ${pgrep_line}"
 pass "the pgrep pattern uses measured comm names for BOTH sessions, and not the bare binary name 'gamescope' which matches no process"
 
+# shellcheck disable=SC2016  # a grep PATTERN: the \$ matches a literal dollar
+# in the generated helper's source, which is exactly what is being pinned.
 grep -qE 'pgrep -u "\$session_user" -x' "$rs_helper" ||
   fail_test "the process check is scoped to the desktop user AND exact-matched" "-u keeps it from matching another user's processes; -x keeps 'gamescope' from matching a window title or wrapper script"
 pass "the process check is both user-scoped (-u) and exact (-x), so it cannot match a wrapper or another user"
@@ -851,9 +857,12 @@ sudoers_line_is_nopasswd "deck ALL=(ALL) NOPASSWD: ALL" ||
 pass "NOPASSWD is detected separately from blanket, so the ordinary password-protected admin grant is not a release failure"
 
 # The exact pair seen on the real Deck: one of each.
+# shellcheck disable=SC2015  # "C runs when A is true" is the INTENT: fail_test
+# must fire whenever either classifier disagrees, not only when the first does.
 sudoers_line_is_blanket   "deck ALL=(ALL) ALL"           &&
 ! sudoers_line_is_nopasswd "deck ALL=(ALL) ALL"          ||
   fail_test "03_deck's real line classifies as blanket-but-password-required"
+# shellcheck disable=SC2015  # same shape, same intent as the pair above.
 sudoers_line_is_blanket   "deck ALL=(ALL) NOPASSWD: ALL" &&
   sudoers_line_is_nopasswd "deck ALL=(ALL) NOPASSWD: ALL" ||
   fail_test "99-deck-testing's real line classifies as blanket AND passwordless"

@@ -122,6 +122,8 @@ pass "the stage installs the layout core into OSK_LIB_DIR"
 # Match the INVOCATION, not the string "--type": the failure message beside it
 # also contains "--type", so a looser grep passes with the check deleted.
 # (Mutation-tested: replacing the command with `true` survived a bare grep.)
+# shellcheck disable=SC2016  # a grep PATTERN: \$ matches a literal dollar in
+# the stage's source, which is the whole point of the assertion.
 grep -q '\$("\$MAPPER_BIN" --type' <<<"$stage_body" ||
   fail "the stage verifies the core by RUNNING the mapper, not by stat-ing a file" "$stage_body"
 pass "the stage verifies the install by running the mapper's --type path"

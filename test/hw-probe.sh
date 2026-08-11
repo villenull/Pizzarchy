@@ -57,6 +57,8 @@ done
 # arrives, which is how this probe hung the first time. Count the nodes.
 kv input.event.nodes "$(set -- /dev/input/event*; [ -e "$1" ] && echo $# || echo 0)"
 kv input.js.nodes "$(set -- /dev/input/js*; [ -e "$1" ] && echo $# || echo 0)"
+# shellcheck disable=SC2012  # sysfs device names are alphanumeric by kernel
+# convention; `find` here would add a second failure mode for no benefit.
 kv input.accel "$(ls /sys/bus/iio/devices/ 2>/dev/null | paste -sd,)"
 
 echo "### display"

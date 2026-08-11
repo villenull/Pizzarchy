@@ -92,10 +92,23 @@ New task: **T8**, the on-screen keyboard we draw ourselves.
 `origin`. Verify with `git rev-list --left-right --count origin/main...main`,
 never by trusting this line — it has been stale before.
 
-✅ **CI is green again.** It was RED while this file claimed otherwise:
-`shellcheck -x` exited 1 on `src/deck-session.sh` (SC2006) and CI's shellcheck
-step has no `|| true`. Fixed in session 17. Now: **8 suites and `shellcheck`
-exit 0** — six shell (`test-deck-session.sh` 70, `test-osk-install-layout.sh`
+✅ **CI is green.** ⚠️ **It has now been RED twice while this file said
+otherwise**, and both times the reason was checking a narrower set than CI does.
+Session 17 fixed an SC2006 in `src/deck-session.sh`; session 18 found
+`shellcheck -x` still exiting **1** on eight `note`-level findings in
+`test/hw-probe.sh` and `test/unit/test-deck-session.sh` — because CI lints
+**every** `*.sh` in the repo and shellcheck exits non-zero on *any* finding,
+including notes. All eight were deliberate patterns (literal injection strings,
+grep patterns, an intentional `A && B || C`) and now carry narrow
+`# shellcheck disable=` directives with reasons.
+
+**Verify with CI's own command, not `shellcheck src/*.sh`:**
+
+```bash
+mapfile -t files < <(git ls-files '*.sh'); shellcheck -x "${files[@]}"
+```
+
+Now: **8 suites and that command exit 0** — six shell (`test-deck-session.sh` 70, `test-osk-install-layout.sh`
 12, four VM-helper suites) and two Python (`test-deck-input-mapper.py` 89,
 `test-deck-osk-layout.py` 100). ⚠️ The Python ones are not in the `test-*.sh`
 glob; run both globs.
