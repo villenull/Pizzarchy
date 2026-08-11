@@ -1516,7 +1516,7 @@ Why a flasher was reframed rather than adopted:
 scaffolding around a distro-specific core (`pacman`, `jupiter-staging`,
 `limine`, `mkinitcpio`, `sddm`, `uwsm`). You would not port that core; you would
 rewrite it. What is genuinely portable is the five `render_*` helper bodies, the
-session-switch *policy*, the mapper, the probes — and §7's 50 facts, which are
+session-switch *policy*, the mapper, the probes — and §7's 53 facts, which are
 the single biggest accelerator and are not code at all.
 
 ⚠️ **"A day" buys ported-and-conformance-green, NOT shippable.** §5.18 surfaced
@@ -2183,6 +2183,21 @@ backup rescue (the rebuild wipes both).
   and the ETag is an S3 multipart hash, so a downloaded image cannot be checked
   against upstream. Also: a beta ISO is a *snapshot*, and `quattro`/`edge` run
   ahead of it — **`omarchy-update` does not put a machine on "the beta"**.
+- **`limine-mkinitcpio-hook` stopped writing the UKI itself between 1.36.0 and
+  1.37.1, so an mtime is no longer proof of regeneration.** 1.36.0's
+  `limine-mkinitcpio-install` ended in an unconditional `mv -f "$tmp_uki_path"
+  "$uki_path"`; in 1.37.1 that line is gone and the ESP write is delegated to
+  `limine-entry-tool --add-uki`, which is **content-addressed and silently
+  declines to rewrite a byte-identical file** — no "skipping" message. Measured
+  2026-08-11 by running `vm-kernel-hook-test.sh` against both substrates:
+  identical `limine` 12.5.2-1 on each, hook **1.36.0-1 → 1.37.1-1** the only
+  variable. Proof it still writes when it should: in the same failing run, gap
+  A deletes the UKI and it reappears with a fresh mtime.
+  ⚠️ **Two consequences.** Any test proving "was it really rebuilt?" must
+  perturb the *inputs* (a nonce in the initramfs → different bytes), never the
+  artifact's timestamp. And `src/omarchy-deck-kernel.sh`'s own idempotency
+  guard is `test "$uki" -nt "$moddir/vmlinuz"` — correct, but it now sees
+  timestamps upstream no longer refreshes on a no-op reinstall.
 - **`git ls-files '*.sh'` lists only TRACKED files, so running "CI's own
   command" locally does NOT lint a file you have just created.** It becomes
   lintable the moment you `git add` it — the check passes, you commit, and the
@@ -2192,6 +2207,13 @@ backup rescue (the rebuild wipes both).
   set than CI does". **Locally use
   `git ls-files --cached --others --exclude-standard '*.sh'`;** CI's narrower
   form is correct only because CI checks out a commit.
+- **When mutation-testing, verify WHAT the mutation changed before recording a
+  survivor.** Happened twice in one session, 2026-08-11: a `perl -0pe` and then
+  a `re.sub` each matched a **header comment** before the code line they were
+  aimed at, so the code under test never changed and the "survivor" was an
+  artifact. Both times the assertion had teeth once re-targeted. A survivor
+  costs an hour of hunting for a coverage gap that does not exist — print the
+  mutated line, or diff it, before believing the result.
 - ⚠️ **CI's shellcheck version is UNPINNED, so "verify with CI's own command"
   does not mean you will get CI's own answer.** The workflow does
   `apt-get install -y shellcheck` on `ubuntu-latest`; this dev machine runs

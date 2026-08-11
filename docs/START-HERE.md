@@ -280,7 +280,7 @@ work without waiting for further instruction.**
 >    **§5.9 gained session 17's measured lizard-mode map**
 > 3. `docs/ROADMAP.md` — phase 2 is the live work queue, **phase 2.9 is new**
 >    (the beta 2 rebase, before phase 3) and phase 4 is the enablement layer
-> 4. `docs/PROGRESS.md` §7 — **50** facts that each cost real time; do not
+> 4. `docs/PROGRESS.md` §7 — **53** facts that each cost real time; do not
 >    re-derive them
 >
 > Hardware evidence: `docs/findings/P15-live-iso-recon.md` (R-0…R-19, raw logs
@@ -492,7 +492,7 @@ it.
 |---|---|
 | `CLAUDE.md` | Auto-loaded every session. Hard constraints. |
 | `docs/ROADMAP.md` | **The plan — three phases.** Where the current block fits and what gates what. |
-| `docs/PROGRESS.md` | **Every session start. This is the authoritative state.** Scope, findings, open issues, and **50** facts not to re-derive. |
+| `docs/PROGRESS.md` | **Every session start. This is the authoritative state.** Scope, findings, open issues, and **53** facts not to re-derive. |
 | `docs/SESSIONS.md` | Usage-limit budgeting and the block schedule. |
 | `docs/PLAN.md` | **Frozen and partly superseded.** Read the banner at the top first. Good for §6.1a (installer screens), §8 (bug hypotheses), §9 (test tiers), §11 (maintenance risks). |
 | `docs/tasks/` | One file per work block. |
