@@ -1569,7 +1569,7 @@ Why a flasher was reframed rather than adopted:
 scaffolding around a distro-specific core (`pacman`, `jupiter-staging`,
 `limine`, `mkinitcpio`, `sddm`, `uwsm`). You would not port that core; you would
 rewrite it. What is genuinely portable is the five `render_*` helper bodies, the
-session-switch *policy*, the mapper, the probes — and §7's 54 facts, which are
+session-switch *policy*, the mapper, the probes — and §7's 55 facts, which are
 the single biggest accelerator and are not code at all.
 
 ⚠️ **"A day" buys ported-and-conformance-green, NOT shippable.** §5.18 surfaced
@@ -2184,7 +2184,7 @@ consumption is proven end-to-end against a real pad, pty and subprocess — but
 the middle link is a stub, because closing it means restarting the operator's
 `fcitx5` on their live desktop.
 
-### 5.27a 🐞 A killed mapper can orphan the focus watcher, and an orphan keeps the seat
+### 5.27a ✅ FIXED — a killed mapper could orphan the focus watcher, and an orphan keeps the seat
 
 Pre-existing, **but newly consequential**: `SIGTERM` does not run the mapper's
 `finally`, so a plain `kill` leaves the watcher alive — and a watcher holding
@@ -2192,7 +2192,27 @@ the input-method seat makes a *later* mapper's auto-show fail permanently with
 `unavailable`, which reads exactly like "the feature is broken".
 
 Under systemd's default `KillMode=control-group` the cgroup kill covers it.
-Outside systemd it does not. `PR_SET_PDEATHSIG` in the watcher closes it.
+Outside systemd it did not.
+
+✅ **Fixed 2026-08-11:** `die_with_parent()` in `src/deck_osk_focus.py`, run at
+the top of `main()` and **never at import** — the mapper imports this module and
+`deck-session.sh` verifies OSK modules *by importing them*, so a module-scope
+`prctl` would arm PDEATHSIG on the mapper and on the installer. **Two** guards,
+because one is not enough:
+
+1. `PR_SET_PDEATHSIG` → SIGTERM, with a `getppid()` re-check for a parent that
+   dies between the read and the call.
+2. ⚠️ **A wider race the usual guard does not cover:** a parent dying *before*
+   the watcher's interpreter starts leaves `getppid()` already reading the
+   reaper — **measured, 5/5**. So the watcher also polls its own stdout for
+   `POLLERR`, which fires when the mapper (sole holder of the read end) is gone.
+   New exit code `EXIT_ORPHANED = 6` with a sentence the mapper prints.
+
+⚠️ **The thread trap is real, and was measured, not assumed.** A first attempt
+appeared to disprove it only because the forking thread died *before* the
+child reached the prctl. This is sound solely because the mapper imports no
+`threading` — **spawning the watcher from a worker thread would silently break
+auto-show seconds after startup, with nothing in the log.**
 ⚠️ Note the shape: this is the **same cgroup-versus-process reasoning** as
 §5.25 decision 2's `ExecStopPost` hole. Two different features, one systemd
 mental model — get it wrong once and it is wrong in both.
@@ -2453,6 +2473,11 @@ backup rescue (the rebuild wipes both).
   set than CI does". **Locally use
   `git ls-files --cached --others --exclude-standard '*.sh'`;** CI's narrower
   form is correct only because CI checks out a commit.
+- **An orphaned process on a desktop is reparented to `systemd --user`, NOT to
+  pid 1**, so `getppid() == 1` is not a valid orphan test. Measured 2026-08-11
+  while fixing §5.27a: the survivor's ppid became 1404, the user manager. Any
+  check written against pid 1 silently passes on this system while the orphan
+  is very much alive.
 - **When mutation-testing, verify WHAT the mutation changed before recording a
   survivor.** Happened twice in one session, 2026-08-11: a `perl -0pe` and then
   a `re.sub` each matched a **header comment** before the code line they were

@@ -39,6 +39,19 @@ WHY THE PROTOCOL IS HAND-ROLLED
     clients. So this is a documented SETTING, never a silent default: the mapper
     runs this only under `--osk-auto-show`, and nothing spawns it otherwise.
 
+⚠️ THIS PROCESS MUST NOT OUTLIVE THE ONE THAT STARTED IT (§5.27a).
+    An orphan here is not a stray process, it is a BROKEN FEATURE: it keeps
+    holding the single-occupancy input-method seat, so the *next* mapper's
+    auto-show is answered `unavailable` forever, which reads exactly like
+    "auto-show does not work" rather than "something is stuck". `SIGTERM` does
+    not run the mapper's `finally`, so a plain `kill` on a mapper started by
+    hand -- which is how it is debugged -- used to leave one behind. Under
+    systemd the cgroup kill hides this; outside systemd nothing does.
+
+    `die_with_parent()` below owns that, at startup, in this file: the watcher
+    owning its own lifetime is the property we want, and it holds however this
+    process was started.
+
 THE LINE PROTOCOL, which is the other half of this file
     stdout carries one line per change, `focus 0` / `focus 1`, and the mapper
     parses it. Both ends of that pipe are defined HERE -- `format_focus_line`
@@ -57,7 +70,10 @@ THE WIRE FORMAT, since there is no library here to hide it
 
 from __future__ import annotations
 
+import ctypes
 import os
+import select
+import signal
 import socket
 import struct
 import sys
@@ -120,6 +136,7 @@ EXIT_NO_CONNECTION = 2
 EXIT_NO_PROTOCOL = 3
 EXIT_LOST = 4
 EXIT_SEAT_TAKEN = 5
+EXIT_ORPHANED = 6
 
 EXIT_REASONS = {
     EXIT_NO_CONNECTION:
@@ -132,6 +149,9 @@ EXIT_REASONS = {
     EXIT_SEAT_TAKEN:
         "another input method owns the seat -- fcitx5, or squeekboard while it "
         "runs; free it with fcitx5's `--disable waylandim` (R-51)",
+    EXIT_ORPHANED:
+        "the process that started this one is already gone, and an orphan here "
+        "would hold the input-method seat forever (§5.27a)",
 }
 
 
@@ -365,6 +385,97 @@ class FocusWatcher:
         return messages
 
 
+# --- not outliving the process that started us (§5.27a) ----------------------
+
+# From <linux/prctl.h>. The option numbers are architecture-independent, which
+# is why a bare 1 is safe to write down here and nowhere else.
+PR_SET_PDEATHSIG = 1
+
+
+def reader_is_gone(fd: int = 1) -> bool:
+    """True when nothing is reading `fd` any more.
+
+    The mapper starts this with `stdout=PIPE` and keeps the read end for as
+    long as it lives, so a broken write end means the mapper has died -- and
+    unlike `getppid()` this is still true if it died BEFORE this process's
+    interpreter got far enough to look (see `die_with_parent`).
+
+    ⚠️ `events=0` IS THE WHOLE TRICK, not an oversight. poll() always reports
+    POLLERR/POLLHUP/POLLNVAL whether or not they were asked for, and masks
+    everything else to what was. Asking for nothing therefore returns nothing
+    at all in the healthy case -- measured 2026-08-11 across every shape this
+    fd takes: a pipe with its reader alive, a tty, a regular file and
+    /dev/null all give `[]`, a pipe whose reader has closed gives POLLERR.
+    Asking for POLLOUT instead would fire on every idle pipe, i.e. always.
+    """
+    poller = select.poll()
+    poller.register(fd, 0)
+    return bool(poller.poll(0))
+
+
+def die_with_parent(signal_number: int = signal.SIGTERM,
+                    parent: int | None = None) -> str | None:
+    """Tie this process's lifetime to the one that started it.
+
+    Returns None once that is arranged, or a sentence saying why it could not
+    be -- which the caller must treat as FATAL. Refusing to start is the safe
+    direction: auto-show is off either way, but a watcher that cannot promise
+    to die with its parent is exactly the orphan that breaks the seat for
+    every later mapper (§5.27a). The STEAM+X chord never went through here.
+
+    ⚠️ PR_SET_PDEATHSIG FIRES ON THE DEATH OF THE **THREAD** THAT FORKED US,
+    not of the parent process. Measured 2026-08-11, and it is not folklore:
+    with the forking thread held open until this call had definitely run, then
+    joined while its process carried on, the child was killed anyway. The
+    mapper is single-threaded -- it imports no `threading` at all -- so its
+    forking thread IS its process, and that is the only reason this is sound.
+    **If the mapper ever grows a worker thread, do not spawn the watcher from
+    it**: auto-show would die seconds after start-up for no visible reason.
+
+    ⚠️ AND IT IS ARMED TOO LATE TO COVER ITS OWN START-UP. Between fork and
+    this call sits a whole Python interpreter start (~30 ms), and a parent that
+    dies inside that window is already gone when the kernel would have signed
+    us up -- measured 5/5 orphans on a parent that exited straight after
+    `Popen`. Two guards close it, and both are needed:
+      * re-reading `getppid()` after the prctl catches a parent that died
+        between the read and the prctl (microseconds, unreachable by any
+        black-box test -- hence the `parent` argument, which is the seam the
+        suite uses to pin the decision);
+      * `reader_is_gone()` catches the far larger case, a parent already dead
+        before we looked, which `getppid()` cannot see because on this machine
+        an orphan is reparented to `systemd --user` (pid 1404 when measured),
+        not to pid 1. Do not "simplify" that to `getppid() == 1`.
+
+    ⚠️ MUST BE CALLED FROM `main()`, NEVER AT IMPORT. The mapper imports this
+    module for `split_lines`/`parse_focus_line`; a prctl at module scope would
+    set PDEATHSIG on the mapper itself, and `deck-session.sh` verifies the OSK
+    modules by importing them (§5.27), which would then arm it during install.
+    """
+    if parent is None:
+        parent = os.getppid()
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl.restype = ctypes.c_int
+        # Spelled out rather than left to ctypes' default int conversion:
+        # prctl(2) is variadic and glibc reads every argument as `unsigned
+        # long`, so a 32-bit push would leave the top half of the register to
+        # chance.
+        libc.prctl.argtypes = (ctypes.c_int,) + (ctypes.c_ulong,) * 4
+        ctypes.set_errno(0)
+        refused = libc.prctl(PR_SET_PDEATHSIG, signal_number, 0, 0, 0) != 0
+        errno = ctypes.get_errno()
+    except (OSError, AttributeError, ValueError) as exc:
+        return f"this process cannot be tied to the one that started it ({exc})"
+    if refused:
+        return ("this process cannot be tied to the one that started it "
+                f"(prctl: {os.strerror(errno)})")
+    if os.getppid() != parent:
+        return f"the process that started this one ({parent}) died during start-up"
+    if reader_is_gone():
+        return "nothing is reading this process's output any more"
+    return None
+
+
 def refuse(code: int, detail: str) -> int:
     """Say why auto-show is off, in one sentence, and hand back the code.
 
@@ -389,6 +500,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="how long the compositor may take to answer setup "
                          f"(default {HANDSHAKE_TIMEOUT})")
     args = ap.parse_args(argv)
+
+    # ⚠️ FIRST, and before the socket: from here on this process holds the
+    # input-method seat, and §5.27a is that an orphan holding it breaks
+    # auto-show for every mapper that comes after. Never at import scope --
+    # see `die_with_parent`.
+    orphaned = die_with_parent()
+    if orphaned:
+        return refuse(EXIT_ORPHANED, orphaned)
 
     watcher = FocusWatcher()
     try:

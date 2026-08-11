@@ -13,6 +13,7 @@ import importlib.util
 import os
 import pathlib
 import select
+import signal
 import socket
 import struct
 import subprocess
@@ -211,12 +212,13 @@ check("invalid utf-8 is replaced rather than thrown",
 
 check("every failure exit has a sentence",
       sorted(fw.EXIT_REASONS), [fw.EXIT_NO_CONNECTION, fw.EXIT_NO_PROTOCOL,
-                                fw.EXIT_LOST, fw.EXIT_SEAT_TAKEN])
+                                fw.EXIT_LOST, fw.EXIT_SEAT_TAKEN,
+                                fw.EXIT_ORPHANED])
 check("success is NOT in the table (nothing to explain)",
       fw.EXIT_OK in fw.EXIT_REASONS, False)
 check("the codes are distinct",
       len({fw.EXIT_OK, fw.EXIT_NO_CONNECTION, fw.EXIT_NO_PROTOCOL,
-           fw.EXIT_LOST, fw.EXIT_SEAT_TAKEN}), 5)
+           fw.EXIT_LOST, fw.EXIT_SEAT_TAKEN, fw.EXIT_ORPHANED}), 6)
 check("the seat sentence names the fix measured in R-51",
       "waylandim" in fw.EXIT_REASONS[fw.EXIT_SEAT_TAKEN], True)
 
@@ -560,6 +562,195 @@ live.wait(timeout=10)
 live.stdout.close()
 live.stderr.close()
 fake.close()
+
+
+# --- 8. §5.27a: AN ORPHANED WATCHER KEEPS THE SEAT, SO IT MUST NOT SURVIVE ----
+#
+# ⚠️ NOT A CHECK THAT PR_SET_PDEATHSIG WAS SET. That would be a test of a
+# syscall. What is under test is the consequence: kill the process that started
+# the watcher, and the watcher is GONE. An orphan here is not litter, it is a
+# broken feature -- it goes on holding the single-occupancy input-method seat,
+# so the next mapper's auto-show is answered `unavailable` forever and reads as
+# "auto-show does not work" rather than "something is stuck".
+#
+# Measured before the fix, with exactly the parent below: the watcher survived
+# its SIGTERMed parent and was reparented to `systemd --user`, NOT to pid 1 --
+# which is why the code does not test `getppid() == 1`.
+
+
+def proc_state(pid: int) -> str:
+    """The kernel's own view: 'gone', 'Z' for a zombie, or the state letter.
+
+    ⚠️ NOT `os.kill(pid, 0)`. The watcher is a GRANDCHILD here and nothing in
+    this process waits on it, so when it dies under a parent that is still
+    around not to reap it, it becomes a zombie -- and signal 0 to a zombie
+    succeeds. That reports a dead process as running, which is the one wrong
+    answer this test cannot afford.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return "gone"
+    # `comm` is parenthesised and may itself contain spaces and parens, so the
+    # state is the field after the LAST ')', never the second field of a split.
+    return data[data.rindex(b")") + 2:].split()[0].decode()
+
+
+def running(pid: int) -> bool:
+    return proc_state(pid) not in ("gone", "Z")
+
+
+def wait_gone(pid: int, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and running(pid):
+        time.sleep(0.05)
+    return not running(pid)
+
+
+# ⚠️ SPAWNED THE WAY `AutoShow.start()` SPAWNS IT, which is the whole point:
+# `stdout=PIPE, bufsize=0`, the read end held for the parent's lifetime, no
+# SIGTERM handler, and ONE THREAD -- PR_SET_PDEATHSIG fires on the death of the
+# thread that forked, so a parent that spawned from a worker thread would be
+# testing something else entirely. The mapper imports no `threading`.
+PARENT_SRC = """
+import os, subprocess, sys, time
+proc = subprocess.Popen([sys.executable, sys.argv[1]], stdout=subprocess.PIPE,
+                        bufsize=0)
+sys.stdout.write("%d\\n" % proc.pid)
+sys.stdout.flush()
+if sys.argv[2] == "vanish":
+    os._exit(0)
+time.sleep(3600)
+"""
+
+
+def spawn_parent(sock_path: str, mode: str = "stay"):
+    """A stand-in mapper. Returns (the parent, the watcher's pid)."""
+    env = dict(os.environ, WAYLAND_DISPLAY=sock_path,
+               XDG_RUNTIME_DIR=os.path.dirname(sock_path))
+    # -B: this suite disables bytecode for itself, and a probe that imported
+    # the module under test without it would leave a src/__pycache__ that
+    # mutation testing then runs instead of the mutated file (§1's one-second
+    # mtime granularity).
+    parent = subprocess.Popen(
+        [sys.executable, "-B", "-c", PARENT_SRC, str(WATCHER), mode],
+        stdout=subprocess.PIPE, text=True, env=env)
+    return parent, int(parent.stdout.readline())
+
+
+def wait_for_seat(fake, timeout: float = 15.0) -> None:
+    deadline = time.monotonic() + timeout
+    while fake.im_id is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+
+# 8a. the bug itself: a plain `kill` on a mapper started by hand.
+sock = os.path.join(tmp, "wayland-fake8a")
+fake = FakeCompositor(sock, script=[])
+parent, watcher_pid = spawn_parent(sock)
+wait_for_seat(fake)
+check("the watcher is up and has taken the input-method seat",
+      (fake.im_id, running(watcher_pid)), (fw.INPUT_METHOD_ID, True))
+
+# ⚠️ THE CONTROL, and without it every assertion below passes vacuously: a
+# watcher that simply exited at start-up is also "gone after the kill", so
+# "gone" only means anything once "still here" has been shown first.
+time.sleep(1.0)
+check("and it stays up for as long as its parent does -- so `gone` below is news",
+      running(watcher_pid), True)
+
+parent.send_signal(signal.SIGTERM)
+check("SIGTERM ends the parent outright, running no `finally` on the way",
+      parent.wait(timeout=10), -signal.SIGTERM)
+check("§5.27a: and the watcher goes with it, seat and all",
+      wait_gone(watcher_pid), True)
+fake.close()
+
+# 8b. SIGKILL: nothing the parent could have done, and the case systemd's
+# KillMode=control-group covers for a service and nothing covers for a mapper
+# run from a terminal.
+sock = os.path.join(tmp, "wayland-fake8b")
+fake = FakeCompositor(sock, script=[])
+parent, watcher_pid = spawn_parent(sock)
+wait_for_seat(fake)
+check("a second watcher takes the seat the same way", running(watcher_pid), True)
+parent.kill()
+parent.wait(timeout=10)
+check("a SIGKILLed parent takes the watcher with it too",
+      wait_gone(watcher_pid), True)
+fake.close()
+
+# 8c. ⚠️ THE WINDOW PR_SET_PDEATHSIG CANNOT COVER BY ITSELF. Between the fork
+# and the prctl sits a whole Python interpreter start-up, so a parent that dies
+# in there is already gone when the kernel would have signed the watcher up,
+# and the signal never comes. Measured 5/5 survivors with PDEATHSIG alone.
+# `getppid()` cannot see it either -- it already reads the reaper by the time
+# the watcher looks. The closed stdout pipe is what remains true.
+survivors = 0
+for attempt in range(3):
+    sock = os.path.join(tmp, f"wayland-fake8c{attempt}")
+    fake = FakeCompositor(sock, script=[])
+    parent, watcher_pid = spawn_parent(sock, mode="vanish")
+    parent.wait(timeout=10)
+    # 3s, deliberately under the 5s handshake timeout: a watcher that died
+    # because its compositor went quiet would prove nothing about orphans.
+    if not wait_gone(watcher_pid, 3.0):
+        survivors += 1
+        os.kill(watcher_pid, signal.SIGKILL)
+    fake.close()
+check("a parent that dies before the watcher is even up leaves no orphan either",
+      survivors, 0)
+
+# 8d. the same guard where its exit code can actually be read: a DIRECT child,
+# whose stdout reader is closed while its parent (this process) lives on --
+# which is what a dead mapper looks like from inside the watcher.
+sock = os.path.join(tmp, "wayland-fake8d")
+fake = FakeCompositor(sock, script=[])
+read_fd, write_fd = os.pipe()
+env = dict(os.environ, WAYLAND_DISPLAY=sock, XDG_RUNTIME_DIR=tmp)
+orphan = subprocess.Popen([sys.executable, str(WATCHER)], stdout=write_fd,
+                          stderr=subprocess.PIPE, env=env, text=True)
+os.close(read_fd)      # nobody is reading it any more
+os.close(write_fd)
+# ⚠️ WAIT FIRST, READ SECOND. `stderr.read()` returns at EOF, i.e. when the
+# watcher exits -- so reading before waiting turns "the guard is broken" into
+# "the suite hangs forever", which is the one failure mode a test may not have.
+# It cost a mutation run before it was written this way round.
+try:
+    orphan_code = orphan.wait(timeout=10)
+except subprocess.TimeoutExpired:
+    orphan.kill()
+    orphan.wait(timeout=10)
+    orphan_code = "still running"
+orphan_err = orphan.stderr.read()
+orphan.stderr.close()
+check("a watcher with no reader left refuses under its own exit code",
+      orphan_code, fw.EXIT_ORPHANED)
+check("saying which process it lost", "nothing is reading" in orphan_err, True)
+check("and that the chord is unaffected", "STEAM+X" in orphan_err, True)
+fake.close()
+
+# 8e. the microsecond window nothing else can see: the parent dying between the
+# `getppid()` and the prctl. Two adjacent syscalls -- unreachable by black-box
+# timing -- so the DECISION is pinned instead. Still not "was the flag set":
+# the assertion is that the watcher refuses when its parent moved under it.
+# In a subprocess so this suite never arms PDEATHSIG on itself.
+PROBE = (
+    "import importlib.util, os, sys;"
+    f"spec = importlib.util.spec_from_file_location('f', {str(WATCHER)!r});"
+    "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m);"
+    "print(m.die_with_parent(parent=os.getppid()));"
+    "print(m.die_with_parent(parent=os.getppid() + 100000))"
+)
+probe = subprocess.run([sys.executable, "-B", "-c", PROBE],
+                       capture_output=True, text=True, timeout=30)
+probe_lines = probe.stdout.split("\n")
+check("with its parent where it left it, the watcher carries on",
+      probe_lines[0] if probe_lines else probe.stderr, "None")
+check("with the parent moved out from under it, it refuses and says so",
+      "died during start-up" in (probe_lines[1] if len(probe_lines) > 1 else ""),
+      True)
 
 try:
     for name in os.listdir(tmp):
