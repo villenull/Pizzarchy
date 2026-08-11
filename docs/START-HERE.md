@@ -28,13 +28,27 @@ work without waiting for further instruction.**
 >   as root** at file-generation time. Fixed.
 > - **The OSK works on text focus** (§5.20), gated by one GSettings key that
 >   ships `false`: `org.gnome.desktop.a11y.applications screen-keyboard-enabled`.
->   **T5 must bake it into the image.** It was first recorded here as a
->   *negative* after four failing experiments — all of which sat downstream of
->   that one gate. **Four experiments sharing a hidden precondition are one
->   experiment**; a `WAYLAND_DEBUG=1` trace found it in minutes and needed no
->   operator.
+>   It was first recorded here as a *negative* after four failing experiments —
+>   all of which sat downstream of that one gate. **Four experiments sharing a
+>   hidden precondition are one experiment**; a `WAYLAND_DEBUG=1` trace found it
+>   in minutes and needed no operator.
+> - **Gaming Mode was confirmed usable by the operator** (R-38), closing P16's
+>   caveat that the session was only ever known to *exist*.
+> - 🆕 **§2.6 decides the keyboard: squeekboard for the INSTALLER, Steam's own
+>   thereafter.** Validated end to end (R-39): `steam -silent` autostarts
+>   resident with **zero windows**, closing a window does not quit it, and
+>   STEAM+X summons Valve's keyboard. **The idle lock had to be disabled** to
+>   make that safe (R-38) — no available keyboard can reach a layer-shell lock
+>   screen.
 >
 > Full evidence: **`docs/findings/P17-input-and-osk.md`** (R-29…R-36).
+>
+> ⚠️ **Three things are load-bearing and silently break the product if lost:**
+> the **`omarchy.tray` bar widget** (without a StatusNotifier host, closing
+> Steam's window *quits* it and Desktop Mode loses its keyboard), the **idle
+> lock staying off** (`shell.json`, and `lock: 0` locks INSTANTLY rather than
+> disabling), and the **installer's two GSettings**. None of them fails a test
+> today.
 >
 > ⚠️ **Lizard mode is the load-bearing fact for T4.** It swallows **X, Y, L1,
 > R1, STEAM and QAM entirely** — no evdev node sees them — and provides no
