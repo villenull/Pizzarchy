@@ -1754,6 +1754,22 @@ lz_setup() {   # lz_setup <Y|N>
   printf '%s\n' "$1" >"$lz_node"
 }
 
+# What a systemd manager that parsed BOTH halves correctly would report. The
+# stage asks four questions and they are one property, so the fake answers them
+# as a set: a manager that knows ExecStopPost= but not OnFailure= is not a state
+# any real system is in, and a suite that mimed it would be testing a fiction.
+lz_exec_line="{ path=${SUDO_BIN} ; argv[]=${SUDO_BIN} -n ${LIZARD_HELPER} on ; ignore_errors=no }"
+lz_systemd_agrees() {
+  export FAKE_SYSTEMCTL_SHOW_ExecStopPost="$lz_exec_line"
+  export FAKE_SYSTEMCTL_SHOW_OnFailure="${LIZARD_RESTORE_UNIT##*/}"
+  export FAKE_SYSTEMCTL_SHOW_LoadState=loaded
+  export FAKE_SYSTEMCTL_SHOW_ExecStart="$lz_exec_line"
+}
+lz_systemd_silent() {
+  unset FAKE_SYSTEMCTL_SHOW_ExecStopPost FAKE_SYSTEMCTL_SHOW_OnFailure \
+        FAKE_SYSTEMCTL_SHOW_LoadState FAKE_SYSTEMCTL_SHOW_ExecStart
+}
+
 lz_setup Y
 run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
 ok_rc 0 "stage-lizard-mode completes against a fake root"
@@ -1791,7 +1807,50 @@ pass "the lizard drop-in reads as scoped-and-passwordless to the release check's
     "the grant mentions ${work}; the seam repoints where the helper is INSTALLED, never what the grant permits"
 pass "the sudoers grant carries no test path -- the seam does not leak into the shipped grant"
 
-# --- 3. the drop-in ---
+# --- 3. the OnFailure unit: a separate unit, purely to get a separate CGROUP -
+#
+# MEASURED, systemd 261: a cgroup-wide SIGKILL starts ExecStopPost= and then
+# kills it, because systemd spawns it INTO the mapper's cgroup
+# ("Control process exited, code=killed, status=9/KILL"). A unit reached by
+# OnFailure= is a separate job in its own cgroup and survives the same kill --
+# confirmed on `systemctl kill -s SIGKILL`, `--kill-whom=all` and cgroup.kill.
+ok_file "$LIZARD_RESTORE_UNIT" "it installs ${LIZARD_RESTORE_UNIT}"
+ok_mode "$LIZARD_RESTORE_UNIT" 644 "the restore unit is mode 0644"
+ok_in_file "$LIZARD_RESTORE_UNIT" "$INSTALL_MARKER" "the restore unit carries the install marker"
+ok_line "$LIZARD_RESTORE_UNIT" "Type=oneshot" \
+  "it is Type=oneshot with no RemainAfterExit=, so it returns to inactive and OnFailure= can trigger it again -- measured at six consecutive triggers, six runs"
+ok_line "$LIZARD_RESTORE_UNIT" "ExecStart=${SUDO_BIN} -n ${LIZARD_HELPER} on" \
+  "it runs '${LIZARD_HELPER} on' -- towards the safe value, which is what makes it harmless when it races a restarting mapper"
+! grep -qE '^ExecStart=.* off$' "$root$LIZARD_RESTORE_UNIT" ||
+  fail_test "the installed restore unit can never turn lizard mode OFF" \
+    "a restore able to write N could take input away from a device with no mapper running -- the failure the whole fallback exists to prevent"
+pass "the installed restore unit cannot turn lizard mode off; its worst case costs STEAM+X, never input"
+! grep -q '^\[Install\]' "$root$LIZARD_RESTORE_UNIT" ||
+  fail_test "the installed restore unit has no [Install] section" \
+    "it is reached by OnFailure= and nothing else. Enabled, it would fire at every session start and race the mapper's own ExecStartPost="
+pass "the installed restore unit has no [Install] -- it is triggered, never enabled"
+! grep -qE 'systemctl .*(enable|start) .*deck-lizard-restore' "$calls" ||
+  fail_test "the stage never enables or starts the restore unit" \
+    "calls:"$'\n'"$(cat "$calls")"
+pass "the stage neither enables nor starts the restore unit"
+
+# It has to be installed BEFORE the drop-in that names it, so OnFailure= never
+# points at a unit that is not there yet.
+#
+# NOT ok_before: that matches the FIRST log line carrying each path, and both
+# paths appear earlier in their own `test -e` ownership checks. The question is
+# about the two INSTALLS, so match those.
+install_line_for() {   # install_line_for <path>
+  grep -nF -- 'install -m 0644' "$calls" | grep -F -- "$1" | head -1 | cut -d: -f1
+}
+lz_restore_at=$(install_line_for "$LIZARD_RESTORE_UNIT")
+lz_dropin_at=$(install_line_for "$LIZARD_DROPIN")
+[[ -n $lz_restore_at && -n $lz_dropin_at && $lz_restore_at -lt $lz_dropin_at ]] ||
+  fail_test "the restore unit is installed BEFORE the drop-in that names it" \
+    "restore at ${lz_restore_at:-none}, drop-in at ${lz_dropin_at:-none}. Installed the other way round there is a window where OnFailure= resolves to nothing. calls:"$'\n'"$(cat "$calls")"
+pass "the restore unit is installed before the drop-in whose OnFailure= names it"
+
+# --- 4. the drop-in ---
 ok_file "$LIZARD_DROPIN" "it installs ${LIZARD_DROPIN}"
 ok_mode "$LIZARD_DROPIN" 644 "the drop-in is mode 0644"
 ok_in_file "$LIZARD_DROPIN" "$INSTALL_MARKER" "the drop-in carries the install marker"
@@ -1800,6 +1859,9 @@ ok_line "$LIZARD_DROPIN" "ExecStartPost=${SUDO_BIN} -n ${LIZARD_HELPER} off" \
   "ExecStartPost= turns lizard mode OFF, and only once the mapper has been started"
 ok_line "$LIZARD_DROPIN" "ExecStopPost=${SUDO_BIN} -n ${LIZARD_HELPER} on" \
   "ExecStopPost= turns it back ON -- THE FALLBACK. Measured, systemd 261: it runs on a clean stop, on a non-zero exit, on a SIGKILLed main process, on a missing ExecStart= and on a failed ExecStartPost=. NOT on a cgroup-wide SIGKILL, which is recorded above render_lizard_dropin"
+ok_line "$LIZARD_DROPIN" "[Unit]" "the drop-in declares [Unit] -- OnFailure= is a [Unit] setting and is 'Unknown key' under [Service]"
+ok_line "$LIZARD_DROPIN" "OnFailure=${LIZARD_RESTORE_UNIT##*/}" \
+  "OnFailure= names the restore unit -- the half that survives 'systemctl kill -s SIGKILL', which is the command a human types while debugging and which kills ExecStopPost= with the cgroup"
 ! grep -qE '^Exec(Start|Stop)Post=-' "$root$LIZARD_DROPIN" ||
   fail_test "neither Exec line is prefixed with '-'" \
     "'-' makes systemd ignore the failure: on ExecStartPost= that is a mapper reading a device the firmware still owns, and on ExecStopPost= it is the fallback silently not happening"
@@ -1849,12 +1911,15 @@ ok_line "$LIZARD_DROPIN" "ExecStopPost=${SUDO_BIN} -n ${LIZARD_HELPER} on" \
 # on disk is not a file systemd has read, and `ignore_errors` is systemd's own
 # report of whether a failure here would be swallowed.
 lz_setup Y
-export FAKE_SYSTEMCTL_SHOW_ExecStopPost="{ path=${SUDO_BIN} ; argv[]=${SUDO_BIN} -n ${LIZARD_HELPER} on ; ignore_errors=no }"
+lz_systemd_agrees
 run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
-ok_rc 0 "the stage accepts an ExecStopPost= that systemd parsed as expected"
-ok_in_out "does not ignore errors" "it says it checked what systemd parsed, not merely what was written"
+ok_rc 0 "the stage accepts a drop-in and a restore unit that systemd parsed as expected"
+ok_in_out "neither ignoring errors" "it says it checked what systemd parsed, not merely what was written"
+ok_in_out "OnFailure=${LIZARD_RESTORE_UNIT##*/}" \
+  "and that the check covered BOTH halves -- ExecStopPost= for the ordinary deaths, OnFailure= for the cgroup kill that takes ExecStopPost= with it"
 
 lz_setup Y
+lz_systemd_agrees
 export FAKE_SYSTEMCTL_SHOW_ExecStopPost="{ path=${SUDO_BIN} ; argv[]=${SUDO_BIN} -n ${LIZARD_HELPER} on ; ignore_errors=yes }"
 run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
 ok_failed "an ExecStopPost= systemd parsed with ignore_errors=yes fails the stage"
@@ -1863,14 +1928,57 @@ ok_in_err "prefixed it with '-'" "the failure names the cause, not just the symp
   fail_test "even that failure leaves the node where it was" "it reads '$(cat "$lz_node")'"
 pass "a stage that fails on the parsed drop-in still leaves lizard mode as it found it"
 
+# --- the OnFailure half, asked of systemd rather than of the file ----------
+#
+# Each of these is a state where the drop-in on disk is perfect and the manager
+# has something else. Without OnFailure= the cgroup-kill path is uncovered, and
+# nothing on disk would show it.
 lz_setup Y
+lz_systemd_agrees
+export FAKE_SYSTEMCTL_SHOW_OnFailure=""
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_failed "an empty OnFailure= fails the stage"
+ok_in_err "does NOT survive a cgroup-wide SIGKILL" \
+  "the failure explains the gap it leaves rather than just naming a missing directive"
+
+lz_setup Y
+lz_systemd_agrees
+export FAKE_SYSTEMCTL_SHOW_OnFailure=some-other-unit.service
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_failed "an OnFailure= naming a different unit fails the stage"
+ok_in_err "which does not name ${LIZARD_RESTORE_UNIT##*/}" "the failure prints what systemd actually has"
+
+lz_setup Y
+lz_systemd_agrees
+export FAKE_SYSTEMCTL_SHOW_LoadState=not-found
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_failed "an OnFailure target systemd cannot load fails the stage"
+ok_in_err "would then resolve to nothing" \
+  "a dangling OnFailure= is reported by systemd only when it tries to trigger it -- i.e. in the failure, which is the worst time to learn it"
+
+lz_setup Y
+lz_systemd_agrees
+export FAKE_SYSTEMCTL_SHOW_ExecStart="{ path=/bin/true ; argv[]=/bin/true ; ignore_errors=no }"
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_failed "a restore unit that does not run the helper fails the stage"
+ok_in_err "The unit exists and does not restore anything" "the failure names the emptiest kind of pass"
+
+lz_setup Y
+lz_systemd_agrees
+export FAKE_SYSTEMCTL_SHOW_ExecStart="{ path=${SUDO_BIN} ; argv[]=${SUDO_BIN} -n ${LIZARD_HELPER} on ; ignore_errors=yes }"
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_failed "a restore unit whose ExecStart= ignores errors fails the stage"
+ok_in_err "last line of defence" "the '-' prefix is refused on the restore unit too, not only on the drop-in"
+
+lz_setup Y
+lz_systemd_agrees
 export FAKE_SYSTEMCTL_SHOW_ExecStopPost="{ path=/bin/true ; argv[]=/bin/true ; ignore_errors=no }"
 run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
 ok_failed "an ExecStopPost= that does not run the helper fails the stage"
 ok_in_err "leaves lizard mode off, and the device with no input" \
   "the failure says what the missing fallback costs"
 
-unset FAKE_SYSTEMCTL_SHOW_ExecStopPost
+lz_systemd_silent
 lz_setup Y
 run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
 ok_rc 0 "with no user manager to ask, the stage still completes"
@@ -1900,6 +2008,14 @@ printf '[Service]\nExecStopPost=/bin/true\n' >"$root$LIZARD_DROPIN"
 run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
 ok_failed "a foreign drop-in at ${LIZARD_DROPIN} stops the stage"
 ok_absent "$LIZARD_HELPER" "and it refuses BEFORE installing the helper, so a foreign fallback is never half-replaced"
+
+lz_setup Y
+printf '[Unit]\nDescription=somebody else owns this\n' >"$root$LIZARD_RESTORE_UNIT"
+run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
+ok_failed "a foreign unit at ${LIZARD_RESTORE_UNIT} stops the stage"
+ok_in_err "was not written by deck-session.sh" \
+  "the OnFailure target is checked for ownership like every other file this stage writes -- silently replacing somebody's unit is how a fallback becomes a surprise"
+ok_absent "$LIZARD_HELPER" "and again it refuses before installing anything"
 
 lz_setup Y
 printf '%s ALL=(ALL) NOPASSWD: ALL\n' decktester >"$root$LIZARD_SUDOERS"

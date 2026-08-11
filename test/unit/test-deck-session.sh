@@ -1144,6 +1144,35 @@ pass "ExecStopPost= runs '${LIZARD_HELPER} on' -- the path back for a stop, a cr
     "a '-' makes systemd ignore the failure. If lizard mode cannot be turned off the mapper is a no-op anyway, and if it cannot be turned back on the device has no input -- both must be loud. File:"$'\n'"$(cat "$lz_dropin")"
 pass "neither ExecStartPost= nor ExecStopPost= is prefixed with '-' -- a failure in either is loud"
 
+# --- OnFailure=, the half ExecStopPost= cannot cover -----------------------
+#
+# MEASURED, systemd 261, with a probe unit mirroring the real one: a SIGKILL of
+# the whole cgroup (`systemctl kill -s SIGKILL`, whose default --kill-whom is
+# NOT main, or systemd-oomd's cgroup.kill) starts ExecStopPost= and then kills
+# it, because systemd spawns it INTO the unit's own cgroup:
+#
+#   Killed unit cgroup '...' with SIGKILL on client request
+#   Control process exited, code=killed, status=9/KILL      <- the ExecStopPost
+#
+# OnFailure= starts a SEPARATE unit, which gets its own cgroup and survives.
+# Verified on every cgroup-kill path, and it fires LAST when the start limit is
+# reached -- so a dead mapper leaves lizard mode ON.
+grep -qx '\[Unit\]' "$lz_dropin" ||
+  fail_test "the drop-in declares [Unit]" \
+    "OnFailure= is a [Unit] setting; under [Service] systemd logs 'Unknown key' and carries on without it"
+pass "the drop-in declares [Unit], the section OnFailure= belongs to"
+
+grep -qx "OnFailure=${LIZARD_RESTORE_UNIT##*/}" "$lz_dropin" ||
+  fail_test "the drop-in names the OnFailure unit" \
+    "expected exactly 'OnFailure=${LIZARD_RESTORE_UNIT##*/}'. WITHOUT IT a 'systemctl kill -s SIGKILL' -- the command a human types while debugging -- leaves lizard mode off with nothing reading the pad, because it kills ExecStopPost= along with the cgroup. File:"$'\n'"$(cat "$lz_dropin")"
+pass "OnFailure= names ${LIZARD_RESTORE_UNIT##*/} -- the separate cgroup that survives a cgroup-wide kill"
+
+# The two must be one fact, not two that agree today.
+[[ $(grep -oP '^OnFailure=\K.*' "$lz_dropin") == "${LIZARD_RESTORE_UNIT##*/}" ]] ||
+  fail_test "OnFailure= is derived from LIZARD_RESTORE_UNIT" \
+    "the drop-in says '$(grep -oP '^OnFailure=\K.*' "$lz_dropin")' and the unit installed is '${LIZARD_RESTORE_UNIT##*/}'; systemd reports a dangling OnFailure= only when it tries to trigger it, i.e. in the failure"
+pass "the OnFailure= target and the unit that gets installed are the same string, by derivation"
+
 # The drop-in has to land in the mapper unit's own .d directory. A drop-in
 # anywhere else is inert: installed, valid, and doing nothing.
 [[ $LIZARD_DROPIN == "${MAPPER_UNIT}.d/"* ]] ||
@@ -1181,6 +1210,65 @@ pass "stage-lizard-mode runs after stage-input-mapper -- the unit it extends exi
 declare -F stage_lizard_mode >/dev/null ||
   fail_test "the INSTALL_STAGES entry resolves to a function" "run_stage maps 'stage-lizard-mode' to stage_lizard_mode, which does not exist"
 pass "stage-lizard-mode resolves to stage_lizard_mode(), the name run_stage derives"
+
+# ---------------------------------------------------------------------------
+# 8c. the OnFailure unit -- a separate unit purely to get a separate CGROUP
+#
+# It exists for one measured reason: ExecStopPost= is spawned INTO the mapper's
+# cgroup and dies with it under a cgroup-wide SIGKILL. A unit reached by
+# OnFailure= is started by the manager as its own job, in its own cgroup, and
+# survives the same kill -- confirmed on all three cgroup-kill paths.
+
+lz_restore="$work/deck-lizard-restore.service"
+render_lizard_restore_unit >"$lz_restore"
+
+grep -qF -- "$INSTALL_MARKER" "$lz_restore" ||
+  fail_test "the rendered restore unit carries the '#'-commented marker" "expected: $INSTALL_MARKER"
+pass "the rendered restore unit carries '${INSTALL_MARKER}'"
+
+for section in '[Unit]' '[Service]'; do
+  grep -qxF -- "$section" "$lz_restore" ||
+    fail_test "the restore unit declares ${section}" \
+      "a setting outside its section is 'Unknown key ... ignoring' and the unit still loads. File:"$'\n'"$(cat "$lz_restore")"
+done
+pass "the restore unit declares both [Unit] and [Service]"
+
+grep -qx 'Type=oneshot' "$lz_restore" ||
+  fail_test "the restore unit is Type=oneshot" \
+    "it runs one command and exits; without RemainAfterExit= it returns to inactive, which is what lets OnFailure= trigger it again (measured: six consecutive triggers, six runs)"
+pass "the restore unit is Type=oneshot, so repeated failures each get a restore"
+
+# The direction. This unit may ONLY ever turn lizard mode on: that is what makes
+# it safe to fire while a mapper is restarting.
+grep -qx "ExecStart=${SUDO_BIN} -n ${LIZARD_HELPER} on" "$lz_restore" ||
+  fail_test "the restore unit runs the helper with 'on'" \
+    "expected exactly 'ExecStart=${SUDO_BIN} -n ${LIZARD_HELPER} on'. File:"$'\n'"$(cat "$lz_restore")"
+pass "the restore unit runs '${LIZARD_HELPER} on' -- towards the safe value, always"
+
+! grep -qE '^ExecStart=.* off$' "$lz_restore" ||
+  fail_test "the restore unit can never turn lizard mode OFF" \
+    "a restore that could write N would be able to take input away from a device with no mapper running -- the exact failure the whole fallback exists to prevent. File:"$'\n'"$(cat "$lz_restore")"
+pass "nothing in the restore unit can turn lizard mode off -- its worst case is costing STEAM+X, never input"
+
+! grep -qE '^ExecStart=-' "$lz_restore" ||
+  fail_test "the restore unit's ExecStart= is not prefixed with '-'" \
+    "this is the last line of defence; it must not be the one that fails quietly"
+pass "the restore unit's ExecStart= is not prefixed with '-'"
+
+# ⚠️ No [Install]. Enabling it would run it at every session start -- turning
+# lizard mode ON exactly as the mapper's ExecStartPost= was turning it off,
+# which is a race against the one thing that has to win.
+! grep -q '^\[Install\]' "$lz_restore" ||
+  fail_test "the restore unit has no [Install] section" \
+    "it is reached by OnFailure= and nothing else. Enabled, it would fire at every session start and race the mapper's own ExecStartPost=. File:"$'\n'"$(cat "$lz_restore")"
+pass "the restore unit has no [Install] section -- it is never enabled, only triggered"
+
+# Same directory as the mapper unit: this is installed by an installer for a
+# user it has never met, so it cannot live in anyone's ~/.config.
+[[ $(dirname "$LIZARD_RESTORE_UNIT") == "$(dirname "$MAPPER_UNIT")" ]] ||
+  fail_test "the restore unit sits beside the mapper unit" \
+    "LIZARD_RESTORE_UNIT is ${LIZARD_RESTORE_UNIT} but MAPPER_UNIT is ${MAPPER_UNIT}; a user unit in the wrong search path is simply not found"
+pass "the restore unit is installed in $(dirname "$MAPPER_UNIT"), the same search path as the mapper unit"
 
 # Nothing may PERSIST the value. The whole safety argument is that boot leaves
 # Y, so a mapper that never starts leaves a usable device -- a modprobe.d option

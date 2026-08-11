@@ -119,16 +119,30 @@ ssh steamdeck 'systemctl --user start deck-input-mapper'
 - [ ] `Y → N → Y → N` exactly. **If the third read is not `Y`, stop** — the
       fallback is not working and every later step assumes it is.
 
-Then the harder case, which a clean stop does not exercise:
+Then the harder cases, which a clean stop does not exercise. **`systemctl kill`
+defaults to SIGTERM**, which was never the broken path — SIGKILL is, because it
+uses the sticky cgroup kill that also kills `ExecStopPost`:
 
 ```bash
-ssh steamdeck 'systemctl --user kill --signal=SIGKILL deck-input-mapper; sleep 3; cat /sys/module/hid_steam/parameters/lizard_mode'
+ssh steamdeck 'systemctl --user kill --signal=SIGKILL deck-input-mapper; sleep 1; cat /sys/module/hid_steam/parameters/lizard_mode'
+ssh steamdeck 'sleep 4; systemctl --user is-active deck-input-mapper; cat /sys/module/hid_steam/parameters/lizard_mode'
 ```
 
-- [ ] Reads `Y`. ⚠️ If it reads `N`, that is the **cgroup-kill hole** — recorded
-      in `docs/PROGRESS.md` §5.25 — and the Deck is now without input until you
-      `systemctl --user start deck-input-mapper` over SSH. Do that, note the
-      result, and treat the hole as open.
+- [ ] First read is **`Y`** — `ExecStopPost` was killed, and `OnFailure=` fired
+      the restore unit instead. Measured on systemd 261 at **+106 ms**.
+- [ ] Second read is **`N`** with the mapper `active` — `Restart=` brought it
+      back and its `ExecStartPost` re-asserted the knob.
+
+⚠️ **The knob deliberately flaps** during an auto-restart: off → (crash) → on →
+(restart) → off. The restore unit can only ever write **`on`**, the safe value,
+and the measured margin is ~2 s. Losing that race would cost STEAM+X until the
+next restart — **never input**.
+
+*(All eight kill paths were verified off-hardware before this session:
+`stop`, `kill` with SIGTERM, SIGKILL of the main pid, `systemctl kill -s
+SIGKILL`, `--kill-whom=all`, a raw `cgroup.kill`, and both routes to the start
+limit. Every one ends with the invariant intact. This step is confirming that
+on the real device, not discovering it.)*
 
 ---
 

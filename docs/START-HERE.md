@@ -3,9 +3,51 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
-> ## Where things stand (updated 2026-08-11, session 19; body below is sessions 17–18)
+> ## Where things stand (updated 2026-08-11, END of session 20)
 >
-> ### 🆕 UPSTREAM MOVED — there is now a PHASE 2.9, before phase 3
+> ### 🚩 READ THIS FIRST — session 20 was large, and it closed a phase
+>
+> **Phase 2.9 is DONE.** It began as "rebase onto the new 4.0 beta 2" and
+> measurement showed **we were already on it** — same commit, same channel,
+> same builder as upstream's published ISO. What the block actually bought was
+> everything below.
+>
+> **The single most important thing on this page:** 🔴 **the power button locks
+> the Deck into a password screen with no password field** (§5.24). Live today,
+> nothing to do with the upstream delta, and the fix is approved and waiting for
+> a Deck session (`docs/tasks/P20-deck-session-runbook.md`).
+>
+> **The next action is that runbook.** Five approved changes plus one read-only
+> check, ordered by blast radius, with rollbacks. Everything else is queued
+> behind it or independent of it.
+>
+> #### What landed in session 20
+>
+> | | |
+> |---|---|
+> | **Phase 2.9** | complete — pin measured from inside both ISOs, delta ahead of us classified (1 BREAKS US / 27 RE-VERIFY / 37 NO IMPACT), substrate rebuilt on the channel we ship, **all four VM suites green** |
+> | **Twelve operator decisions** | §5.25 — all settled, do not re-litigate |
+> | **Five new test suites** | stage integration (300 assertions), duplicated-facts, limine pin, ISO payload audit, plus auto-show. **15 suites total** |
+> | **`stage-lizard-mode`** | the knob now follows the mapper's lifetime, with a fallback. ⚠️ One hole known (`systemctl kill`); see §5.25 |
+> | **OSK auto-show** | built, **not shipped** — two hand-offs in §5.27 must land together |
+> | **T4's screen spec** | `docs/tasks/T4-screen-spec.md` — wrap the configurator, six screens, and a gate (§5.26) |
+> | **T5's fork plan** | `docs/tasks/T5-fork-plan.md` — and the obvious fork point is **broken** (§3.10a) |
+>
+> #### Three findings that will bite whoever ignores them
+>
+> 1. 🔴 **Nobody has read the lizard-mode knob in the LIVE ISO** (§5.26). Every
+>    such measurement came from the installed system on Valve's kernel. If the
+>    knob is absent there, **T4 has no keyboard and no product**. One line, from
+>    a booted USB. It is step 1 of the runbook for that reason.
+> 2. 🔴 **`hyprctl layers` cannot verify the lock fix.** It reports the surface
+>    identically whether the rule works or not — only pixels distinguish them.
+>    Same shape as R-29, where every check passed while the mapper was a no-op.
+> 3. 🔴 **The git ref and the package channel are two independent pins** and only
+>    one is expressible in git (§3.10a). Forking `omarchy-iso` at the commit our
+>    own ISO came from, and building today, yields an installer that calls a
+>    binary the runtime no longer has.
+>
+> ### 🆕 UPSTREAM MOVED — there was a PHASE 2.9, and it is now COMPLETE
 >
 > **Operator direction, 2026-08-11: Omarchy shipped a 4.0 beta 2, and
 > everything we own gets rebased onto it before the release run.** Spec:
@@ -280,7 +322,7 @@ work without waiting for further instruction.**
 >    **§5.9 gained session 17's measured lizard-mode map**
 > 3. `docs/ROADMAP.md` — phase 2 is the live work queue, **phase 2.9 is new**
 >    (the beta 2 rebase, before phase 3) and phase 4 is the enablement layer
-> 4. `docs/PROGRESS.md` §7 — **53** facts that each cost real time; do not
+> 4. `docs/PROGRESS.md` §7 — **54** facts that each cost real time; do not
 >    re-derive them
 >
 > Hardware evidence: `docs/findings/P15-live-iso-recon.md` (R-0…R-19, raw logs
@@ -294,21 +336,18 @@ work without waiting for further instruction.**
 > for f in test/unit/test-*.sh; do ./"$f"; done; for f in test/unit/test-*.py; do python3 "$f"; done
 > ```
 >
-> **15 suites, seconds, no VM.** ⚠️ That is *two* globs — the shell one alone
-> misses all five Python suites, which is where the input layer's coverage
-> lives. Seven shell (`test-deck-session.sh` **70**, `test-osk-install-layout.sh`
-> **19**, `test-vm-limine-pin.sh` **12**, four VM-helper suites) and five Python (`test-deck-input-mapper.py`
-> **106**, `test-deck-osk-layout.py` **134**, `test-deck-osk-tty.py` **54**,
-> `test-deck-osk-wayland.py` **47**, `test-deck-osk-focus.py` **37**).
+> **15 suites — 10 shell, 5 Python — seconds, no VM.** ⚠️ That is *two* globs:
+> the shell one alone misses every Python suite, which is where the whole input
+> layer's coverage lives.
 >
-> *(Every number in that sentence was **re-counted by running the suites**
-> 2026-08-11. Four were wrong: the suite total, `osk-install-layout` (16→19),
-> `osk-tty` (49→54), and `test-deck-osk-focus.py` was missing entirely — it
-> arrived with the focus watcher in `44e8f66`. Count them; don't quote them.)*
+> ⚠️ **Per-suite assertion counts are deliberately NOT listed here any more.**
+> They have been wrong in this file four separate times — the numbers move every
+> session, and a stale count reads as authority. Count them when you need them:
 >
-> ⚠️ **This is the failure this file keeps warning about, found again by
-> running one glob.** The paragraph above is the *documentation* of the test
-> suite, and it was wrong about the test suite.
+> ```bash
+> for f in test/unit/test-*.sh; do printf '%-40s %s\n' "$f" "$(./"$f" | grep -c '^ok')"; done
+> for f in test/unit/test-*.py; do printf '%-40s %s\n' "$f" "$(python3 "$f" | grep -c '^ok')"; done
+> ```
 >
 > ⚠️ **One more suite is NOT in either glob, on purpose.**
 > `test/osk-tty-e2e.py` drives the on-screen keyboard end to end — virtual pad →
@@ -492,10 +531,10 @@ it.
 |---|---|
 | `CLAUDE.md` | Auto-loaded every session. Hard constraints. |
 | `docs/ROADMAP.md` | **The plan — three phases.** Where the current block fits and what gates what. |
-| `docs/PROGRESS.md` | **Every session start. This is the authoritative state.** Scope, findings, open issues, and **53** facts not to re-derive. |
+| `docs/PROGRESS.md` | **Every session start. This is the authoritative state.** Scope, findings, open issues, and **54** facts not to re-derive. |
 | `docs/SESSIONS.md` | Usage-limit budgeting and the block schedule. |
 | `docs/PLAN.md` | **Frozen and partly superseded.** Read the banner at the top first. Good for §6.1a (installer screens), §8 (bug hypotheses), §9 (test tiers), §11 (maintenance risks). |
-| `docs/tasks/` | One file per work block. |
+| `docs/tasks/` | One file per work block. **Start with `P20-deck-session-runbook.md`** — it is the next action. |
 | `docs/findings/` | Research outputs. Evidence behind the decisions in `docs/PROGRESS.md`. |
 | `docs/drafts/` | Staged upstream report. **Nothing sent. Do not send.** |
 | `src/omarchy-deck-kernel.sh` | T1's deliverable. Ten idempotent stages, VM-tested and hardware-validated. |
@@ -566,7 +605,7 @@ between 2 and 3.** Task-to-phase mapping:
 | T4 | `docs/tasks/T4-installer-ui.md` | Sonnet | ⬜ **unblocked, re-scoped by §5.9** → P2.5–P2.6 |
 | T5 | `docs/tasks/T5-iso-and-payload.md` | Sonnet/Opus | ⬜ P2.7–P2.8, now with §5.12/§5.13 constraints |
 | T6 | `docs/tasks/T6-integration-release.md` | **Opus** | ⬜ phase 3 |
-| T9 | `docs/tasks/T9-beta2-rebase.md` | **Opus** | ⬜ **phase 2.9 — NEW (2026-08-11).** Rebase every artifact onto Omarchy 4.0 **beta 2** and re-establish by measurement each fact that names upstream behavior. P2.9a–P2.9d need no hardware. **Two operator calls open:** approval to download the 6 GB beta 2 ISO (no upstream checksum exists), and whether to rebase now or wait for stable, which may ship this week. Makes P3.6 (rebase onto *stable*) the second run of the procedure, not the first |
+| T9 | `docs/tasks/T9-beta2-rebase.md` | **Opus** | ✅ **phase 2.9 DONE (session 20).** We were already on beta 2 — measured from inside both ISOs. The block's value was the delta *ahead* of us, the substrate now pinned to the shipped channel, and four VM suites green on it. **Left:** P2.9e/f, folded into `docs/tasks/P20-deck-session-runbook.md` |
 | T8 | `docs/tasks/T8-onscreen-keyboard.md` | Sonnet/**Opus** | ✅ **DONE (session 18) — all seven steps, hardware-proven (R-43) and console-sharing proven in QEMU (R-47).** Was P2.4b. Input half was already done in the mapper, chord included |
 | T7 | `docs/tasks/T7-enablement-layer.md` | **Opus** | ⬜ **phase 4 — NEW.** Generalise into a Deck enablement layer so the next distro is ~a day. Deliberately after phase 3: abstracting from one *finished* example is engineering, from one unfinished example is guessing |
 
@@ -577,24 +616,9 @@ are done as far as a script can verify them. Sensible entry points:
   (T4's installer screens; text entry is the real gap) or **P2.7/P2.8** (T5's
   `omarchy-iso` fork, which now carries six recorded constraints — see above).
   Either is days of work and needs no hardware.
-- 🆕 **Also without the Deck, and cheap: P2.9a–P2.9d** — pin beta 2, finish the
-  delta document, rebuild the ISO, rebuild the substrate and re-run every
-  suite. ⚠️ **P2.9a needs one answer from the operator first** (where beta 2
-  was announced); P2.9b can start immediately from the seed in
-  `docs/findings/T9-beta2-delta.md`. Do **not** rebuild the substrate from the
-  old ISO — a substrate mimicking the previous Quattro passes while testing a
-  system that no longer exists.
-- **With the Deck, needing a HUMAN present:** everything left on P2.1/P2.2/P2.4
-  is a thing a script cannot check — does the OSK appear on text focus, are the
-  buttons mapped correctly, does sound actually come out, do haptics and gyro
-  respond, and every rotation surface. Batch these into one hands-on pass.
-- **A decision, not a task: §5.17.** It is *answered* — a narrower sudo grant is
-  impossible, because the install stages write to `/etc/sudoers.d/` itself.
-  What remains is choosing whether to drop `99-deck-testing` (and lose the
-  unattended SSH loop) or keep it and rely on T5 excluding it from the image.
-  `./src/deck-session.sh stage-audit-privileges` is the gate either way.
-- **Held for operator approval, both boot-chain:** Limine's
-  `interface_rotation: 270` and the TTY's `fbcon=rotate:1`.
+- ✅ *(Retired — P2.9a–P2.9d are done, session 20.)* The Deck-free half of
+  phase 2.9 is complete: pin measured, delta classified, substrate rebuilt on
+  the `edge` channel with the boot chain asserted, all four VM suites green.
 
 ⚠️ **P2.3 (TDP, fan curves, battery) still requires per-item operator approval
 every single time.** That rule has not moved.

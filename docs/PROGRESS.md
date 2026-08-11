@@ -1569,7 +1569,7 @@ Why a flasher was reframed rather than adopted:
 scaffolding around a distro-specific core (`pacman`, `jupiter-staging`,
 `limine`, `mkinitcpio`, `sddm`, `uwsm`). You would not port that core; you would
 rewrite it. What is genuinely portable is the five `render_*` helper bodies, the
-session-switch *policy*, the mapper, the probes — and §7's 53 facts, which are
+session-switch *policy*, the mapper, the probes — and §7's 54 facts, which are
 the single biggest accelerator and are not code at all.
 
 ⚠️ **"A day" buys ported-and-conformance-green, NOT shippable.** §5.18 surfaced
@@ -2039,7 +2039,7 @@ the owner is named.
 | # | Decision | Owner |
 |---|---|---|
 | 1 | 🔴 **Fix both lock causes** (§5.24): the `above_lock = 2` layer rule for `deck-osk`, **and** mask `omarchy-sleep-lock.service`. The power button must stop producing an unanswerable password screen | Deck |
-| 2 | **Persist `lizard_mode=N` WITH a fallback** (§5.21) that restores `Y` when the mapper is not running. ⚠️ Non-negotiable half: persisting without the fallback leaves a handheld with no input if the mapper dies | Deck + dev |
+| 2 | ✅ **BUILT (session 20).** `stage-lizard-mode` ties the knob to the mapper's lifetime — `ExecStartPost` off, `ExecStopPost` on, **plus `OnFailure=` on a separate unit** for the cgroup-kill path where `ExecStopPost` is itself killed. **All eight kill paths verified on systemd 261**; the no-input window went from *until the next boot* to **≤106 ms**. Left: confirm on hardware (runbook §2.1) | Deck |
 | 3 | **Measure QAM's evdev code** — one press with lizard mode off. The binding is written and deliberately inert until this exists (§5.23) | Deck |
 | 4 | **Run `stage-default-session`** — the Deck starts booting to Gaming Mode | Deck |
 | 5 | **Apply BOTH rotations**: Limine `interface_rotation: 270` and the TTY's `fbcon=rotate:1`. Boot-chain, hence the explicit approval | Deck |
@@ -2056,10 +2056,22 @@ the owner is named.
 | 11 | **Pin CI's shellcheck** (v0.11.0, fetched from the release, not apt) so local and CI cannot disagree |
 | 12 | **Leave STEAM long-press alone.** Any press-and-release opens the apps menu unless another button was pressed during the hold. No timer, because nothing needs one yet |
 
-⚠️ **Decision 2 is the one that can brick the session.** The mapper becomes the
-only input path the moment lizard mode is off; the fallback is what keeps a
-crashed mapper from costing you SSH-only recovery. Build and test the fallback
-*before* the Deck session, not during it.
+✅ **Decision 2's fallback was built and proven off-hardware before the Deck
+session, as required.** Two of my own claims about it were wrong and were
+corrected by measurement rather than argument:
+
+1. *"`ExecStopPost` runs in every failure case"* — **false.** A cgroup-wide
+   SIGKILL kills it too, because systemd spawns it into the unit's own cgroup.
+   That is what `OnFailure=` on a separate unit now covers.
+2. *"`OnFailure` should not fire on a clean auto-restart"* — **also false**, and
+   `systemd.unit(5)`'s wording agrees with the wrong version. It fires on every
+   restarting path, measured. Safe here because the restore unit can only ever
+   write `on`, with a ~2 s margin; the worst case is STEAM+X dead until the next
+   restart, never lost input.
+
+⚠️ **One residual, documented in the source:** if the *user manager itself* is
+destroyed, neither hook runs — but nothing is reading the pad then either, and
+boot resets the parameter to `Y`, so it self-heals.
 
 ### 5.25a Three defects found while making the stages testable — deliberately NOT fixed
 

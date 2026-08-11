@@ -295,6 +295,17 @@ readonly LIZARD_SUDOERS=/etc/sudoers.d/99-deck-lizard-mode
 # installed, and doing nothing. The two must not be able to drift.
 readonly LIZARD_DROPIN="${MAPPER_UNIT}.d/50-deck-lizard-mode.conf"
 
+# The unit the drop-in's OnFailure= reaches. It exists because ExecStopPost= has
+# a measured hole -- systemd spawns it INTO the mapper's cgroup, so a cgroup-wide
+# SIGKILL kills it too -- and OnFailure= starts a SEPARATE unit, in its own
+# cgroup, which survives. Both halves are kept: ExecStopPost= is synchronous and
+# covers the ordinary paths, OnFailure= covers the ones that kill it. The table
+# above render_lizard_dropin has the measurements for both.
+#
+# Same directory as MAPPER_UNIT, and for the same reason: an installer writes it
+# for a user it has never met, so T5 can bake it into the image unchanged.
+readonly LIZARD_RESTORE_UNIT=/etc/systemd/user/deck-lizard-restore.service
+
 # The absolute sudo, for the drop-in's Exec lines. systemd runs Exec= without a
 # shell and wants an absolute path for the first token. NOT the same thing as
 # this script's own ${SUDO}, which is "sudo" or the empty string depending on
@@ -2200,18 +2211,60 @@ EOF
 #   lzprobe.service: Control process exited, code=killed, status=9/KILL  <- us
 #   lzprobe.service: Failed with result 'signal'
 #
-# Reachable three ways: `systemctl kill` (whose DEFAULT --kill-whom is NOT
-# main), `--kill-whom=all|cgroup`, and systemd-oomd, which kills by writing
-# cgroup.kill. In that case lizard mode stays off with no mapper running -- a
-# Deck with no pointer and no keys until the next boot, where the module
-# parameter resets to Y. A ~10s power-button hold is the recovery that needs no
-# keyboard, which is why this is a bad day and not a brick.
+# Reachable three ways: `systemctl kill -s SIGKILL` (whose DEFAULT --kill-whom
+# is NOT main), `--kill-whom=all|cgroup`, and systemd-oomd, which kills by
+# writing cgroup.kill. A debugging session is exactly when a human types the
+# first of those.
 #
-# NOT mitigated here, deliberately. The fix is an `OnFailure=` unit, which runs
-# in its OWN cgroup and therefore survives; that is a fourth installed file and
-# a change to the design rather than an implementation detail, so it is
-# reported rather than smuggled in. systemd-oomd is disabled and inactive on
-# Omarchy today, which is what makes recording this acceptable for now.
+# ===========================================================================
+# WHICH IS WHY OnFailure= EXISTS -- ALSO MEASURED, SAME PROBE
+# ===========================================================================
+#
+# OnFailure= starts a SEPARATE unit, so systemd gives it its OWN cgroup and the
+# kill that defeats ExecStopPost= cannot reach it. Probed against a unit
+# mirroring this one exactly (Restart=on-failure, RestartSec=2,
+# StartLimitBurst=5, StartLimitIntervalSec=60):
+#
+#   how it died                        ExecStopPost   OnFailure   ended at
+#   ---------------------------------------------------------------------
+#   systemctl stop                     ran            no          lizard on
+#   systemctl kill (default SIGTERM)   ran            no          lizard on
+#   SIGKILL of the main pid only       ran            RAN         lizard off,
+#                                                                 mapper back
+#   systemctl kill -s SIGKILL          KILLED         RAN         lizard off,
+#     (default --kill-whom)                                       mapper back
+#   --kill-whom=all -s SIGKILL         KILLED         RAN         lizard off,
+#                                                                 mapper back
+#   cgroup.kill (systemd-oomd)         KILLED         RAN         lizard off,
+#                                                                 mapper back
+#   start limit exhausted              KILLED         RAN LAST    LIZARD ON,
+#                                                                 no mapper
+#   ExecStart= missing, limit hit      ran            RAN LAST    LIZARD ON,
+#                                                                 no mapper
+#
+# The two rows that matter: every cgroup-kill path now ends with input working,
+# and every path that ends with NO MAPPER ends with LIZARD ON. There is no
+# longer a way to reach "lizard off and nothing reading the pad" that survives
+# more than one RestartSec.
+#
+# ⚠️ ONE DOCUMENTED SURPRISE, because it contradicts systemd.unit(5).
+# That page says a unit using Restart= "enters the failed state only after the
+# start limits are reached", which would mean OnFailure= does not fire on a
+# crash that restarts cleanly. IT FIRES ANYWAY -- measured on every restarting
+# row above. So the knob really does flap: off -> (crash) -> on -> (restart)
+# -> off. That is deliberate and it is the safe direction:
+#
+#   * The restore only ever writes ON. It can never turn lizard mode off.
+#   * Measured margin: the restore lands ~0.5s after the kill, the restart's
+#     ExecStartPost ~2.2s after it. RestartSec=2 is what buys the ~1.7s.
+#   * If it ever lost that race, the cost is a mapper running against a device
+#     the firmware still owns -- STEAM+X dead until the next restart. Annoying,
+#     visible, and NOT a loss of input.
+#
+# Do not "fix" the flap by making the restore conditional on the mapper's state:
+# during an auto-restart the mapper is `activating`, not `failed`, so every
+# condition worth writing skips the restore in precisely the cgroup-kill case
+# it exists for.
 render_lizard_dropin() {
   cat <<EOF
 ${INSTALL_MARKER}
@@ -2228,11 +2281,16 @@ ${INSTALL_MARKER}
 #     table above render_lizard_dropin in ${PROG}.sh.
 #   * Worst case is losing STEAM+X until the next start. Not losing input.
 #
-# 🔴 ONE MEASURED EXCEPTION: a SIGKILL of the WHOLE CGROUP (\`systemctl kill\`
-# with its default --kill-whom, or systemd-oomd) kills this ExecStopPost= too,
-# because systemd spawns it into the unit's own cgroup. Lizard mode then stays
-# off until the next boot. The table above render_lizard_dropin has the journal
-# extract and the reason it is recorded rather than fixed.
+# 🔴 ExecStopPost= HAS ONE MEASURED HOLE: a SIGKILL of the WHOLE CGROUP
+# (\`systemctl kill -s SIGKILL\`, whose default --kill-whom is not main, or
+# systemd-oomd) kills it too, because systemd spawns it into this unit's own
+# cgroup. That is what OnFailure= below is for: it starts a SEPARATE unit, which
+# gets its own cgroup and survives the same kill. Both were measured -- the
+# table above render_lizard_dropin in ${PROG}.sh has every path.
+#
+# OnFailure= is NOT a duplicate of ExecStopPost=. ExecStopPost= is synchronous
+# and covers the ordinary paths; OnFailure= is asynchronous and covers the ones
+# that kill it. Removing either leaves a real gap.
 #
 # NEITHER LINE IS PREFIXED WITH '-', deliberately. If lizard mode cannot be
 # turned off then the mapper is a no-op anyway, and a loud failure that leaves
@@ -2246,9 +2304,49 @@ ${INSTALL_MARKER}
 # by ExecStopPost=: if the mapper dies in that window the service fails and
 # lizard mode goes straight back on. Closing it properly needs Type=notify and
 # an sd_notify() in deck-input-mapper.py.
+[Unit]
+# The half ExecStopPost= cannot cover. Measured: it fires on every cgroup-kill
+# path, and it fires LAST when the start limit is reached -- so the state a
+# dead mapper leaves behind is lizard mode ON.
+OnFailure=${LIZARD_RESTORE_UNIT##*/}
+
 [Service]
 ExecStartPost=${SUDO_BIN} -n ${LIZARD_HELPER} off
 ExecStopPost=${SUDO_BIN} -n ${LIZARD_HELPER} on
+EOF
+}
+
+# The unit OnFailure= reaches. Written to stdout, split out for the same reason
+# render_update_stub is.
+#
+# WHY A WHOLE SEPARATE UNIT FOR ONE COMMAND: because a separate unit is the only
+# way to get a separate CGROUP, and the cgroup is the entire point. ExecStopPost=
+# runs inside the mapper's cgroup and dies with it under a cgroup-wide SIGKILL;
+# this runs in its own and does not. Measured, both ways -- see the table above
+# render_lizard_dropin.
+#
+# Type=oneshot with no RemainAfterExit=, so it returns to inactive after each
+# run and OnFailure= can trigger it again. Measured: six consecutive triggers,
+# six runs.
+#
+# ⚠️ NO [Install] SECTION, deliberately. This unit is reached by OnFailure= and
+# by nothing else. Enabling it would run it at every session start -- turning
+# lizard mode ON just as the mapper was turning it off, which is a race with the
+# one thing that must win.
+render_lizard_restore_unit() {
+  cat <<EOF
+${INSTALL_MARKER}
+[Unit]
+Description=Restore Steam Deck lizard mode after ${MAPPER_UNIT##*/} failed
+Documentation=file://${LIZARD_HELPER}
+
+[Service]
+Type=oneshot
+# 'on' -- towards the SAFE value, always. This unit can never turn lizard mode
+# off, which is what makes it harmless when it races a restarting mapper: the
+# worst it can do is leave the firmware in charge while the mapper runs, i.e.
+# cost STEAM+X. It cannot cost input.
+ExecStart=${SUDO_BIN} -n ${LIZARD_HELPER} on
 EOF
 }
 
@@ -2387,13 +2485,15 @@ verify_lizard_grant() {
 }
 
 stage_lizard_mode() {
-  # Installs the three pieces that make "lizard mode is off IF AND ONLY IF the
+  # Installs the four pieces that make "lizard mode is off IF AND ONLY IF the
   # mapper is running" true, and nothing else:
   #
-  #   1. ${LIZARD_HELPER}   validates, writes, reads back, fails loudly
-  #   2. ${LIZARD_SUDOERS}  the desktop user may run exactly that, both ways
-  #   3. ${LIZARD_DROPIN}   deck-input-mapper.service's own ExecStartPost=/
-  #                         ExecStopPost= turn it off and back on
+  #   1. ${LIZARD_HELPER}        validates, writes, reads back, fails loudly
+  #   2. ${LIZARD_SUDOERS}       the desktop user may run exactly that, both ways
+  #   3. ${LIZARD_RESTORE_UNIT}  a separate unit, so a separate CGROUP -- the
+  #                              half that survives a cgroup-wide SIGKILL
+  #   4. ${LIZARD_DROPIN}        deck-input-mapper.service's own ExecStartPost=/
+  #                              ExecStopPost=/OnFailure=
   #
   # It deliberately does NOT start, restart or enable anything. Starting the
   # mapper from here would turn lizard mode off on a live machine on the
@@ -2408,6 +2508,7 @@ stage_lizard_mode() {
 
   assert_ours_or_absent "$helper" "something else"
   assert_ours_or_absent "$LIZARD_DROPIN" "something else"
+  assert_ours_or_absent "$LIZARD_RESTORE_UNIT" "something else"
   assert_ours_or_absent "$LIZARD_SUDOERS" "another package's sudoers drop-in"
 
   # A drop-in for a unit that does not exist is inert: installed, valid, and
@@ -2465,7 +2566,23 @@ EOF
     fail "could not install ${LIZARD_SUDOERS}"
   rm -f "$tmp"
 
-  # --- 3. the drop-in ---
+  # --- 3. the OnFailure unit ---
+  #
+  # Installed BEFORE the drop-in that names it, so there is never a moment where
+  # OnFailure= points at a unit that does not exist. Neither is active, so the
+  # ordering costs nothing and removes a state nobody would think to check.
+  local restore_name=${LIZARD_RESTORE_UNIT##*/}
+  log "installing the OnFailure unit: ${LIZARD_RESTORE_UNIT}"
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$LIZARD_RESTORE_UNIT")" ||
+    fail "could not create $(dirname "$LIZARD_RESTORE_UNIT")"
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_lizard_restore_unit >"$tmp" ||
+    fail "could not render the lizard-mode restore unit"
+  $SUDO install -m 0644 -o root -g root "$tmp" "$LIZARD_RESTORE_UNIT" ||
+    fail "could not install ${LIZARD_RESTORE_UNIT}"
+  rm -f "$tmp"
+
+  # --- 4. the drop-in ---
   log "installing the systemd drop-in: ${LIZARD_DROPIN}"
   $SUDO install -d -m 0755 -o root -g root "$(dirname "$LIZARD_DROPIN")" ||
     fail "could not create $(dirname "$LIZARD_DROPIN")"
@@ -2484,20 +2601,47 @@ EOF
     warn "could not reload this user's systemd manager. Over SSH with no session that is normal and the drop-in applies from the next desktop session; inside the desktop it means ${unit_name} is still running without its fallback."
   fi
 
-  # Ask systemd what it actually parsed, when there is a manager to ask. This is
+  # Ask systemd what it actually PARSED, when there is a manager to ask. This is
   # the only check that can see the '-' prefix question at all: `ignore_errors`
   # is systemd's own report of whether a failure here would be swallowed, and a
   # swallowed ExecStartPost= is a mapper running against a silent device.
+  #
+  # All four questions are asked together, because they are one property split
+  # across two files: ExecStopPost= covers the ordinary deaths, OnFailure= covers
+  # the cgroup-wide SIGKILL that kills ExecStopPost=, and a fallback that is
+  # only half parsed is a fallback with a hole nobody can see from the disk.
   local parsed
   parsed=$(systemctl --user show "$unit_name" -p ExecStopPost --value 2>/dev/null) || parsed=""
   if [[ -z $parsed ]]; then
-    warn "this user's systemd manager cannot report ${unit_name}'s ExecStopPost=, so the drop-in was verified as FILE CONTENT only. Re-check inside a desktop session with 'systemctl --user show ${unit_name} -p ExecStopPost'."
+    warn "this user's systemd manager cannot report ${unit_name}'s ExecStopPost=, so the drop-in and ${restore_name} were verified as FILE CONTENT only. Re-check inside a desktop session with 'systemctl --user show ${unit_name} -p ExecStopPost -p OnFailure'."
   else
     [[ $parsed == *"${LIZARD_HELPER} on"* ]] ||
       fail "systemd parsed ${unit_name} with ExecStopPost=${parsed}, which does not run '${LIZARD_HELPER} on'. Without it a mapper that dies leaves lizard mode off, and the device with no input."
     [[ $parsed != *"ignore_errors=yes"* ]] ||
       fail "systemd parsed ${unit_name}'s ExecStopPost= with ignore_errors=yes -- something prefixed it with '-'. A silently ignored failure here is exactly the fallback not working, on the one path that has to."
-    log "verified: systemd parses ${unit_name} with an ExecStopPost= that restores lizard mode and does not ignore errors"
+
+    local on_failure
+    on_failure=$(systemctl --user show "$unit_name" -p OnFailure --value 2>/dev/null) || on_failure=""
+    [[ $on_failure == *"$restore_name"* ]] ||
+      fail "systemd parsed ${unit_name} with OnFailure=${on_failure:-<empty>}, which does not name ${restore_name}. ExecStopPost= alone does NOT survive a cgroup-wide SIGKILL -- 'systemctl kill -s SIGKILL' defaults to killing the whole cgroup, and it takes ExecStopPost= with it. Without OnFailure= that path leaves lizard mode off with nothing reading the pad."
+
+    # The unit OnFailure= names has to be one systemd can actually load. A
+    # nonexistent or unparseable target makes OnFailure= a line that resolves to
+    # nothing, and systemd reports that only when it tries to trigger it -- i.e.
+    # in the failure, which is the worst possible time to find out.
+    local restore_load
+    restore_load=$(systemctl --user show "$restore_name" -p LoadState --value 2>/dev/null) || restore_load=""
+    [[ $restore_load == loaded ]] ||
+      fail "systemd reports ${restore_name} as LoadState=${restore_load:-<empty>}, not 'loaded'. OnFailure= would then resolve to nothing, and would say so only at the moment it was needed."
+
+    local restore_exec
+    restore_exec=$(systemctl --user show "$restore_name" -p ExecStart --value 2>/dev/null) || restore_exec=""
+    [[ $restore_exec == *"${LIZARD_HELPER} on"* ]] ||
+      fail "systemd parsed ${restore_name} with ExecStart=${restore_exec:-<empty>}, which does not run '${LIZARD_HELPER} on'. The unit exists and does not restore anything."
+    [[ $restore_exec != *"ignore_errors=yes"* ]] ||
+      fail "systemd parsed ${restore_name}'s ExecStart= with ignore_errors=yes -- something prefixed it with '-'. The last line of defence must not be the one that fails quietly."
+
+    log "verified: systemd parses ${unit_name} with an ExecStopPost= AND an OnFailure=${restore_name} that both restore lizard mode, neither ignoring errors"
   fi
 
   verify_lizard_grant "$helper"
@@ -2506,7 +2650,9 @@ EOF
   log "stage-lizard-mode: ok"
   log "NOTE: nothing was started. Lizard mode is still whatever it was, and goes"
   log "      off only when deck-input-mapper.service next starts -- and back on"
-  log "      when it stops, crashes or is killed. A reboot restores it too."
+  log "      when it stops, crashes or is killed, by ExecStopPost= or, when a"
+  log "      cgroup-wide SIGKILL takes that with it, by ${restore_name}."
+  log "      A reboot restores it too: the parameter does not persist."
 }
 
 # ---------------------------------------------------------------------------
@@ -2881,8 +3027,10 @@ Stages also cover Gaming Mode / display defects (PROGRESS.md 5.11, 5.14, 5.15):
                            the TTY are NOT covered here.
   stage-lizard-mode        binds the controller firmware's lizard mode to
                            deck-input-mapper.service: off while it runs, on
-                           again when it stops, crashes or is killed. Nothing
-                           persists it -- a reboot restores it too, on purpose.
+                           again when it stops, crashes or is killed -- by
+                           ExecStopPost=, and by an OnFailure= unit for the
+                           cgroup-wide SIGKILL that kills ExecStopPost= too.
+                           Nothing persists it: a reboot restores it, on purpose.
 
 Exit codes: 0 success, 1 stage failure, 2 usage error.
 EOF
