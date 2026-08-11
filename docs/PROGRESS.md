@@ -2116,7 +2116,16 @@ the ISO's kernel, **text-entry mode cannot be entered at all**: the Wi-Fi
 passphrase screen and the account screen have no keyboard, and the
 controller-only install — the entire point of the project — has no mechanism.
 
-➡️ **Add to the next Deck session, before anything else on the list:**
+🟡 **HALF-ANSWERED off-hardware, 2026-08-11** (`docs/findings/T4-harness-feasibility.md` §5):
+`hid-steam.ko.zst` **is present in the live ISO**, and `modinfo` on it
+**declares the `lizard_mode` parameter**. So the module ships and the knob is
+compiled in — the sysfs node should therefore exist on the Deck once the module
+binds to real hardware. QEMU cannot finish the answer (`hid_steam.loaded=0`
+there, no Steam Controller to bind to), so the *writability* half and the
+does-it-actually-appear half still need the Deck. **The gate is much less
+likely to be closed than it looked, but it is not yet open.**
+
+➡️ **Still add to the next Deck session, before anything else on the list:**
 
 ```bash
 ls -l /sys/module/hid_steam/parameters/lizard_mode; cat /sys/module/hid_steam/parameters/lizard_mode
