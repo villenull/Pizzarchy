@@ -40,7 +40,31 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck parted dosfstools mtools btrfs-progs jq openssl qemu-utils python3-evdev
+          sudo apt-get install -y parted dosfstools mtools btrfs-progs jq openssl qemu-utils python3-evdev
+
+      # ⚠️ shellcheck is PINNED, and apt's is deliberately not used.
+      #
+      # apt installs whatever ubuntu-latest carries that week, while a developer
+      # has whatever their distro ships -- so the same tree can be clean here and
+      # dirty locally, or worse, clean locally and dirty here. Measured
+      # 2026-08-11: this machine had 0.11.0 and flagged two SC2016 findings the
+      # runner's older build may not have; a commit message claimed "CI is red"
+      # on the strength of a local run, and that was never true.
+      #
+      # Bump this deliberately, and run the same version locally when you do:
+      #   docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 -x <files>
+      - name: Install pinned shellcheck
+        env:
+          SHELLCHECK_VERSION: v0.11.0
+        run: |
+          set -euo pipefail
+          url="https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          curl -fsSL "$url" | tar -xJf - --strip-components=1 -C /usr/local/bin "shellcheck-${SHELLCHECK_VERSION}/shellcheck"
+          shellcheck --version
+          # Fail loudly if the binary is not the version we asked for -- a silent
+          # fallback to apt's would put this check straight back where it was.
+          shellcheck --version | grep -qx "version: ${SHELLCHECK_VERSION#v}" ||
+            { echo "shellcheck is not ${SHELLCHECK_VERSION}"; exit 1; }
 
       - name: shellcheck
         run: |

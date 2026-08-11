@@ -1975,6 +1975,41 @@ neither Omarchy nor the Deck.
 
 ---
 
+## 5.25 ✅ TWELVE OPERATOR DECISIONS, 2026-08-11 — all settled in one pass
+
+Every one of these had been open, some for several sessions. **They are decided;
+do not re-litigate them without new evidence.** Where a decision creates work,
+the owner is named.
+
+### Approved for the next Deck session — batch them, do not go four times
+
+| # | Decision | Owner |
+|---|---|---|
+| 1 | 🔴 **Fix both lock causes** (§5.24): the `above_lock = 2` layer rule for `deck-osk`, **and** mask `omarchy-sleep-lock.service`. The power button must stop producing an unanswerable password screen | Deck |
+| 2 | **Persist `lizard_mode=N` WITH a fallback** (§5.21) that restores `Y` when the mapper is not running. ⚠️ Non-negotiable half: persisting without the fallback leaves a handheld with no input if the mapper dies | Deck + dev |
+| 3 | **Measure QAM's evdev code** — one press with lizard mode off. The binding is written and deliberately inert until this exists (§5.23) | Deck |
+| 4 | **Run `stage-default-session`** — the Deck starts booting to Gaming Mode | Deck |
+| 5 | **Apply BOTH rotations**: Limine `interface_rotation: 270` and the TTY's `fbcon=rotate:1`. Boot-chain, hence the explicit approval | Deck |
+
+### Decided, no hardware
+
+| # | Decision |
+|---|---|
+| 6 | **Wait for 4.0 stable rather than moving to `edge` now.** We are on beta 2 exactly; the one alarming delta row was reclassified (§5.24). If stable lands this week, this block and P3.6 become one rebase |
+| 7 | **Keep `99-deck-testing`, and make the ISO refuse to carry it** (§5.17). ⚠️ T5 owes a build-time check that **FAILS THE BUILD**, not a comment. Until then every privilege-dependent result on that Deck stays suspect |
+| 8 | **T5 (the ISO build) is the next major piece**, ahead of T4's installer screens |
+| 9 | **`stage_return_icon` gets an ownership marker** and starts refusing foreign files, like every other stage |
+| 10 | **Refactor the five untestable stages** so verification takes a path — production behaviour unchanged, default argument is today's constant |
+| 11 | **Pin CI's shellcheck** (v0.11.0, fetched from the release, not apt) so local and CI cannot disagree |
+| 12 | **Leave STEAM long-press alone.** Any press-and-release opens the apps menu unless another button was pressed during the hold. No timer, because nothing needs one yet |
+
+⚠️ **Decision 2 is the one that can brick the session.** The mapper becomes the
+only input path the moment lizard mode is off; the fallback is what keeps a
+crashed mapper from costing you SSH-only recovery. Build and test the fallback
+*before* the Deck session, not during it.
+
+---
+
 ## 6. Blocked on human
 
 - **`docs/ROADMAP.md` P1.4 — Ventoy on the test USB + the stock Omarchy 4.0 beta
@@ -1986,13 +2021,14 @@ neither Omarchy nor the Deck.
   recovery image on a second USB as the floor, and anything personal copied
   off the Deck first. Approved in principle by §2.5; still confirm before
   executing.
-- 🆕 **Approval to download the beta 2 ISO** — 6.0 GB from
-  `https://iso.omarchy.org/omarchy-quattro-beta2.iso`, with **no upstream
-  checksum to verify it against** (§5.22). Needed for P2.9a's remaining pin
-  fields, which can only be read from inside the image.
-- 🆕 **A timing decision: rebase onto beta 2 now, or wait for stable?** The
-  thread the operator cited says Quattro ships **this week**. If stable lands in
-  days, phase 2.9 and P3.6 are the same work twice.
+- ✅ *(Retired 2026-08-11 — both answered, see §5.25.)* ~~Approval to download
+  the beta 2 ISO~~ (granted; done, and it proved we were already on beta 2).
+  ~~Rebase now or wait for stable?~~ **Wait.**
+- 🆕 **ONE Deck session, five approved items batched** (§5.25 rows 1–5): the
+  lock fix, `lizard_mode` persistence + fallback, QAM's evdev code,
+  `stage-default-session`, and both rotations. ⚠️ **Row 2's fallback must be
+  built and tested BEFORE the session** — persisting lizard mode without it
+  leaves a handheld with no input if the mapper dies. Runbook owed.
 - 🆕 **`docs/ROADMAP.md` P2.9e — bringing the Deck to beta 2.** Snapshot #8,
   then in-place `omarchy-update`, then re-running every `deck-session.sh`
   stage. Prepared and described before execution, per the rule below. Batch it
