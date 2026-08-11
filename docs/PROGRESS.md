@@ -1323,8 +1323,13 @@ Ships **`false`**. `squeekboard` uses it as its auto-show gate, so nothing else
 being correct matters until it is set. With it `true`, focusing a text field
 pops the keyboard.
 
-**T5 must bake this into the LIVE ISO** — see §2.6, which scopes squeekboard to
-the installer and hands everything after install to Steam's own keyboard. It
+✅ **Implemented as `stage-desktop-settings`** (session 17) — installed as a
+**dconf site default**, not a per-user `gsettings set`, because the image
+creates a user we have never met and a user-level write leaves a later account
+with the broken default. ⚠️ **Verify with `dconf read -d`**: a plain read
+returns the user's value and would pass while the site default was absent.
+See §2.6, which scopes squeekboard to the installer and hands everything after
+install to Steam's own keyboard. It
 sits alongside `org.gnome.desktop.input-sources` and the rotation: values that
 currently live in one user's session and are all load-bearing.
 

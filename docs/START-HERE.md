@@ -86,21 +86,26 @@ work without waiting for further instruction.**
 >    targets masked. This is an **OLED** panel, so burn-in is the reason not to
 >    leave it. Revert: `sudo /usr/local/sbin/deck-always-on-revert.sh`.
 >
-> 🆕 **Two GSettings values are set on the Deck and are NOT temporary** — they
-> are requirements of **the installer image**, and session 17 corrected an
-> earlier note telling you to revert one of them:
+> ✅ **`stage-desktop-settings` now installs these — they are no longer hand
+> edits**, and the Deck's user-level overrides were reset so the site default is
+> what is actually in effect:
 >
 > - `org.gnome.desktop.input-sources sources` = `[('xkb','us')]` — squeekboard
->   has no keys to draw without it. *(Previously listed here as a temporary hack
->   to undo. It is not.)*
+>   has no keys to draw without it. *(An earlier note here told you to revert
+>   this. It was wrong.)*
 > - `org.gnome.desktop.a11y.applications screen-keyboard-enabled` = `true` —
 >   ships `false`, and **the OSK never auto-shows without it** (§5.20).
+> - Omarchy's idle policy in `shell.json` — screensaver 150s, **lock 86400s**
+>   (R-38). ⚠️ `lock: 0` locks **instantly** rather than disabling.
 >
-> ⚠️ **They belong to the LIVE ISO, not the installed system** (§2.6): the
-> installer uses squeekboard, and everything after install uses **Steam's own
-> keyboard**. On the test Deck they are therefore a **known divergence from the
-> product** — harmless, since squeekboard is not autostarted, but do not read
-> the Deck as evidence of what the installed image should contain.
+> They install as **dconf site defaults** (`/etc/dconf/db/local.d/50-deck-desktop`),
+> not per-user `gsettings set`, because the image creates a user we have never
+> met. ⚠️ **Verify them with `dconf read -d`**, never `gsettings get`: a plain
+> read returns the *user's* value and passes while the site default is missing.
+>
+> ⚠️ Still a T5 item: **`shell.json` is a per-user dotfile**, so a *new* account
+> needs it seeded. And per §2.6 squeekboard itself belongs to the **live ISO**,
+> not the installed system.
 >
 > They are T5 constraints: GSettings in one user's dconf, **absent from a built
 > image**. No test would notice — every suite runs on the Deck where they are
