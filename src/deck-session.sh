@@ -743,7 +743,7 @@ session_user=${session_user}
 # in ~50ms. It is a UNIT IN THE USER MANAGER, so neither of the two conditions
 # above can see it: it owns no logind session and its processes are not named
 # after a compositor. Starting sddm into that window is what makes the incoming
-# session's `uwsm start ... Hyprland` exit in ~1ms.
+# session's \`uwsm start ... Hyprland\` exit in ~1ms.
 #
 # Asked generally (any deactivating unit) rather than by name, because
 # steam-launcher is simply the slowest example rather than a special case.

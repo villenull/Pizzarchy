@@ -3,7 +3,41 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
-> ## Where things stand (updated 2026-08-10, end of session 16)
+> ## Where things stand (updated 2026-08-10, end of session 17)
+>
+> ### 🆕 SESSION 17 WAS THE FIRST TIME ANY OF THIS WAS SEEN ON A SCREEN — read this first
+>
+> Session 16 ended admitting *"nothing here was seen on a screen."* Session 17
+> put the operator in front of the Deck for the **input** half. What a passing
+> unit suite and `systemctl is-active` had been hiding:
+>
+> - **The input mapper was a COMPLETE NO-OP on the desktop.** It was `active`
+>   and correctly bound to `event7`, and that node is **silent** — lizard mode
+>   routes the buttons to the emulated nodes instead. P2.1's "verified on
+>   hardware" was true in every particular and proved nothing.
+> - **The d-pad emitted nothing**, because the Deck sends `BTN_DPAD_*` buttons
+>   and the mapper only handled `ABS_HAT0*` axes — which `hid-steam`
+>   *advertises and never sends*. The suite passed because it drove a device
+>   model this hardware does not use.
+> - **A resting analog stick cancelled every held direction in ~10 ms**, killing
+>   auto-repeat, because two input sources shared one state slot.
+> - Both are **fixed, deployed, and verified by pressing the buttons.** Hold and
+>   auto-repeat now measure exactly `REPEAT_DELAY`/`REPEAT_INTERVAL`.
+> - **CI was RED** — `shellcheck` exit 1 — while `docs/PROGRESS.md` claimed it
+>   passed. Cause: an unquoted heredoc that **executed `uwsm start ... Hyprland`
+>   as root** at file-generation time. Fixed.
+> - **The OSK question is answered:** it does **not** appear on text focus, but
+>   `sm.puri.OSK0`'s `SetVisible` **works and was seen on screen** (§5.20). T4
+>   should drive it explicitly.
+>
+> Full evidence: **`docs/findings/P17-input-and-osk.md`** (R-29…R-36).
+>
+> ⚠️ **Lizard mode is the load-bearing fact for T4.** It swallows **X, Y, L1,
+> R1, STEAM and QAM entirely** — no evdev node sees them — and provides no
+> **Space**, which archinstall's multi-select needs. The knob that frees them,
+> `/sys/module/hid_steam/parameters/lizard_mode`, also removes the free pointer,
+> making the mapper the *only* input path. Do not set it to `N` anywhere until
+> the mapper is proven working, or the Deck is uncontrollable without SSH.
 >
 > ### ✅ PHASE 1 COMPLETE. Phase 2 is underway — the core promise now works.
 >

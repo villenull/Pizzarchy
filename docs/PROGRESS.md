@@ -69,12 +69,24 @@ Deck-free work: **§5.13**'s repo-precedence audit, **P2.5** (T4 installer
 screens) or **P2.7** (T5 ISO fork). T5 also inherits a new obligation from
 §5.11: the desktop rotation currently lives in one user's dotfile.
 
-**Git state (end of session 15):** all phase-1 and P2.0 work is merged into
-**`main`**, with `p15-deck-recon` at the same commit. **Nothing is
-pushed** — `main` is ahead of `origin/main` by all of it
-(`github.com/villenull/Pizzarchy`), and pushing is an operator decision.
-`src/deck-session.sh` now has unit coverage (`test/unit/test-deck-session.sh`);
-CI's five bash suites and `shellcheck -x` over 21 scripts pass locally.
+**Session 17 (2026-08-10) was the eyes-and-hands pass for input**, the first
+time any of this was seen on a screen. It found the input mapper was a
+**complete no-op** on the desktop (bound to a node lizard mode keeps silent),
+and two defects beneath that: the d-pad emitted nothing at all, and a resting
+analog stick cancelled every held direction within ~10 ms. Both are fixed,
+deployed, and **verified on hardware by pressing the buttons**. It also answered
+the OSK question (§5.20) and fixed a generated file that executed a command at
+render time (§R-36). Findings: `docs/findings/P17-input-and-osk.md` (R-29…R-36).
+
+**Git state:** `main` and `origin/main` were level at the start of session 17
+(verify with `git rev-list --left-right --count origin/main...main`, never by
+trusting this line). Session 17's work is on **`p17-input-and-osk`**.
+
+⚠️ **CI was RED and this file said otherwise.** `shellcheck -x` exited 1 on
+`src/deck-session.sh` (SC2006), and CI's shellcheck step has no `|| true`. The
+old claim that "five bash suites and `shellcheck -x` over 21 scripts pass
+locally" was stale. Fixed in session 17; shellcheck now exits 0 and all five
+bash suites plus both Python suites pass.
 
 ### 1.1 Artifacts that live OUTSIDE this repo
 
@@ -596,6 +608,29 @@ operable at all. Text entry (the Wi-Fi passphrase) remains the real gap.
 cannot express, or suppress it (via `hid-steam`'s hidraw behavior —
 unverified) and lose the free mouse/keyboard. Recommendation in the finding:
 use it.
+
+> ### 🆕 Session 17 measured the whole map, on the installed system, with a human
+>
+> `docs/findings/P17-input-and-osk.md` R-29…R-31. Three things this section could
+> not say:
+>
+> 1. **Lizard mode holds on the installed system too**, not just the live ISO —
+>    and it swallows **X, Y, L1, R1, STEAM and QAM entirely**. Those six report
+>    on **no evdev node at all**, so no user-space program can recover them.
+> 2. **It gives Enter, Esc, Tab, arrows and both mouse buttons — but NO Space.**
+>    `Y → KEY_SPACE` (archinstall's multi-select toggle) is precisely what the
+>    mapper exists to add, so "already navigable" is true for movement and
+>    confirmation and **false for toggling**.
+> 3. **The suppression question is answered and no longer "unverified":**
+>    `/sys/module/hid_steam/parameters/lizard_mode` is a documented, writable
+>    module parameter. `N` silences the emulated nodes and makes `event7` fully
+>    live, including the six swallowed buttons. It does **not** persist across a
+>    reboot.
+>
+> So the decision above is now a real trade with both sides measured: keep
+> lizard mode and lose Space, or drop it and lose the free pointer, making the
+> mapper the *only* input path. **The mapper must be proven working before
+> anything sets `lizard_mode=N`,** or the device is uncontrollable without SSH.
 
 ### 5.10 ✅ Steam's "Switch to Desktop" menu item — **RESOLVED 2026-08-10, proven on hardware**
 
@@ -1211,6 +1246,45 @@ thing here is the **controller-only install** and the layer beneath it.
 
 ---
 
+## 5.20 🟡 The OSK does not appear on text focus — drive it explicitly instead
+
+**Answered on hardware 2026-08-10 (session 17), with the operator watching the
+screen.** `docs/findings/P17-input-and-osk.md` R-35. This was session 16's
+open "needs eyes" item.
+
+`squeekboard` runs on Hyprland 0.56.2, owns `sm.puri.OSK0` on the session bus,
+and **renders correctly when told to**:
+
+```bash
+busctl --user call sm.puri.OSK0 /sm/puri/OSK0 sm.puri.OSK0 SetVisible b true
+```
+
+That was **seen on the screen**. What never happens is the focus-triggered
+appearance. Four conditions were tried and all failed: stock session; with
+`fcitx5` stopped and squeekboard restarted to claim the input-method seat; with
+a dialog launched *after* squeekboard to rule out ordering; and with
+`GTK_IM_MODULE=wayland` set for the app.
+
+Also recorded: **Omarchy 4.0 ships and runs `fcitx5`** (`INPUT_METHOD`,
+`XMODIFIERS`, `QT_IM_MODULE` all `fcitx`). It was the obvious suspect for
+holding the `zwp_input_method_v2` seat; stopping it changed nothing, so it is
+**not** the cause. It was restored.
+
+**What this means for T4, and it is not bad news.** The installer draws its own
+screens, so it knows when a text field is focused and can call `SetVisible`
+itself. **Design for explicit control, not auto-show** — auto-show is unproven
+here and would be a dependency on compositor behaviour this project does not
+own.
+
+⚠️ **Not established:** *why* the activation never arrives — Hyprland not
+bridging `text-input-v3` → `input-method-v2`, or GTK never creating a
+text-input object. That needs a protocol trace, not another button press, and
+it is off T4's critical path now that the programmatic route is proven. Do not
+record "the OSK is broken"; record that **auto-show is unavailable and
+programmatic show works**.
+
+---
+
 ## 6. Blocked on human
 
 - **`docs/ROADMAP.md` P1.4 — Ventoy on the test USB + the stock Omarchy 4.0 beta
@@ -1236,6 +1310,31 @@ backup rescue (the rebuild wipes both).
 
 ## 7. Don't re-derive — each of these cost real time
 
+- **The Deck's d-pad arrives as `BTN_DPAD_*` key events, never as `ABS_HAT0X/Y`.**
+  `hid-steam` *advertises* the hat axes and never sends them. Anything handling
+  only the axes silently ignores the d-pad — which is exactly what shipped
+  (§R-33). Check what a device **sends**, not what it advertises.
+- **`hid-steam` uses Nintendo-style button codes:** physical **X** is
+  `BTN_NORTH`, physical **Y** is `BTN_WEST`. The kernel's own aliases confirm it
+  (`BTN_NORTH/BTN_X`). This looks inverted beside the Xbox convention and will
+  invite a "fix" that breaks it.
+- **Lizard mode swallows X, Y, L1, R1, STEAM and QAM completely** — they appear
+  on no evdev node. It provides Enter, Esc, Tab, arrows and both mouse buttons,
+  but **no Space**. Suppress it with
+  `/sys/module/hid_steam/parameters/lizard_mode` (writable, non-persistent).
+- **An evdev node can be enumerated and permanently silent.** Counting nodes,
+  `systemctl is-active`, and a log line naming the bound device all reported
+  health while the mapper delivered nothing for an entire session (§R-31).
+- **When probing input by hand, press a known-good button as a DELIMITER between
+  test buttons.** A silent button leaves no marker, so an undelimited batch
+  cannot attribute events to presses. A reliably emits `KEY_ENTER`.
+- **`pkill -f <pattern>` over SSH kills its own shell** when the pattern text
+  appears anywhere in the remote command line — including in a later argument.
+  The `[p]attern` bracket trick fails too if the plain name appears again. Kill
+  by PID, or put the `pkill` in its own invocation.
+- **Unquoted heredocs execute backticks and `$(...)` at render time, as root.**
+  `deck-session.sh` shipped a comment that really ran `uwsm start ... Hyprland`
+  during a stage install (§R-36). Escape them; `shellcheck` catches it (SC2006).
 - Docker's default bridge network is throttled to ~2 KB/s on the operator's dev
   machine. Use `--network host` for any Docker-based tooling there.
 - `mount -o remount` does **not** re-apply `fmask`/`dmask` on vfat. A full

@@ -37,9 +37,10 @@ investigations.
 | Speaker output audible | ⏸ | ⏸ | needs a human |
 | Headphone jack detect | ⏸ | ⏸ | needs a human |
 | Mic capture | ⏸ | ⏸ | needs a human |
-| Trackpads / haptics | ⏸ | ⏸ | needs a human |
+| Trackpad → pointer | ✅ moves + clicks (`event5`) | n/a — Steam owns it | verified session 17 |
+| Trackpad haptics | ⏸ | ⏸ | needs a human |
 | Gyro actually responding | ⏸ | ⏸ | needs a human |
-| Button mapping correctness | ⏸ | ⏸ | needs a human |
+| Button mapping correctness | ✅ **verified session 17** | ⏸ | see below |
 | BT pairing with a real device | ⏸ | ⏸ | needs a human |
 
 **Everything that can be checked without hands is at parity except input**, and
@@ -88,9 +89,20 @@ searching for the latter returns zero in both sessions. Worth stating because
 this session already lost time to a near-miss name (`gamescope` vs
 `gamescope-wl`); anything matching input devices by name needs the exact string.
 
-**Consequence for P2.1:** the desktop input mapper has the native `Steam Deck`
+**Consequence for P2.1:** ~~the desktop input mapper has the native `Steam Deck`
 node (`event7 js0`) available, because Steam is not running there. It does not
-have to contend with the virtual Xbox pad, which only exists in Gaming Mode.
+have to contend with the virtual Xbox pad, which only exists in Gaming Mode.~~
+
+⚠️ **CORRECTED 2026-08-10 (session 17) — this was wrong, and it mattered.** The
+node is **enumerated but silent**. With Steam not running the Deck is in *lizard
+mode*, and Valve's firmware routes the buttons to the emulated keyboard/mouse
+nodes (`event6`/`event5`) while `event7` emits nothing at all. The mapper was
+bound to it, reported `active`, and was a **complete no-op**.
+
+Enumerated and live are different claims. This table was built by counting
+nodes, which cannot tell them apart — see `docs/findings/P17-input-and-osk.md`
+R-29/R-31 for the measured timeline and the `hid_steam` `lizard_mode` knob that
+makes the node live.
 
 ## Reproducing
 
