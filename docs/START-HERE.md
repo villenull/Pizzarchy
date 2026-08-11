@@ -26,9 +26,13 @@ work without waiting for further instruction.**
 > - **CI was RED** — `shellcheck` exit 1 — while `docs/PROGRESS.md` claimed it
 >   passed. Cause: an unquoted heredoc that **executed `uwsm start ... Hyprland`
 >   as root** at file-generation time. Fixed.
-> - **The OSK question is answered:** it does **not** appear on text focus, but
->   `sm.puri.OSK0`'s `SetVisible` **works and was seen on screen** (§5.20). T4
->   should drive it explicitly.
+> - **The OSK works on text focus** (§5.20), gated by one GSettings key that
+>   ships `false`: `org.gnome.desktop.a11y.applications screen-keyboard-enabled`.
+>   **T5 must bake it into the image.** It was first recorded here as a
+>   *negative* after four failing experiments — all of which sat downstream of
+>   that one gate. **Four experiments sharing a hidden precondition are one
+>   experiment**; a `WAYLAND_DEBUG=1` trace found it in minutes and needed no
+>   operator.
 >
 > Full evidence: **`docs/findings/P17-input-and-osk.md`** (R-29…R-36).
 >
@@ -239,11 +243,14 @@ work without waiting for further instruction.**
 >   Draw our own button glyphs; do not use Valve's artwork
 >   (`docs/findings/P16-redistribution-and-trademark.md`).
 > - **T5's ISO fork (P2.7/P2.8)**, `docs/tasks/T5-iso-and-payload.md`, which now
->   carries **five** recorded constraints: offline-only pacman · the encryption
+>   carries **six** recorded constraints: offline-only pacman · the encryption
 >   default (§5.12) · repo precedence (§5.13) · **baking in BOTH rotations**
 >   (desktop `monitors.lua` *and* Limine `interface_rotation`) · **excluding
->   `99-deck-testing`** (§5.17). Also decide **bundle vs fetch** — `steamdeck-dsp`
->   is `Proprietary`, so bundling redistributes it and fetching does not.
+>   `99-deck-testing`** (§5.17) · 🆕 **the three load-bearing session settings**
+>   (§5.20 — `screen-keyboard-enabled`, `input-sources`, rotation), which are
+>   GSettings in one user's dconf today and would be simply absent from a built
+>   image. Also decide **bundle vs fetch** — `steamdeck-dsp` is `Proprietary`,
+>   so bundling redistributes it and fetching does not.
 
 Layout is in `CLAUDE.md`. Paths below are repo-root-relative.
 
@@ -354,7 +361,7 @@ are done as far as a script can verify them. Sensible entry points:
 
 - **Without the Deck — this is where the remaining bulk is.** **P2.5/P2.6**
   (T4's installer screens; text entry is the real gap) or **P2.7/P2.8** (T5's
-  `omarchy-iso` fork, which now carries five recorded constraints — see above).
+  `omarchy-iso` fork, which now carries six recorded constraints — see above).
   Either is days of work and needs no hardware.
 - **With the Deck, needing a HUMAN present:** everything left on P2.1/P2.2/P2.4
   is a thing a script cannot check — does the OSK appear on text focus, are the

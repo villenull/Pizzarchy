@@ -1246,42 +1246,49 @@ thing here is the **controller-only install** and the layer beneath it.
 
 ---
 
-## 5.20 🟡 The OSK does not appear on text focus — drive it explicitly instead
+## 5.20 ✅ The OSK works on text focus — RESOLVED 2026-08-10, one GSettings key
 
-**Answered on hardware 2026-08-10 (session 17), with the operator watching the
-screen.** `docs/findings/P17-input-and-osk.md` R-35. This was session 16's
-open "needs eyes" item.
-
-`squeekboard` runs on Hyprland 0.56.2, owns `sm.puri.OSK0` on the session bus,
-and **renders correctly when told to**:
+**Answered on hardware (session 17), seen on the screen.**
+`docs/findings/P17-input-and-osk.md` R-35. This was session 16's open
+"needs eyes" item.
 
 ```bash
-busctl --user call sm.puri.OSK0 /sm/puri/OSK0 sm.puri.OSK0 SetVisible b true
+gsettings set org.gnome.desktop.a11y.applications screen-keyboard-enabled true
 ```
 
-That was **seen on the screen**. What never happens is the focus-triggered
-appearance. Four conditions were tried and all failed: stock session; with
-`fcitx5` stopped and squeekboard restarted to claim the input-method seat; with
-a dialog launched *after* squeekboard to rule out ordering; and with
-`GTK_IM_MODULE=wayland` set for the app.
+Ships **`false`**. `squeekboard` uses it as its auto-show gate, so nothing else
+being correct matters until it is set. With it `true`, focusing a text field
+pops the keyboard.
 
-Also recorded: **Omarchy 4.0 ships and runs `fcitx5`** (`INPUT_METHOD`,
-`XMODIFIERS`, `QT_IM_MODULE` all `fcitx`). It was the obvious suspect for
-holding the `zwp_input_method_v2` seat; stopping it changed nothing, so it is
-**not** the cause. It was restored.
+**T5 must bake this into the image**, alongside the rotation and the
+`org.gnome.desktop.input-sources` setting — three GSettings/dotfile values that
+currently live in one user's session and are all load-bearing.
 
-**What this means for T4, and it is not bad news.** The installer draws its own
-screens, so it knows when a text field is focused and can call `SetVisible`
-itself. **Design for explicit control, not auto-show** — auto-show is unproven
-here and would be a dependency on compositor behaviour this project does not
-own.
+⚠️ **This was first recorded here as a NEGATIVE ("does not appear on focus"),
+and that was wrong.** Four conditions were tested — stock session, `fcitx5`
+stopped, startup ordering corrected, `GTK_IM_MODULE=wayland` — and all of them
+sat downstream of the same unexamined gate. **Four experiments sharing a hidden
+precondition are one experiment.** A `WAYLAND_DEBUG=1` trace showed the whole
+chain had been working the entire time: GTK binds `zwp_text_input_manager_v3`
+and calls `enable()`, Hyprland sends `enter`, and squeekboard receives
+`zwp_input_method_v2.activate()`. The trace cost minutes, needed no operator,
+and should have come before the fourth button-press experiment.
 
-⚠️ **Not established:** *why* the activation never arrives — Hyprland not
-bridging `text-input-v3` → `input-method-v2`, or GTK never creating a
-text-input object. That needs a protocol trace, not another button press, and
-it is off T4's critical path now that the programmatic route is proven. Do not
-record "the OSK is broken"; record that **auto-show is unavailable and
-programmatic show works**.
+Two facts recorded on the way:
+
+- **Omarchy 4.0 ships and runs `fcitx5`** (`INPUT_METHOD`/`XMODIFIERS`/
+  `QT_IM_MODULE` = `fcitx`). It does **not** block squeekboard, and it
+  **respawns within a second of being killed** — anything assuming it stays
+  dead is wrong.
+- **`sm.puri.OSK0`'s `SetVisible` also works**, so explicit show/hide is
+  available where a screen wants it rather than focus.
+
+**Steam's own OSK is not an alternative for the installer** (R-35b). Steam does
+not run in the desktop session here, its keyboard is rendered by the Steam
+client itself, and the live ISO has no Steam at all. Gaming Mode already has it
+for free because that is Valve's session. Desktop Mode could have it only by
+keeping Steam running in the background — untested, and a heavyweight
+dependency.
 
 ---
 

@@ -156,38 +156,94 @@ Both are the same failure as the code's: **a check that cannot distinguish "I
 looked and found nothing" from "I looked in the wrong place."** All six
 mutations are caught now, including a reconstruction of the original defect.
 
-## R-35 — the OSK does NOT appear on text focus, but CAN be shown programmatically
+## R-35 — the OSK DOES appear on text focus. One GSettings key gated it.
 
-Session 16 left this open as *"needs eyes"*. Answered, and the answer is a
-negative with a usable workaround.
+Session 16 left this open as *"needs eyes"*. **Answered: it works.**
 
-| Condition tested | OSK on focus? |
+```bash
+gsettings set org.gnome.desktop.a11y.applications screen-keyboard-enabled true
+```
+
+It ships **`false`** on this Deck. squeekboard honours it as its auto-show gate,
+so with it unset the keyboard never appears no matter what else is correct.
+With it `true`, focusing a text field pops the keyboard — **seen on screen**.
+
+### ⚠️ This finding was first recorded as a NEGATIVE, and that was wrong
+
+Four conditions were tested and all "failed", producing a confident conclusion
+that focus-triggered show was unavailable and T4 must drive the OSK explicitly:
+stock session; `fcitx5` stopped and squeekboard restarted; a dialog launched
+after squeekboard to rule out ordering; and `GTK_IM_MODULE=wayland`.
+
+**Every one of those was downstream of the same unexamined gate.** Four
+independent-looking experiments that share a hidden precondition are one
+experiment. The error was concluding a mechanism was absent after testing only
+the ways it might be *configured*, without once tracing whether the mechanism
+itself ran.
+
+The protocol trace is what broke it open, and it showed the chain was **already
+working end to end**:
+
+```
+# client side (GTK/zenity)
+-> zwp_text_input_manager_v3#83.get_text_input(new id zwp_text_input_v3#79, wl_seat#3)
+   zwp_text_input_v3#79.enter(wl_surface#46)      <- compositor grants focus
+-> zwp_text_input_v3#79.enable()
+-> zwp_text_input_v3#79.set_content_type(0, 0)
+-> zwp_text_input_v3#79.commit()
+
+# input-method side (squeekboard)
+-> zwp_input_method_manager_v2#37.get_input_method(wl_seat#36, new id zwp_input_method_v2#35)
+   zwp_input_method_v2#35.activate()              <- IT WAS BEING ACTIVATED ALL ALONG
+   zwp_input_method_v2#35.done()
+```
+
+Hyprland 0.56.2 advertises `zwp_text_input_manager_v3`,
+`zwp_input_method_manager_v2` and `zwp_virtual_keyboard_manager_v1`, GTK binds
+text-input-v3 and enables it, and squeekboard receives `activate()`. Nothing was
+broken; the keyboard was being told to show and declining.
+
+**Method note worth keeping:** the two traces cost minutes and needed no
+operator at all — zenity focuses its entry automatically. They should have come
+*before* the fourth button-press experiment, not after the negative was written
+down.
+
+Also recorded and still true: **Omarchy 4.0 ships and runs `fcitx5`**
+(`INPUT_METHOD`, `XMODIFIERS`, `QT_IM_MODULE` all `fcitx`). It was a reasonable
+suspect for holding the `zwp_input_method_v2` seat and is **not** the cause —
+squeekboard binds it fine. It also **respawns on its own** within a second of
+being killed, so anything assuming it stays dead is wrong.
+
+### What T4 should do
+
+Focus-triggered auto-show is **available and proven**, so T4 can rely on it —
+but it must **set `screen-keyboard-enabled=true` as part of the image**, exactly
+like the rotation and input-source settings. It is off by default.
+
+`SetVisible` over `sm.puri.OSK0` also works and was seen on screen, so explicit
+show/hide remains available where a screen needs it.
+
+## R-35b — Steam's own OSK is available in Gaming Mode only
+
+Asked by the operator: can the SteamOS keyboard be used instead?
+
+**Steam is not running in the desktop session at all** — `pgrep steam` is empty
+and `steamwebhelper` is 0 — and Steam's on-screen keyboard is rendered *by the
+Steam client*, not by anything separable.
+
+| Context | Steam's OSK |
 |---|---|
-| squeekboard running, GTK3 dialog (zenity), stock session | **no** |
-| fcitx5 stopped first, squeekboard restarted to claim the input-method seat | **no** |
-| fresh dialog launched *after* squeekboard, ruling out startup ordering | **no** |
-| `GTK_IM_MODULE=wayland` in the app's environment | **no** |
-| **`busctl --user call sm.puri.OSK0 /sm/puri/OSK0 sm.puri.OSK0 SetVisible b true`** | **YES — seen on screen** |
+| **Gaming Mode** | ✅ already there, for free — it is Valve's own session, which this project does not build |
+| **Desktop Mode** | ⬜ only if Steam is started and kept running in the background. Untested here, and it costs a heavyweight always-on dependency |
+| **The installer (live ISO)** | ❌ impossible — Steam is not present, and it is proprietary, so it cannot be carried |
 
-So squeekboard runs, owns `sm.puri.OSK0` on the bus, and **renders correctly on
-demand**. What never arrives is the focus-triggered activation.
+So the installer's text entry (the Wi-Fi passphrase, the whole reason this
+matters) can **never** use Valve's keyboard. squeekboard is the answer there and
+is now proven to work.
 
-Also recorded: **Omarchy 4.0 ships and runs `fcitx5`**, with `INPUT_METHOD`,
-`XMODIFIERS` and `QT_IM_MODULE` all set to `fcitx` in the session. It was a
-reasonable suspect for occupying the `zwp_input_method_v2` seat; stopping it
-changed nothing, so it is **not** the cause. Left running, as it is stock.
-
-**Consequence for T4, and it is a good one:** the installer draws its own
-screens, so it knows when a text field is focused and can call `SetVisible`
-itself. The design should **drive the OSK explicitly** rather than depend on
-focus-triggered auto-show, which is unproven here and would be a dependency on
-compositor behaviour outside this project's control.
-
-⚠️ **Not established:** *why* the activation never arrives — whether Hyprland
-0.56.2 is not bridging `text-input-v3` to `input-method-v2`, or GTK is not
-creating a text-input object at all. Deciding that needs a protocol-level trace,
-not another button press, and it is not on T4's critical path now that the
-programmatic route is proven.
+⚠️ If the goal is for our keyboard to *look* like Valve's, that runs into
+`docs/findings/P16-redistribution-and-trademark.md`: draw our own, do not copy
+Valve's artwork. A comparable layout is fine; a visual imitation is not.
 
 ## R-36 — a generated file executed a command at render time
 
