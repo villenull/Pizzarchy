@@ -52,18 +52,25 @@ check("pad autorepeat ignored", mm.translate(e.EV_KEY, e.BTN_SOUTH, 2, 0.0), [])
 check("unmapped button ignored", mm.translate(e.EV_KEY, e.BTN_THUMBL, 1, 0.0), [])
 check("unmapped type ignored", mm.translate(e.EV_REL, e.REL_X, 5, 0.0), [])
 
-# --- d-pad hats --------------------------------------------------------------
+# --- device ABS_HAT0* is the LEFT TRACKPAD, and must be IGNORED -------------
+#
+# Measured on hardware 2026-08-10: sliding the left trackpad moves ABS_HAT0X/Y
+# across the full +/-32767 analog range. The suite used to drive those codes as
+# a d-pad, because the capability list advertises them and the name looks like
+# one. Treating them as directions emits arrow keys for a thumb resting on the
+# pad. The real d-pad is BTN_DPAD_*, covered below.
 
 mm = fresh()
-check("hat down engages Down", mm.translate(e.EV_ABS, e.ABS_HAT0Y, 1, 0.0), [(e.KEY_DOWN, 1)])
-check("hat held is quiet", mm.translate(e.EV_ABS, e.ABS_HAT0Y, 1, 0.1), [])
-check(
-    "hat reverse releases Down, presses Up",
-    mm.translate(e.EV_ABS, e.ABS_HAT0Y, -1, 0.2),
-    [(e.KEY_DOWN, 0), (e.KEY_UP, 1)],
-)
-check("hat center releases Up", mm.translate(e.EV_ABS, e.ABS_HAT0Y, 0, 0.3), [(e.KEY_UP, 0)])
-check("hat X left", mm.translate(e.EV_ABS, e.ABS_HAT0X, -1, 0.4), [(e.KEY_LEFT, 1)])
+check("left-trackpad motion emits no key (was read as a d-pad)",
+      mm.translate(e.EV_ABS, e.ABS_HAT0Y, 20000, 0.0), [])
+check("left-trackpad motion on the other axis is also silent",
+      mm.translate(e.EV_ABS, e.ABS_HAT0X, -25000, 0.1), [])
+check("returning to centre stays silent too",
+      mm.translate(e.EV_ABS, e.ABS_HAT0Y, 0, 0.2), [])
+
+# Analog triggers are buttons elsewhere; their axes must not become directions.
+check("analog trigger axis emits no key",
+      mm.translate(e.EV_ABS, e.ABS_HAT2X, 32767, 0.3), [])
 
 # --- d-pad as DISCRETE BUTTONS -- what the Deck actually sends ----------------
 #
@@ -151,12 +158,6 @@ mm.translate(e.EV_ABS, e.ABS_Y, 13000, 0.1)  # frac 0.397: past release, under e
 check("a sub-engage stick does not latch while the d-pad owns the axis",
       mm.translate(e.EV_KEY, e.BTN_DPAD_UP, 0, 0.2), [(e.KEY_UP, 0)])
 
-# Same guarantee for a pad that reports the hat as an axis.
-mm = fresh()
-mm.translate(e.EV_ABS, e.ABS_HAT0Y, -1, 0.0)
-check("resting stick does NOT release a held hat direction",
-      mm.translate(e.EV_ABS, e.ABS_Y, 0, 0.1), [])
-
 # With no digital input held, the stick still owns the axis outright.
 mm = fresh()
 mm.translate(e.EV_ABS, e.ABS_Y, 25000, 0.0)
@@ -185,13 +186,13 @@ check("stick up direction", mm.translate(e.EV_ABS, e.ABS_Y, -30000, 0.4), [(e.KE
 
 # stick and d-pad share the hat state: no double-hold of one direction
 mm = fresh()
-mm.translate(e.EV_ABS, e.ABS_HAT0Y, 1, 0.0)
-check("stick agreeing with held hat is quiet", mm.translate(e.EV_ABS, e.ABS_Y, 25000, 0.1), [])
+mm.translate(e.EV_KEY, e.BTN_DPAD_DOWN, 1, 0.0)
+check("stick agreeing with a held d-pad is quiet", mm.translate(e.EV_ABS, e.ABS_Y, 25000, 0.1), [])
 
 # --- auto-repeat scheduling --------------------------------------------------
 
 mm = fresh()
-mm.translate(e.EV_ABS, e.ABS_HAT0Y, 1, 100.0)
+mm.translate(e.EV_KEY, e.BTN_DPAD_DOWN, 1, 100.0)
 check("no repeat before delay", mm.due_repeats(100.0 + m.REPEAT_DELAY - 0.01), [])
 check("repeat after delay", mm.due_repeats(100.0 + m.REPEAT_DELAY + 0.01), [(e.KEY_DOWN, 2)])
 check(
@@ -200,9 +201,157 @@ check(
     [(e.KEY_DOWN, 2)],
 )
 check("deadline exists while held", mm.next_deadline() is not None, True)
-mm.translate(e.EV_ABS, e.ABS_HAT0Y, 0, 101.0)
+mm.translate(e.EV_KEY, e.BTN_DPAD_DOWN, 0, 101.0)
 check("release clears repeats", mm.due_repeats(200.0), [])
 check("deadline cleared on release", mm.next_deadline(), None)
+
+# --- triggers become mouse buttons ------------------------------------------
+#
+# Matching lizard mode's own convention so muscle memory carries over: R2 is
+# left click, L2 is right click. Without these the pointer below can move but
+# can never select anything.
+
+mm = fresh()
+check("R2 press -> left click down", mm.translate(e.EV_KEY, e.BTN_TR2, 1, 0.0), [(e.BTN_LEFT, 1)])
+check("R2 release -> left click up", mm.translate(e.EV_KEY, e.BTN_TR2, 0, 0.1), [(e.BTN_LEFT, 0)])
+check("L2 press -> right click down", mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.2), [(e.BTN_RIGHT, 1)])
+check("trigger autorepeat ignored", mm.translate(e.EV_KEY, e.BTN_TR2, 2, 0.3), [])
+
+# --- STEAM+X toggles the on-screen keyboard ---------------------------------
+#
+# BTN_MODE is the STEAM button, visible only with lizard_mode=N. The action is
+# QUEUED rather than performed so the chord is testable without a DBus session,
+# and so a hung DBus call can never block the input loop.
+
+mm = fresh()
+check("STEAM alone emits nothing", mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0), [])
+check("X while STEAM is held does not also type Tab",
+      mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.1), [])
+check("the chord queued an OSK toggle", mm.pending_actions, ["toggle-osk"])
+
+# X on its own must still be Tab, or the chord would cost the installer its
+# next-field key.
+mm = fresh()
+check("X alone is still Tab", mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.0), [(e.KEY_TAB, 1)])
+check("X alone queues nothing", mm.pending_actions, [])
+
+# Releasing STEAM must disarm the chord.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.1)
+check("X after STEAM is released is Tab again",
+      mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.2), [(e.KEY_TAB, 1)])
+check("no toggle queued once STEAM is released", mm.pending_actions, [])
+
+# --- the pointer, from the RIGHT trackpad -----------------------------------
+#
+# The pad reports ABSOLUTE position while touched and nothing when lifted, so
+# differencing across a lift would hurl the cursor the width of the pad.
+
+mm = fresh()
+check("first sample of a touch only baselines, it does not move",
+      mm.pointer_delta(e.ABS_HAT1X, 10000, 0.0), (0, 0))
+check("a later sample in the same touch moves by the difference",
+      mm.pointer_delta(e.ABS_HAT1X, 10000 + m.POINTER_DIVISOR * 3, 0.05), (3, 0))
+
+# The Y axis is inverted: the pad grows upward, screens grow downward.
+mm = fresh()
+mm.pointer_delta(e.ABS_HAT1Y, 0, 0.0)
+check("pad Y is inverted for the screen",
+      mm.pointer_delta(e.ABS_HAT1Y, m.POINTER_DIVISOR * 4, 0.05), (0, -4))
+
+# The case that makes a trackpad usable at all: lift, move the finger, touch
+# down elsewhere. Without a re-baseline this jumps the cursor across the screen.
+mm = fresh()
+mm.pointer_delta(e.ABS_HAT1X, 0, 0.0)
+mm.pointer_delta(e.ABS_HAT1X, m.POINTER_DIVISOR, 0.05)
+check("a gap longer than the touch threshold re-baselines instead of jumping",
+      mm.pointer_delta(e.ABS_HAT1X, 30000, 0.05 + m.POINTER_TOUCH_GAP + 0.01), (0, 0))
+check("and motion resumes normally from the new baseline",
+      mm.pointer_delta(e.ABS_HAT1X, 30000 + m.POINTER_DIVISOR * 2,
+                       0.05 + m.POINTER_TOUCH_GAP + 0.06), (2, 0))
+
+# Sub-threshold movement must accumulate, or slow precise motion never moves
+# the cursor at all.
+mm = fresh()
+mm.pointer_delta(e.ABS_HAT1X, 0, 0.0)
+mm.pointer_delta(e.ABS_HAT1X, 10, 0.02)
+check("a sub-pixel sample emits nothing but keeps its baseline",
+      mm.pointer_delta(e.ABS_HAT1X, 20, 0.04), (0, 0))
+check("accumulated sub-pixel motion eventually moves the cursor",
+      mm.pointer_delta(e.ABS_HAT1X, m.POINTER_DIVISOR + 5, 0.06), (1, 0))
+
+# Lifting a finger makes the pad report 0, which differencing turns into a
+# swipe from wherever the thumb was to the centre -- the measured cause of the
+# cursor "jumping around". A quick lift-and-retouch lands inside the touch-gap
+# window, so the gap timer alone does not catch it.
+mm = fresh()
+mm.pointer_delta(e.ABS_HAT1X, 0, 0.0)
+mm.pointer_delta(e.ABS_HAT1X, 20000, 0.01)   # discontinuity: absorbed
+check("a release-to-centre jump emits no motion",
+      mm.pointer_delta(e.ABS_HAT1X, 0, 0.02), (0, 0))
+check("and the next real movement is measured from the new baseline",
+      mm.pointer_delta(e.ABS_HAT1X, m.POINTER_DIVISOR * 5, 0.03), (5, 0))
+
+# The clamp must not swallow ordinary movement, or the pointer stops working.
+mm = fresh()
+mm.pointer_delta(e.ABS_HAT1X, 0, 0.0)
+check("a normal-sized movement still passes the jump clamp",
+      mm.pointer_delta(e.ABS_HAT1X, m.POINTER_JUMP_RAW - 1, 0.01),
+      ((m.POINTER_JUMP_RAW - 1) // m.POINTER_DIVISOR, 0))
+
+# Motion must be SYMMETRIC. Floor division rounds toward negative infinity, so
+# `//` made leftward movement nearly twice as fast as rightward and flipped the
+# rounding mid-gesture -- measured as a cursor that jumped between movements.
+mm = fresh()
+mm.pointer_delta(e.ABS_HAT1X, 0, 0.0)
+right = mm.pointer_delta(e.ABS_HAT1X, m.POINTER_DIVISOR + m.POINTER_DIVISOR // 4, 0.01)
+mm = fresh()
+mm.pointer_delta(e.ABS_HAT1X, 0, 0.0)
+left = mm.pointer_delta(e.ABS_HAT1X, -(m.POINTER_DIVISOR + m.POINTER_DIVISOR // 4), 0.01)
+check("equal movement left and right travels equally far",
+      (right[0], -left[0]), (1, 1))
+
+# The emitted remainder must be carried, or every step silently drops a
+# fraction of a pixel and slow motion crawls unevenly.
+mm = fresh()
+mm.pointer_delta(e.ABS_HAT1X, 0, 0.0)
+mm.pointer_delta(e.ABS_HAT1X, m.POINTER_DIVISOR + m.POINTER_DIVISOR - 1, 0.01)  # emits 1, carries the rest
+check("the sub-pixel remainder carries into the next sample",
+      mm.pointer_delta(e.ABS_HAT1X, m.POINTER_DIVISOR * 2, 0.02), (1, 0))
+
+# ⚠️ BOTH AXES TOGETHER -- the case every other pointer test here missed.
+#
+# X and Y arrive in the same report. Re-baselining used to replace the whole
+# baseline dict, so each axis wiped the other's baseline every sample and the
+# pointer emitted NOTHING while both moved -- it worked only for pure
+# horizontal or pure vertical strokes. Every test above drives one axis, which
+# is exactly why the suite stayed green while the cursor was unusable.
+mm = fresh()
+mm.pointer_delta(e.ABS_HAT1X, 0, 0.0)
+mm.pointer_delta(e.ABS_HAT1Y, 0, 0.0)
+dx, _ = mm.pointer_delta(e.ABS_HAT1X, m.POINTER_DIVISOR * 3, 0.004)
+_, dy = mm.pointer_delta(e.ABS_HAT1Y, m.POINTER_DIVISOR * 3, 0.004)
+check("diagonal movement emits on BOTH axes", (dx, dy), (3, -3))
+
+# And it must keep working sample after sample, not just once.
+dx2, _ = mm.pointer_delta(e.ABS_HAT1X, m.POINTER_DIVISOR * 6, 0.008)
+_, dy2 = mm.pointer_delta(e.ABS_HAT1Y, m.POINTER_DIVISOR * 6, 0.008)
+check("diagonal movement keeps emitting on both axes", (dx2, dy2), (3, -3))
+
+# A jump on one axis must not re-baseline the other.
+mm = fresh()
+mm.pointer_delta(e.ABS_HAT1X, 0, 0.0)
+mm.pointer_delta(e.ABS_HAT1Y, 0, 0.0)
+mm.pointer_delta(e.ABS_HAT1X, 30000, 0.004)          # X jumps: X alone re-baselines
+_, dy3 = mm.pointer_delta(e.ABS_HAT1Y, m.POINTER_DIVISOR * 2, 0.004)
+check("a jump on one axis leaves the other axis measuring normally", dy3, -2)
+
+# The LEFT trackpad must never drive the pointer -- only the right one does.
+mm = fresh()
+mm.pointer_delta(e.ABS_HAT0X, 0, 0.0)
+check("left trackpad does not move the pointer",
+      mm.pointer_delta(e.ABS_HAT0X, 30000, 0.05), (0, 0))
 
 # --- emitted-keys contract ---------------------------------------------------
 
@@ -210,7 +359,8 @@ check(
     "virtual keyboard advertises exactly the mapped keys",
     sorted(m.EMITTED_KEYS),
     sorted({e.KEY_ENTER, e.KEY_ESC, e.KEY_SPACE, e.KEY_TAB, e.KEY_PAGEUP,
-            e.KEY_PAGEDOWN, e.KEY_LEFT, e.KEY_RIGHT, e.KEY_UP, e.KEY_DOWN}),
+            e.KEY_PAGEDOWN, e.KEY_LEFT, e.KEY_RIGHT, e.KEY_UP, e.KEY_DOWN,
+            e.BTN_LEFT, e.BTN_RIGHT}),
 )
 
 # --- device selection: Steam's virtual pad must never be bound ----------------

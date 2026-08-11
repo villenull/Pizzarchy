@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import selectors
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -62,7 +63,18 @@ BUTTON_MAP: dict[int, int] = {
     e.BTN_SELECT: e.KEY_ESC,
 }
 
-# (axis, direction) -> key. Direction is the sign of the axis value.
+# ⚠️ THESE ARE INTERNAL AXIS IDENTIFIERS, NOT DEVICE AXES.
+#
+# ABS_HAT0X/Y are reused here purely as names for "horizontal direction" and
+# "vertical direction", because the d-pad and both sticks all resolve onto them
+# and must share one held-direction state.
+#
+# On the Deck's own pad those codes mean something completely different --
+# ABS_HAT0X/Y is the LEFT TRACKPAD (measured 2026-08-10: sliding it moved
+# ABS_HAT0X -1130 / ABS_HAT0Y 2408, full +/-32767 analog range). Feeding device
+# ABS_HAT0* events in here as if they were a d-pad emits arrow keys for a
+# thumb resting on the trackpad. DEVICE_AXES below is the authority on what the
+# hardware actually sends; nothing routes ABS_HAT0* from the device into these.
 HAT_MAP: dict[tuple[int, int], int] = {
     (e.ABS_HAT0X, -1): e.KEY_LEFT,
     (e.ABS_HAT0X, +1): e.KEY_RIGHT,
@@ -70,13 +82,71 @@ HAT_MAP: dict[tuple[int, int], int] = {
     (e.ABS_HAT0Y, +1): e.KEY_DOWN,
 }
 
-# The Deck's d-pad arrives as DISCRETE BUTTONS, not as the hat axes above.
-# `hid-steam` advertises ABS_HAT0X/Y *and* BTN_DPAD_* but only ever sends the
-# buttons -- measured on hardware 2026-08-10 with lizard mode off, where
-# BTN_DPAD_UP appeared on the pad node and no ABS_HAT0Y event ever did. Before
-# this table the d-pad fell through BUTTON_MAP and emitted nothing at all.
-# Route it onto the same hat axes so a d-pad press and a stick push cannot
-# double-hold one direction.
+# --- what the Deck's pad ACTUALLY sends, measured on hardware 2026-08-10 -----
+#
+# Every one of these was named by a human moving that control while a probe
+# watched, not read off a datasheet. The capability list alone is misleading:
+# it advertises ABS_HAT0X/Y, which looks like a d-pad and is not.
+DECK_LEFT_TRACKPAD = (e.ABS_HAT0X, e.ABS_HAT0Y)
+DECK_RIGHT_TRACKPAD = (e.ABS_HAT1X, e.ABS_HAT1Y)
+DECK_TRIGGERS = (e.ABS_HAT2X, e.ABS_HAT2Y)  # X is R2, Y is L2; both 0..32767
+
+# The pointer comes from the RIGHT trackpad, matching where a thumb rests and
+# what lizard mode does when it is enabled.
+POINTER_AXES = {e.ABS_HAT1X: "x", e.ABS_HAT1Y: "y"}
+
+# Trackpads report ABSOLUTE position while touched and nothing while lifted, so
+# consecutive samples across a lift would jump the cursor across the screen.
+# There is no touch flag we have measured, so a gap longer than this re-baselines.
+#
+# ⚠️ Deliberately LOOSE. At 0.12s this was the main source of jerkiness: during
+# slow movement the pad reports sparsely, gaps exceeded the threshold, and each
+# re-baseline silently SWALLOWED that movement. POINTER_JUMP_RAW is what
+# actually catches a lift, so this only needs to cover a long pause.
+POINTER_TOUCH_GAP = 0.5
+
+# Trackpad units per emitted pixel. Lower is faster. Tuned on hardware with the
+# operator moving the cursor and saying how it felt, which is the only way this
+# number can be set: 90 unusably slow, 24 and 40 over-sensitive, 80 and 100 still fast, 125 right.
+#
+# Note the early attempts were judging the wrong thing -- the cursor was
+# "jerky" because diagonal movement emitted nothing at all, not because of
+# speed. Do not re-tune this without first checking both axes still move.
+POINTER_DIVISOR = 125
+
+# Any single-sample jump larger than this is a DISCONTINUITY, not a movement:
+# re-baseline and emit nothing.
+#
+# Measured on hardware 2026-08-10: the cursor "jumped around" because lifting a
+# finger makes the pad report 0 (centre), so the release itself looks like a
+# swipe from wherever the thumb was all the way to the middle. The touch-gap
+# timer alone does not catch it -- a quick lift-and-retouch lands inside the
+# gap. Clamping the step catches both, and needs no touch flag we have not
+# measured.
+#
+# The pad spans +/-32767, so a real inter-sample movement is small; anything
+# this large is the finger leaving or arriving.
+POINTER_JUMP_RAW = 4000
+
+# Mouse buttons, matching lizard mode's own convention so muscle memory carries
+# over: right trigger clicks, left trigger context-clicks.
+TRIGGER_BUTTON_MAP: dict[int, int] = {
+    e.BTN_TR2: e.BTN_LEFT,
+    e.BTN_TL2: e.BTN_RIGHT,
+}
+
+# STEAM+X toggles the on-screen keyboard. BTN_MODE is the STEAM button and is
+# only visible with lizard_mode=N -- with lizard mode on, the firmware swallows
+# it and no evdev node ever sees it.
+OSK_CHORD_HOLD = e.BTN_MODE
+OSK_CHORD_PRESS = e.BTN_NORTH  # physical X
+
+# The Deck's d-pad arrives as DISCRETE BUTTONS. `hid-steam` advertises
+# ABS_HAT0X/Y *and* BTN_DPAD_*, and (as above) those axes are the left
+# trackpad, so the buttons are the only d-pad input there is. Before this table
+# the d-pad fell through BUTTON_MAP and emitted nothing at all. Route it onto
+# the internal axes so a d-pad press and a stick push cannot double-hold one
+# direction.
 DPAD_BUTTON_MAP: dict[int, tuple[int, int]] = {
     e.BTN_DPAD_UP: (e.ABS_HAT0Y, -1),
     e.BTN_DPAD_DOWN: (e.ABS_HAT0Y, +1),
@@ -95,7 +165,18 @@ STICK_RELEASE = 0.35
 REPEAT_DELAY = 0.40
 REPEAT_INTERVAL = 0.15
 
-EMITTED_KEYS = sorted(set(BUTTON_MAP.values()) | set(HAT_MAP.values()))
+EMITTED_KEYS = sorted(
+    set(BUTTON_MAP.values()) | set(HAT_MAP.values()) | set(TRIGGER_BUTTON_MAP.values())
+)
+EMITTED_RELS = [e.REL_X, e.REL_Y]
+
+# Toggling squeekboard is a DBus call, not an input event. Kept as an argv
+# rather than a shell string so nothing here goes through a shell.
+OSK_TOGGLE_ARGV_SHOW = [
+    "busctl", "--user", "call", "sm.puri.OSK0", "/sm/puri/OSK0",
+    "sm.puri.OSK0", "SetVisible", "b", "true",
+]
+OSK_TOGGLE_ARGV_HIDE = OSK_TOGGLE_ARGV_SHOW[:-1] + ["false"]
 
 
 # --- pure translation core (unit-tested without any device) ------------------
@@ -114,8 +195,14 @@ class AxisState:
 
     active_key: int | None = None
     next_repeat: float = 0.0
-    hat_dir: int = 0  # from ABS_HAT0* events, for pads that send them
     stick_dir: int = 0  # from the analog stick, after hysteresis
+
+    # There is deliberately NO hat_dir. A pad that genuinely reports a hat axis
+    # would need one, but the Deck does not have one to report: its d-pad is
+    # BTN_DPAD_* and ABS_HAT0X/Y is the left trackpad. Carrying a field nothing
+    # can set invites someone to "fix" the missing wiring and reintroduce arrow
+    # keys under a resting thumb. Phase 4's profile interface is where a real
+    # hat belongs.
 
 
 @dataclass
@@ -134,6 +221,68 @@ class Mapper:
     # opposing edges at once, so the direction is recomputed from the held
     # set rather than from whichever event arrived last.
     dpad_held: set[int] = field(default_factory=set)
+
+    # STEAM (BTN_MODE) held, for the STEAM+X chord.
+    mode_held: bool = False
+    # Actions the caller should perform, drained by main(). Kept as data rather
+    # than executed here so the whole chord is unit-testable without a DBus
+    # session or a subprocess.
+    pending_actions: list[str] = field(default_factory=list)
+
+    # Right-trackpad pointer state: last absolute sample per axis, and when it
+    # arrived, so a lift-and-retouch re-baselines instead of hurling the cursor.
+    pointer_last: dict[int, int] = field(default_factory=dict)
+    pointer_last_seen: float = 0.0
+
+    def pointer_delta(self, code: int, value: int, now: float) -> tuple[int, int]:
+        """Right trackpad -> relative pointer motion. Returns (dx, dy).
+
+        The trackpad reports ABSOLUTE position while a finger is on it and
+        stops entirely when lifted, so differencing consecutive samples across
+        a lift would jump the cursor the width of the pad. No touch flag has
+        been measured, so a gap longer than POINTER_TOUCH_GAP is treated as a
+        new touch: re-baseline and emit nothing for that sample.
+        """
+        if code not in POINTER_AXES:
+            return (0, 0)
+        # ⚠️ Re-baselining must NOT wipe the other axis.
+        #
+        # This previously did `self.pointer_last = {code: value}`, which cleared
+        # the whole dict. Since X and Y arrive in the same report and each one
+        # re-baselines on its first sample, they wiped each other forever: the
+        # pointer emitted NOTHING whenever both axes moved together, and worked
+        # only during pure-horizontal or pure-vertical strokes. Every pointer
+        # test drove a single axis, so the suite passed throughout.
+        #
+        # A genuine new touch (a real pause) re-baselines BOTH. A jump on one
+        # axis re-baselines only that axis.
+        stale = (now - self.pointer_last_seen) > POINTER_TOUCH_GAP
+        self.pointer_last_seen = now
+        if stale:
+            self.pointer_last.clear()
+        previous = self.pointer_last.get(code)
+        if previous is not None and abs(value - previous) > POINTER_JUMP_RAW:
+            previous = None
+        self.pointer_last[code] = value
+        if previous is None:
+            return (0, 0)
+        # int(x / d), NOT x // d. Floor division rounds toward negative
+        # infinity, so -30 // 24 == -2 while 30 // 24 == 1 -- left would move
+        # nearly twice as fast as right, and the rounding would flip sign
+        # mid-gesture. Measured as a cursor that "jumps between movements".
+        raw = value - previous
+        delta = int(raw / POINTER_DIVISOR)
+        if delta == 0:
+            # Hold the old baseline so slow movement accumulates instead of
+            # being discarded a fraction at a time.
+            self.pointer_last[code] = previous
+            return (0, 0)
+        # Advance the baseline by exactly what was EMITTED, not to the current
+        # sample: baselining to `value` throws away the sub-pixel remainder on
+        # every step, which is the other half of the stutter.
+        self.pointer_last[code] = previous + delta * POINTER_DIVISOR
+        # The pad's Y axis grows upward; screens grow downward.
+        return (delta, 0) if POINTER_AXES[code] == "x" else (0, -delta)
 
     def _dpad_direction(self, hat_axis: int) -> int:
         """Resolve one axis from the held d-pad buttons. Opposing edges held
@@ -174,13 +323,10 @@ class Mapper:
     def _effective_direction(self, hat_axis: int) -> int:
         """Combine the sources for one axis. Digital input wins over the
         stick, so resting-stick neutrality can never cancel a held d-pad."""
-        state = self.hats[hat_axis]
         dpad = self._dpad_direction(hat_axis)
         if dpad:
             return dpad
-        if state.hat_dir:
-            return state.hat_dir
-        return state.stick_dir
+        return self.hats[hat_axis].stick_dir
 
     def _hat_transition(self, hat_axis: int, direction: int, now: float) -> list[tuple[int, int]]:
         state = self.hats[hat_axis]
@@ -198,6 +344,20 @@ class Mapper:
 
     def translate(self, etype: int, code: int, value: int, now: float) -> list[tuple[int, int]]:
         if etype == e.EV_KEY:
+            # STEAM+X toggles the on-screen keyboard. Checked before every
+            # other key path so the X in the chord does not also type Tab.
+            if code == OSK_CHORD_HOLD:
+                if value in (0, 1):
+                    self.mode_held = bool(value)
+                return []
+            if code == OSK_CHORD_PRESS and self.mode_held:
+                if value == 1:
+                    self.pending_actions.append("toggle-osk")
+                return []
+            if code in TRIGGER_BUTTON_MAP:
+                if value in (0, 1):
+                    return [(TRIGGER_BUTTON_MAP[code], value)]
+                return []
             if code in DPAD_BUTTON_MAP:
                 if value not in (0, 1):
                     return []  # the pad's own autorepeat; we schedule our own
@@ -214,9 +374,12 @@ class Mapper:
                 return [(key, value)]
             return []  # ignore the pad's own autorepeat; we schedule our own
         if etype == e.EV_ABS:
-            if code in (e.ABS_HAT0X, e.ABS_HAT0Y):
-                self.hats[code].hat_dir = 0 if value == 0 else (1 if value > 0 else -1)
-                return self._hat_transition(code, self._effective_direction(code), now)
+            # ⚠️ NO ABS_HAT0X/Y BRANCH HERE, DELIBERATELY. On this hardware
+            # those are the LEFT TRACKPAD (measured), not a d-pad, so treating
+            # them as directions emitted arrow keys for a resting thumb. The
+            # d-pad is BTN_DPAD_*, handled above.
+            if code in POINTER_AXES or code in DECK_TRIGGERS:
+                return []  # pointer motion and analog triggers are not keys
             if code in STICK_AXES:
                 hat_axis = STICK_AXES[code]
                 self.hats[hat_axis].stick_dir = self._stick_direction(code, value)
@@ -382,15 +545,61 @@ def main() -> None:
 
     ui = None
     if not args.dry_run:
-        ui = UInput({e.EV_KEY: EMITTED_KEYS}, name="deck-input-mapper virtual keyboard")
+        # EV_REL as well as EV_KEY: this device is the pointer too when lizard
+        # mode is off, and a device that advertises no REL axes has its motion
+        # events silently dropped.
+        ui = UInput(
+            {e.EV_KEY: EMITTED_KEYS, e.EV_REL: EMITTED_RELS},
+            name="deck-input-mapper virtual keyboard",
+        )
 
     def emit(key: int, value: int) -> None:
         if args.verbose or ui is None:
-            print(f"emit {e.KEY[key]} {value}", file=sys.stderr, flush=True)
+            name = e.KEY.get(key) or e.BTN.get(key) or key
+            if isinstance(name, (list, tuple)):
+                name = "/".join(name)
+            print(f"emit {name} {value}", file=sys.stderr, flush=True)
         if ui is None:
             return
         ui.write(e.EV_KEY, key, value)
         ui.syn()
+
+    def emit_motion(dx: int, dy: int) -> None:
+        if args.verbose or ui is None:
+            print(f"emit REL {dx:+d},{dy:+d}", file=sys.stderr, flush=True)
+        if ui is None:
+            return
+        if dx:
+            ui.write(e.EV_REL, e.REL_X, dx)
+        if dy:
+            ui.write(e.EV_REL, e.REL_Y, dy)
+        ui.syn()
+
+    osk_visible = False
+
+    def run_pending(actions: list[str]) -> None:
+        """Perform queued side effects. Never blocks the input loop: a DBus
+        call that hangs must not freeze the pointer."""
+        nonlocal osk_visible
+        while actions:
+            action = actions.pop(0)
+            if action != "toggle-osk":
+                continue
+            osk_visible = not osk_visible
+            argv = OSK_TOGGLE_ARGV_SHOW if osk_visible else OSK_TOGGLE_ARGV_HIDE
+            if args.verbose or ui is None:
+                print(f"osk -> {'show' if osk_visible else 'hide'}", file=sys.stderr, flush=True)
+            if ui is None:
+                continue
+            try:
+                subprocess.Popen(
+                    argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+            except OSError as exc:
+                # Loud, but not fatal: losing the OSK toggle must not take the
+                # pointer down with it.
+                print(f"deck-input-mapper: could not toggle the OSK: {exc}",
+                      file=sys.stderr, flush=True)
 
     if args.grab:
         pad.grab()
@@ -405,9 +614,30 @@ def main() -> None:
             ready = sel.select(timeout)
             now = time.monotonic()
             if ready:
+                # Pointer deltas accumulate across ONE report and are emitted
+                # together on SYN_REPORT. A real mouse sends REL_X and REL_Y in
+                # a single report; emitting them as two separate syn'd events
+                # makes the cursor staircase -- right, then down, then right --
+                # which is felt as jerkiness even though the input stream is a
+                # steady 250Hz. Measured on hardware.
+                pending_dx = pending_dy = 0
                 for event in pad.read():
+                    if event.type == e.EV_SYN and event.code == e.SYN_REPORT:
+                        if pending_dx or pending_dy:
+                            emit_motion(pending_dx, pending_dy)
+                            pending_dx = pending_dy = 0
+                        continue
+                    if event.type == e.EV_ABS and event.code in POINTER_AXES:
+                        dx, dy = mapper.pointer_delta(event.code, event.value, now)
+                        pending_dx += dx
+                        pending_dy += dy
+                        continue
                     for key, value in mapper.translate(event.type, event.code, event.value, now):
                         emit(key, value)
+                    run_pending(mapper.pending_actions)
+                # A device that never sends SYN_REPORT must still move.
+                if pending_dx or pending_dy:
+                    emit_motion(pending_dx, pending_dy)
             for key, value in mapper.due_repeats(now):
                 emit(key, value)
     except KeyboardInterrupt:
