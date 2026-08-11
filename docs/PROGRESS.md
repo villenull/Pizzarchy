@@ -214,7 +214,41 @@ deliberate exception, not a shortcut.
 hand-edited files only mattered for restoring the current install's state.
 Since that state is scheduled to be wiped, losing them costs nothing.
 
-### 2.6 On-screen keyboard: squeekboard for the INSTALLER, Steam's thereafter — decided 2026-08-10
+### 2.6 On-screen keyboard — REVISED 2026-08-10 by R-42: squeekboard EVERYWHERE except Gaming Mode
+
+> ⚠️ **The original decision below is superseded, and not by preference — by
+> measurement.** It routed Desktop Mode's keyboard through Steam. **R-42 proves
+> that cannot work on Hyprland at any configuration:** Steam drives desktop
+> mouse and keyboard through **XTEST**, which under XWayland cannot move a
+> Wayland compositor's pointer or reach Wayland-native clients. Resetting the
+> Desktop layout to Valve's default changed nothing, and Steam never created a
+> virtual mouse or keyboard device — only the gamepad.
+>
+> Worse, a resident Steam is **actively harmful**: it takes the controller and
+> removes lizard mode's pointer and keys (R-41), so adopting it costs Desktop
+> Mode the only input path that works.
+>
+> **The revised decision:**
+>
+> | Where | Keyboard | Pointer / keys |
+> |---|---|---|
+> | **Installer (live ISO)** | squeekboard, auto-show on focus | lizard mode |
+> | **Desktop Mode** | **squeekboard**, auto-show on focus | **lizard mode** |
+> | **Gaming Mode** | Steam's own, native and free | Steam |
+>
+> **Steam is NOT autostarted.** Launch it when wanted, quit it when done.
+>
+> What this cancels: the `~/.config/autostart/steam.desktop` requirement, and
+> the plan to exclude squeekboard from the installed system. squeekboard and its
+> two GSettings now ship **everywhere** — which `stage-desktop-settings` already
+> installs as dconf site defaults.
+>
+> What survives unchanged: **the idle lock stays disabled** (R-38). Whether
+> squeekboard can reach a layer-shell lock surface is **untested** — it was seen
+> over the *screensaver*, which is not the same surface. Do not re-enable the
+> lock on that assumption.
+
+### ~~2.6 (superseded) On-screen keyboard: squeekboard for the INSTALLER, Steam's thereafter~~ — decided 2026-08-10
 
 **Operator decision, session 17**, after both options were tested on hardware
 (§5.20, R-35b, R-37).

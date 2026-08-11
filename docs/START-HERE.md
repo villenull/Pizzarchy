@@ -35,14 +35,16 @@ work without waiting for further instruction.**
 > - **Gaming Mode was confirmed usable by the operator** (R-38), closing P16's
 >   caveat that the session was only ever known to *exist*.
 > - 🆕 **§2.6 decides the keyboard: squeekboard for the INSTALLER, Steam's own
->   thereafter** — but its Desktop Mode half is 🐞 **BLOCKED by R-41**. With
->   Steam resident the desktop gets **no input at all**: every node stays
->   enumerated and **none emits**, because Steam takes the controller over
->   hidraw and feeds only its own UI. The operator hit it as an unexitable
->   screensaver — which is the *symptom*; the desktop was equally unusable
->   without one. **R-39's checks all passed while the device was
->   uncontrollable** — "STEAM+X shows the keyboard" is not evidence the desktop
->   is usable.
+>   thereafter** — **REVISED by R-42, and the revision is forced.** Steam
+>   **cannot** drive a Wayland desktop: it uses **XTEST**, which under XWayland
+>   reaches neither the compositor's pointer nor Wayland clients. Resetting the
+>   Desktop layout changed nothing and Steam never created a virtual
+>   mouse/keyboard. A resident Steam is also **actively harmful** — it takes the
+>   controller and removes lizard mode's pointer/keys (R-41), which the operator
+>   hit as an unexitable screensaver. **So: squeekboard everywhere except Gaming
+>   Mode, and Steam is NOT autostarted.** R-39's checks all passed while the
+>   device was uncontrollable — "STEAM+X shows the keyboard" was never evidence
+>   the desktop was usable.
 >
 > Full evidence: **`docs/findings/P17-input-and-osk.md`** (R-29…R-36).
 >

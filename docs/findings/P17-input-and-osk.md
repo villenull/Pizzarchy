@@ -1,4 +1,4 @@
-# Session 17 — the input path, seen on a screen for the first time (R-29…R-41)
+# Session 17 — the input path, seen on a screen for the first time (R-29…R-42)
 
 **2026-08-10, OLED Deck, operator present and holding the device.** Session 16
 closed with the honest admission that *"nothing here was seen on a screen"*.
@@ -528,6 +528,69 @@ reopens §2.6's choice.
 
 ⚠️ **Never treat "STEAM+X shows the keyboard" as evidence the desktop is
 usable.** It was true here while nothing could move a cursor.
+
+## R-42 — R-41 RESOLVED: Steam cannot drive a Wayland desktop. §2.6's Desktop half is dead.
+
+Investigated with the operator on hardware. **This is not a missing setting.**
+
+### What was tested
+
+| Step | Result |
+|---|---|
+| Steam started **foregrounded** (not `-silent`), fully loaded, window on screen | ✅ |
+| Trackpad moves the desktop cursor? | ❌ **no** |
+| Controller navigates Steam's **own desktop window**? | ❌ **no** |
+| Steam's **Desktop Layout** exists in Settings → Controller? | ✅ yes, with Edit + gear |
+| Any "enable/apply" toggle on it? | ❌ none — only *Reset to default* and *Cancel* |
+| **Reset controller layout to default**, then re-check | ❌ **no change** |
+| Steam holds `/dev/uinput`? | ✅ yes (pid, fd 150) |
+| Virtual **mouse or keyboard** device created? | ❌ **never** — only `Microsoft X-Box 360 pad 0` |
+| `libXtst.so.6.1.0` mapped into Steam? | ✅ **yes** |
+
+### The mechanism
+
+Steam uses **uinput for the virtual gamepad only**, and drives desktop mouse and
+keyboard through **XTEST** — the X11 fake-input extension, whose client library
+is mapped into the process. Under XWayland, XTEST cannot move a Wayland
+compositor's pointer or reach Wayland-native clients, so the Desktop layout
+produces nothing a Hyprland session can see.
+
+That single mechanism explains every observation, including the one that looked
+strangest: **Steam's own window is unnavigable**, because its X11 surface is
+composited by Hyprland, which owns the pointer. Big Picture responds only
+because it reads the controller directly rather than through the desktop layout.
+
+⚠️ **Honest limit:** `libXtst` being mapped proves Steam *links* XTEST, not that
+the desktop layout uses it exclusively. The behaviour is measured; the mechanism
+is a strong inference. It does not change the conclusion — what matters is that
+**no configuration made desktop input appear**.
+
+### Consequence: §2.6's Desktop Mode half is not implementable here
+
+"Steam autostarts and provides the keyboard in Desktop Mode" **cannot work on
+Hyprland**, at any configuration. It is not blocked pending a setting; the
+mechanism is absent. Worse than merely not helping, a resident Steam **takes the
+controller away** (R-41), so adopting it costs the desktop its pointer.
+
+**What works, and always did:**
+
+| | Desktop Mode |
+|---|---|
+| Pointer + keys | **lizard mode** — trackpad→mouse, buttons→Enter/Esc/Tab/arrows, free and automatic |
+| Text entry | **squeekboard**, auto-showing on focus (§5.20), installed by `stage-desktop-settings` |
+| Steam | **not resident.** Launch it when wanted; quit it when done |
+
+Gaming Mode is unaffected — Valve's session brings its own keyboard, and this
+project does not build it.
+
+### Two findings worth keeping independently
+
+- **Steam's desktop window is not controller-navigable at all**, on any
+  platform — only Big Picture is. A controller-only user cannot configure Steam
+  from the desktop, which is worth knowing before designing any flow that
+  expects them to.
+- **A resident Steam is actively harmful to Desktop Mode here**, not neutral. It
+  removes the only working input path and returns nothing usable.
 
 ## State on exit
 
