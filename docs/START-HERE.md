@@ -97,6 +97,25 @@ work without waiting for further instruction.**
 >    overlay-patch seam that **does not exist yet**
 > 3. OSK auto-hides after unlock — **implemented, not deployed**
 >
+> ### 🆕 LATE IN SESSION 20: the Steam option was closed, then REOPENED — T10 decides it
+>
+> Full story: §5.29 and `docs/findings/P20-steam-xtest-closure.md` (R-53, R-54).
+> One sentence: real XTEST reaches nothing on Hyprland (measured), but
+> **extest** — the community's MIT LD_PRELOAD bridge converting Steam's XTEST
+> calls to uinput — **does reach Wayland-native clients here (measured)**, so
+> whether **Valve's own keyboard** can serve Desktop Mode now hangs on one
+> untested link: Steam driving the bridge. **`docs/tasks/T10-steam-extest-spike.md`
+> is a ~45 min Deck session that settles it**, artifacts prebuilt at
+> `~/ISOs/extest-cb77cd4/`, rebuildable via `tools/build-extest.sh`.
+>
+> ⚠️ **Consequences for the queue:** the approved OSK touch/restyle plan
+> (`~/.claude/plans/proud-finding-wreath.md`) is **ON HOLD pending T10** — do
+> not resume the layout-parity work before T10 answers. Our OSK stays the
+> installer's and the lock's keyboard in every outcome (Steam's is an XWayland
+> window and cannot render above `ext-session-lock`). **Next Deck session
+> opens with the §5.28 cold-boot check, then T10, in that order** — §5.28 is
+> the release blocker; T10 is a decision.
+>
 > ---
 >
 > ## Where things stood at the END of session 19 (kept; superseded above where they disagree)

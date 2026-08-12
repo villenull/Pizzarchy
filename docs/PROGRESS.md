@@ -277,6 +277,7 @@ missing will waste an hour rebuilding them.
 | **QEMU substrate image** | `test/images/neptune-substrate.raw` | 14 GB apparent / ~2.9 GB sparse, gitignored. **Rebuilt 2026-08-11 from the `edge` channel** with the boot-chain pin asserted (limine 12.5.2-1, hook 1.37.1-1, snapper-sync 1.31.0-1); all four VM suites green against it. Rebuilt automatically by `test/images/vm-neptune-image.sh` if absent (~6 min) |
 | ⚠️ **Previous substrate, kept** | `test/images/neptune-substrate.prev.raw` | The old **`stable`-channel** image (hook **1.36.0-1**). Kept only because it is the A/B control that proved the mtime oracle was invalid, and because rebuilding right now needs a workaround for a broken upstream Arch mirror. **Never point a suite at it expecting the product's boot chain** — that is the exact defect the pin exists to prevent. Delete once the mirror heals |
 | **`omarchy-iso` scratch clone** | session scratch — **will be lost** | Had two local deviations worth reapplying if rebuilding: `--network host` on the Docker run (§7's bridge throttle) and a scratch pacman cache instead of the host's (§3.10 item 3) |
+| 🆕 **extest, both targets** | `~/ISOs/extest-cb77cd4/libextest-{i686,x86_64}.so` | Built 2026-08-11 at pin `cb77cd4` (v1.0.4, MIT). The i686 one is what T10 preloads into Steam (Steam's input process is 32-bit). Rebuild: `tools/build-extest.sh` — pinned, licence-gated, contained toolchain, needs network once |
 
 ---
 
@@ -2497,6 +2498,41 @@ always passes.
 
 ⚠️ **T5 inherits this.** A built image has the same race, and a first-boot user
 gets a desktop with no menus and possibly no keyboard.
+
+---
+
+## 5.29 🆕 The Steam-in-background option: closed, then REOPENED by measurement — T10 decides it
+
+**2026-08-11, session 20, operator-driven.** Short version; the evidence is
+`docs/findings/P20-steam-xtest-closure.md` (R-53 + R-54 addendum), the next
+action is `docs/tasks/T10-steam-extest-spike.md`.
+
+- **R-53:** real XTEST reaches neither Wayland-native clients nor Hyprland's
+  pointer (measured with a positive control that caught a wrong first run). The
+  stock-Steam route is dead, and now for a stated reason: SteamOS Desktop Mode
+  is X11; Omarchy is not.
+- **R-54:** the operator asked for one last try at higher effort, and it found
+  what the first analysis missed — **extest** (MIT, pinned `cb77cd4`, v1.0.4),
+  the community's LD_PRELOAD bridge converting XTEST calls to **uinput** before
+  they leave the process. **Measured on this Hyprland: its keystrokes land in a
+  Wayland-native terminal and its motion moves the compositor cursor.** The
+  mechanism Steam needs exists.
+- **Unmeasured, and the whole remaining question:** Steam itself driving it.
+  Steam's input process is 32-bit; the i686 build is at
+  `~/ISOs/extest-cb77cd4/`, reproducible via `tools/build-extest.sh`
+  (pinned, licence-gated, contained toolchain). **T10 is one ~45 min Deck
+  session** with file oracles and a decision table.
+- 🔴 **Known already, whatever T10 finds:** Steam's keyboard is an XWayland
+  window and **cannot render above `ext-session-lock`** — §5.24's our-OSK lock
+  fix stays load-bearing in every future. And row 7 of T10 tests the hard case:
+  a locked session under a resident Steam may be unanswerable without USB/SSH,
+  because our mapper has no pad while Steam holds it.
+
+⚠️ **The approved OSK touch/restyle plan is ON HOLD pending T10** — deliberate,
+operator-chosen: if Steam+extest works, most of that desktop work is moot, and
+the layout-parity agent was paused *before* executing its Caps/Shift rework for
+exactly this reason. Our OSK remains the installer's and the lock's keyboard
+regardless of the outcome.
 
 ---
 
