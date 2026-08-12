@@ -34,15 +34,38 @@ investigations.
 | **Kernel** | Neptune `6.11.11-valve29` | same | ✅ identical |
 | **Input devices** | **17** | **16** | ⚠️ differs — see below |
 | **Joystick nodes** | `js0`, `js1` | `js0` only | ⚠️ differs — see below |
-| Speaker output audible | ⏸ | ⏸ | needs a human |
-| Headphone jack detect | ⏸ | ⏸ | needs a human |
-| Mic capture | ⏸ | ⏸ | needs a human |
-| Trackpad → pointer | ✅ moves + clicks (`event5`) | n/a — Steam owns it | verified session 17 |
-| Trackpad haptics | ⏸ | ⏸ | needs a human |
-| Gyro actually responding | ⏸ | ⏸ | needs a human |
-| Button mapping correctness | ✅ **verified session 17** | ⏸ | see below |
+| Speaker output audible | ✅ **2026-08-11** | ⏸ | 440 Hz sine, both channels, heard at 55% |
+| Headphone jack detect | ✅ **2026-08-11** | ⏸ | Default sink moved **automatically** `43 Speaker → 56 Headphones` on insertion; 660 Hz heard in the headphones and **not** the speakers |
+| Mic capture | ✅ **2026-08-11** | ⏸ | 11.7 s capture: **peak 4545/32767 (13.9% FS)**, per-second RMS varying **5.3×** (98→510). Played back and recognised by ear |
+| Trackpad → pointer | ✅ moves + clicks (`event5`) | n/a — Steam owns it | verified session 17; **diagonal confirmed 2026-08-11** |
+| Trackpad haptics | ✅ **2026-08-11** | ⏸ | `event7` advertises `FF_RUMBLE/PERIODIC/SQUARE/TRIANGLE/SINE`; strong, weak and combined effects uploaded and played — **all three felt** |
+| Gyro actually responding | ✅ **2026-08-11** | ⏸ | 30 s of deliberate tilting: **32,552 `EV_ABS` events, 6 of 6 axes moved**, spans 4,481–47,598. No flat axis |
+| Button mapping correctness | ✅ **verified session 17** | ⏸ | see below. **QAM measured 2026-08-11**: `BTN_BASE` (294) |
 | Gaming Mode usable on screen | n/a | ✅ **operator confirmed, session 17** | closes P16 §5's caveat |
-| BT pairing with a real device | ⏸ | ⏸ | needs a human |
+| BT pairing with a real device | ✅ **2026-08-11** | ⏸ | `soundcore Life Q30` (`98:47:44:D8:CF:14`): **Paired/Bonded/Trusted/Connected all yes**, `bluez_output` sink created at s16le 2ch 48 kHz, took default, 880 Hz **heard in the headphones** |
+| **BT adapter state at boot** | ⚠️ **`Powered: no`** | ⏸ | 🆕 2026-08-11. Not rfkill-blocked (soft **and** hard both `no`), service active — the radio simply starts **down** and had to be powered on by hand. Unknown whether stock SteamOS does the same; recorded as an observation, **not** yet a defect. A user expecting their headphones to reconnect on boot would notice |
+| Gaming Mode brightness slider | n/a | ⏸ | ⚠️ **§5.17 makes this row untrustworthy on this Deck.** The slider works here partly via `99-deck-testing`'s blanket NOPASSWD sudo, which must never ship. A pass means "works on the test rig", not "works on the product" |
+
+### How the human rows were judged, 2026-08-11
+
+⚠️ **Three of these were measured, not just observed**, because "it seems fine"
+is how this project has been fooled before (R-29: a correctly-bound evdev node,
+permanently silent, while every check passed).
+
+- **Mic** — a recording that is digital silence sounds exactly like one you
+  forgot to speak into. Peak **and** per-second RMS variation were computed; a
+  flat non-zero level (DC offset or noise floor) would have **failed**, and
+  `peak > 0` alone would have passed it.
+- **Gyro** — the probe reports each axis's min/max span and fails any axis that
+  never moves, rather than reporting that `event8` exists.
+- **QAM** — captured with two `BTN_SOUTH` delimiter presses either side, on a
+  probe watching **every** candidate node at once. Two of the four enumerated
+  nodes were completely silent throughout (`event5`, `event6`, both named "Valve
+  Software Steam Controller"); a single-node probe could have called a working
+  button dead.
+
+**Haptics and the three audible rows are genuinely subjective** and are recorded
+as the operator's report, which is the correct oracle for them.
 
 **Everything that can be checked without hands is at parity except input**, and
 the input difference is Steam behaving as designed rather than a defect.
