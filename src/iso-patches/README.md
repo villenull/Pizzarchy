@@ -8,27 +8,48 @@ runtime** at pacman time (T12).
 
 `iso/bin/build` applies **every** `overlay/patches/*.patch` it finds. Dropping
 one there takes effect on the very next build — and `docs/tasks/T5-fork-plan.md`
-§7 is explicit:
+§7 was explicit that T5c (the slice that first adds overlay content) could not
+start until T5a proved the pipeline reproduces the known-good ISO. Otherwise a
+later parity check couldn't tell whether a difference came from our overlay or
+from the pipeline itself.
 
-> **Do not start T5c before T5a proves parity.** An overlay whose base build was
-> never shown to reproduce the known-good ISO cannot attribute any later failure.
+**Parity was proven, and T5c has already landed.** §7's
+"🟢 Outcome, 2026-08-12 — T5a is CLOSED" records the four-test re-measurement
+against T5b's pinned build; `docs/findings/T5a-parity.md` Appendix A has
+**P1, P2, P3 and P4 all pass**, every difference from the reference ISO
+temporal, none attributable to the overlay. T5c then added its own overlay
+content — `deck-valve-repos.patch` and `deck-packages.patch`, now sitting in
+`iso/overlay/patches/` — which is why that directory is no longer empty.
 
-**Parity is not proven yet.** `docs/findings/T5a-parity.md` found the pipeline
-reproduces the reference almost exactly but the artifact is broken (it bundles a
-runtime missing `omarchy-setup-system`, so it dies at phase 5 of 14), and the
-`--local-source` build that should fix it has not reported. Adding overlay
-content now would mean the next parity measurement compares a *patched* build
-against the reference and cannot attribute a difference to either cause.
-
-`test/unit/test-iso-build.sh` enforces the empty overlay, and it caught this
-within minutes of the first patch landing.
+So the reason these two patches are *still* staged here isn't parity — that's
+settled. It's the patch budget below, and (for `configure-deck-phase.patch`)
+the seam it depends on not being ready.
 
 ## Moving one into place
 
-When T5's slice is ready **and parity is proven**, `git mv` the patch into
-`iso/overlay/patches/` and update `test-iso-build.sh`'s empty-overlay assertion
-in the same commit — the assertion is the record of *why* the overlay was empty,
-so retiring it deliberately is the point at which that reason expires.
+When a staged patch's slice is ready, `git mv` it into `iso/overlay/patches/`.
+There is no empty-overlay assertion to retire anymore — `test/unit/test-iso-build.sh`
+section 11 replaced it (in the same T5c commit that added the first overlay
+content) with checks that apply directly to whatever promotion you do next:
+the overlay must stay non-empty (counted, so it can't regress to a vacuous
+pass), the **patch budget is ≤ 4** overlay patches, no patch may be
+simultaneously staged here and promoted there, and every promoted patch must
+apply cleanly to the pinned upstream (`git apply --3way` against `iso/UPSTREAM`,
+checked in seconds instead of 40 minutes into a Docker build).
+
+⚠️ **The budget is already at 4/4** (`docs/tasks/T5-fork-plan.md` §1 point 3:
+"≤ 4 patch files, and a fifth should have to argue for itself"). Count it:
+`iso/overlay/patches/` holds two promoted patches from T5c
+(`deck-valve-repos.patch`, `deck-packages.patch`), and the two patches below
+are still staged. That's 4 patches against the ISO builder tree, staged or
+promoted, already spoken for — T5-fork-plan.md's own "Patch budget now 4/4"
+line (§7, the T5c outcome) says so directly. Promoting one of the two below
+doesn't add a new patch — it just moves an already-counted one from this
+directory into `iso/overlay/patches/`, and the suite's mechanical check
+(promoted count ≤ 4) still has headroom for that. What the budget actually
+blocks is introducing any **additional** patch beyond these four: that has to
+**argue for a fifth**, or the change belongs in the `omarchy-deck` package
+instead of the ISO overlay.
 
 | Patch | Applies to | Owner |
 |---|---|---|
