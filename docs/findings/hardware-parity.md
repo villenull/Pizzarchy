@@ -44,7 +44,9 @@ investigations.
 | Gaming Mode usable on screen | n/a | ✅ **operator confirmed, session 17** | closes P16 §5's caveat |
 | BT pairing with a real device | ✅ **2026-08-11** | ⏸ | `soundcore Life Q30` (`98:47:44:D8:CF:14`): **Paired/Bonded/Trusted/Connected all yes**, `bluez_output` sink created at s16le 2ch 48 kHz, took default, 880 Hz **heard in the headphones** |
 | **BT adapter state at boot** | ⚠️ **`Powered: no`** | ⏸ | 🆕 2026-08-11. Not rfkill-blocked (soft **and** hard both `no`), service active — the radio simply starts **down** and had to be powered on by hand. Unknown whether stock SteamOS does the same; recorded as an observation, **not** yet a defect. A user expecting their headphones to reconnect on boot would notice |
-| Gaming Mode brightness slider | n/a | ⏸ | ⚠️ **§5.17 makes this row untrustworthy on this Deck.** The slider works here partly via `99-deck-testing`'s blanket NOPASSWD sudo, which must never ship. A pass means "works on the test rig", not "works on the product" |
+| Gaming Mode brightness slider | n/a | 🟡 **works, but see caveat** | 2026-08-11: operator saw the panel change; backlight moved **21627 → 24826** of 65535. ⚠️ **§5.17 makes this row untrustworthy as PRODUCT evidence** — the slider works here partly via `99-deck-testing`'s blanket NOPASSWD sudo, which must never ship, so this means "works on the test rig". ✅ **But the canary is intact:** the node is still **0644**, not 666, so Steam did *not* fall back to `chmod a+w`. START-HERE records 666 as the signal that a helper broke |
+| **Session switch after today's changes** | n/a | ✅ **2026-08-11** | 🆕 `steamos-session-select gamescope` from the desktop landed in Gaming Mode with `gamescope` running, Steam under `-gamepadui`, session `Desktop=gamescope Active=yes`. Confirms switching survived the rotation and lizard-mode changes |
+| **`lizard_mode` restored by the switch** | n/a | ✅ **2026-08-11** | 🆕 Incidental but valuable: the mapper went `inactive` and the knob returned to **`Y`** automatically during a *real session switch*. §2.1 of the runbook only proved this with a manual `systemctl stop` |
 
 ### How the human rows were judged, 2026-08-11
 
