@@ -319,17 +319,62 @@ target was 8. This is 6 the user answers, which is the direction §6.1a asked fo
    one is the "don't claim support you haven't tested" rule (`CLAUDE.md`) applied
    to a screen. If translation ever happens, this screen comes back first.
 
-2. **Region: no longer sets the keyboard layout.** Two independent reasons:
-   §2.2 item 4 (the OSK is US-only, so `loadkeys` makes the drawn keys lie), and
-   `docs/tasks/T5-fork-plan.md` §5.3, which already bakes
-   `org.gnome.desktop.input-sources = [('xkb','us')]` into the installed
-   desktop. Upstream's own reason for the screen — so the LUKS passphrase is
-   typed under the right layout **(READ, `configurator` line ~1016 comment)** —
-   evaporates when encryption is off. `keyboard` becomes the constant `us`, and
-   **the console keymap is never changed in the live environment.**
-   ⚠️ **This is a real reduction for non-US users. Say so in the release notes.**
-   The follow-on that restores it is bounded and named: per-layout tables in
-   `deck_osk_layout.py` plus ordering `loadkeys` after the OSK knows the layout.
+2. **Region: no longer sets the keyboard layout — and the live console keymap is
+   pinned to the layout the OSK draws.** §2.2 item 4: the OSK is US-only, so a
+   `loadkeys` of anything else makes the drawn keys lie. Upstream's own reason
+   for its keyboard step — so the LUKS passphrase is typed under the right
+   layout **(READ, `configurator` line ~1016 comment)** — evaporates when
+   encryption is off (deviation 4). The Region screen therefore asks about
+   timezone only, and **the live console keymap is `us` for the whole
+   install**, set by our `keyboard_form` override and re-asserted by
+   `deck_form_text_prompt` on every text screen.
+
+   🔴 **CORRECTED 2026-08-12 (`docs/PROGRESS.md` §5.20a). This deviation used
+   to end "`keyboard` becomes the constant `us`". That is not implemented, and
+   should not be.** Two different settings were being conflated because
+   upstream reads one variable for both:
+
+   - the **live console keymap** is a *mechanism*. Its only correct value is
+     the layout the OSK draws, because the OSK is the only thing typing.
+   - **`$keyboard`** is a *preference*: `configurator` interpolates it into
+     the archinstall JSON as `"kb_layout": "$keyboard"` (:778, :1164 — READ),
+     which decides the **installed** system's keymap, and propagates onward —
+     Omarchy's `default/hypr/input.lua` reads `kb_layout` out of
+     `/etc/vconsole.conf`, which is how the test Deck's desktop reached
+     `latam`.
+
+   The user's pick still reaches archinstall, untouched. Forcing it to `us` is
+   the **session-wide** shape the operator explicitly rejected the same day on
+   the desktop half of the identical defect (commit `e8c3698`: "physical
+   keyboards keep Latin American … session-wide is a defect here, not a simpler
+   version of the fix"), and it would write `"kb_layout": "us"` into a machine
+   whose owner picked something else, with nothing on screen saying so.
+
+   **What the old wording missed, and why it mattered:** upstream's
+   `keyboard_form` ends in `loadkeys "$keyboard"` (`configurator`:225) and
+   `user_form` then prompts for the **account password** (:246, :253). Not the
+   LUKS passphrase — the password the user needs at every future login, typed
+   into a **masked** field, on a device with no physical keyboard. Ordering
+   alone cannot fix it either: `user_step` re-enters `keyboard_form` on both
+   Esc-back and "No, change it" (:273, :292), which is why the pin lives in the
+   text-entry primitive as well as in the override. (S1's passphrase was
+   already safe for a different reason — it runs from `greeter`, before the
+   first `loadkeys`; commit `d49dbe4`.)
+
+   **Consequences of the correction:** S5's row list gains **Keyboard**, built
+   from the same `$keyboard` the JSON writer reads (§4 S5's row list predates
+   this and is superseded here). ⚠️ `omarchy_prompt_keyboard` is **not**
+   overridden — upstream's picker keeps running, and `setup-form.sh` is not
+   vendored in this repo, so **its navigability with a controller is
+   unverified** and is a [V] question against a real ISO. If it falls back to
+   `gum filter`'s narrow-by-typing the way `omarchy_prompt_timezone` does, it
+   needs deviation 3's treatment.
+   ⚠️ **Release note, narrowed:** non-US users get their layout on the installed
+   system, but the account password is typed on a US-drawn OSK during the
+   install. Symbols and punctuation therefore follow US positions. The follow-on
+   that removes even that is still bounded and named: per-layout tables in
+   `deck_osk_layout.py`, after which `DECK_CONSOLE_KEYMAP` stops being a
+   constant and becomes the OSK's reported layout.
 
 3. **Region: the flat timezone list is replaced by a two-level pick.**
    `omarchy_prompt_timezone` feeds ~600 `timedatectl list-timezones` entries to

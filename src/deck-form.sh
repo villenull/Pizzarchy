@@ -157,9 +157,18 @@
 #     Fixing S6/S7 needs a THIRD additive overlay file (an
 #     `omarchy-install-dashboard` replacement) or a patch to it -- neither
 #     is `src/deck-form.sh`.
-#   - The keyboard-layout half of §3 deviation 2 ("keyboard becomes the
-#     constant `us`") is `omarchy_prompt_keyboard`/`keyboard_form`, not any
-#     of S2/S4/S5/S6/S7 as scoped by §4. Not touched; flagged as a gap.
+#
+# 10. THE KEYBOARD LAYOUT (2026-08-12, `docs/PROGRESS.md` §5.20a) -- the gap
+#     item 9's session left open, closed, and NOT the way §3 deviation 2
+#     originally wrote it. See the "S2b" block below for the whole argument.
+#     One sentence: `$keyboard` is the user's preference and still reaches
+#     archinstall's `"kb_layout"`; the LIVE console keymap is pinned to the
+#     layout the on-screen keyboard actually draws, and upstream's
+#     `loadkeys "$keyboard"` -- which typed the ACCOUNT PASSWORD under a
+#     keymap the OSK does not draw -- is gone. deviation 2's own remedy
+#     ("`keyboard` becomes the constant `us`") is not implemented, because
+#     it is the session-wide shape the operator explicitly rejected on the
+#     desktop side of the identical defect the same day (commit e8c3698).
 
 set -uo pipefail
 
@@ -207,6 +216,71 @@ readonly DECK_OSK_BOUND_MARKER="deck-input-mapper: bound"
 readonly -a DECK_MAPPER_ARGS=(--osk-backend=tty --osk-start-shown)
 readonly DECK_OSK_BIND_DEADLINE=5      # seconds -- §2.3 step 2's "a deadline"
 readonly DECK_OSK_POLL_INTERVAL=0.1
+
+# --- the console keymap the OSK actually draws (§5.20a) --------------------
+#
+# 🔴 THE SECOND HALF OF THE OSK'S CONTRACT, and the half a bare console does
+# not get for free. The mapper's uinput device emits raw KEYCODES
+# (src/deck_osk_layout.py binds ';' to KEY_SEMICOLON); which CHARACTER a
+# keycode becomes is decided downstream. In a Wayland session that decision
+# is per-device XKB, and src/deck-session.sh already pins OUR device -- and
+# only ours -- with `readonly OSK_KB_LAYOUT=us` (commit e8c3698). A bare
+# console has no XKB and no per-device anything: `loadkeys` sets ONE keymap
+# for the whole virtual terminal, so the only way for the installer's console
+# to type what the OSK draws is for that one keymap to be the OSK's.
+#
+# So this constant is not "US, arbitrarily". It is "whatever
+# src/deck_osk_layout.py draws", and test/unit/test-deck-form.sh asserts it
+# against `OSK_KB_LAYOUT` in src/deck-session.sh so the two cannot drift.
+# The day the OSK grows per-layout tables (§3 deviation 2's own named
+# follow-on), this stops being a constant and starts being the OSK's
+# reported layout -- and nothing else here has to change.
+readonly DECK_CONSOLE_KEYMAP=us
+
+# deck_form_console_tty
+# Upstream's own guard, kept verbatim in spirit: `loadkeys` only means
+# anything on a Linux virtual console, not in a terminal emulator
+# (`configurator`'s own comment at its keyboard step). Split out and
+# overridable so the unit suite can exercise BOTH branches without a real VT
+# -- and, just as importantly, so running the suite from a real VT on a dev
+# machine can never re-key that machine's console.
+deck_form_console_tty() {
+  if [[ -n ${DECK_FORM_TTY_OVERRIDE:-} ]]; then
+    printf '%s\n' "$DECK_FORM_TTY_OVERRIDE"
+    return 0
+  fi
+  tty 2>/dev/null || true
+}
+
+# deck_form_pin_console_keymap [keymap]
+#
+# Makes the console type what the OSK draws. Idempotent, and deliberately
+# NOT bounded the way lizard mode is: §2.3 borrows lizard_mode=N and hands
+# it back because lizard_mode=Y is the failure-safe state. Here the pinned
+# value IS the failure-safe state -- it is the layout every keycode the OSK
+# can emit was drawn under -- so there is nothing to hand back to, and a
+# "restore" would be restoring the defect.
+#
+# ⚠️ Upstream writes `loadkeys "$keyboard" 2>/dev/null`. Dropping the
+# `2>/dev/null` is not tidying: a failure here means the console is typing
+# something other than what the user is looking at, on a screen whose value
+# is MASKED, and CLAUDE.md's "never silently swallow a failure" applies with
+# unusual force to a discard of exactly that message.
+deck_form_pin_console_keymap() {
+  local keymap=${1:-$DECK_CONSOLE_KEYMAP}
+  local tty_name err rc=0
+  tty_name=$(deck_form_console_tty)
+  if [[ $tty_name != /dev/tty* ]]; then
+    deck_form_log "not on a Linux virtual console (tty is '${tty_name:-none}') -- loadkeys would do nothing here, so the keymap is left alone"
+    return 0
+  fi
+  err=$(loadkeys "$keymap" 2>&1) || rc=$?
+  if ((rc != 0)); then
+    deck_form_warn "could not pin the console keymap to '$keymap' (loadkeys exited $rc: ${err:-no output}). Anything typed on this console may not be the character the on-screen keyboard drew -- INCLUDING THE ACCOUNT PASSWORD, which is masked, so nobody would see it happen."
+    return 1
+  fi
+  return 0
+}
 
 # deck_form_lizard_write <sysfs-path> <value>
 #
@@ -314,6 +388,20 @@ deck_form_text_prompt() {
   local stderr_file mapper_pid=0 osk_up=0
   stderr_file=$(mktemp) || { deck_form_die "mktemp failed"; return 1; }
 
+  # STEP 0 (§5.20a). Every caller of this function is, by construction, a
+  # screen whose text is typed on the OSK -- that is what this function is
+  # FOR. So the console keymap is pinned HERE, at the point of use, rather
+  # than only once in `keyboard_form` below: the property "whatever types a
+  # password does so under the keymap the OSK draws" then holds without
+  # depending on any ordering between screens at all. That matters concretely
+  # -- upstream re-enters `keyboard_form` from `user_step` on both Esc-back
+  # and "No, change it" (configurator:273, :292), so "S1 runs before the
+  # first loadkeys" (this file's S0/S1 argument) protects the Wi-Fi
+  # passphrase and nothing after it. Never fatal: a prompt with a doubtful
+  # keymap still beats no prompt, and the failure is stated loudly.
+  deck_form_pin_console_keymap ||
+    deck_form_warn "this prompt runs with an UNVERIFIED console keymap -- what you type may not be what the on-screen keyboard shows"
+
   deck_form_lizard_write "$sysfs" N ||
     deck_form_warn "could not turn lizard mode off -- this prompt runs WITHOUT the on-screen keyboard"
 
@@ -409,6 +497,195 @@ greeter() {
 deck_form_stty_sane() {
   local tty=$1
   stty sane <"$tty" 2>/dev/null || true
+}
+
+# ===========================================================================
+# S2b -- the keyboard layout  🔴 §5.20a: the installer typed the account
+#        password under a keymap the on-screen keyboard does not draw
+# ===========================================================================
+#
+# THE DEFECT, READ out of the pinned tree rather than inferred. Upstream's
+# `keyboard_form` (configurator:189) ends:
+#
+#     if [[ $(tty 2>/dev/null) == "/dev/tty"* ]]; then
+#       loadkeys "$keyboard" 2>/dev/null          # :225
+#     fi
+#
+# and `user_form` (configurator:246) then runs `omarchy_prompt_username` and
+# `omarchy_prompt_password` (:252-253) -- so every character of the ACCOUNT
+# PASSWORD is typed after that `loadkeys`. Our OSK emits US keycodes; under a
+# `latam` console keymap those keycodes are different characters. The
+# password field is MASKED, so the substitution is invisible: the user sets a
+# password they cannot reproduce, on a device with no physical keyboard, and
+# finds out at the first lock screen -- which `docs/PROGRESS.md` §5.24
+# already established is unanswerable without our OSK. Upstream's own comment
+# at configurator:1015 states the intent this breaks for us ("the keyboard
+# chosen above is already loaded, so the LUKS passphrase entered in the user
+# step is typed under the right layout") -- correct for a machine with a
+# keyboard, and load-bearing only for a LUKS passphrase we do not have
+# (§3 deviation 4: encryption is off).
+#
+# ⚠️ The desktop fix does NOT reach here. Commit e8c3698 pins our virtual
+# keyboard with a per-device Hyprland `kb_layout` rule. A bare console has no
+# XKB and no per-device anything -- keycodes go through `loadkeys` and the
+# kernel keymap -- so that rule is meaningless in the installer.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS DOES INSTEAD, AND WHY IT IS NOT WHAT §3 DEVIATION 2 SAID
+# ---------------------------------------------------------------------------
+#
+# TWO SETTINGS, NOT ONE. They have been conflated because upstream reads one
+# variable for both:
+#
+#   (a) the LIVE console keymap, for the ~2 minutes the installer is on
+#       screen. This is a MECHANISM, not a preference. Its only correct
+#       value is the layout the OSK draws (DECK_CONSOLE_KEYMAP above),
+#       because the OSK is the only thing typing.
+#   (b) `$keyboard`, which upstream interpolates into the archinstall JSON as
+#       `"kb_layout": "$keyboard"` (configurator:778 and :1164 -- READ). This
+#       is a real PREFERENCE: it decides the INSTALLED system's keymap, and
+#       on this project's own measurement it propagates further than the
+#       console -- Omarchy's `default/hypr/input.lua` reads `kb_layout`
+#       straight out of `/etc/vconsole.conf` (src/deck-session.sh's §5.20
+#       block), which is how this Deck's desktop ended up on `latam`.
+#
+# So this override changes (a) and leaves (b) entirely alone. The user's pick
+# still reaches archinstall, byte for byte.
+#
+# 🔴 §3 deviation 2 says instead: "`keyboard` becomes the constant `us`" --
+# i.e. change (b) too, and drop the picker. NOT IMPLEMENTED, deliberately,
+# and the spec is updated rather than quietly ignored. Three reasons:
+#
+#  1. It is the SESSION-WIDE shape the operator explicitly rejected the same
+#     day, one layer up. e8c3698's own message: "PER DEVICE, per operator
+#     decision: physical keyboards keep Latin American, and the suite FAILS
+#     if every keyboard ends up on us while the session layout does not --
+#     session-wide is a defect here, not a simpler version of the fix."
+#     Hard-coding `kb_layout=us` is exactly that, moved earlier: it forces
+#     every physical keyboard on the installed machine to US to protect a
+#     password that is typed on the OSK.
+#  2. Deviation 2's stated reasons both dissolve. "The OSK is US-only, so
+#     `loadkeys` makes the drawn keys lie" is an argument against (a) only,
+#     and (a) is fixed here. Its other reason -- upstream's own rationale for
+#     the screen, the LUKS passphrase -- it already notes "evaporates when
+#     encryption is off".
+#  3. It is a silent lie in the artefact. A user who picked `latam` on a
+#     screen upstream still draws would find `"kb_layout": "us"` written to
+#     their machine, with nothing on screen saying so.
+#
+# WHAT IS NOT DONE HERE, and is a real residual risk: `omarchy_prompt_keyboard`
+# is NOT overridden. Upstream's picker keeps running, unmodified. This repo
+# does not vendor `setup-form.sh` (nothing here has its body -- see the S3
+# reserved-username block for the same gap), so its navigability on a
+# controller is UNVERIFIED, and if it falls back to `gum filter`'s
+# narrow-by-typing the way `omarchy_prompt_timezone` does (§3 deviation 3)
+# it needs the same treatment. That is a [V] question against a real ISO and
+# a new screen's worth of design; it is not this fix, and inventing a layout
+# picker blind would be the guessing this file's header exists to forbid.
+
+# deck_form_keyboard_status_action <status> <back> <signal> <allow-defer>
+#
+# The pure decision half of the loop below, split out so upstream's four
+# outcomes are a truth table a unit test can drive rather than a shape only a
+# real `gum` can reach. Prints exactly one of:
+#   accept | reask | defer-offer | abort
+#
+# `OMARCHY_FORM_BACK` / `OMARCHY_FORM_SIGNAL` come from `setup-form.sh`,
+# which this repo does not vendor, so they are passed in rather than read --
+# and if they arrive empty or non-numeric the answer is `abort` WITH a
+# warning, never a guess. Guessing `back` wrong would silently turn "the user
+# pressed Esc" into "end the install", or worse, an unrecognised failure into
+# an infinite re-ask.
+deck_form_keyboard_status_action() {
+  local status=$1 back=${2:-} signal=${3:-} allow_defer=${4:-false}
+
+  if [[ ! $status =~ ^-?[0-9]+$ ]]; then
+    deck_form_warn "keyboard prompt returned a non-numeric status '$status' -- treating it as a failure"
+    printf 'abort\n'
+    return 0
+  fi
+  ((status == 0)) && { printf 'accept\n'; return 0; }
+
+  if [[ ! $back =~ ^-?[0-9]+$ || ! $signal =~ ^-?[0-9]+$ ]]; then
+    deck_form_warn "OMARCHY_FORM_BACK/OMARCHY_FORM_SIGNAL are not usable numbers (back='$back' signal='$signal') -- setup-form.sh was not sourced, so Esc and Ctrl+C cannot be told apart from a real failure. Treating status $status as a failure."
+    printf 'abort\n'
+    return 0
+  fi
+
+  ((status == back)) && { printf 'reask\n'; return 0; }
+  if [[ $allow_defer == true ]] && ((status == signal)); then
+    printf 'defer-offer\n'
+    return 0
+  fi
+  printf 'abort\n'
+}
+
+# keyboard_form [allow-defer-provisioning]
+#
+# Overrides `configurator`'s own (:189). The NAME is measured, not chosen:
+# `configurator` calls `keyboard_form` at :989 (top level, with `true`),
+# :273 (Esc unwind out of the user step) and :292 ("No, change it" on the
+# recap). All three re-enter this function, which is why the fix cannot be
+# "run the text screens earlier" -- there is no "earlier" that survives a
+# re-edit.
+#
+# The loop mirrors upstream's structure deliberately, including the
+# deferred-provisioning Ctrl+C path (unreachable on a Deck -- §2.2 item 1,
+# there is no Ctrl -- but reachable on the `bin/omarchy-iso-configurator` dry
+# run, and dropping it would be a silent feature removal, not a
+# simplification). The ONE line that differs is the tail: upstream loads the
+# user's chosen layout, and we pin the OSK's instead.
+#
+# Parity note: the defer path returns before the pin, exactly as upstream
+# returns before its `loadkeys`. That path skips `user_form` entirely
+# (configurator:992-1010 sets the account fields to empty constants), so
+# nothing on it types anything.
+keyboard_form() {
+  local allow_defer_provisioning="${1:-false}"
+  local status action
+
+  while true; do
+    clear_logo
+    echo
+    say "Let's setup your machine..."
+    if [[ $allow_defer_provisioning == true ]]; then
+      say --foreground 8 "Press Ctrl+C to prepare this machine for another owner."
+    fi
+    echo
+
+    # Upstream's picker, untouched -- see this block's "WHAT IS NOT DONE
+    # HERE". A missing `omarchy_prompt_keyboard` (setup-form.sh unsourced)
+    # surfaces as status 127 and lands in `abort` below, loudly, rather than
+    # as an install that silently never asked.
+    omarchy_prompt_keyboard && status=0 || status=$?
+
+    action=$(deck_form_keyboard_status_action \
+               "$status" "${OMARCHY_FORM_BACK:-}" "${OMARCHY_FORM_SIGNAL:-}" \
+               "$allow_defer_provisioning")
+    case $action in
+      accept) break ;;
+      reask) continue ;;
+      defer-offer)
+        if confirm_prepare_for_another_owner; then
+          # shellcheck disable=SC2034  # read by configurator:991
+          defer_provisioning=true
+          return 0
+        fi
+        continue
+        ;;
+      *)
+        deck_form_warn "the keyboard screen failed (status $status) -- ending the install rather than continuing with an unknown layout"
+        abort
+        return 1
+        ;;
+    esac
+  done
+
+  # 🔴 NOT `loadkeys "$keyboard"`. That is the whole defect. `$keyboard`
+  # keeps the user's pick and travels on to `"kb_layout"`; the console gets
+  # the layout the OSK draws.
+  deck_form_pin_console_keymap || return 1
+  return 0
 }
 
 # ===========================================================================
@@ -1970,6 +2247,16 @@ deck_form_summary_rows() {
   # shellcheck disable=SC2154  # set by upstream's user_form / S3's override -- see this file's header CORRECTION note
   printf 'Hostname,%s\n' "$hostname"
   printf 'Timezone,%s\n' "$timezone"
+  # §5.20a. Added when the layout stopped being a constant this file forced
+  # and went back to being the user's own preference: `$keyboard` is the
+  # exact global `write_user_files` interpolates into `"kb_layout"`
+  # (configurator:778, :1164), so the row and the artefact are the same
+  # value by construction -- which is precisely §4 S5's stated property.
+  # Deliberately NOT `${keyboard:-}`: an unset `keyboard` here would mean
+  # the screen that sets it never ran, and printing an empty cell would hide
+  # that behind a plausible-looking table.
+  # shellcheck disable=SC2154  # set by keyboard_form / upstream's defer path
+  printf 'Keyboard,%s\n' "$keyboard"
   printf 'Wi-Fi,%s\n' "$wifi_display"
   printf 'Disk,%s\n' "$disk_label"
   printf 'Encryption,%s\n' "$encryption_display"

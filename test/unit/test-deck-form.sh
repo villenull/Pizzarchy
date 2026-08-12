@@ -41,6 +41,17 @@ fail() { printf 'not ok - %s\n' "$1"; [[ -n ${2:-} ]] && printf '%s\n' "$2" >&2;
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
+# 🔴 SUITE-LEVEL SAFETY, not a convenience. deck_form_pin_console_keymap runs
+# `loadkeys` whenever `tty` reports a Linux virtual console (§5.20a), and
+# `deck_form_text_prompt` calls it on EVERY prompt. Run this suite from a real
+# VT (Ctrl+Alt+F2) with no override and it would re-key the developer's own
+# console. Pointing the tty probe at a pts name -- the "not a virtual console"
+# branch -- makes the default for every test in this file "loadkeys is never
+# executed". The tests that mean to exercise the pin set the override to a
+# /dev/tty* name themselves AND put a fake `loadkeys` on PATH; nothing here
+# ever reaches the real binary.
+export DECK_FORM_TTY_OVERRIDE=/dev/pts/deck-form-test
+
 # deck-form.sh does not `set -euo pipefail` itself (source-safety -- see its
 # own header). Source it under THIS suite's stricter mode so a real bug
 # (an unset variable, a broken pipe inside a function) still surfaces here,
@@ -413,6 +424,319 @@ LC_ALL=C grep -qF "status=no-hardware" "$work/s0-state/$DECK_NET_OUTCOME_FILE" |
   fail "S1, reached through greeter with an empty sysfs net root, must record the no-hardware outcome" \
        "$(cat "$work/s0-state/$DECK_NET_OUTCOME_FILE")"
 pass "greeter actually runs S1 (the outcome artefact proves the screen ran, not just that it is defined)"
+
+# ===========================================================================
+# §5.20a -- S2b: the keyboard layout.
+#
+# 🔴 WHAT THIS SECTION IS ACTUALLY FOR. Upstream's `keyboard_form` ends with
+# `loadkeys "$keyboard"` (configurator:225) and `user_form` then prompts for
+# the ACCOUNT PASSWORD (configurator:246, :253). Our OSK emits US keycodes,
+# so under a non-`us` console keymap the password becomes different
+# characters -- and the field is MASKED, so nobody sees it happen.
+#
+# An assertion that `keyboard_form` merely EXISTS would pass with the defect
+# fully intact. So the assertions below are about ORDER AND EFFECT: what
+# keymap was in force at the instant the password body was asked, and what
+# `$keyboard` still held afterwards. The fake `loadkeys` therefore maintains
+# a "current console keymap" state file, and the prompt bodies read it.
+# ===========================================================================
+
+echo "--- §5.20a the console keymap: pin, truth table, and the ORDER --------"
+
+# A fake `loadkeys`: logs every layout it was asked for, and -- only on
+# success -- updates the state file standing in for the console's keymap.
+mkdir -p "$work/bin-fakekeys"
+cat >"$work/bin-fakekeys/loadkeys" <<'FAKEKEYS'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-}" >>"${FAKE_LOADKEYS_LOG:-/dev/null}"
+if [[ -n ${FAKE_LOADKEYS_FAIL:-} ]]; then
+  printf 'loadkeys: unable to open file %s\n' "${1:-}" >&2
+  exit "$FAKE_LOADKEYS_FAIL"
+fi
+[[ -n ${FAKE_CONSOLE_KEYMAP_FILE:-} ]] && printf '%s\n' "${1:-}" >"$FAKE_CONSOLE_KEYMAP_FILE"
+exit 0
+FAKEKEYS
+chmod +x "$work/bin-fakekeys/loadkeys"
+KEYS_PATH="$work/bin-fakekeys:$PATH"
+
+# --- the pin primitive -----------------------------------------------------
+
+: >"$work/lk.log"
+out=$(DECK_FORM_TTY_OVERRIDE=/dev/pts/9 FAKE_LOADKEYS_LOG="$work/lk.log" \
+      PATH="$KEYS_PATH" deck_form_pin_console_keymap 2>&1) ||
+  fail "pin must return 0 off a virtual console -- there is nothing to fix there" "$out"
+[[ ! -s "$work/lk.log" ]] ||
+  fail "pin must NOT run loadkeys when tty is not a virtual console" "$(cat "$work/lk.log")"
+LC_ALL=C grep -qF "not on a Linux virtual console" <<<"$out" ||
+  fail "pin must say why it did nothing, not go silent" "got: $out"
+pass "deck_form_pin_console_keymap is a stated no-op off a virtual console (upstream's own loadkeys guard)"
+
+: >"$work/lk.log"
+DECK_FORM_TTY_OVERRIDE=/dev/tty1 FAKE_LOADKEYS_LOG="$work/lk.log" \
+  PATH="$KEYS_PATH" deck_form_pin_console_keymap ||
+  fail "pin must succeed on a virtual console with a working loadkeys"
+[[ $(cat "$work/lk.log") == "$DECK_CONSOLE_KEYMAP" ]] ||
+  fail "pin must load exactly DECK_CONSOLE_KEYMAP" "got: $(cat "$work/lk.log")"
+pass "deck_form_pin_console_keymap loads DECK_CONSOLE_KEYMAP ('$DECK_CONSOLE_KEYMAP') on a virtual console"
+
+out=$(DECK_FORM_TTY_OVERRIDE=/dev/tty1 FAKE_LOADKEYS_FAIL=3 \
+      PATH="$KEYS_PATH" deck_form_pin_console_keymap 2>&1) &&
+  fail "pin must return NONZERO when loadkeys fails -- the console is then typing something nobody verified"
+LC_ALL=C grep -qF "ACCOUNT PASSWORD" <<<"$out" ||
+  fail "a failed pin must name the consequence (the masked password), not just log an errno" "got: $out"
+# Upstream discards this with `2>/dev/null`. Keeping it is the CLAUDE.md rule.
+LC_ALL=C grep -qF "unable to open file" <<<"$out" ||
+  fail "a failed pin must surface loadkeys' OWN message -- upstream's 2>/dev/null discard must not come back" "got: $out"
+pass "a failed pin returns nonzero, names the masked-password consequence, and forwards loadkeys' own stderr"
+
+# --- the cross-file constant: 'us' here is not a coincidence ---------------
+#
+# DECK_CONSOLE_KEYMAP means "the layout the OSK draws". src/deck-session.sh
+# pins OUR Wayland device to that same layout with OSK_KB_LAYOUT (e8c3698).
+# If one is ever changed alone, the console and the desktop disagree about
+# what the same keycode means, which is the whole §5.20/§5.20a defect again.
+osk_layout=$(sed -n 's/^readonly OSK_KB_LAYOUT=\(.*\)$/\1/p' "$REPO_ROOT/src/deck-session.sh")
+[[ -n $osk_layout ]] ||
+  fail "could not find 'readonly OSK_KB_LAYOUT=' in src/deck-session.sh -- this cross-check is broken, not the code"
+[[ $osk_layout == "$DECK_CONSOLE_KEYMAP" ]] ||
+  fail "DECK_CONSOLE_KEYMAP ('$DECK_CONSOLE_KEYMAP') and deck-session.sh's OSK_KB_LAYOUT ('$osk_layout') disagree -- the console and the desktop would type different characters for the same OSK key"
+pass "DECK_CONSOLE_KEYMAP agrees with src/deck-session.sh's OSK_KB_LAYOUT ('$osk_layout') -- one layout, both layers"
+
+# --- the status truth table ------------------------------------------------
+
+[[ $(deck_form_keyboard_status_action 0 10 11 true) == accept ]] ||
+  fail "status 0 must be 'accept'"
+[[ $(deck_form_keyboard_status_action 10 10 11 true) == reask ]] ||
+  fail "OMARCHY_FORM_BACK (Esc) must re-ask -- nothing precedes the first screen (configurator:210)"
+[[ $(deck_form_keyboard_status_action 11 10 11 true) == defer-offer ]] ||
+  fail "OMARCHY_FORM_SIGNAL with defer allowed must offer deferred provisioning"
+[[ $(deck_form_keyboard_status_action 11 10 11 false) == abort ]] ||
+  fail "OMARCHY_FORM_SIGNAL with defer NOT allowed must abort -- configurator:193's own reason (a re-edit must not flip a user install into deferred provisioning)"
+[[ $(deck_form_keyboard_status_action 7 10 11 true) == abort ]] ||
+  fail "an unrecognised nonzero status must abort, not be guessed at"
+pass "deck_form_keyboard_status_action reproduces upstream's four outcomes"
+
+out=$(deck_form_keyboard_status_action 7 "" "" true 2>&1)
+[[ ${out##*$'\n'} == abort ]] ||
+  fail "with OMARCHY_FORM_* unset the answer must be 'abort', never a guess" "got: $out"
+LC_ALL=C grep -qF "setup-form.sh was not sourced" <<<"$out" ||
+  fail "unset OMARCHY_FORM_* must be reported, not silently defaulted" "got: $out"
+out=$(deck_form_keyboard_status_action 7 abc 11 true 2>&1)
+[[ ${out##*$'\n'} == abort ]] ||
+  fail "a non-numeric OMARCHY_FORM_BACK must abort rather than reach an arithmetic evaluation" "got: $out"
+out=$(deck_form_keyboard_status_action "" 10 11 true 2>&1)
+[[ ${out##*$'\n'} == abort ]] ||
+  fail "a non-numeric STATUS must abort rather than reach an arithmetic evaluation" "got: $out"
+LC_ALL=C grep -qF "non-numeric status" <<<"$out" ||
+  fail "a non-numeric status must be reported" "got: $out"
+pass "unset/non-numeric OMARCHY_FORM_* and statuses abort LOUDLY instead of being guessed at"
+
+echo "--- §5.20a keyboard_form: the preference is kept, the console is not ---"
+
+# The picker, queue-driven: one "<layout>:<status>" line consumed per call,
+# so the re-ask loop can be driven without a real gum.
+: >"$work/kb.queue"
+omarchy_prompt_keyboard() {
+  local line
+  line=$(head -1 "$FAKE_KB_QUEUE" 2>/dev/null)
+  [[ -z $line ]] && return 99
+  tail -n +2 "$FAKE_KB_QUEUE" >"$FAKE_KB_QUEUE.tmp" && mv "$FAKE_KB_QUEUE.tmp" "$FAKE_KB_QUEUE"
+  keyboard=${line%%:*}
+  return "${line##*:}"
+}
+confirm_prepare_for_another_owner() { return "${FAKE_DEFER_CONFIRM_RC:-0}"; }
+OMARCHY_FORM_BACK=10
+OMARCHY_FORM_SIGNAL=11
+
+# 🔴 THE CENTRAL ASSERTION OF THIS SECTION.
+printf 'latam:0\n' >"$work/kb.queue"
+: >"$work/lk.log"
+printf 'latam\n' >"$work/console-keymap"   # the console starts on the user's pick
+keyboard=
+FAKE_KB_QUEUE="$work/kb.queue" DECK_FORM_TTY_OVERRIDE=/dev/tty1 \
+FAKE_LOADKEYS_LOG="$work/lk.log" FAKE_CONSOLE_KEYMAP_FILE="$work/console-keymap" \
+PATH="$KEYS_PATH" keyboard_form true ||
+  fail "keyboard_form must return 0 when the picker succeeds"
+[[ $keyboard == latam ]] ||
+  fail "the user's layout PREFERENCE must survive keyboard_form untouched -- it is what reaches archinstall's kb_layout" "keyboard='$keyboard'"
+if LC_ALL=C grep -qx latam "$work/lk.log"; then
+  fail "keyboard_form must NEVER loadkeys the user's chosen layout -- that is the §5.20a defect itself" "$(cat "$work/lk.log")"
+fi
+[[ $(cat "$work/console-keymap") == "$DECK_CONSOLE_KEYMAP" ]] ||
+  fail "after keyboard_form the console must be on the layout the OSK draws" "got: $(cat "$work/console-keymap")"
+pass "keyboard_form keeps \$keyboard='latam' for archinstall AND leaves the live console on '$DECK_CONSOLE_KEYMAP'"
+
+# 🔴 THE ORDERING PROPERTY, END TO END: replay configurator's own sequence
+# (keyboard_form:989 -> user_form's omarchy_prompt_password:253) and record
+# the keymap that was in force AT THE MOMENT each password field was asked.
+# A `loadkeys "$keyboard"` restored to keyboard_form's tail turns this red;
+# a test that only checked "keyboard_form is defined" would not.
+#
+# The real prompt bodies are swapped for recording ones and swapped BACK via
+# `declare -f`, rather than the obvious `( ... )` subshell: a subshell that
+# exports PATH makes shellcheck (correctly) flag every later `PATH=... cmd`
+# in this file as possibly-lost, and CI fails on info-level findings.
+printf 'latam:0\n' >"$work/kb.queue"
+printf 'latam\n' >"$work/console-keymap"
+: >"$work/typed-under.log"
+orig_password_body=$(declare -f deck_form_password_body)
+orig_confirm_body=$(declare -f deck_form_confirm_body)
+# shellcheck disable=SC2329  # invoked indirectly, by name, from deck_form_text_prompt
+deck_form_password_body() { cat "$FAKE_CONSOLE_KEYMAP_FILE" >>"$work/typed-under.log"; printf 'hunter22\n'; }
+# shellcheck disable=SC2329  # same: deck_form_text_prompt "$prompt_fn"
+deck_form_confirm_body()  { cat "$FAKE_CONSOLE_KEYMAP_FILE" >>"$work/typed-under.log"; printf 'hunter22\n'; }
+FAKE_KB_QUEUE="$work/kb.queue" FAKE_CONSOLE_KEYMAP_FILE="$work/console-keymap" \
+DECK_FORM_TTY_OVERRIDE=/dev/tty1 PATH="$KEYS_PATH" \
+  keyboard_form true 2>/dev/null ||
+  fail "the replayed configurator sequence must reach the password step (keyboard_form failed)"
+FAKE_CONSOLE_KEYMAP_FILE="$work/console-keymap" \
+DECK_FORM_TTY_OVERRIDE=/dev/tty1 PATH="$KEYS_PATH" \
+DECK_TEXT_PROMPT_LIZARD_SYSFS="$work/no-such-knob" \
+DECK_TEXT_PROMPT_MAPPER_BIN="$work/no-such-mapper" \
+  omarchy_prompt_password 2>/dev/null ||
+  fail "the replayed configurator sequence (keyboard_form -> omarchy_prompt_password) must complete"
+eval "$orig_password_body"
+eval "$orig_confirm_body"
+mapfile -t typed_under <"$work/typed-under.log"
+[[ ${#typed_under[@]} -eq 2 ]] ||
+  fail "both password fields must have been asked -- this assertion is worthless if the body never ran" "${typed_under[*]:-none}"
+for seen in "${typed_under[@]}"; do
+  [[ $seen == "$DECK_CONSOLE_KEYMAP" ]] ||
+    fail "🔴 the account password was typed under console keymap '$seen', not the layout the OSK draws ('$DECK_CONSOLE_KEYMAP') -- §5.20a" "$(cat "$work/typed-under.log")"
+done
+pass "🔴 the account password is typed under the keymap the OSK draws, with \$keyboard still on the user's non-us pick"
+
+# The same property for the bounded text-entry primitive itself, so it holds
+# for EVERY text screen regardless of what ran before it (upstream re-enters
+# keyboard_form from user_step at :273 and :292 -- there is no ordering that
+# survives that).
+printf 'latam\n' >"$work/console-keymap"
+: >"$work/prompt-under.log"
+deck_form_test_recording_body() { cat "$FAKE_CONSOLE_KEYMAP_FILE" >>"$work/prompt-under.log"; printf 'typed\n'; }
+out=$(FAKE_CONSOLE_KEYMAP_FILE="$work/console-keymap" DECK_FORM_TTY_OVERRIDE=/dev/tty1 \
+      PATH="$KEYS_PATH" DECK_TEXT_PROMPT_LIZARD_SYSFS="$work/no-such-knob" \
+      DECK_TEXT_PROMPT_MAPPER_BIN="$work/no-such-mapper" \
+      deck_form_text_prompt deck_form_test_recording_body 2>/dev/null)
+[[ $out == typed ]] || fail "the recording body must have run" "got: $out"
+[[ $(cat "$work/prompt-under.log") == "$DECK_CONSOLE_KEYMAP" ]] ||
+  fail "deck_form_text_prompt must pin the console keymap BEFORE running its body -- otherwise every text screen inherits whatever loadkeys last set" "got: $(cat "$work/prompt-under.log")"
+pass "deck_form_text_prompt pins the console keymap before the body runs (ordering-independent, not ordering-dependent)"
+
+# A failed pin must degrade, not block: a prompt with a doubtful keymap still
+# beats no prompt, and it must say so.
+printf 'latam\n' >"$work/console-keymap"
+: >"$work/prompt-under.log"
+out=$(FAKE_CONSOLE_KEYMAP_FILE="$work/console-keymap" FAKE_LOADKEYS_FAIL=1 \
+      DECK_FORM_TTY_OVERRIDE=/dev/tty1 PATH="$KEYS_PATH" \
+      DECK_TEXT_PROMPT_LIZARD_SYSFS="$work/no-such-knob" \
+      DECK_TEXT_PROMPT_MAPPER_BIN="$work/no-such-mapper" \
+      deck_form_text_prompt deck_form_test_recording_body 2>"$work/prompt.err")
+[[ $out == typed ]] ||
+  fail "a failed pin must NOT block the prompt -- §2.3's degrade-loudly rule" "got: $out"
+LC_ALL=C grep -qF "UNVERIFIED console keymap" "$work/prompt.err" ||
+  fail "a failed pin inside a text prompt must be stated, not swallowed" "$(cat "$work/prompt.err")"
+pass "a failed pin degrades the prompt loudly (body still runs, the doubt is stated)"
+
+# --- the rest of upstream's loop, kept rather than quietly dropped ---------
+
+printf 'us:10\nlatam:0\n' >"$work/kb.queue"
+: >"$work/lk.log"
+keyboard=
+FAKE_KB_QUEUE="$work/kb.queue" DECK_FORM_TTY_OVERRIDE=/dev/tty1 \
+FAKE_LOADKEYS_LOG="$work/lk.log" PATH="$KEYS_PATH" keyboard_form true ||
+  fail "Esc (OMARCHY_FORM_BACK) must re-ask the picker, then accept the second answer"
+[[ $keyboard == latam ]] ||
+  fail "the SECOND pick must be the one that survives the re-ask loop" "keyboard='$keyboard'"
+[[ ! -s "$work/kb.queue" ]] ||
+  fail "the picker must have been called twice (the queue should be drained)" "$(cat "$work/kb.queue")"
+pass "keyboard_form re-asks on Esc and keeps the answer from the successful pass"
+
+printf 'us:11\n' >"$work/kb.queue"
+: >"$work/lk.log"
+defer_provisioning=false
+FAKE_KB_QUEUE="$work/kb.queue" FAKE_DEFER_CONFIRM_RC=0 DECK_FORM_TTY_OVERRIDE=/dev/tty1 \
+FAKE_LOADKEYS_LOG="$work/lk.log" PATH="$KEYS_PATH" keyboard_form true ||
+  fail "the deferred-provisioning path must return 0"
+[[ $defer_provisioning == true ]] ||
+  fail "Ctrl+C + confirm must set defer_provisioning=true (configurator:991 reads it)"
+[[ ! -s "$work/lk.log" ]] ||
+  fail "the defer path must not touch the console keymap -- upstream returns before its own loadkeys, and nothing on that path types anything" "$(cat "$work/lk.log")"
+pass "the deferred-provisioning path is preserved (sets defer_provisioning, pins nothing) -- parity with upstream, not a silent feature removal"
+
+printf 'us:11\nus:0\n' >"$work/kb.queue"
+defer_provisioning=false
+FAKE_KB_QUEUE="$work/kb.queue" FAKE_DEFER_CONFIRM_RC=1 DECK_FORM_TTY_OVERRIDE=/dev/tty1 \
+FAKE_LOADKEYS_LOG="$work/lk.log" PATH="$KEYS_PATH" keyboard_form true ||
+  fail "declining the defer offer must return to the picker, not abort"
+[[ $defer_provisioning == false ]] ||
+  fail "a DECLINED defer offer must leave defer_provisioning false (configurator:217)"
+pass "declining the deferred-provisioning offer returns to the picker"
+
+printf 'us:11\n' >"$work/kb.queue"
+out=$(FAKE_KB_QUEUE="$work/kb.queue" DECK_FORM_TTY_OVERRIDE=/dev/tty1 \
+      PATH="$KEYS_PATH" keyboard_form false 2>&1) &&
+  fail "Ctrl+C on a RE-EDIT (allow-defer false) must not flip the install into deferred provisioning"
+LC_ALL=C grep -qF "ABORT" <<<"$out" ||
+  fail "an unusable status must reach upstream's abort, not fall through" "got: $out"
+printf 'us:127\n' >"$work/kb.queue"
+out=$(FAKE_KB_QUEUE="$work/kb.queue" DECK_FORM_TTY_OVERRIDE=/dev/tty1 \
+      PATH="$KEYS_PATH" keyboard_form true 2>&1) &&
+  fail "a missing omarchy_prompt_keyboard (status 127) must abort, not continue with an unknown layout"
+LC_ALL=C grep -qF "status 127" <<<"$out" ||
+  fail "the abort must name the status it saw" "got: $out"
+pass "unusable picker statuses abort loudly instead of installing with an unknown layout"
+
+echo "--- §5.20a the PREMISE, re-derived from upstream's own source ---------"
+
+# Every assertion above is only worth something if upstream still does the
+# thing being fixed. These four pin that premise, so an upstream rebase that
+# moves the defect says "re-derive" instead of leaving a green suite behind.
+CONFIGURATOR="$REPO_ROOT/iso/upstream/configs/airootfs/root/configurator"
+[[ -r $CONFIGURATOR ]] ||
+  fail "iso/upstream is not checked out, so §5.20a's premise was NOT verified. Run: git submodule update --init iso/upstream"
+
+kf_start=$(LC_ALL=C grep -n '^keyboard_form() {' "$CONFIGURATOR" | head -1 | cut -d: -f1)
+[[ -n $kf_start ]] || fail "upstream no longer defines keyboard_form -- re-derive §5.20a"
+kf_end=$(awk -v s="$kf_start" 'NR>s && /^}/ { print NR; exit }' "$CONFIGURATOR")
+# shellcheck disable=SC2016  # the literal upstream text is the point -- it must NOT expand
+LC_ALL=C sed -n "${kf_start},${kf_end}p" "$CONFIGURATOR" | LC_ALL=C grep -qF 'loadkeys "$keyboard"' ||
+  fail "upstream's keyboard_form no longer runs loadkeys \"\$keyboard\" -- the defect this override exists for may be gone or may have MOVED. Re-derive before trusting anything above."
+pass "premise: upstream's keyboard_form really does loadkeys the user's chosen layout (configurator:${kf_start}-${kf_end})"
+
+# shellcheck disable=SC2016  # the literal upstream text is the point -- it must NOT expand
+LC_ALL=C grep -qF '"kb_layout": "$keyboard"' "$CONFIGURATOR" ||
+  fail "upstream no longer writes \$keyboard into the archinstall JSON as kb_layout -- the reason this override PRESERVES the preference no longer holds; re-derive"
+pass "premise: \$keyboard is what reaches archinstall's kb_layout, so keeping it is what keeps the preference"
+
+kf_call=$(LC_ALL=C grep -n '^keyboard_form true$' "$CONFIGURATOR" | head -1 | cut -d: -f1)
+pw_call=$(LC_ALL=C grep -n 'omarchy_prompt_password' "$CONFIGURATOR" | head -1 | cut -d: -f1)
+[[ -n $kf_call && -n $pw_call ]] ||
+  fail "could not locate upstream's keyboard_form/omarchy_prompt_password call sites -- this premise check is broken"
+[[ $kf_start -lt $pw_call ]] ||
+  fail "upstream's password prompt no longer follows the keyboard step -- re-derive §5.20a's ordering claim"
+pass "premise: upstream prompts for the password (configurator:${pw_call}) after the keyboard step, and re-enters it from user_step"
+
+# And the fix itself, at the source level: this file must never load the
+# user's chosen layout, under any spelling.
+# Comment lines are stripped first -- the S2b block QUOTES upstream's
+# offending line verbatim, and a scanner that cannot tell a quotation from
+# code would either fire on the documentation or be weakened until it fired
+# on nothing.
+strip_comments() { LC_ALL=C grep -vE '^[[:space:]]*#' "$1"; }
+if strip_comments "$REPO_ROOT/src/deck-form.sh" | LC_ALL=C grep -qE 'loadkeys[^#]*\$\{?keyboard\b'; then
+  fail "src/deck-form.sh loads \$keyboard into the console keymap -- §5.20a is back"
+fi
+# Positive control: an absence assertion is worthless if the pattern could
+# never match anything. Upstream's own file is the known positive.
+strip_comments "$CONFIGURATOR" | LC_ALL=C grep -qE 'loadkeys[^#]*\$\{?keyboard\b' ||
+  fail "the loadkeys scanner cannot see upstream's own loadkeys \"\$keyboard\" -- it is broken, not clean"
+# The picker itself is deliberately NOT overridden (see the S2b block's
+# 'WHAT IS NOT DONE HERE'). Asserted so a future session that adds one does
+# it on purpose, having read why it was left alone.
+if LC_ALL=C grep -qE '^omarchy_prompt_keyboard\(\)' "$REPO_ROOT/src/deck-form.sh"; then
+  fail "deck-form.sh now overrides omarchy_prompt_keyboard -- upstream's picker was left alone deliberately (its body is not vendored here, so a replacement would be designed blind). Update the S2b block's reasoning if that changed."
+fi
+pass "deck-form.sh never loadkeys \$keyboard, and leaves upstream's picker in place"
 
 # ===========================================================================
 # S3: Account
@@ -1929,6 +2253,7 @@ hostname=steamdeck
 timezone=Europe/Copenhagen
 disk=/dev/nvme0n1
 encrypt_installation=false
+keyboard=latam
 unset DECK_WIFI_SSID 2>/dev/null || true
 
 rows=$(DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" deck_form_summary_rows)
@@ -1941,6 +2266,22 @@ LC_ALL=C grep -qF "Encryption,Off" <<<"$rows" || fail "summary must show Encrypt
 LC_ALL=C grep -qF "Desktop,Omarchy" <<<"$rows" || fail "summary must show Desktop: Omarchy"
 LC_ALL=C grep -qF "Boot,Gaming Mode" <<<"$rows" || fail "summary must show Boot: Gaming Mode"
 pass "summary rows reflect username/password-mask/hostname/timezone/Wi-Fi/encryption/desktop/boot"
+
+# §5.20a. The layout is a user preference again (it is no longer forced to a
+# constant), so S5 -- "one recap before anything destructive runs" -- must
+# show the value that will actually be installed. §4 S5's stated property is
+# that every row is built from the same global the artefact writer reads;
+# `keyboard` is exactly what upstream interpolates into `"kb_layout"`, so it
+# is asserted here as a PAIR (change the global, the row must follow) rather
+# than against a literal that could drift into a hardcoded string.
+LC_ALL=C grep -qF "Keyboard,latam" <<<"$rows" ||
+  fail "summary must show the keyboard layout that will be installed (§5.20a: it is the user's pick, not a constant)" "$rows"
+keyboard=us
+rows=$(DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" deck_form_summary_rows)
+LC_ALL=C grep -qF "Keyboard,us" <<<"$rows" ||
+  fail "the Keyboard row must track \$keyboard -- the same global write_user_files reads -- not a hardcoded value" "$rows"
+keyboard=latam
+pass "S5 shows the keyboard layout, tracking the same \$keyboard upstream writes into kb_layout"
 
 DECK_WIFI_SSID="MyHomeNetwork"
 rows=$(DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" deck_form_summary_rows)
