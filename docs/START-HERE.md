@@ -3,13 +3,13 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
-> ## Where things stand (updated 2026-08-11, END of session 20)
+> ## Where things stand (updated 2026-08-11, session 21)
 >
-> *(Session 20 ran the same calendar day as 19. The date is shared; the session
-> numbers are not. Session 19's block is kept below and is still broadly true —
-> where the two disagree, this one wins.)*
+> *(Sessions 19, 20 and 21 all ran the same calendar day. The date is shared;
+> the session numbers are not. The older blocks are kept below and are still
+> broadly true — where they disagree with this one, this one wins.)*
 >
-> ### 🔴 READ THIS FIRST — there is a RELEASE BLOCKER, and it is new
+> ### 🔴 READ THIS FIRST — the RELEASE BLOCKER now has a fix, and the fix is UNVERIFIED
 >
 > **§5.28: on a fresh boot to the desktop, the Deck has NO ON-SCREEN KEYBOARD,
 > no app launcher and no menu.** Measured on hardware by cold-booting and
@@ -23,10 +23,28 @@ work without waiting for further instruction.**
 >
 > ⚠️ **The obvious fix is a trap.** `After=graphical-session.target` creates an
 > ordering cycle systemd resolves by **deleting the start job**, so the unit
-> silently never runs — already measured, already documented in the unit. The fix
-> is to resolve the environment **at spawn time** (`systemctl --user
-> show-environment`, or `systemd-run --user`). **The test must boot the machine:
-> a mapper restarted by hand always passes.**
+> silently never runs — already measured, already documented in the unit.
+>
+> **🟡 Session 21 implemented the real fix and it is NOT VERIFIED.**
+> `src/deck-input-mapper.py` grew a `SessionEnv` resolver: it polls
+> `systemctl --user show-environment` **on the main loop's clock** (never on a
+> button press) until `WAYLAND_DISPLAY`, `HYPRLAND_INSTANCE_SIGNATURE` and
+> `OMARCHY_PATH` are all present, then caches; **every** child — menus,
+> layer-shell OSK, focus watcher, `hyprctl` — is now started with that
+> environment instead of inheriting. 302 assertions, **9/9 mutations caught**,
+> two of them structural because `main()` cannot be entered without a device.
+> Details and the honest limits: `docs/PROGRESS.md` §5.28 "The fix".
+>
+> 🔴 **The mapper has still never started on a cold-booted Deck with this code.**
+> **The test must boot the machine: a mapper restarted by hand always passes** —
+> that is exactly how the bug shipped. Next Deck session: cold boot, press STEAM
+> / QAM / STEAM+X **before touching anything**, then `journalctl --user -u
+> deck-input-mapper` for `session environment resolved`. Only then is §5.28
+> closed.
+>
+> ⚠️ **The Gaming→Desktop switch path is a second, separate cold case** (§5.28's
+> own note): switch modes and press the same three buttons without restarting
+> anything.
 >
 > ### ✅ The P2.9 Deck session is COMPLETE — all seven sections
 >
@@ -137,8 +155,10 @@ work without waiting for further instruction.**
 > not resume the layout-parity work before T10 answers. Our OSK stays the
 > installer's and the lock's keyboard in every outcome (Steam's is an XWayland
 > window and cannot render above `ext-session-lock`). **Next Deck session
-> opens with the §5.28 cold-boot check, then T10, in that order** — §5.28 is
-> the release blocker; T10 is a decision.
+> opens with the §5.28 cold-boot check (now written up as
+> `docs/tasks/T11-cold-boot-verification.md`, and it deploys the session-21 fix
+> first), then T10, in that order** — §5.28 is the release blocker; T10 is a
+> decision.
 >
 > ---
 >
@@ -695,7 +715,7 @@ it.
 | `docs/PROGRESS.md` | **Every session start. This is the authoritative state.** Scope, findings, open issues, and **55** facts not to re-derive. |
 | `docs/SESSIONS.md` | Usage-limit budgeting and the block schedule. |
 | `docs/PLAN.md` | **Frozen and partly superseded.** Read the banner at the top first. Good for §6.1a (installer screens), §8 (bug hypotheses), §9 (test tiers), §11 (maintenance risks). |
-| `docs/tasks/` | One file per work block. **Start with `P2.9-deck-session-runbook.md`** — it is the next action. |
+| `docs/tasks/` | One file per work block. **Start with `T11-cold-boot-verification.md`** — it is the next action, and it needs the Deck. Then `T10-steam-extest-spike.md`. |
 | `docs/findings/` | Research outputs. Evidence behind the decisions in `docs/PROGRESS.md`. |
 | `docs/drafts/` | Staged upstream report. **Nothing sent. Do not send.** |
 | `src/omarchy-deck-kernel.sh` | T1's deliverable. Ten idempotent stages, VM-tested and hardware-validated. |

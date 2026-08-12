@@ -71,6 +71,7 @@ import json
 import os
 import pathlib
 import selectors
+import shlex
 import subprocess
 import sys
 import time
@@ -723,13 +724,21 @@ def lock_state_from_monitors(monitors_json: str) -> bool | None:
 
 
 def read_lock_state(argv: tuple[str, ...] = LOCK_STATE_ARGV,
-                    timeout: float = LOCK_STATE_TIMEOUT) -> bool | None:
+                    timeout: float = LOCK_STATE_TIMEOUT,
+                    env=None) -> bool | None:
     """One bounded, synchronous read of Hyprland's own lock state. See the
     module-level note above this section for why blocking here is a
-    deliberate, scoped exception to `spawn_detached`'s "never block" rule."""
+    deliberate, scoped exception to `spawn_detached`'s "never block" rule.
+
+    ⚠️ `hyprctl` needs `HYPRLAND_INSTANCE_SIGNATURE`, which a cold-booted
+    service does not have (§5.28). Without the session environment every
+    reading here is None, which fails toward "does not auto-hide" -- quiet,
+    survivable, and invisible to every check. Hence the explicit `env`.
+    """
     try:
         result = subprocess.run(
-            list(argv), capture_output=True, text=True, timeout=timeout)
+            list(argv), capture_output=True, text=True, timeout=timeout,
+            env=session_environ() if env is None else env)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0:
@@ -804,6 +813,208 @@ class LockWatcher:
         return self.next_check if self.armed else None
 
 
+def say(message: str) -> None:
+    """One line to the journal, prefixed the way everything else here is."""
+    print(f"deck-input-mapper: {message}", file=sys.stderr, flush=True)
+
+
+# --- the session environment: resolved at RUN time, never inherited (§5.28) --
+#
+# 🔴 THIS SECTION EXISTS BECAUSE OF A RELEASE BLOCKER, MEASURED ON A COLD BOOT.
+#
+# On a freshly booted desktop this service's ENTIRE environment is one variable:
+#
+#     XDG_RUNTIME_DIR=/run/user/1000
+#
+# No WAYLAND_DISPLAY, no OMARCHY_PATH, no HYPRLAND_INSTANCE_SIGNATURE. The unit
+# is `WantedBy=wayland-session@hyprland.desktop.target` with NO ordering, so it
+# wins the race against uwsm's `systemctl --user import-environment`. The mapper
+# itself does not care -- it reads evdev and writes uinput. ⚠️ ITS CHILDREN DO,
+# and every user-visible affordance on this device is a child:
+#
+#     omarchy-menu       STEAM / QAM      needs OMARCHY_PATH   -> exits at once
+#     deck_osk_wayland   the keyboard     needs WAYLAND_DISPLAY
+#     deck_osk_focus     auto-show        needs WAYLAND_DISPLAY
+#     hyprctl            the lock watcher needs HYPRLAND_INSTANCE_SIGNATURE
+#
+# So a cold-booted Deck had no keyboard, no launcher and no menu, while every
+# check said the service was healthy -- R-29's shape, one layer up. A
+# `systemctl --user restart deck-input-mapper` fixed all three, because by then
+# the manager's environment was populated.
+#
+# ⚠️ THE OBVIOUS FIX IS A TRAP, and the unit says so in its own comment:
+# `After=graphical-session.target` creates an ordering cycle with the target
+# this unit is `WantedBy`, and systemd resolves the cycle by DELETING the start
+# job -- the service then silently never runs at all. Measured on hardware.
+#
+# The fix is to stop relying on INHERITANCE and ask the manager for its
+# environment at run time, which works however late the variables arrive and
+# reintroduces no ordering. Asking is a subprocess, so it happens on the main
+# loop's clock (like LockWatcher), never on a button press: by the time a user
+# can press anything the answer is cached, and `spawn_detached`'s "never block"
+# rule survives intact.
+#
+# ⚠️ WHATEVER YOU CHANGE HERE, THE TEST MUST BOOT THE MACHINE. A mapper
+# restarted by hand always passes -- that is exactly how this shipped.
+SESSION_ENV_ARGV: tuple[str, ...] = ("systemctl", "--user", "show-environment")
+SESSION_ENV_TIMEOUT = 0.3    # bounded, like LOCK_STATE_TIMEOUT and for the same reason
+SESSION_ENV_INTERVAL = 1.0   # between attempts, while still unresolved
+SESSION_ENV_WINDOW = 60.0    # then stop asking: see `gave_up` below
+# The variables whose absence was actually measured to break a child. All three
+# are required before we stop polling, because they arrive from different places
+# (uwsm's import, Hyprland's own export, Omarchy's session snippet) and the
+# first one landing does not imply the rest have.
+SESSION_ENV_REQUIRED: tuple[str, ...] = (
+    "WAYLAND_DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "OMARCHY_PATH",
+)
+
+
+def parse_show_environment(text: str) -> dict[str, str]:
+    """Parse `systemctl --user show-environment` into a dict.
+
+    systemd's output is "suitable for eval in a shell", so a value containing
+    anything interesting comes back QUOTED -- `PATH=/usr/bin` but
+    `FOO='a b'`. Unquoting with shlex rather than stripping characters keeps
+    an embedded space or quote intact instead of corrupting it silently.
+
+    ⚠️ A line this cannot make sense of is SKIPPED, not fatal. This parses
+    another program's output on a device whose only input path is this
+    process; one unexpected line must cost that variable and nothing else.
+    """
+    found: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        name, sep, raw = line.partition("=")
+        # A shell variable name: ASCII, and never leading with a digit --
+        # `isidentifier()` is exactly that rule, and `1INVALID=x` is not a line
+        # any shell would accept either.
+        if not sep or not name.isascii() or not name.isidentifier():
+            continue
+        if raw[:1] in ("'", '"'):
+            try:
+                parts = shlex.split(raw)
+            except ValueError:
+                continue          # an unbalanced quote: drop the line, keep the rest
+            if len(parts) != 1:
+                continue
+            raw = parts[0]
+        found[name] = raw
+    return found
+
+
+def read_show_environment(argv: tuple[str, ...] = SESSION_ENV_ARGV,
+                          timeout: float = SESSION_ENV_TIMEOUT) -> str | None:
+    """One bounded read of the user manager's environment block. None if it
+    could not be read at all -- no user manager (the live ISO has none), no
+    session bus, `systemctl` missing, or a timeout.
+
+    ⚠️ Deliberately runs with the environment WE inherited: reaching the user
+    manager needs `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS`, and those are
+    the two the cold-boot environment does have. Passing `env=` explicitly
+    rather than inheriting implicitly is the invariant every spawn in this
+    file now holds, and `test-deck-input-mapper.py` asserts it by parsing this
+    source -- a new spawn added without one is the §5.28 bug returning.
+    """
+    try:
+        result = subprocess.run(list(argv), capture_output=True, text=True,
+                                timeout=timeout, env=os.environ.copy())
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+@dataclass
+class SessionEnv:
+    """The session's environment, polled until it exists, then cached.
+
+    `environ()` is what every child of this process is started with. It is
+    always usable -- before anything has been resolved it is simply what we
+    inherited, which is what shipped -- so this can only ever add variables,
+    never take a working spawn away.
+
+    ⚠️ MERGED, NEVER REPLACED. A later read that omits a variable an earlier
+    one had leaves the earlier value in place. The manager's environment only
+    grows during a session, and a transient empty answer (the manager busy,
+    the bus momentarily unavailable) must not un-set the keyboard's display.
+    """
+
+    interval: float = SESSION_ENV_INTERVAL
+    window: float = SESSION_ENV_WINDOW
+    required: tuple[str, ...] = SESSION_ENV_REQUIRED
+    log: object = say
+    variables: dict = field(default_factory=dict)
+    next_check: float = 0.0     # due immediately: the first refresh always asks
+    started: float | None = None
+    gave_up: bool = False
+    complained: bool = False
+
+    @property
+    def resolved(self) -> bool:
+        return all(name in self.variables for name in self.required)
+
+    def missing(self) -> list[str]:
+        return [name for name in self.required if name not in self.variables]
+
+    def environ(self) -> dict:
+        """What to start a child with. Resolved variables win over inherited
+        ones: the manager's block is the session's truth, ours is a snapshot
+        of whatever systemd happened to have when this unit started."""
+        merged = dict(os.environ)
+        merged.update(self.variables)
+        return merged
+
+    def refresh(self, now: float, reader=read_show_environment) -> bool:
+        """Ask, if due. True when this call learned a required variable.
+
+        Stops asking once resolved -- and also once `window` seconds have
+        passed without success, because in the live ISO there is no user
+        manager at all and a poll every second forever is a subprocess every
+        second forever for nothing.
+        """
+        if self.gave_up or self.resolved or now < self.next_check:
+            return False
+        if self.started is None:
+            self.started = now
+        self.next_check = now + self.interval
+        text = reader()
+        if text is not None:
+            self.variables.update(parse_show_environment(text))
+        if self.resolved:
+            self.log("session environment resolved; menus and the keyboard "
+                     "have a compositor to talk to")
+            return True
+        if now - self.started >= self.window:
+            self.gave_up = True
+            if not self.complained:
+                self.complained = True
+                self.log("no session environment after "
+                         f"{self.window:.0f}s (missing {', '.join(self.missing())}); "
+                         "children run with what we inherited -- expected in the "
+                         "installer, a defect on the desktop")
+        return False
+
+    def next_deadline(self) -> float | None:
+        """For the caller's select() timeout. None once there is nothing left
+        to ask for."""
+        if self.gave_up or self.resolved:
+            return None
+        return self.next_check
+
+
+# The one this process actually uses. A singleton because `spawn_detached` is
+# module-level and every spawn must go through the same answer; the class takes
+# all its collaborators as arguments so the suite never touches this object.
+SESSION_ENV = SessionEnv()
+
+
+def session_environ() -> dict:
+    """The environment for a child of this process, right now."""
+    return SESSION_ENV.environ()
+
+
 # --- spawning helpers, and what the menu buttons will actually do ------------
 
 
@@ -831,7 +1042,7 @@ def reap_spawned() -> int:
     return before - len(_spawned)
 
 
-def spawn_detached(argv: list[str], what: str) -> bool:
+def spawn_detached(argv: list[str], what: str, env=None) -> bool:
     """Start a helper process and never wait for it. True if it started.
 
     `start_new_session=True` puts the helper in its own session, so a signal
@@ -847,11 +1058,16 @@ def spawn_detached(argv: list[str], what: str) -> bool:
     missing entirely raises OSError here, which must cost that one button and
     nothing else; it is reported loudly because a button that silently does
     nothing is indistinguishable from lizard mode swallowing the press.
+
+    ⚠️ `env` IS NOT OPTIONAL DECORATION -- see §5.28 above. A menu started with
+    what this service inherited on a cold boot exits immediately with
+    `OMARCHY_PATH is not set`, which the user experiences as a dead button.
     """
     reap_spawned()
     try:
         proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                start_new_session=True)
+                                start_new_session=True,
+                                env=session_environ() if env is None else env)
     except OSError as exc:
         print(f"deck-input-mapper: could not {what}: {exc}",
               file=sys.stderr, flush=True)
@@ -883,11 +1099,6 @@ def run_menu_action(action: str, dry_run: bool = False) -> bool:
 # --- focus-triggered auto-show (T8 step 8) -----------------------------------
 
 
-def say(message: str) -> None:
-    """One line to the journal, prefixed the way everything else here is."""
-    print(f"deck-input-mapper: {message}", file=sys.stderr, flush=True)
-
-
 class AutoShow:
     """Show the keyboard when a text field takes focus, hide it when it leaves.
 
@@ -916,10 +1127,15 @@ class AutoShow:
         reports, disables itself, and leaves the chord working.
     """
 
-    def __init__(self, module, argv: list[str], log=say) -> None:
+    def __init__(self, module, argv: list[str], log=say,
+                 env_source=session_environ) -> None:
         self.module = module        # deck_osk_focus: it owns the line protocol
         self.argv = list(argv)
         self.log = log
+        # ⚠️ The watcher binds `zwp_input_method_v2`, so it needs
+        # WAYLAND_DISPLAY, which a cold-booted service does not have (§5.28).
+        # Resolved when it is STARTED, not when this object was built.
+        self.env_source = env_source
         self.proc = None
         self.buffer = b""
         self.ignored = 0
@@ -932,7 +1148,8 @@ class AutoShow:
             # -- no compositor, no protocol, seat taken -- and that belongs in
             # the same journal as everything else this service says.
             self.proc = subprocess.Popen(
-                self.argv, stdout=subprocess.PIPE, bufsize=0)
+                self.argv, stdout=subprocess.PIPE, bufsize=0,
+                env=self.env_source())
         except OSError as exc:
             self.proc = None
             self.log(f"could not start the focus watcher ({exc}); auto-show is "
@@ -1432,6 +1649,11 @@ def main() -> None:
         A SEPARATE PROCESS on purpose: with lizard_mode=N this mapper is the
         only input path on the device, so a GTK crash or a compositor restart
         must not be able to take it down. The cost is a pipe.
+
+        ⚠️ It is a layer-shell client, so it needs WAYLAND_DISPLAY -- which a
+        cold-booted service does not have (§5.28). Started with the resolved
+        session environment, not ours; without that this exits immediately and
+        the device a user just booted has no keyboard.
         """
         nonlocal osk_layer_proc
         if osk_layer_proc is not None and osk_layer_proc.poll() is None:
@@ -1439,7 +1661,7 @@ def main() -> None:
         try:
             osk_layer_proc = subprocess.Popen(
                 [sys.executable, str(osk_layer_script)],
-                stdin=subprocess.PIPE, text=True,
+                stdin=subprocess.PIPE, text=True, env=session_environ(),
             )
         except OSError as exc:
             osk_layer_proc = None
@@ -1610,6 +1832,16 @@ def main() -> None:
     for line in menu_binding_report(read_lizard_mode()):
         print(line, file=sys.stderr, flush=True)
 
+    # First ask, before the loop: on a warm start this resolves immediately and
+    # nothing else here ever runs. On a cold boot it fails, and the loop keeps
+    # asking. ⚠️ The startup line matters as EVIDENCE -- §5.28 was invisible
+    # precisely because a healthy-looking service said nothing about this.
+    SESSION_ENV.refresh(time.monotonic())
+    if not SESSION_ENV.resolved:
+        say("the session environment is not ready yet (missing "
+            f"{', '.join(SESSION_ENV.missing())}); menus and the keyboard stay "
+            "dead until it arrives, which is what this polls for (§5.28)")
+
     sel = selectors.DefaultSelector()
     sel.register(pad.fd, selectors.EVENT_READ)
     auto_fd = auto.fileno() if auto is not None else None
@@ -1628,9 +1860,19 @@ def main() -> None:
             lock_deadline = lock_watcher.next_deadline()
             if lock_deadline is not None:
                 deadline = lock_deadline if deadline is None else min(deadline, lock_deadline)
+            # ⚠️ Same reasoning, and it is the load-bearing half of §5.28's fix:
+            # a Deck sitting untouched on a fresh boot generates no pad events,
+            # so without this deadline select() blocks until the user presses
+            # something -- and the press they make is the one that must already
+            # have a working environment. Polling on the loop's clock is what
+            # keeps the answer ready BEFORE the first press instead of after it.
+            env_deadline = SESSION_ENV.next_deadline()
+            if env_deadline is not None:
+                deadline = env_deadline if deadline is None else min(deadline, env_deadline)
             timeout = max(0.0, deadline - time.monotonic()) if deadline is not None else None
             ready = sel.select(timeout)
             now = time.monotonic()
+            SESSION_ENV.refresh(now)
             ready_fds = {key.fd for key, _ in ready}
             # ⚠️ DISPATCH BY FD, never "something was ready so read the pad".
             # evdev opens the device non-blocking, so a read on a quiet pad

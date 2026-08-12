@@ -1257,5 +1257,262 @@ check("re-starting clears the earlier LOCK -- it belongs to the last showing",
       lw5.saw_lock, False)
 check("re-starting resets the poll clock too", lw5.next_deadline(), 100.0)
 
+# --- §5.28: the session environment, resolved at run time --------------------
+#
+# 🔴 THE BUG THIS SECTION EXISTS FOR shipped on hardware: a cold-booted mapper
+# inherits ONE variable (XDG_RUNTIME_DIR), wins the race against uwsm's
+# import-environment, and every child it starts is born blind -- no menus, no
+# launcher, no keyboard, on a device with no physical keyboard. A mapper
+# RESTARTED BY HAND has all 33 variables and passes every check, which is
+# exactly why nothing caught it.
+#
+# ⚠️ NOTHING BELOW CAN PROVE THE FIX ON THE DECK. These assertions pin the
+# mechanism -- children are started with the RESOLVED environment, and the
+# resolution keeps being attempted until it succeeds -- but the only evidence
+# that matters comes from booting the machine and pressing STEAM before
+# touching anything else. Do not read a green run here as §5.28 closed.
+
+import ast  # noqa: E402 -- local to this block, like the imports above
+
+# --- parse_show_environment: systemd's own output format ---------------------
+
+env_text = "\n".join([
+    "WAYLAND_DISPLAY=wayland-1",
+    "HYPRLAND_INSTANCE_SIGNATURE=abc123_17",
+    "OMARCHY_PATH=/home/deck/.local/share/omarchy",
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+    "QUOTED='a value with spaces'",
+    "EMPTY=",
+])
+parsed = m.parse_show_environment(env_text)
+check("a plain assignment parses", parsed.get("WAYLAND_DISPLAY"), "wayland-1")
+# The DBus address contains '=' in its VALUE. Splitting on every '=' rather
+# than the first truncates it, and a truncated bus address is a child that
+# cannot reach the session bus -- a subtler version of the bug being fixed.
+check("a value containing '=' survives",
+      parsed.get("DBUS_SESSION_BUS_ADDRESS"), "unix:path=/run/user/1000/bus")
+check("a shell-quoted value is unquoted, spaces intact",
+      parsed.get("QUOTED"), "a value with spaces")
+check("an empty value is kept as empty, not dropped", parsed.get("EMPTY"), "")
+check("all six lines parsed", len(parsed), 6)
+
+# A malformed line must cost that line and nothing else: this parses another
+# program's output on a device whose only input path is this process.
+messy = m.parse_show_environment("\n".join([
+    "GOOD=1", "", "no-equals-here", "# a comment", "BAD='unbalanced",
+    "1INVALID=x", "ALSO_GOOD=2",
+]))
+check("garbage lines are skipped, the good ones survive",
+      sorted(messy), ["ALSO_GOOD", "GOOD"])
+check("an unbalanced quote does not raise or poison the rest",
+      messy.get("ALSO_GOOD"), "2")
+check("empty input parses to nothing", m.parse_show_environment(""), {})
+
+# --- SessionEnv: ask until it answers, then stop -----------------------------
+
+READY = ("WAYLAND_DISPLAY=wayland-1\n"
+         "HYPRLAND_INSTANCE_SIGNATURE=abc123_17\n"
+         "OMARCHY_PATH=/home/deck/.local/share/omarchy\n")
+COLD = ""            # what a cold boot's user manager actually holds: nothing useful
+
+
+def reader_returning(*answers):
+    """A reader that hands back each answer in turn, then repeats the last.
+    Counts its calls on `.calls` -- the throttle assertions need that."""
+    queue = list(answers)
+
+    def read():
+        read.calls += 1
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+
+    read.calls = 0
+    return read
+
+
+log = []
+se = m.SessionEnv(interval=1.0, window=60.0, log=log.append)
+check("a fresh resolver has nothing", se.resolved, False)
+check("and names everything it is missing", se.missing(), list(m.SESSION_ENV_REQUIRED))
+check("its deadline is due immediately -- the first refresh always asks",
+      se.next_deadline(), 0.0)
+
+cold = reader_returning(COLD)
+check("a cold-boot answer resolves nothing", se.refresh(now=100.0, reader=cold), False)
+check("the reader was actually called", cold.calls, 1)
+# THE THROTTLE. Without it the main loop would ask on every pass -- 250 Hz of
+# pad samples means 250 subprocesses a second, on the process that IS the
+# device's input path.
+check("asking again before the interval does not call the reader",
+      se.refresh(now=100.5, reader=cold), False)
+check("...and the reader stayed uncalled", cold.calls, 1)
+check("the deadline is one interval out", se.next_deadline(), 101.0)
+
+# The late arrival: uwsm has imported by now. This is the transition the whole
+# fix turns on -- the mapper is already running, and nothing restarted it.
+warm = reader_returning(READY)
+check("the environment arriving LATE is picked up", se.refresh(now=101.0, reader=warm), True)
+check("and the resolver latches", se.resolved, True)
+check("it says so, once, in the journal",
+      sum("session environment resolved" in line for line in log), 1)
+check("a resolved resolver stops polling entirely", se.next_deadline(), None)
+check("...and never calls the reader again", se.refresh(now=200.0, reader=warm), False)
+check("proved by the call count", warm.calls, 1)
+
+# environ(): inherited variables stay, resolved ones win.
+os.environ["DECK_TEST_INHERITED"] = "kept"
+merged = se.environ()
+check("inherited variables are carried through", merged.get("DECK_TEST_INHERITED"), "kept")
+check("the resolved session variables are present too",
+      merged.get("WAYLAND_DISPLAY"), "wayland-1")
+del os.environ["DECK_TEST_INHERITED"]
+
+# ⚠️ MERGED, NEVER REPLACED. A later read that omits a variable must not
+# un-set it: a transient empty answer would otherwise take the keyboard's
+# display away from a session that is running fine.
+se2 = m.SessionEnv(interval=1.0, log=log.append)
+se2.refresh(now=0.0, reader=reader_returning("WAYLAND_DISPLAY=wayland-1\n"))
+se2.refresh(now=1.0, reader=reader_returning("OMARCHY_PATH=/opt/omarchy\n"))
+check("a variable from an earlier read survives a later one that omits it",
+      se2.variables.get("WAYLAND_DISPLAY"), "wayland-1")
+check("and the later one is added", se2.variables.get("OMARCHY_PATH"), "/opt/omarchy")
+check("still unresolved while one required variable is missing", se2.resolved, False)
+check("which it names", se2.missing(), ["HYPRLAND_INSTANCE_SIGNATURE"])
+
+# Giving up: the live ISO has no user manager at all, and a poll every second
+# forever is a subprocess every second forever for nothing.
+log3 = []
+se3 = m.SessionEnv(interval=1.0, window=5.0, log=log3.append)
+never = reader_returning(None)
+now = 0.0
+while se3.next_deadline() is not None and now < 20.0:
+    se3.refresh(now=now, reader=never)
+    now += 1.0
+check("a resolver that never succeeds gives up", se3.gave_up, True)
+check("after roughly the window, not forever", never.calls, 6)
+check("and stops asking", se3.next_deadline(), None)
+check("saying why, once", sum("no session environment" in line for line in log3), 1)
+check("naming what was missing", "WAYLAND_DISPLAY" in log3[-1], True)
+check("a resolver that gave up refreshes to nothing",
+      se3.refresh(now=999.0, reader=reader_returning(READY)), False)
+
+# --- the children are started with it ----------------------------------------
+#
+# The assertions above are about a dict. THESE are the ones that would have
+# caught §5.28: they run real processes and read back the environment those
+# processes actually got.
+
+MARK = "DECK_SESSION_ENV_PROOF"
+ECHO_ENV = ("import os, sys; "
+            f"open(sys.argv[1], 'w').write(os.environ.get({MARK!r}, 'MISSING'))")
+
+
+def spawn_and_read(env=None):
+    """Run a child through spawn_detached and return the marker it saw."""
+    with tempfile.TemporaryDirectory() as tmp:
+        out = pathlib.Path(tmp) / "env"
+        started = m.spawn_detached(
+            [sys.executable, "-c", ECHO_ENV, str(out)], "prove the env", env=env)
+        if not started:
+            return "NOT STARTED"
+        m._spawned[-1].wait(timeout=10)
+        return out.read_text() if out.exists() else "NO OUTPUT"
+
+
+check("an explicit env reaches the child",
+      spawn_and_read(env={**os.environ, MARK: "explicit"}), "explicit")
+
+# The default path: no env argument, so the child gets whatever the module's
+# resolver holds. THIS is the cold-boot bug's exact shape -- omarchy-menu
+# started with an environment that has no OMARCHY_PATH exits immediately, and
+# the user calls that a dead button.
+saved = dict(m.SESSION_ENV.variables)
+try:
+    m.SESSION_ENV.variables[MARK] = "resolved"
+    check("a spawn with no env argument gets the RESOLVED session environment",
+          spawn_and_read(), "resolved")
+finally:
+    m.SESSION_ENV.variables.clear()
+    m.SESSION_ENV.variables.update(saved)
+
+check("...and without it, the child sees nothing -- the bug, reproduced",
+      spawn_and_read(), "MISSING")
+
+# The focus watcher takes its environment from a source consulted at START
+# time, not at construction: the object is built while the environment is
+# still missing and started (or restarted) after it arrives.
+FOCUS_STUB = ("import os, sys; "
+              f"sys.stdout.write('focus 1\\n' if os.environ.get({MARK!r}) else 'focus 0\\n'); "
+              "sys.stdout.flush(); "
+              "import time; time.sleep(0.2)")
+log4 = []
+auto = m.AutoShow(focus_mod, [sys.executable, "-c", FOCUS_STUB], log=log4.append,
+                  env_source=lambda: {**os.environ, MARK: "1"})
+check("the focus watcher starts", auto.start(), True)
+check("it was started with the session environment", auto.pump(False), True)
+auto.stop()
+
+log5 = []
+auto = m.AutoShow(focus_mod, [sys.executable, "-c", FOCUS_STUB], log=log5.append,
+                  env_source=lambda: {k: v for k, v in os.environ.items() if k != MARK})
+auto.start()
+check("without it the watcher reports the other state -- the env is really the source",
+      auto.pump(True), False)
+auto.stop()
+
+# hyprctl needs HYPRLAND_INSTANCE_SIGNATURE, and a lock reading of None fails
+# toward "does not auto-hide" -- silent, survivable, and invisible to every
+# check. The env must reach it too.
+HYPRCTL_STUB = ("import os; "
+                f"print({LOCKED_ONE_MONITOR!r} if os.environ.get({MARK!r}) "
+                f"else {UNLOCKED_NULL!r})")
+check("read_lock_state passes the session environment to hyprctl",
+      m.read_lock_state(argv=(sys.executable, "-c", HYPRCTL_STUB),
+                        env={**os.environ, MARK: "1"}), True)
+check("...and its default is the resolver, not a bare inherit",
+      m.read_lock_state(argv=(sys.executable, "-c", HYPRCTL_STUB)), False)
+
+# --- the invariant, enforced against the SOURCE ------------------------------
+#
+# ⚠️ THIS IS THE ONE THAT CATCHES THE NEXT §5.28. The bug was not a wrong line;
+# it was a spawn added years after the justification for inheriting stopped
+# being true, in a file where nothing forced the question. Every subprocess
+# call in the mapper must NAME the environment it runs with -- including the
+# resolver itself, which explicitly passes what it inherited because that is
+# where XDG_RUNTIME_DIR and the bus address live.
+
+MAPPER_SOURCE = REPO_ROOT / "src" / "deck-input-mapper.py"
+tree = ast.parse(MAPPER_SOURCE.read_text())
+spawns = [
+    node for node in ast.walk(tree)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    and node.func.attr in ("Popen", "run")
+    and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess"
+]
+check("the mapper's subprocess call sites are all still accounted for",
+      len(spawns) >= 4, True)
+envless = sorted(node.lineno for node in spawns
+                 if not any(kw.arg == "env" for kw in node.keywords))
+check("EVERY subprocess call in the mapper names its environment (§5.28)",
+      envless, [])
+
+# The resolver is only worth anything if main() actually drives it, and main()
+# is a 400-line function around a live device that no unit test can enter. So
+# its wiring is asserted structurally instead of not at all -- deleting any of
+# these three leaves a resolver that never resolves, which is §5.28 verbatim
+# and would otherwise leave this whole suite green.
+main_def = next(node for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef) and node.name == "main")
+main_calls = [node for node in ast.walk(main_def)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+              and isinstance(node.func.value, ast.Name)
+              and node.func.value.id == "SESSION_ENV"]
+called = sorted({node.func.attr for node in main_calls})
+check("main() both asks at startup and keeps asking in the loop",
+      sum(node.func.attr == "refresh" for node in main_calls) >= 2, True)
+# Without this the select() blocks until the user presses something -- and the
+# press they make is the one that needed the environment to be ready already.
+check("...and its deadline bounds the select(), so an untouched Deck still polls",
+      "next_deadline" in called, True)
+
 print(f"\n{'PASS' if FAILURES == 0 else 'FAILED'} — {FAILURES} failure(s)")
 sys.exit(1 if FAILURES else 0)

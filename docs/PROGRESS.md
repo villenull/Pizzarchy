@@ -23,7 +23,7 @@ may use Wi-Fi (§2.2).
 | **R1** Six research questions | ✅ done | All six resolved. Several overturned the plan — §3 |
 | **T1** Kernel / firmware / boot | ✅ done | Ten stages, **hardware-validated end to end 2026-08-10** (§5.2). Neptune pin bump still untested |
 | **T2** Gamepad input spike | ✅ done | Navigation confirmed; T4 is days not weeks. Text entry open — §3.9 |
-| **T3** Gaming Mode + switching | 🟡 **nearly done (session 20):** §5.10/§5.14/§5.15/§5.16/§5.18 ✅; §5.11 ✅ **all four rotation surfaces upright on the panel**; P2.1 ✅ (lizard stage + QAM=`BTN_BASE` wired, verified on screen); P2.2 ✅ **7/7 human rows** (`docs/findings/hardware-parity.md`); boots to Gaming Mode. **Remaining:** 🔴 §5.28 (fresh-boot env race — release blocker), §5.17 (keep `99-deck-testing` off the image), P2.3 (per-item approval), P2.4 menu-row placement, §5.24a's three lock-usability requests |
+| **T3** Gaming Mode + switching | 🟡 **nearly done (session 20):** §5.10/§5.14/§5.15/§5.16/§5.18 ✅; §5.11 ✅ **all four rotation surfaces upright on the panel**; P2.1 ✅ (lizard stage + QAM=`BTN_BASE` wired, verified on screen); P2.2 ✅ **7/7 human rows** (`docs/findings/hardware-parity.md`); boots to Gaming Mode. **Remaining:** 🟡 §5.28 (fresh-boot env race — release blocker; **fix implemented session 21, UNVERIFIED — needs a cold boot**), §5.17 (keep `99-deck-testing` off the image), P2.3 (per-item approval), P2.4 menu-row placement, §5.24a's three lock-usability requests |
 | **T4** Controller-only installer | 🟡 **specified, UNGATED (session 20)** | Full screen spec `docs/tasks/T4-screen-spec.md` (wrap the configurator, 6 screens + Failure). Test tier **proven viable**. ✅ **§5.26 answered on hardware:** the lizard knob exists at 0644 in the live ISO **and the write is accepted** — text-entry mode is reachable. U3 too: live console **50×160**, installed TTY **25×80** — *read geometry at runtime*. ⚠️ Harness work exists **unfinished/untracked** in the T4 agent worktree (see §1 note below) |
 | **T5** ISO + package payload | 🟡 **T5a skeleton MERGED (session 20), parity UNPROVEN** | `iso/` exists: `UPSTREAM`/`RUNTIME` pins, submodule at `a12bfea`, `bin/build` with guards 6.1/6.3, `test-iso-build.sh`. 🔴 **The parity build's outcome is UNKNOWN** — no container, no ISO, no log survives; *do not build on the skeleton until an empty-overlay build reproduces the known-good ISO* (`T5-fork-plan.md` §7 says exactly this). Bake-ins grew: **three** rotations (§5.11), the lock rule (§5.24), §5.28's env fix, and an upstream-QML patch seam (§5.24a #2) that the plan lacks |
 | **T6** Integration + release | ⬜ not started | Gated on Omarchy 4.0 stable |
@@ -2413,7 +2413,11 @@ mental model — get it wrong once and it is wrong in both.
 
 ---
 
-## 5.28 🔴 NEW — on a FRESH BOOT the mapper's children are born blind: no menus, and probably no keyboard
+## 5.28 🔴 on a FRESH BOOT the mapper's children are born blind: no menus, and probably no keyboard
+
+> **Status: fix implemented session 21, 🔴 UNVERIFIED — the check needs a cold
+> boot.** Jump to "The fix" below for what was built and what it does not
+> prove.
 
 **Found on hardware 2026-08-11, by the operator noticing STEAM and QAM did
 nothing after a reboot.** Every check said healthy. This is R-29's shape again,
@@ -2487,7 +2491,7 @@ path starts a fresh Hyprland session through sddm, so the same race applies.
 Assume it is broken there too until someone boots into Gaming Mode, switches to
 the desktop, and presses STEAM+X without restarting anything.
 
-### The fix, not yet implemented
+### The fix — 🟡 IMPLEMENTED (session 21), NOT YET VERIFIED ON HARDWARE
 
 **Stop relying on inheritance.** Resolve the environment at *spawn* time rather
 than at unit start — read `systemctl --user show-environment`, or launch children
@@ -2495,6 +2499,45 @@ via `systemd-run --user`, either of which works even when the variables arrive
 late and neither of which reintroduces the ordering cycle. ⚠️ Whatever is
 written, **the test must boot the machine**, because a mapper restarted by hand
 always passes.
+
+**What was built** (`src/deck-input-mapper.py`, new `SessionEnv` section):
+
+- `SessionEnv` polls `systemctl --user show-environment` **on the main loop's
+  clock**, not on a button press — its deadline joins `LockWatcher`'s in the
+  `select()` timeout, so an untouched Deck keeps asking while nobody is
+  pressing anything. `spawn_detached`'s "never block" rule survives untouched.
+- Attempts are throttled to `SESSION_ENV_INTERVAL` (1 s) and stop on the first
+  of two events: all three required variables present
+  (`WAYLAND_DISPLAY`, `HYPRLAND_INSTANCE_SIGNATURE`, `OMARCHY_PATH`), or
+  `SESSION_ENV_WINDOW` (60 s) elapsed — the live ISO has no user manager at
+  all and must not poll a missing one forever.
+- Reads are **merged, never replaced**: a transient empty answer cannot un-set
+  a running session's display.
+- **Every** child now names its environment — the menus, the layer-shell
+  keyboard, the focus watcher, and `hyprctl` in the lock watcher. With nothing
+  resolved, `environ()` is exactly `os.environ`, i.e. the behaviour that
+  shipped: this can only add variables, never take a working spawn away.
+- The unit in `src/deck-session.sh` keeps its comment about the ordering cycle
+  and now records that the *"never talks to the compositor"* justification
+  expired — that expiry, not a wrong line, was the defect.
+
+**Evidence so far, and its limit.** `test/unit/test-deck-input-mapper.py` grew
+to **302 assertions**, **9/9 mutations caught** (dropped `env=` at each of the
+three spawn sites and at `hyprctl`, throttle removed, merge turned into
+replace, give-up removed, value truncated at the second `=`, and both halves of
+the main-loop wiring deleted). The last two are asserted **structurally**
+against the source's AST, because `main()` cannot be entered without a device —
+without them, deleting the poll leaves the whole suite green, which is §5.28
+verbatim. The parser was also run against this dev box's real
+`systemctl --user show-environment`: **187 lines, 187 parsed, 0 dropped**, and
+it resolves. ⚠️ **No quoted value appeared in that sample**, so the shell-quoting
+path is covered only by synthetic input.
+
+🔴 **None of that is the verification.** The mapper has never started on a Deck
+that was cold-booted with this code. **The check is still §5.28's: boot the
+machine, press STEAM / QAM / STEAM+X before touching anything else**, and read
+the journal for `session environment resolved`. A hand-restarted mapper passes
+either way.
 
 ⚠️ **T5 inherits this.** A built image has the same race, and a first-boot user
 gets a desktop with no menus and possibly no keyboard.

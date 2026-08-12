@@ -2026,8 +2026,21 @@ PartOf=graphical-session.target
 #   Job deck-input-mapper.service/start deleted to break ordering cycle
 #
 # systemd resolves the cycle by DELETING this unit's start job, so the service
-# silently never runs. Measured on hardware. The mapper needs no ordering
-# anyway: it reads evdev and writes uinput, and never talks to the compositor.
+# silently never runs. Measured on hardware.
+#
+# 🔴 THIS COMMENT USED TO END "the mapper needs no ordering anyway: it reads
+# evdev and writes uinput, and never talks to the compositor." That was TRUE
+# when written and QUIETLY EXPIRED (docs/PROGRESS.md §5.28): the mapper has
+# since grown children that do talk to the compositor -- omarchy-menu on
+# STEAM/QAM, the layer-shell keyboard, the focus watcher, hyprctl -- so this
+# unit STARTING EARLY, with an environment of one variable, shipped a Deck that
+# cold-booted with no keyboard, no launcher and no menu.
+#
+# The ordering stays absent (the cycle above is real). The mapper now resolves
+# the session environment AT SPAWN TIME instead of inheriting it, and polls for
+# it on its own loop until it arrives. ⚠️ If you are tempted to "fix" this with
+# ordering here, read §5.28 first, and note that any test of it MUST BOOT THE
+# MACHINE -- a mapper restarted by hand always passes.
 #
 # StartLimit* live in [Unit], not [Service]. Putting them in [Service] is not an
 # error -- systemd logs "Unknown key ... ignoring" and carries on unbounded.
