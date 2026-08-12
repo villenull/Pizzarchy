@@ -85,16 +85,50 @@ pass "a letter resolves to its keycode"
 # The renderer is not on the --type path, so it needs its own check from the
 # INSTALLED directory: it also has to find the layout core from there, and
 # `import deck_osk_layout` inside it is the thing that would break.
+#
+# 🔴 AND THE GEOMETRY, ASSERTED HERE BECAUSE THIS IS THE INSTALLED COPY. T8 §9g
+# made the keyboard ONE grid of 16 cells, and docs/PROGRESS.md §7 measured the
+# console it has to survive: **the installed system's TTY is 25x80** (the live
+# ISO's is 50x160, same panel). 16 cells at KEY_CELL=5 is 80 columns EXACTLY,
+# with nothing spare -- and a keyboard one column wider does not get clipped,
+# the VT WRAPS it, which pushes the rest of the keyboard off the bottom. That
+# is R-49's failure on the other axis, and it is just as silent.
+#
+# Four numbers, not one, so a wrong answer says WHICH thing moved: rows, drawn
+# width, the width derived from the grid, and the cell size.
 rendered=$(python3 -c "
 import sys
 sys.path.insert(0, '$root$osk_lib_dir')
 import deck_osk_layout as osk, deck_osk_tty as tty
 rows = tty.render(osk.OnScreenKeyboard(), osk.Cursors())
-print(len(rows), tty.width(rows))
+print(len(rows), tty.width(rows), osk.LETTERS.width * tty.KEY_CELL, tty.KEY_CELL)
 " 2>&1) || fail "the installed renderer imports and draws" "$rendered"
-[[ $rendered == "5 73" ]] ||
-  fail "the installed renderer draws 5 rows, 73 columns" "got: $rendered"
-pass "the installed renderer imports the core from the same directory and draws (5 rows, 73 cols)"
+[[ $rendered == "5 80 80 5" ]] ||
+  fail "the installed renderer draws 5 rows of exactly 80 columns at KEY_CELL=5" \
+       "expected '5 80 80 5' (rows, drawn width, 16 cells x KEY_CELL, KEY_CELL); got: $rendered"
+pass "the installed renderer imports the core from the same directory and draws (5 rows, 80 cols)"
+
+# ⚠️ NOT A RESTATEMENT OF THE LINE ABOVE. That one pins the literal geometry;
+# this one asserts it against the console the installer actually gets, in the
+# renderer's own words -- write_at must ACCEPT a draw at 25x80 and REFUSE one
+# column less. Without it, someone widening KEY_CELL could "fix" the numbers
+# above and ship a keyboard that wraps.
+fit=$(python3 -c "
+import sys
+sys.path.insert(0, '$root$osk_lib_dir')
+import io
+import deck_osk_layout as osk, deck_osk_tty as tty
+rows = tty.render(osk.OnScreenKeyboard(), osk.Cursors())
+tty.write_at(io.StringIO(), rows, 25 - len(rows) + 1, console_rows=25, console_cols=80)
+try:
+    tty.write_at(io.StringIO(), rows, 21, console_rows=25, console_cols=79)
+except ValueError:
+    print('fits-80-refuses-79')
+" 2>&1) || fail "the installed renderer accepts the installed TTY's 25x80" "$fit"
+[[ $fit == "fits-80-refuses-79" ]] ||
+  fail "the installed renderer must fit 25x80 exactly and refuse a narrower console" \
+       "got: $fit"
+pass "the installed renderer fits the installed TTY's 25x80 and refuses 79 columns"
 
 # The mapper must not have quietly fallen back to the copy in src/: that would
 # make this suite pass on a dev machine and fail on the Deck, which is worse

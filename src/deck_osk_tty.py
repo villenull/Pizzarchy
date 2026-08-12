@@ -15,7 +15,20 @@ WHY TEXT AND NOT THE FRAMEBUFFER
     that were present, enumerated and silent -- that trade is not close.
 
     It also removes the whole font-rendering problem, and a console font is
-    not guaranteed to carry box-drawing glyphs. Everything here is ASCII.
+    not guaranteed to carry box-drawing glyphs. Everything here is ASCII,
+    including the arrows and the emoji key -- see `osk.ascii_face`.
+
+ONE CONTINUOUS GRID, NO GUTTER (T8 §9g)
+    🔴 Changed 2026-08-12 with the layout core. The keyboard used to be two
+    half-grids drawn side by side with `GUTTER` blank columns between them;
+    the operator's first words on seeing ours next to Valve's were "i still
+    see a gap between the left half and the right half". `Layer.split` is a
+    CURSOR-ADDRESSING boundary and nothing draws it. `GUTTER` is gone, not
+    set to zero: there is no gap to tune.
+
+    Keys are placed from `Layer.cell_bounds(row)`, so a key's columns are
+    derived from the one grid rather than from a per-half loop that could
+    drift from it.
 
 TWO CURSORS, WITHOUT A POINTER
     Each cursor highlights the key it is over rather than floating between
@@ -27,19 +40,31 @@ TWO CURSORS, WITHOUT A POINTER
     is invisible to `tmux capture-pane` without `-e`, unreadable on some console
     fonts, and gone entirely in a plain log. `[ q ]` survives all three.
 
+    ⚠️ TWO CURSORS CAN LAND ON ONE KEY, and since §9g the space bar straddles
+    `split` precisely so either thumb can reach it. When they do, ONE cell is
+    highlighted, not two. Anything counting highlights must count cells and not
+    assume the number of pads.
+
 WHAT THIS MODULE DOES NOT DO
     It does not own the screen. `render()` returns lines; the caller decides
     where they go. The installer's TUI is drawing on the same console, so
     something has to keep them apart -- see `write_at()` and the note there.
 
-    It also does not, and cannot, draw COLOUR or SHAPE. T8 §9f asks for two
-    things this renderer has no primitive for: modifier/action keys visibly
-    darker than letter keys, and two badge shapes (a circle for face buttons,
-    a rounded rectangle for triggers/stick-clicks). A bare console has
-    neither a second shade nor a curve -- everything here is the SAME colour
-    and the SAME rectangle of characters. `deck_osk_wayland.draw()` renders
-    both; here they degrade to nothing rather than to a lie (see
-    `HINT_GLYPH`'s own note for how the badge SHAPE specifically degrades).
+    It also does not, and cannot, draw COLOUR or SHAPE. §9g asks for three
+    things this renderer has no primitive for: action keys visibly darker than
+    letter keys, two badge shapes (a circle for face buttons, a rounded
+    rectangle for triggers/stick-clicks), and an ACTIVE MODIFIER DRAWN BLUE. A
+    bare console has neither a second shade nor a curve -- everything here is
+    the SAME colour and the SAME rectangle of characters.
+
+    Two of the three degrade to nothing rather than to a lie: `is_action` is
+    simply not drawn, and every badge degrades to the same one text convention
+    (see `display_label`). The third does NOT get to degrade to nothing --
+    a user who cannot see that Shift is armed finds out by typing the wrong
+    case into a passphrase field they cannot read back. So modifier state is
+    SPELLED OUT IN WORDS, which is the one channel a colourless console still
+    has. `MODIFIER_TEXT` is that decision; `display_label` gives it priority
+    over the badge when both cannot fit.
 
 WHO IT MAY SHARE A CONSOLE WITH -- A POLICY, AND IT IS MEASURED
     **Line-oriented prompts, and nothing else.** `gum input` and its siblings
@@ -86,24 +111,35 @@ import deck_osk_layout as osk
 
 # Characters per unit-span key.
 #
-# ⚠️ 7, not 5, and the two brackets are why. A highlighted cell spends two
-# columns on `[` and `]`, so a width of 5 leaves three for the label and the
-# longest single-span faces -- `enter`, `right` -- render as `[ent]` and
-# `[rig]`. A user cannot read a truncated key, and the truncation only appears
-# on the key the cursor is ON, which is the one moment it has to be legible.
+# 🔴 5, AND THE GRID DECIDES IT -- NOT LEGIBILITY. Since T8 §9g the layout is
+# ONE grid of `Layer.width` == 16 cells, and `docs/PROGRESS.md` §7 measured the
+# two consoles this has to survive: the live ISO's is 50x160 and **the installed
+# TTY's is 25x80, on the same panel**. 16 * 5 == 80 EXACTLY, with nothing spare.
+# 6 would be 96 and 7 -- what this was before §9g, sized for the old two-half
+# layout's 73 columns -- would be 112. Either wraps on the installed TTY, and a
+# wrapped row pushes the rows below it down and off the end of the screen: R-49's
+# defect arriving on the other axis.
 #
-# 7 leaves five columns highlighted, which is exactly the longest single-span
-# label in either layer. `test-deck-osk-tty.py` asserts nothing is ever
-# truncated, at every span, in both states -- so adding a longer label fails
-# the suite rather than quietly cropping on screen.
+# ⚠️ ZERO SLACK IS THE POINT AND ALSO THE HAZARD. Nothing may widen a cell, and
+# `write_at`'s `console_cols` guard exists because 80 is a measurement of one
+# console rather than a property of all of them -- READ THE GEOMETRY AT RUNTIME
+# (`docs/PROGRESS.md` §7, and `_console_rows` in `deck-input-mapper.py` already
+# does it for height).
 #
-# Two halves of 5 unit cells is 5*7*2 + GUTTER = 73 columns, inside an 80-column
-# console with room to spare.
-KEY_CELL = 7
+# ⚠️ AND THE LABELS STILL FIT, which is why 5 is affordable now and was not
+# before. A highlighted unit cell spends two columns on `[` and `]`, leaving
+# THREE -- and §9g's legend rule made the widest single-cell label three
+# characters ("1 !", "` ~", "< ^"), where the old layout's `enter` and `right`
+# needed five. The wide labels all landed on wide keys: `Enter` is span 2 (budget
+# 8, and "R2 Enter" is exactly 8), `Backspace`/`Shift`/`Caps`/`Move`/`Tab` are
+# span 3 (budget 13). `test-deck-osk-tty.py` asserts NOTHING is ever truncated,
+# at every span, in every shift/caps state -- so a longer label fails the suite
+# rather than quietly cropping on the one keyboard the installer has.
+KEY_CELL = 5
 
-# Blank columns between the two halves. This is the only thing telling a user
-# which cursor belongs to which thumb, so it is not decoration.
-GUTTER = 3
+# ⛔ There is no GUTTER any more, and it is deliberately not defined as 0.
+# T8 §9g: one continuous keyboard, no gap. `Layer.split` addresses cursors; it
+# draws nothing. A name still in scope would invite something to space by it.
 
 REVERSE = "\x1b[7m"
 RESET = "\x1b[0m"
@@ -125,66 +161,97 @@ def cell_text(label: str, width: int, highlighted: bool) -> str:
     return label.center(width)[:width]
 
 
-# --- visual parity with SteamOS's keyboard (T8 §9, degraded honestly) --------
+# --- visual parity with SteamOS's keyboard (T8 §9g, degraded honestly) --------
 #
-# ⛔ Not Valve's artwork -- one letter, ours, spelling out which of OUR OWN
-# "L2"/"R2"/"Y" strings (`deck_osk_layout.HINT_LEFT/HINT_RIGHT/HINT_SPACE`) a
-# hinted key carries. `docs/findings/P16-redistribution-and-trademark.md`.
+# 🔴 AN ACTIVE MODIFIER IS BLUE ON THE REFERENCE AND WE HAVE NO COLOUR, so it
+# is spelled. `OnScreenKeyboard.modifier_state()` answers "" | "once" |
+# "locked" | "on"; this is the word each becomes, appended to the key's face.
 #
-# ⚠️ T8 §9f's BADGE SHAPE is not representable here, and that is the honest
-# degrade rather than an oversight. The reference draws circles for face
-# buttons and rounded rectangles for triggers/stick-clicks -- a bare console
-# has neither shape nor colour, only characters. Every hint, whichever shape
-# it would be on Wayland, degrades to the SAME one-letter prefix already used
-# for HINT_LEFT/HINT_RIGHT ("Lshift", "Rback", and now "Yspace") -- one
-# uniform convention rather than two conventions a human would have to learn.
-HINT_GLYPH: dict[str, str] = {
-    osk.HINT_LEFT: "L", osk.HINT_RIGHT: "R", osk.HINT_SPACE: "Y",
-}
+# WHY WORDS RATHER THAN A SYMBOL OR AN ATTRIBUTE:
+#   * Reverse video is already taken -- it is the CURSOR, and a second meaning
+#     for one attribute makes an armed Shift indistinguishable from a Shift the
+#     thumb happens to be resting on.
+#   * Bold/underline survive neither `tmux capture-pane` without `-e` nor a
+#     plain serial log, which is the medium this module chose in the first
+#     place (see the header). Words survive all three, and grep.
+#   * A bare marker (`*`, `!`) has to be learnt and cannot distinguish a
+#     one-shot from a lock. That distinction is not cosmetic: a user who cannot
+#     tell them apart finds out by typing the wrong case, and this keyboard's
+#     job is a Wi-Fi passphrase that is echoed as dots.
+#
+# ONCE and LOCK are the same length on purpose, so the Shift key's drawn width
+# does not change as it cycles off -> once -> locked; only its text does.
+MODIFIER_TEXT: dict[str, str] = {"once": "ONCE", "locked": "LOCK", "on": "ON"}
 
 
 def display_label(kb: osk.OnScreenKeyboard, key: osk.Key) -> str:
-    """The text `cell_text` draws for one key: `face()`, plus -- when there is
-    room -- the shifted-symbol legend or the controller-button hint this key
-    carries. Never both: no key in the layout has both a `shift_label` and a
-    `hint` (asserted in `test-deck-osk-layout.py`).
+    """The text `cell_text` draws for one key.
+
+    Built from three things the core supplies, in descending priority when they
+    cannot all fit:
+
+      1. `face()` -- always drawn.
+      2. `modifier_state()` -- §9g's blue, spelled (`MODIFIER_TEXT`).
+      3. either `secondary_face()`, the shifted legend §9g draws SMALL ABOVE,
+         or the controller-button badge. Never both: no key in the layout has
+         both a `shift_label` and a `hint` (asserted in `test-deck-osk-tty.py`).
+
+    ⚠️ §9g's SMALL-ABOVE BECOMES BESIDE. A console has one type size, so
+    "smaller" is not available; drawing a second console line per grid row
+    would double the keyboard's height without buying the size difference that
+    made the reference readable. `1 !` beside is the honest degrade, and it is
+    what fits three columns.
+
+    ⚠️ THE BADGE IS THE FIRST THING DROPPED, THE MODIFIER WORD THE LAST. A
+    missing badge costs a user a shortcut they can also reach by aiming at the
+    key; a missing modifier word costs them the case of a character they cannot
+    read back. Nothing in today's layout actually overflows -- every candidate
+    below fits at KEY_CELL=5 -- so the ladder is exercised by synthetic keys in
+    the suite rather than left as an untested claim.
+
+    ⚠️ BADGES ARE NOT PAD-GATED HERE, though `osk.hint_visible()` exists and
+    the Wayland renderer uses it. §9g hides a trigger badge while that pad is
+    touched; doing that on a console would make a key's drawn TEXT depend on
+    something that changes several times a second, and `rows_on_screen` (docs
+    on `face_of`) compares a REFERENCE render against a console captured
+    afterwards. A badge that came and went between the two would make every
+    row count a race -- the same trap the paragraph below records paying for
+    once already. The badge names a BUTTON, which is true whether or not a
+    thumb is on the pad.
 
     ⚠️ THE SAME TEXT WHETHER THE KEY IS HIGHLIGHTED OR NOT, DELIBERATELY --
     THIS IS NOT AN OVERSIGHT, IT IS THE ONE THING THIS FUNCTION MUST NEVER DO.
-    `rows_on_screen` (docs on `face_of`) assumes a key's drawn TEXT is
-    invariant to the cursor's position: only the brackets and reverse video
-    may differ, because that machinery compares a REFERENCE render against a
-    console captured after the cursor had time to move -- "the cursors move
-    between a render and a console read", in `write_at`'s own words. A hint
-    that appeared cold and vanished hot would make that comparison a race,
-    and a first version of this function did exactly that: it passed the
-    unit suite that exercises `display_label` directly and then failed
-    `test-deck-osk-tty.py`'s "the highlight having moved does not lose a
-    row" two hundred lines later, for a reason that took a while to see.
-    Fixed by deciding ONCE, against the TIGHTER of the two budgets a key will
-    ever be drawn at (`key.span * KEY_CELL - 2`, the highlighted one -- brackets
-    always cost exactly 2 columns), and applying that decision unconditionally.
-
-    ⚠️ THE CONSEQUENCE: `enter` never gets a hint, in EITHER state. `enter` is
-    a single-span key whose face already fills the highlighted budget (5
-    characters, no spare) -- the one label KEY_CELL=7 was sized around in the
-    first place. `shift` (span 2) and `back` (4 characters, exactly 1 spare)
-    both fit; `enter` genuinely does not, and showing the hint only when cold
-    would be the same race this paragraph exists to rule out. Wayland has
-    pixels to spare and draws every hint regardless (`deck_osk_wayland.draw`);
-    the TTY renderer degrading enter's hint away rather than lying about it
-    sometimes IS the honest degrade this module's header asks for.
+    `rows_on_screen` assumes a key's drawn TEXT is invariant to the cursor's
+    position: only the brackets and reverse video may differ, because that
+    machinery compares a reference render against a console read after the
+    cursors had time to move. A hint that appeared cold and vanished hot would
+    make that comparison a race, and a first version of this function did
+    exactly that: it passed the unit suite that exercises `display_label`
+    directly and then failed "the highlight having moved does not lose a row"
+    two hundred lines later, for a reason that took a while to see. Fixed by
+    deciding ONCE, against the TIGHTER of the two budgets a key will ever be
+    drawn at (`key.span * KEY_CELL - 2`, the highlighted one -- brackets always
+    cost exactly 2 columns), and applying that decision unconditionally.
     """
-    face = kb.face(key)
-    secondary = kb.secondary_face(key)
+    face = osk.ascii_face(kb.face(key))
+    secondary = osk.ascii_face(kb.secondary_face(key))
+    state = MODIFIER_TEXT.get(kb.modifier_state(key), "")
+
     if secondary:
-        extra = f"{face} {secondary}"
-    elif key.hint:
-        extra = f"{HINT_GLYPH.get(key.hint, '')}{face}"
+        candidates = (f"{face} {secondary}", face)
     else:
-        return face
-    highlighted_budget = key.span * KEY_CELL - 2
-    return extra if len(extra) <= highlighted_budget else face
+        stem = f"{face} {state}" if state else face
+        candidates = ((f"{key.hint} {stem}", stem, face) if key.hint
+                      else (stem, face))
+
+    budget = key.span * KEY_CELL - 2  # the highlighted width -- the tighter one
+    for text in candidates:
+        if len(text) <= budget:
+            return text
+    # Nothing fits, not even the bare face. Returning it anyway lets `cell_text`
+    # truncate, which the suite's no-truncation invariant turns red on --
+    # inventing a shorter label here would hide that instead.
+    return candidates[-1]
 
 
 def render(kb: osk.OnScreenKeyboard, cursors: osk.Cursors) -> list[list[Segment]]:
@@ -193,34 +260,34 @@ def render(kb: osk.OnScreenKeyboard, cursors: osk.Cursors) -> list[list[Segment]
     Pure: no escape sequences, no file descriptors, no terminal size. Both the
     ANSI writer below and the tests consume this, so what CI asserts on is the
     same structure a user sees.
+
+    One continuous grid (T8 §9g): every row spans all `Layer.width` cells and
+    each key's columns come from `Layer.cell_bounds`, so the drawn width cannot
+    drift from the grid the hit test uses. `Layer.__post_init__` already refuses
+    a layer whose rows disagree on width, which is why nothing here re-checks
+    it -- the ragged-layer guard this function used to carry belonged to the old
+    two-half model and is gone with it.
     """
     layer = kb.layer
-    highlights = {
-        half: kb.locate(half, *cursors.position(half)) for half in ("left", "right")
-    }
-
-    left_rows, right_rows = layer.left, layer.right
-    if len(left_rows) != len(right_rows):
-        # Both halves of one layer must have the same row count or they cannot
-        # line up on screen. A layout that breaks this is a layout bug, and
-        # silently rendering a ragged keyboard would hide it.
-        raise ValueError(
-            f"layer {layer.name!r} has {len(left_rows)} left rows and "
-            f"{len(right_rows)} right rows; they must match"
-        )
+    # ⚠️ A SET OF CELLS, NOT ONE PER HALF. Both cursors can be over the SAME key
+    # -- the space bar straddles `split` exactly so either thumb reaches it --
+    # and that key is one highlighted cell, drawn once.
+    hot_cells = {found for found in
+                 (kb.locate(half, *cursors.position(half))
+                  for half in ("left", "right"))
+                 if found is not None}
 
     out: list[list[Segment]] = []
-    for row_index in range(len(left_rows)):
+    for row_index, row in enumerate(layer.rows):
+        bounds = layer.cell_bounds(row_index)
         segments: list[Segment] = []
-        for half, rows in (("left", left_rows), ("right", right_rows)):
-            if half == "right":
-                segments.append((" " * GUTTER, False))
-            for key_index, key in enumerate(rows[row_index]):
-                hot = highlights[half] == (row_index, key_index)
-                segments.append((
-                    cell_text(display_label(kb, key), key.span * KEY_CELL, hot),
-                    hot,
-                ))
+        for key_index, key in enumerate(row):
+            start, end = bounds[key_index]
+            hot = (row_index, key_index) in hot_cells
+            segments.append((
+                cell_text(display_label(kb, key), (end - start) * KEY_CELL, hot),
+                hot,
+            ))
         out.append(segments)
     return out
 
@@ -258,10 +325,10 @@ def face_of(cell: str) -> str:
     between a render and a read, and a keyboard that is intact except for where
     the highlight sits is intact.
 
-    ⚠️ Geometry, not string surgery, and the symbols layer is why: `[` and `]`
-    are KEYS there. A plain one draws as `   [   `, whose first column is a
-    space, so it is read as the face `[` and not as an empty highlight. A
-    highlighted one draws as `[  [  ]` and unwraps to the same face.
+    ⚠️ Geometry, not string surgery, and the punctuation keys are why: `[` and
+    `]` are KEYS on this layout. A plain one draws as ` [ {`, whose first
+    column is a space, so it is read as its own face and not as an empty
+    highlight. A highlighted one draws as `[[ {]` and unwraps to the same face.
     """
     if len(cell) >= 2 and cell[0] == "[" and cell[-1] == "]":
         return cell[1:-1].strip()
@@ -273,11 +340,11 @@ def rows_on_screen(screen: str, rows: list[list[Segment]]) -> list[int]:
 
     ⚠️ COUNT THE ROWS. DO NOT GREP FOR A WORD. R-49's defect was five keyboard
     rows clamped onto one line by a console that had shrunk underneath them:
-    garbled, unusable, and still carrying the word `shift` -- so `osk.shown=1`
+    garbled, unusable, and still carrying the word `Shift` -- so `osk.shown=1`
     passed and a human glancing at a screenshot saw "a keyboard". R-52 then
     reproduced the same lie from the opposite direction: a full-screen TUI
     repainting every line but the last leaves exactly the function row alive,
-    which is the row `shift` is on. Only the count separates those from a
+    which is the row `space` is on. Only the count separates those from a
     keyboard that is actually on screen.
 
     `screen` is the console as text, one line per console row. `/dev/vcsN`
@@ -288,7 +355,8 @@ def rows_on_screen(screen: str, rows: list[list[Segment]]) -> list[int]:
     column that row puts it. Partial credit is the thing being guarded against:
     half a keyboard row is not a keyboard row, and a user typing on it has no
     way to tell. Columns to the right of the keyboard are not inspected -- the
-    keyboard is 73 columns wide and does not own the rest of the line.
+    keyboard is `Layer.width * KEY_CELL` columns wide (80 today) and does not
+    own anything past that, which on the installed TTY is nothing at all.
     """
     return [n for n, line in enumerate(screen.split("\n"), start=1)
             if any(_line_carries(line, row) for row in rows)]
@@ -309,7 +377,8 @@ def _line_carries(line: str, row: list[Segment]) -> bool:
 
 
 def write_at(stream, rows: list[list[Segment]], top_row: int, *,
-             ansi: bool = True, console_rows: int | None = None) -> None:
+             ansi: bool = True, console_rows: int | None = None,
+             console_cols: int | None = None) -> None:
     """Draw the keyboard with its first line at `top_row` (1-based).
 
     ⚠️ THE INSTALLER'S TUI IS DRAWING ON THIS SAME CONSOLE, and the obvious way
@@ -327,12 +396,31 @@ def write_at(stream, rows: list[list[Segment]], top_row: int, *,
     `console_rows` is the guard. Given it, a draw that would fall outside the
     console REFUSES and raises, rather than painting five rows onto one.
 
-    ⚠️ THE GUARD IS NOT A CO-TENANCY MECHANISM, and nothing here is. It stops
-    the keyboard drawing off the end of the console; it cannot stop anything
-    else drawing over it. What keeps the keyboard and a full-screen TUI apart
-    is the policy in this module's header -- they are never up at the same
-    time -- and R-52 in docs/findings/P18-osk-hardware-pass.md is the
+    🔴 `console_cols` IS THE SAME GUARD ON THE OTHER AXIS, and since §9g the
+    keyboard needs every column the installed TTY has (see `KEY_CELL`). A row
+    wider than the console does not get clipped -- the VT WRAPS it, so each
+    keyboard row becomes two, the rows below are pushed down, and the bottom of
+    the keyboard scrolls off exactly the way R-49's did. Same silent failure,
+    same treatment: refuse loudly.
+
+    ⚠️ BOTH GUARDS ARE OPT-IN, and a caller that reads neither geometry gets
+    neither check. `docs/PROGRESS.md` §7 is explicit that the two consoles this
+    ships to differ (50x160 live, 25x80 installed) and that geometry is to be
+    READ AT RUNTIME, never assumed -- so a caller drawing on a real console
+    should pass both.
+
+    ⚠️ THE GUARDS ARE NOT A CO-TENANCY MECHANISM, and nothing here is. They
+    stop the keyboard drawing off the edge of the console; they cannot stop
+    anything else drawing over it. What keeps the keyboard and a full-screen
+    TUI apart is the policy in this module's header -- they are never up at the
+    same time -- and R-52 in docs/findings/P18-osk-hardware-pass.md is the
     measurement of what happens when they are.
+
+    A row that exactly fills the console's width is safe, which is what makes
+    80-in-80 usable rather than merely arithmetic: the VT defers its wrap until
+    the NEXT character is written, and the next thing written here is always an
+    absolute cursor move (`\\x1b[row;1H`) or the restore below, both of which
+    clear the pending wrap. Nothing is ever written past the last column.
 
     Cursor position is saved and restored around the draw, so the TUI's own
     cursor does not end up parked in the keyboard.
@@ -343,6 +431,14 @@ def write_at(stream, rows: list[list[Segment]], top_row: int, *,
             raise ValueError(
                 f"the keyboard needs rows {top_row}-{last} but the console has "
                 f"{console_rows}; drawing would collapse them onto the last line"
+            )
+    if console_cols is not None:
+        drawn = width(rows)
+        if drawn > console_cols:
+            raise ValueError(
+                f"the keyboard is {drawn} columns wide but the console has "
+                f"{console_cols}; every row would wrap and push the rest of the "
+                f"keyboard off the bottom"
             )
     body = (to_ansi if ansi else to_plain)(rows)
     parts = ["\x1b[s"]  # save cursor
