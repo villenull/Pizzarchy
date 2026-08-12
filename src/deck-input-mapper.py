@@ -901,6 +901,12 @@ class Mapper:
         """
         if code not in POINTER_AXES:
             return (0, 0)
+        # Feed the SAME state the badge gate reads, so `pointer_lifted()` below
+        # can ask `pad_touched` the one release question this file knows how to
+        # ask. Without this line `pad_last` is only ever written on the OSK
+        # path (`_osk_event`), and the pointer -- which runs when the keyboard
+        # is NOT up -- would be asking about a sample from minutes ago.
+        self.note_pad_sample(code, value)
         # ⚠️ Re-baselining must NOT wipe the other axis.
         #
         # This previously did `self.pointer_last = {code: value}`, which cleared
@@ -939,6 +945,76 @@ class Mapper:
         self.pointer_last[code] = previous + delta * POINTER_DIVISOR
         # The pad's Y axis grows upward; screens grow downward.
         return (delta, 0) if POINTER_AXES[code] == "x" else (0, -delta)
+
+    def pointer_lifted(self) -> bool:
+        """Report boundary: is the right pad RELEASED? True means throw this
+        report's accumulated motion away and re-baseline.
+
+        🔴 THE OPERATOR'S "when i release, the mouse moves a non-zero distance
+        in an annoying way" (2026-08-12), AND IT IS THE SAME LIFT SIGNATURE
+        `pad_touched` WAS FIXED FOR AN HOUR EARLIER, in the path that had no
+        such rule. `POINTER_JUMP_RAW` alone does not catch a lift: it catches
+        the step to centre only when the thumb was FURTHER than 4000 counts
+        out. A thumb lifting from anywhere nearer emits `int(step/125)` pixels
+        of real motion toward the pad centre -- up to 31 px, in the exact
+        direction the finger happened to be sitting, which is why the operator
+        described the cursor as "reading exactly how i released". A lift from
+        `x=-1147` (capture #6) jumps 9 px; `x=96 -> -121` (capture #8's
+        residual) jumps 1. Nothing about the sample says "discontinuity"
+        because, on that axis, it is not one.
+
+        ⚠️ ONE RELEASE RULE, NOT TWO. This asks `pad_touched("right")` -- the
+        PAD_RELEASE_RESIDUAL rule measured over 23 real lifts -- and asks it of
+        the same `pad_last` the badges and the aiming cursor read. Two release
+        rules that disagree would mean a lift that hides a badge but still
+        moves the pointer, or the reverse; there is no version of that which is
+        better than one imperfect rule. Its documented blind spot (a thumb at
+        dead centre, or on a centre line within 256 counts) costs the pointer
+        one report of motion -- ~4 ms at 250 Hz -- and then re-baselines.
+
+        🔴 WHY AT THE REPORT BOUNDARY AND NOT PER SAMPLE. The rule needs BOTH
+        axes, and a lift delivers them one after the other: `x` first, then
+        `y`. Asked at the `x=0` sample, `y` still holds its pre-lift value and
+        the pad reads TOUCHED -- which is exactly the sample whose motion has
+        to be dropped. Asked once the report closes, both axes are in and the
+        rule sees the lift it was measured on. main() already accumulates a
+        report's motion and emits it on SYN_REPORT for an unrelated reason
+        (staircasing), so the buffer this needs is the one already there.
+
+        ✅ AND THE TWO ZEROES REALLY ARE IN ONE REPORT -- read out of the
+        SHIPPED `hid-steam.ko` (2026-08-12), because the Deck was idle and no
+        live capture could be taken. `steam_do_input_event` is inlined into
+        `steam_raw_event`; the untouched-pad path is a cold block that emits
+        the two axes back to back with nothing in between:
+
+            2072:  xor %ecx,%ecx        # value = 0
+                   mov $0x12,%edx       # ABS_HAT1X
+                   mov $0x3,%esi        # EV_ABS
+                   call input_event
+            2090:  xor %ecx,%ecx        # value = 0
+                   mov $0x13,%edx       # ABS_HAT1Y
+                   mov $0x3,%esi
+                   call input_event
+
+        There is no `input_event(dev, EV_SYN, SYN_REPORT, 0)` between them --
+        the driver syncs once, after the whole HID packet is unpacked. So a
+        lift can never be split across two SYN_REPORTs, and this check can
+        never run with only half of it visible. (The left pad's pair,
+        `ABS_HAT0X`/`ABS_HAT0Y`, is compiled identically at `2031`.)
+
+        ⚠️ CLEARING BOTH AXES IS DELIBERATE AND IS NOT THE RE-BASELINING BUG.
+        That defect (§7) was `pointer_last = {code: value}` running on EVERY
+        sample, so X and Y wiped each other and diagonal motion emitted
+        nothing. This clears both only at a release -- a real touch boundary,
+        exactly like the `stale` path above -- and both axes re-baseline
+        together on the next touch. It is also what finally kills the
+        lift-and-retouch jump inside POINTER_TOUCH_GAP that the jump clamp only
+        half caught.
+        """
+        if self.pad_touched("right"):
+            return False
+        self.pointer_last.clear()
+        return True
 
     def _dpad_direction(self, hat_axis: int) -> int:
         """Resolve one axis from the held d-pad buttons. Opposing edges held
@@ -1382,6 +1458,110 @@ def lock_state_from_monitors(monitors_json: str) -> bool | None:
     return False
 
 
+# --- the SCREENSAVER, which is a different thing from the lock ---------------
+#
+# 🔴 THE OPERATOR'S REQUEST (2026-08-12): *"can we hide the keyboard prior to
+# going into screensaver? right now the screensaver plays and the keyboard is
+# still there"*. The keyboard is an `overlay` layer with `above_lock=2`, so it
+# sits above a fullscreen toplevel exactly as it sits above the lock, and the
+# screensaver plays around it.
+#
+# 🔴 AND THE ONE WAY THIS MUST NOT BE BUILT: hiding on the screensaver must
+# never become hiding on the LOCK. §5.24 records that the power button produces
+# a password screen the user cannot answer without this keyboard, and the fix
+# was verified in pixels. `LockWatcher`'s docstring says the same. So the whole
+# question is: what tells the two states apart, and how sure is that?
+#
+# ✅ THEY ARE DIFFERENT OBJECTS IN DIFFERENT hyprctl QUERIES. Measured on the
+# Deck 2026-08-12 with the screensaver actually playing:
+#
+#     hyprctl -j clients   ->  [{"class": "org.omarchy.screensaver",
+#                                "initialClass": "org.omarchy.screensaver",
+#                                "title": "foot", "mapped": true,
+#                                "fullscreen": 2, ...}]
+#     hyprctl -j monitors  ->  eDP-1 solitaryBlockedBy: null
+#
+# The screensaver is an ordinary TOPLEVEL WINDOW -- a terminal running
+# `omarchy-screensaver`. The lock is an `ext_session_lock_v1` held by the
+# compositor's session-lock manager, which is what `solitaryBlockedBy` reports
+# and what `lock_state_from_monitors` above reads. A window cannot appear in
+# `solitaryBlockedBy` and a session lock cannot appear in `clients`: telling
+# them apart is not a heuristic, it is asking two different questions of two
+# different objects. That matters here more than anywhere else in this file,
+# because §5.24's failure is the one this feature could reintroduce.
+#
+# ⚠️ THE APP-ID IS A CONTRACT, NOT AN INCIDENTAL STRING. Upstream's
+# `omarchy-launch-screensaver` passes `--class=org.omarchy.screensaver` (or
+# `--app-id=`) to every one of the four terminals it supports, then identifies
+# its own window two ways: `pgrep -f '[o]rg.omarchy.screensaver'` for the
+# already-running check, and `openwindow>>*,org.omarchy.screensaver,*` on
+# Hyprland's event socket to wait for it to map. We match what upstream names
+# it, and against the same field it sets.
+#
+# ⚠️ AND THE CHECK IS STILL NOT ALLOWED TO DECIDE ALONE. `LockWatcher.tick`
+# only ever reaches this query after an EXPLICIT unlocked reading -- not
+# "unknown", not "we did not ask". A screensaver playing over a lock screen
+# (the idle service does not stop firing because the session locked) is
+# therefore invisible to it, and the keyboard stays exactly where the user
+# needs it. Fails toward doing nothing, like everything else here: unreadable,
+# unparseable or an unexpected shape all return None and hide nothing.
+SCREENSAVER_STATE_ARGV: tuple[str, ...] = ("hyprctl", "-j", "clients")
+SCREENSAVER_APP_ID = "org.omarchy.screensaver"
+
+
+def screensaver_from_clients(clients_json: str) -> bool | None:
+    """True if any client window is Omarchy's screensaver; False if the JSON
+    parses and none is; None if it cannot be read this way at all.
+
+    Both `class` and `initialClass` are checked. Hyprland reports the app-id a
+    window currently has AND the one it mapped with, and a terminal that
+    re-announces its app-id after start would change only the first -- matching
+    either costs nothing and neither field can hold this value by accident.
+    """
+    try:
+        clients = json.loads(clients_json)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(clients, list):
+        return None
+    for client in clients:
+        if not isinstance(client, dict):
+            continue
+        if any(client.get(key) == SCREENSAVER_APP_ID
+               for key in ("class", "initialClass")):
+            return True
+    return False
+
+
+def read_screensaver_state(argv: tuple[str, ...] = SCREENSAVER_STATE_ARGV,
+                           timeout: float = LOCK_STATE_TIMEOUT,
+                           env=None) -> bool | None:
+    """One bounded, synchronous read of Hyprland's client list.
+
+    Same shape, same bound and same `env` requirement as `read_lock_state` --
+    see the module note above that function for why a blocking call is a
+    deliberate, scoped exception here. This one is asked LESS often than that
+    one: `LockWatcher.tick` skips it entirely while locked, while the state is
+    unknown, and on the unlock edge itself.
+
+    ⚠️ WHAT IT COSTS, MEASURED RATHER THAN ASSUMED. On the Deck, 2026-08-12,
+    eight runs each: `hyprctl -j monitors` 9.1-10.0 ms, `hyprctl -j clients`
+    9.2-9.9 ms. So the worst case this adds is ~10 ms once per
+    LOCK_POLL_INTERVAL (0.75 s) -- about 1.3% of the input loop, and only while
+    the layer keyboard is on screen in an unlocked session. LOCK_STATE_TIMEOUT
+    still bounds a hung compositor at 0.3 s, which is the number that matters.
+    """
+    try:
+        result = subprocess.run(
+            list(argv), capture_output=True, text=True, timeout=timeout,
+            env=session_environ() if env is None else env)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return screensaver_from_clients(result.stdout)
+
+
 def read_lock_state(argv: tuple[str, ...] = LOCK_STATE_ARGV,
                     timeout: float = LOCK_STATE_TIMEOUT,
                     env=None) -> bool | None:
@@ -1405,13 +1585,37 @@ def read_lock_state(argv: tuple[str, ...] = LOCK_STATE_ARGV,
     return lock_state_from_monitors(result.stdout)
 
 
+# What the journal says for each reason `LockWatcher.tick` can return. A dict
+# rather than an if-chain at the call site so a reason added to the watcher and
+# forgotten here still logs SOMETHING (the raw reason) instead of hiding the
+# keyboard silently -- on this device an unexplained disappearance is the same
+# symptom as a crash.
+HIDE_REASONS = {
+    "unlock": ("the session unlocked; hiding the keyboard it was shown across "
+               "(docs/PROGRESS.md §5.24a #3)"),
+    "screensaver": ("the screensaver is up and the session is NOT locked; "
+                    "hiding the keyboard (T8 §9h #3)"),
+}
+
+
 @dataclass
 class LockWatcher:
-    """Detects a LOCKED -> UNLOCKED edge, throttled and self-correcting.
+    """Decides when the keyboard should take itself off screen.
 
     `tick()` is meant to be called on every pass through the main loop while
     the layer-shell keyboard is on screen; it polls at most once per
-    `interval` seconds and reports True exactly once, on the transition.
+    `interval` seconds and names a reason to hide, or None:
+
+        "unlock"       a LOCKED -> UNLOCKED edge, reported exactly once
+        "screensaver"  the session is UNLOCKED and Omarchy's screensaver is
+                       on screen (operator request, T8 §9h #3)
+
+    ⚠️ ONE POLL FEEDS BOTH, and the lock reading is the gate on the other.
+    The screensaver query is only reached after an EXPLICIT unlocked reading:
+    locked hides nothing, and unknown hides nothing. A second, independent
+    watcher would have had to read the lock state for itself anyway -- and
+    could have got a different answer for the same instant, which on this
+    device means hiding the keyboard over a password prompt.
 
     ⚠️ EDGE-TRIGGERED, IN ONE DIRECTION ONLY -- THIS IS WHAT KEEPS IT FROM
     EVER FIRING ON LOCK. `saw_lock` starts False every time `start()` is
@@ -1431,7 +1635,8 @@ class LockWatcher:
     `saw_lock` exactly where it was: the keyboard just keeps behaving as it
     does today, staying up until STEAM+X. The only failure mode this adds is
     "does not auto-hide"; it cannot add "cannot be hidden at all", because
-    the chord never goes through this class.
+    the chord never goes through this class. `read_screensaver_state()` fails
+    the same way, and one step further out: only a literal True hides.
     """
 
     interval: float = LOCK_POLL_INTERVAL
@@ -1452,20 +1657,35 @@ class LockWatcher:
     def armed(self) -> bool:
         return self.next_check != float("inf")
 
-    def tick(self, now: float, reader=read_lock_state) -> bool:
-        """Poll if due. Returns True exactly on a LOCKED -> UNLOCKED edge."""
+    def tick(self, now: float, reader=read_lock_state,
+             screensaver=read_screensaver_state) -> "str | None":
+        """Poll if due. Returns why the keyboard should hide, or None.
+
+        🔴 EVERY EARLY RETURN BELOW IS A REFUSAL TO HIDE, and the order they
+        appear in is the safety argument. Nothing past the `if state:` line
+        runs while the session is locked, so no reading of any other sensor --
+        present or future -- can hide the keyboard a lock prompt needs.
+        """
         if not self.armed or now < self.next_check:
-            return False
+            return None
         self.next_check = now + self.interval
         state = reader()
         if state is None:
-            return False
+            return None
         if state:
             self.saw_lock = True
-            return False
+            return None
         was_locked = self.saw_lock
         self.saw_lock = False
-        return was_locked
+        if was_locked:
+            return "unlock"
+        # Unlocked, and not an unlock edge: the screensaver is the only other
+        # thing that hides. `is True` and not truthiness -- None means the
+        # question could not be answered, and an unanswered question changes
+        # nothing here exactly as it changes nothing above.
+        if screensaver() is True:
+            return "screensaver"
+        return None
 
     def next_deadline(self) -> float | None:
         """For the caller's select() timeout. None when not armed."""
@@ -2490,6 +2710,24 @@ def main() -> None:
             ui.write(e.EV_REL, e.REL_Y, dy)
         ui.syn()
 
+    def flush_motion() -> None:
+        """Emit one report's worth of accumulated pointer motion -- unless that
+        report was the LIFT, in which case it is dropped.
+
+        🔴 THE ONLY DRAIN, and that is the point. There are two places a report
+        can end (SYN_REPORT, and the end of a batch from a device that sends
+        none), and a release check on only one of them is a release check that
+        can be walked around. `Mapper.pointer_lifted` carries the reasoning and
+        the measurement; this is where it has to be asked, because the buffer it
+        needs to discard lives here.
+        """
+        nonlocal pending_dx, pending_dy
+        if mapper.pointer_lifted():
+            pending_dx = pending_dy = 0
+        if pending_dx or pending_dy:
+            emit_motion(pending_dx, pending_dy)
+        pending_dx = pending_dy = 0
+
     osk_visible = False
 
     # Auto-hide on unlock (docs/PROGRESS.md §5.24a #3). Only the `layer`
@@ -3121,9 +3359,7 @@ def main() -> None:
                     continue
                 for event in events:
                     if event.type == e.EV_SYN and event.code == e.SYN_REPORT:
-                        if pending_dx or pending_dy:
-                            emit_motion(pending_dx, pending_dy)
-                            pending_dx = pending_dy = 0
+                        flush_motion()
                         continue
                     # ⚠️ `not mapper.osk_active`. With the keyboard up the right
                     # pad is a CURSOR, not the pointer; without this it would be
@@ -3140,9 +3376,9 @@ def main() -> None:
                     for key, value in mapper.translate(event.type, event.code, event.value, now):
                         emit(key, value)
                     run_pending(mapper.pending_actions)
-                # A device that never sends SYN_REPORT must still move.
-                if pending_dx or pending_dy:
-                    emit_motion(pending_dx, pending_dy)
+                # A device that never sends SYN_REPORT must still move -- and
+                # must still not move on a lift, hence the same drain.
+                flush_motion()
                 # Redraw once per batch, not per event: the pads run at 250 Hz
                 # and a redraw per sample would spend the whole loop writing
                 # escape sequences.
@@ -3160,10 +3396,11 @@ def main() -> None:
             # by nothing but the timeout this class asked for, or an unlock
             # with no pad activity after it goes undetected until the pad
             # moves again.
-            if osk_backend == "layer" and osk_visible and lock_watcher.tick(now):
-                say("the session unlocked; hiding the keyboard it was shown "
-                    "across (docs/PROGRESS.md §5.24a #3)")
-                set_osk_visible(False)
+            if osk_backend == "layer" and osk_visible:
+                hide_because = lock_watcher.tick(now)
+                if hide_because is not None:
+                    say(HIDE_REASONS.get(hide_because, hide_because))
+                    set_osk_visible(False)
     except KeyboardInterrupt:
         pass
     finally:

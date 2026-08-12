@@ -759,6 +759,228 @@ mm.pointer_delta(e.ABS_HAT0X, 0, 0.0)
 check("left trackpad does not move the pointer",
       mm.pointer_delta(e.ABS_HAT0X, 30000, 0.05), (0, 0))
 
+# --- 🔴 THE LIFT MUST NOT MOVE THE POINTER (T8 §9h #3) -----------------------
+#
+# The operator, 2026-08-12: *"when i release, often the mouse moves a non-zero
+# distance in an annoying way. almost as if in the release the deck is reading
+# exactly how i released and moving the mouse that way"*.
+#
+# ⚠️ AND `POINTER_JUMP_RAW` ABOVE IS WHY THAT IS NOT ALREADY FIXED. It catches
+# the step to centre only when the thumb was FURTHER OUT than 4000 counts.
+# Lifting from anywhere nearer produces a step the clamp calls ordinary
+# movement, and `int(step/125)` pixels of cursor travel toward the pad centre --
+# in the exact direction the finger was sitting, which is what the operator
+# described. The fixtures below are the SAME 23 real lifts §9h #1 was measured
+# from, so this is not a hypothetical shape: it is the hardware's.
+#
+# The capture recorded the LEFT pad and the pointer is the RIGHT one. That is
+# not a substitution: the shipped `hid-steam.ko` compiles the two pairs
+# identically (`Mapper.pointer_lifted` quotes both), so a left-pad lift and a
+# right-pad lift are the same four instructions with a different axis constant.
+CAPTURED_LIFT_TAILS = [
+    "L.y=3338 L.x=4782 L.y=3370 L.x=4651 L.x=0 L.y=0",
+    "R.y=-14856 R.x=-8610 R.x=-8435 R.x=-8192 R.x=0 R.y=0",
+    "L.x=8973 L.x=8746 L.x=8208 L.x=8070 L.x=0 L.y=0",
+    "L.x=11646 L.y=-1358 L.x=11500 L.y=-1198 L.x=0 L.y=0",
+    "L.x=2799 L.y=6849 L.x=2612 L.y=6980 L.x=0 L.y=0",
+    "L.y=10920 L.x=-997 L.x=-1147 L.y=10881 L.x=0 L.y=0",
+    "L.x=16846 L.y=-860 L.x=16624 L.y=-904 L.x=0 L.y=0",
+    "L.x=270 L.y=17200 L.x=96 L.y=17234 L.x=-121 L.y=0",   # <-- the residual
+    "L.x=7803 L.y=-3163 L.x=7614 L.y=-2972 L.x=0 L.y=0",
+    "L.x=14951 L.x=14216 L.x=14057 L.x=13897 L.x=0 L.y=0",
+    "L.x=21238 L.y=-4032 L.x=21379 L.y=-4093 L.x=0 L.y=0",
+    "L.x=19461 L.y=-6206 L.x=19516 L.y=-6354 L.x=0 L.y=0",
+    "L.x=15803 L.y=4620 L.x=14922 L.y=4587 L.x=0 L.y=0",
+    "L.y=-4215 L.y=-4349 L.y=-4485 L.y=-4626 L.x=0 L.y=0",
+    "L.x=6808 L.y=4190 L.x=6853 L.y=4156 L.x=0 L.y=0",
+    "R.y=14871 R.y=14832 R.y=14800 R.y=13996 R.x=0 R.y=0",
+    "L.y=-10616 L.y=-10581 L.x=0 L.y=0 R.x=0 R.y=0",
+    "L.x=20373 L.y=-18616 L.x=20529 L.y=-18671 L.x=0 L.y=0",
+    "L.x=6356 L.y=4565 L.x=6131 L.y=4724 L.x=0 L.y=0",
+    "L.x=-6725 L.x=-6853 L.x=-6900 L.x=-6936 L.x=0 L.y=0",
+    "L.x=24931 L.y=-14478 L.y=-14424 L.y=-14379 L.x=0 L.y=0",
+    "L.x=16309 L.y=-12116 L.x=16439 L.y=-12255 L.x=0 L.y=0",
+    "L.x=-8998 L.y=9646 L.x=-9163 L.y=9812 L.x=0 L.y=0",
+]
+check("all 23 captured lifts are carried, not a convenient subset",
+      len(CAPTURED_LIFT_TAILS), 23)
+
+RIGHT_AXIS = {"x": e.ABS_HAT1X, "y": e.ABS_HAT1Y}
+
+
+def reports_from_tail(tail: str) -> list:
+    """Group a captured tail into evdev REPORTS -- the unit main() emits on.
+
+    The capture logged samples, not SYN_REPORTs (it was taken to answer a
+    different question). An axis repeating is the only place a report can have
+    ended, so that is the split: `x=96 y=17234 x=-121 y=0` is two reports, and
+    the lift's `x` and `y` land in ONE. That grouping is not a guess -- the
+    disassembly quoted in `pointer_lifted` shows the driver emitting a pad's
+    two zeroes back to back with no `input_sync` between them.
+    """
+    reports, current, seen = [], [], set()
+    for token in tail.split():
+        label, value = token.split("=")
+        axis = label.split(".")[1]
+        if axis in seen:
+            reports.append(current)
+            current, seen = [], set()
+        current.append((axis, int(value)))
+        seen.add(axis)
+    if current:
+        reports.append(current)
+    return reports
+
+
+def replay(reports: list, lift_check: bool = True) -> list:
+    """Drive one Mapper the way main() does: accumulate a report's motion, then
+    drain it at the report boundary. `lift_check=False` is the OLD behaviour --
+    kept so the fixtures can be shown to actually reproduce the defect."""
+    mm = fresh()
+    emitted, now = [], 0.0
+    for report in reports:
+        dx = dy = 0
+        for axis, value in report:
+            ddx, ddy = mm.pointer_delta(RIGHT_AXIS[axis], value, now)
+            dx += ddx
+            dy += ddy
+        if lift_check and mm.pointer_lifted():
+            dx = dy = 0
+        emitted.append((dx, dy))
+        # 250 Hz, so nothing here is ever more than 4 ms apart: the touch-gap
+        # timer CANNOT be what suppresses these. The release rule has to.
+        now += 0.004
+    return emitted
+
+
+check("the fixture's reports are grouped as the driver emits them -- the "
+      "residual lift's x and y are ONE report",
+      reports_from_tail(CAPTURED_LIFT_TAILS[7])[-1], [("x", -121), ("y", 0)])
+check("...and a tail that reports one axis at a time stays one axis per report",
+      reports_from_tail(CAPTURED_LIFT_TAILS[2])[:2], [[("x", 8973)], [("x", 8746)]])
+check("no fixture is replayed near the touch-gap threshold -- 23 lifts of at "
+      "most 6 samples at 250Hz",
+      max(len(reports_from_tail(t)) for t in CAPTURED_LIFT_TAILS) * 0.004
+      < m.POINTER_TOUCH_GAP, True)
+
+# 🔴 THE DEFECT, MEASURED ON THE FIXTURE. If this number is 0 the fixtures
+# prove nothing -- they would pass against code that never had the bug. It is
+# the count of captured lifts whose FINAL report moved the cursor under the
+# rule that shipped.
+jumped_before = [i for i, tail in enumerate(CAPTURED_LIFT_TAILS, 1)
+                 if replay(reports_from_tail(tail), lift_check=False)[-1] != (0, 0)]
+check("the captured lifts really did move the pointer under the OLD rule -- "
+      "these fixtures can fail", len(jumped_before) >= 7, True)
+check("...and the worst of them is a jump a user would call annoying "
+      "(measured: 26 px, lift #1)",
+      max(max(abs(dx), abs(dy)) for dx, dy in
+          [replay(reports_from_tail(t), lift_check=False)[-1]
+           for t in CAPTURED_LIFT_TAILS]) >= 20, True)
+
+# 🔴 AND THE FIX: not one of the 23 moves the pointer on its lift.
+jumped_after = [i for i, tail in enumerate(CAPTURED_LIFT_TAILS, 1)
+                if replay(reports_from_tail(tail))[-1] != (0, 0)]
+check("NOT ONE of the 23 captured lifts moves the pointer", jumped_after, [])
+
+# ...including the one lift in 23 that does not reach centre on both axes.
+# `pad_touched`'s residual is what catches this one, which is the whole reason
+# there is one release rule here and not two.
+check("the residual lift (#8, x stops at -121) emits nothing either",
+      replay(reports_from_tail(CAPTURED_LIFT_TAILS[7]))[-1], (0, 0))
+check("...and it is genuinely the residual doing it, not an exact zero",
+      reports_from_tail(CAPTURED_LIFT_TAILS[7])[-1][0][1] != 0, True)
+
+# ⚠️ THE OTHER HALF, and without it `return True` passes everything above.
+# Real movement inside these same captures must still reach the cursor.
+moved_before_lift = [tail for tail in CAPTURED_LIFT_TAILS
+                     if any(step != (0, 0)
+                            for step in replay(reports_from_tail(tail))[:-1])]
+check("the captured strokes still move the cursor before they end -- 20 of the "
+      "23 tails carry real motion, and all of it survives",
+      len(moved_before_lift), 20)
+
+# A deliberate, ordinary stroke: no zeroes anywhere, nothing may be suppressed.
+stroke = [[("x", 10000), ("y", 10000)]]
+stroke += [[("x", 10000 + m.POINTER_DIVISOR * n),
+            ("y", 10000 + m.POINTER_DIVISOR * n)] for n in range(1, 6)]
+check("an ordinary diagonal stroke emits on every report and on both axes",
+      replay(stroke)[1:], [(1, -1)] * 5)
+
+# ⚠️ AND THE RE-BASELINE MUST NOT WIPE THE OTHER AXIS. §7 records a measured
+# defect where re-baselining replaced the whole dict, X and Y wiped each other,
+# and diagonal motion emitted NOTHING. `pointer_lifted` clears both -- at a
+# release, which is a real touch boundary -- so this drives a lift and then a
+# fresh diagonal stroke through the same mapper the way the device would.
+lift_then_stroke = [[("x", 8000), ("y", 8000)],
+                    [("x", 8000 + m.POINTER_DIVISOR * 2),
+                     ("y", 8000 + m.POINTER_DIVISOR * 2)],
+                    [("x", 0), ("y", 0)]]                      # the lift
+# ⚠️ The re-touch lands WITHIN POINTER_JUMP_RAW of the lift's zero, on
+# purpose: further out and the jump clamp would absorb it and this would pass
+# against a `pointer_lifted` that forgot to re-baseline at all.
+retouch = -(m.POINTER_JUMP_RAW - 1000)
+lift_then_stroke += [[("x", retouch), ("y", retouch)]]         # touched down again
+lift_then_stroke += [[("x", retouch + m.POINTER_DIVISOR * n),
+                      ("y", retouch + m.POINTER_DIVISOR * n)] for n in range(1, 4)]
+replayed = replay(lift_then_stroke)
+check("the lift itself emits nothing", replayed[2], (0, 0))
+check("...and the re-touch elsewhere does not hurl the cursor there",
+      replayed[3], (0, 0))
+check("...and diagonal motion after the lift still emits on BOTH axes",
+      replayed[4:], [(1, -1)] * 3)
+
+# The release rule here is `pad_touched`'s, so its boundary is the same one.
+# One count outside the residual is a touch and MUST still move the cursor --
+# otherwise the "fix" is a deadband that eats real motion near the centre.
+mm = fresh()
+mm.pointer_delta(e.ABS_HAT1X, m.PAD_RELEASE_RESIDUAL + 1 + m.POINTER_DIVISOR, 0.0)
+mm.pointer_delta(e.ABS_HAT1Y, 20000, 0.0)
+mm.pointer_lifted()
+dx, _ = mm.pointer_delta(e.ABS_HAT1X, m.PAD_RELEASE_RESIDUAL + 1, 0.004)
+mm.pointer_delta(e.ABS_HAT1Y, 0, 0.004)
+check("a sample one count OUTSIDE the residual is a touch, and still moves",
+      (dx, mm.pointer_lifted()), (-1, False))
+mm = fresh()
+mm.pointer_delta(e.ABS_HAT1X, m.PAD_RELEASE_RESIDUAL + m.POINTER_DIVISOR, 0.0)
+mm.pointer_delta(e.ABS_HAT1Y, 20000, 0.0)
+mm.pointer_lifted()
+mm.pointer_delta(e.ABS_HAT1X, m.PAD_RELEASE_RESIDUAL, 0.004)
+mm.pointer_delta(e.ABS_HAT1Y, 0, 0.004)
+check("...and one count INSIDE it, with the other axis zeroed, is the lift",
+      mm.pointer_lifted(), True)
+
+# ⚠️ AND IT MUST BE `pad_touched`'S RULE, NOT A LOOKALIKE. A plain deadband
+# (|x| and |y| both within the residual) catches all 23 lifts above just as
+# well -- and reads a thumb resting NEAR dead centre as lifted, which T8 §9h #1
+# rejected precisely because dead centre is a legitimate place to aim. The
+# exact-zero requirement is what keeps that thumb touched; nothing above can
+# see the difference, so this does.
+mm = fresh()
+mm.pointer_delta(e.ABS_HAT1X, 100 + m.POINTER_DIVISOR, 0.0)
+mm.pointer_delta(e.ABS_HAT1Y, 100 + m.POINTER_DIVISOR, 0.0)
+mm.pointer_lifted()
+dx, _ = mm.pointer_delta(e.ABS_HAT1X, 100, 0.004)
+_, dy = mm.pointer_delta(e.ABS_HAT1Y, 100, 0.004)
+check("a thumb creeping NEAR dead centre, neither axis zero, is still touched "
+      "-- and still moves the cursor",
+      (mm.pointer_lifted(), dx, dy), (False, -1, 1))
+
+# The pointer path must feed the same state the badges read, or `pad_touched`
+# is answering about a sample from the last time the keyboard was up.
+mm = fresh()
+mm.pointer_delta(e.ABS_HAT1X, 11111, 0.0)
+mm.pointer_delta(e.ABS_HAT1Y, -2222, 0.0)
+check("pointer samples are recorded into the pad state the release rule reads",
+      mm.pad_last["right"], [11111, -2222])
+check("...and the LEFT pad is untouched by the pointer path",
+      mm.pad_last["left"], [0, 0])
+
+# A quiet pad (no pointer events at all, e.g. a report carrying only a button)
+# reads as lifted, and that must be harmless rather than a source of motion.
+mm = fresh()
+check("an untouched pad reports lifted, costing nothing",
+      (mm.pointer_lifted(), mm.pointer_last), (True, {}))
+
 # --- OSK routing: what changes when the keyboard is up (T8 step 4) -----------
 #
 # ⚠️ `osk_active` is set ONLY by the tty backend. With squeekboard the pads must
@@ -2263,10 +2485,20 @@ check("a nonzero exit is treated as unknown, not unlocked",
       None)
 check("a binary that does not exist is unknown, never raises",
       m.read_lock_state(argv=("/nonexistent/hyprctl", "-j", "monitors")), None)
+# ⚠️ THE ANSWER IS NOT THE ASSERTION HERE -- THE CLOCK IS. A `read_lock_state`
+# that ignored `timeout` entirely would ALSO return None from this, five
+# seconds later, having blocked the only input path on the device for five
+# seconds. So the elapsed time is what is checked. 2.0s is far above a Python
+# interpreter's start-up and far below the 5s this process would otherwise
+# wait for.
+import time as _time  # noqa: E402 -- the suite is a script; block-local by design
+_started = _time.monotonic()
 check("a process that outlasts the timeout is unknown, never blocks forever",
       m.read_lock_state(argv=(sys.executable, "-c", "import time; time.sleep(5)"),
                         timeout=0.2),
       None)
+check("...and it was CUT OFF at the bound, not merely answered late",
+      _time.monotonic() - _started < 2.0, True)
 
 # --- LockWatcher: the edge-trigger, throttled and self-correcting -----------
 
@@ -2285,7 +2517,7 @@ def queue_reader(*results):
 lw = m.LockWatcher(interval=10.0)
 check("a fresh watcher is not armed", lw.armed, False)
 check("an unarmed watcher never polls or fires, however long is passed",
-      lw.tick(1_000_000.0, reader=queue_reader()), False)
+      lw.tick(1_000_000.0, reader=queue_reader(), screensaver=queue_reader()), None)
 check("...and its deadline is None -- nothing to wait for", lw.next_deadline(), None)
 
 lw.start(now=0.0)
@@ -2296,28 +2528,32 @@ check("start() clears any earlier saw_lock", lw.saw_lock, False)
 
 # The FIRST poll observes LOCKED: no edge yet, but the state latches.
 check("a LOCKED reading reports no edge -- it must not hide the keyboard",
-      lw.tick(0.0, reader=queue_reader(True)), False)
+      lw.tick(0.0, reader=queue_reader(True), screensaver=queue_reader()), None)
 check("...and is remembered", lw.saw_lock, True)
 check("the next check is scheduled one interval out", lw.next_deadline(), 10.0)
 
 # Asking again before the interval elapses must NOT poll -- queue_reader()
 # with no values raises if it is called, so this also proves the throttle.
 check("polling again before the interval is due does nothing, and does not "
-      "even call the reader", lw.tick(5.0, reader=queue_reader()), False)
+      "even call the reader",
+      lw.tick(5.0, reader=queue_reader(), screensaver=queue_reader()), None)
 check("saw_lock is unaffected by a tick that did not poll", lw.saw_lock, True)
 
 # Still locked on the next legitimate poll: still no edge.
 check("a SECOND locked reading still reports no edge",
-      lw.tick(10.0, reader=queue_reader(True)), False)
+      lw.tick(10.0, reader=queue_reader(True), screensaver=queue_reader()), None)
 check("saw_lock stays latched", lw.saw_lock, True)
 
 # NOW it unlocks. This is the one and only case that must report True.
 check("LOCKED -> UNLOCKED is exactly the edge that fires",
-      lw.tick(20.0, reader=queue_reader(False)), True)
+      lw.tick(20.0, reader=queue_reader(False), screensaver=queue_reader()),
+      "unlock")
 check("the edge consumes saw_lock -- it will not fire twice for one unlock",
       lw.saw_lock, False)
 check("a further UNLOCKED reading reports no edge -- there was nothing to "
-      "transition FROM", lw.tick(30.0, reader=queue_reader(False)), False)
+      "transition FROM",
+      lw.tick(30.0, reader=queue_reader(False), screensaver=queue_reader(False)),
+      None)
 
 # ⚠️ THE PROPERTY THE WHOLE DESIGN EXISTS FOR: a keyboard shown in an ALREADY
 # unlocked desktop, that never observes a LOCK, must NEVER report an edge --
@@ -2327,10 +2563,11 @@ check("a further UNLOCKED reading reports no edge -- there was nothing to "
 lw2 = m.LockWatcher(interval=10.0)
 lw2.start(now=0.0)
 never_locked = queue_reader(False, False, False, False)
+no_screensaver = queue_reader(False, False, False, False)
 saw_edge = False
 t = 0.0
 for _ in range(4):
-    if lw2.tick(t, reader=never_locked):
+    if lw2.tick(t, reader=never_locked, screensaver=no_screensaver):
         saw_edge = True
     t += 10.0
 check("a keyboard that never observed LOCK never reports an unlock edge",
@@ -2342,37 +2579,198 @@ check("a keyboard that never observed LOCK never reports an unlock edge",
 # failure is "does not auto-hide", never a spurious hide while still locked.
 lw3 = m.LockWatcher(interval=10.0)
 lw3.start(now=0.0)
-lw3.tick(0.0, reader=queue_reader(True))
+lw3.tick(0.0, reader=queue_reader(True), screensaver=queue_reader())
 check("still locked before the unknown reading", lw3.saw_lock, True)
 check("an unknown reading (None) reports no edge",
-      lw3.tick(10.0, reader=queue_reader(None)), False)
+      lw3.tick(10.0, reader=queue_reader(None), screensaver=queue_reader()), None)
 check("...and does not clear saw_lock -- a later real reading can still fire",
       lw3.saw_lock, True)
 check("the very next legitimate poll can still detect the real unlock",
-      lw3.tick(20.0, reader=queue_reader(False)), True)
+      lw3.tick(20.0, reader=queue_reader(False), screensaver=queue_reader()),
+      "unlock")
 
 # stop() disarms unconditionally, from any state.
 lw4 = m.LockWatcher(interval=10.0)
 lw4.start(now=0.0)
-lw4.tick(0.0, reader=queue_reader(True))
+lw4.tick(0.0, reader=queue_reader(True), screensaver=queue_reader())
 lw4.stop()
 check("stop() disarms", lw4.armed, False)
 check("stop() clears saw_lock too -- a re-show must start from scratch",
       lw4.saw_lock, False)
 check("a stopped watcher's deadline is None", lw4.next_deadline(), None)
 check("ticking a stopped watcher never polls or fires",
-      lw4.tick(999.0, reader=queue_reader()), False)
+      lw4.tick(999.0, reader=queue_reader(), screensaver=queue_reader()), None)
 
 # start() while already armed re-arms cleanly -- the shape a real re-show
 # takes (hide, then show again) rather than a fresh object every time.
 lw5 = m.LockWatcher(interval=10.0)
 lw5.start(now=0.0)
-lw5.tick(0.0, reader=queue_reader(True))
+lw5.tick(0.0, reader=queue_reader(True), screensaver=queue_reader())
 check("mid-sequence: locked once", lw5.saw_lock, True)
 lw5.start(now=100.0)   # hidden and re-shown
 check("re-starting clears the earlier LOCK -- it belongs to the last showing",
       lw5.saw_lock, False)
 check("re-starting resets the poll clock too", lw5.next_deadline(), 100.0)
+
+# --- the SCREENSAVER: hide for it, and NEVER mistake it for the lock ---------
+#
+# Operator, 2026-08-12: *"can we hide the keyboard prior to going into
+# screensaver? right now the screensaver plays and the keyboard is still
+# there"*.
+#
+# 🔴 THE DANGEROUS DIRECTION IS THE OTHER ONE. §5.24 records that the power
+# button produces a password screen the user cannot answer without this
+# keyboard, verified in pixels; T8 request 1 says the same. So the assertions
+# that matter most below are the ones proving a LOCKED session hides nothing --
+# and, stronger, that the screensaver is not even ASKED ABOUT while locked.
+#
+# What tells them apart: the screensaver is an ordinary toplevel WINDOW (a
+# terminal running `omarchy-screensaver`, launched with an explicit app-id) and
+# appears in `hyprctl -j clients`. The lock is an `ext_session_lock_v1` and
+# appears as LOCK in `solitaryBlockedBy` in `hyprctl -j monitors`. Different
+# objects, different queries; neither can show up in the other's answer. Both
+# shapes below were read off the Deck on 2026-08-12 with the screensaver
+# actually playing.
+
+SCREENSAVER_UP = ('[{"class": "org.omarchy.screensaver", '
+                  '"initialClass": "org.omarchy.screensaver", '
+                  '"title": "foot", "mapped": true, "fullscreen": 2}]')
+ORDINARY_WINDOWS = ('[{"class": "Alacritty", "initialClass": "Alacritty", '
+                    '"title": "deck@steamdeck"}, '
+                    '{"class": "chromium", "initialClass": "chromium", '
+                    '"title": "Omarchy"}]')
+
+check("the screensaver's own window is recognised",
+      m.screensaver_from_clients(SCREENSAVER_UP), True)
+check("ordinary windows are not the screensaver",
+      m.screensaver_from_clients(ORDINARY_WINDOWS), False)
+check("an empty desktop is not the screensaver",
+      m.screensaver_from_clients("[]"), False)
+check("a window that only kept its INITIAL app-id still counts",
+      m.screensaver_from_clients(
+          '[{"class": "foot", "initialClass": "org.omarchy.screensaver"}]'), True)
+check("a window merely TITLED like it is not it -- the app-id is the handle",
+      m.screensaver_from_clients(
+          '[{"class": "foot", "title": "org.omarchy.screensaver"}]'), False)
+check("malformed JSON is UNKNOWN, not 'no screensaver'",
+      m.screensaver_from_clients("{not json"), None)
+check("a JSON object instead of a list is unknown -- the shape changed",
+      m.screensaver_from_clients('{"class": "org.omarchy.screensaver"}'), None)
+check("a non-dict client entry is skipped, not fatal",
+      m.screensaver_from_clients('["not a client object", '
+                                 '{"class": "org.omarchy.screensaver"}]'), True)
+check("empty input is unknown", m.screensaver_from_clients(""), None)
+check("the app-id matched is the one upstream launches every terminal with",
+      m.SCREENSAVER_APP_ID, "org.omarchy.screensaver")
+check("...and it is looked for in the CLIENT list, which is where windows are "
+      "-- the lock lives in `monitors` and is read separately",
+      m.SCREENSAVER_STATE_ARGV, ("hyprctl", "-j", "clients"))
+check("the two sensors really do ask different questions",
+      m.SCREENSAVER_STATE_ARGV != m.LOCK_STATE_ARGV, True)
+
+# read_screensaver_state: the same bounded, fail-quiet contract as the lock.
+check("a real hyprctl-shaped process's stdout is parsed",
+      m.read_screensaver_state(argv=(sys.executable, "-c",
+                                     f"print({SCREENSAVER_UP!r})")), True)
+check("a nonzero exit is unknown, not 'no screensaver'",
+      m.read_screensaver_state(argv=(sys.executable, "-c",
+                                     f"import sys; print({SCREENSAVER_UP!r}); "
+                                     "sys.exit(1)")),
+      None)
+check("a binary that does not exist is unknown, never raises",
+      m.read_screensaver_state(argv=("/nonexistent/hyprctl", "-j", "clients")), None)
+_started = _time.monotonic()
+check("a process that outlasts the timeout is unknown, never blocks forever",
+      m.read_screensaver_state(argv=(sys.executable, "-c", "import time; time.sleep(5)"),
+                               timeout=0.2),
+      None)
+check("...and it too was CUT OFF at the bound -- see read_lock_state above for "
+      "why the clock is the assertion and the None is not",
+      _time.monotonic() - _started < 2.0, True)
+
+
+def spy_reader(value):
+    """A reader that records whether it was called at all. Being able to assert
+    NOT CALLED is the point: "we asked and ignored the answer" and "we never
+    asked" are the same result today and diverge the moment someone reorders
+    `tick`."""
+    calls = []
+
+    def reader():
+        calls.append(value)
+        return value
+    return reader, calls
+
+
+# The plain case the operator asked for: unlocked desktop, screensaver comes up.
+sw = m.LockWatcher(interval=10.0)
+sw.start(now=0.0)
+saver, saver_calls = spy_reader(True)
+check("an UNLOCKED session with the screensaver up hides the keyboard",
+      sw.tick(0.0, reader=queue_reader(False), screensaver=saver), "screensaver")
+check("...and it really did read the client list to decide", len(saver_calls), 1)
+check("...without inventing a lock it never saw", sw.saw_lock, False)
+
+# Level-triggered, not edge-triggered: a screensaver that is still up on the
+# next poll still says hide. main() will have hidden the keyboard and stopped
+# the watcher by then, so this only matters if that hide failed -- in which
+# case retrying is the behaviour that recovers.
+check("a screensaver still up on the next poll still says hide",
+      sw.tick(10.0, reader=queue_reader(False), screensaver=spy_reader(True)[0]),
+      "screensaver")
+check("and no screensaver means no hide",
+      sw.tick(20.0, reader=queue_reader(False), screensaver=spy_reader(False)[0]),
+      None)
+check("an UNREADABLE client list hides nothing -- unknown is not 'up'",
+      sw.tick(30.0, reader=queue_reader(False), screensaver=spy_reader(None)[0]),
+      None)
+
+# 🔴 THE ASSERTION THIS WHOLE FEATURE HAS TO EARN. A locked session hides
+# NOTHING, with the screensaver playing on top of the lock and reporting so.
+# Getting this wrong takes away the only keyboard that can answer the password
+# prompt, on a device with no other input path (§5.9, §5.24).
+locked = m.LockWatcher(interval=10.0)
+locked.start(now=0.0)
+saver, saver_calls = spy_reader(True)
+check("🔴 a LOCKED session with the screensaver up hides NOTHING",
+      locked.tick(0.0, reader=queue_reader(True), screensaver=saver), None)
+check("🔴 ...and the screensaver was never even asked about while locked",
+      saver_calls, [])
+check("...the lock is still latched, so the later unlock still fires",
+      locked.saw_lock, True)
+check("🔴 still nothing on a second locked poll, however long it stays up",
+      locked.tick(10.0, reader=queue_reader(True), screensaver=saver), None)
+check("🔴 ...still never asked", saver_calls, [])
+
+# ...and an UNKNOWN lock reading is treated as locked for this purpose: we did
+# not establish that it is safe to hide, so we do not hide.
+unknown = m.LockWatcher(interval=10.0)
+unknown.start(now=0.0)
+saver, saver_calls = spy_reader(True)
+check("🔴 an UNKNOWN lock reading hides nothing, screensaver or not",
+      unknown.tick(0.0, reader=queue_reader(None), screensaver=saver), None)
+check("🔴 ...and the screensaver was not asked about either",
+      saver_calls, [])
+
+# The unlock edge still wins, and still spends no subprocess deciding.
+both = m.LockWatcher(interval=10.0)
+both.start(now=0.0)
+both.tick(0.0, reader=queue_reader(True), screensaver=queue_reader())
+saver, saver_calls = spy_reader(True)
+check("an unlock edge reports the UNLOCK, not the screensaver behind it",
+      both.tick(10.0, reader=queue_reader(False), screensaver=saver), "unlock")
+check("...and does not spend a second hyprctl to say so", saver_calls, [])
+
+# The throttle covers both sensors, or a keyboard on screen runs two
+# subprocesses per pass through the input loop.
+throttled = m.LockWatcher(interval=10.0)
+throttled.start(now=0.0)
+throttled.tick(0.0, reader=queue_reader(False), screensaver=queue_reader(False))
+saver, saver_calls = spy_reader(True)
+check("a tick before the interval is due polls NEITHER sensor",
+      throttled.tick(5.0, reader=queue_reader(), screensaver=saver), None)
+check("...proven by the screensaver reader never running", saver_calls, [])
+
 
 # --- §5.28: the session environment, resolved at run time --------------------
 #
@@ -2723,6 +3121,79 @@ mapper_calls = [node for node in ast.walk(main_def)
                 and node.func.value.id == "mapper"]
 check("main() resets the OSK's state on BOTH show paths (tty and layer)",
       sum(node.func.attr == "reset_osk_state" for node in mapper_calls), 2)
+
+# 🔴 THE LIFT GATE, PINNED THE SAME WAY. `Mapper.pointer_lifted` can be as
+# green as it likes above and the cursor still jumps on every release, because
+# whether it is CONSULTED is main()'s business and main() is a 400-line
+# function around a live device. Two report boundaries drain the accumulated
+# motion (SYN_REPORT, and the end of a batch from a device that sends none);
+# a gate on only one of them is a gate that can be walked around.
+flush_def = next(node for node in ast.walk(main_def)
+                 if isinstance(node, ast.FunctionDef) and node.name == "flush_motion")
+check("main() emits pointer motion from exactly ONE place",
+      [node.func.id for node in ast.walk(main_def)
+       if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+       and node.func.id == "emit_motion"],
+      ["emit_motion"])
+check("...and that place asks the mapper whether the report was a LIFT",
+      any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+          and node.func.attr == "pointer_lifted" for node in ast.walk(flush_def)),
+      True)
+check("...asked once, so there is one gate rather than a scattering",
+      sum(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+          and node.func.attr == "pointer_lifted" for node in ast.walk(main_def)),
+      1)
+check("...and BOTH report boundaries go through it",
+      sum(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+          and node.func.id == "flush_motion" for node in ast.walk(main_def)),
+      2)
+
+# Every reason `tick` can return must have a journal line. A hide with no
+# explanation looks exactly like a crash on a device this process is the only
+# input path for.
+tick_def = next(node for node in ast.walk(
+    next(n for n in ast.walk(tree)
+         if isinstance(n, ast.ClassDef) and n.name == "LockWatcher"))
+    if isinstance(node, ast.FunctionDef) and node.name == "tick")
+tick_reasons = sorted({node.value.value for node in ast.walk(tick_def)
+                       if isinstance(node, ast.Return)
+                       and isinstance(node.value, ast.Constant)
+                       and isinstance(node.value.value, str)})
+check("tick() returns exactly the two reasons this file knows about",
+      tick_reasons, ["screensaver", "unlock"])
+check("...and every one of them has a line for the journal",
+      sorted(set(tick_reasons) - set(m.HIDE_REASONS)), [])
+check("...with no orphan lines for reasons that cannot happen",
+      sorted(set(m.HIDE_REASONS) - set(tick_reasons)), [])
+
+# 🔴 AND THE HIDE ITSELF IS GATED ON THE WATCHER'S ANSWER, in main(), where no
+# behavioural test here can reach. The watcher may only be asked while the
+# LAYER keyboard is actually on screen: `above_lock=2` is what makes it visible
+# over a lock at all, and no other backend has this problem.
+lock_ticks = [node for node in ast.walk(main_def)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+              and node.func.attr == "tick"
+              and isinstance(node.func.value, ast.Name)
+              and node.func.value.id == "lock_watcher"]
+check("main() polls the watcher from exactly one place", len(lock_ticks), 1)
+tick_guard = next(node for node in ast.walk(main_def)
+                  if isinstance(node, ast.If)
+                  and any(sub in lock_ticks for sub in ast.walk(node)))
+check("...only while a LAYER keyboard is actually visible",
+      sorted(name.id for name in ast.walk(tick_guard.test)
+             if isinstance(name, ast.Name)), ["osk_backend", "osk_visible"])
+check("...and the only thing it does with a reason is hide",
+      sorted({node.func.id for node in ast.walk(tick_guard)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}),
+      ["say", "set_osk_visible"])
+# ...for ANY reason the watcher can give. A call site that hard-codes one of
+# them silently drops the other -- green everywhere else in this file, because
+# `tick` would still be returning it.
+check("...and it acts on whatever reason comes back, never a hard-coded one",
+      sorted({node.value for node in ast.walk(tick_guard)
+              if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+             & set(tick_reasons)),
+      [])
 
 # Same shape again: `osk_metric` defaults to the tty renderer's metric, so the
 # LAYER backend has to say so, and if it stops saying so every commit quietly

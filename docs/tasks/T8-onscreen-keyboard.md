@@ -908,3 +908,145 @@ satisfied by `return False`, and "a resting thumb is touched" is satisfied by th
 rule that was just replaced.
 
 **38 mutations, 0 survivors.**
+
+### 3. 🔴 The pointer jumped on release — the SAME lift, in the path with no rule
+
+> *"outside the keyboard i can move the mouse around correctly, but when i
+> release, often the mouse moves a non-zero distance in an annoying way. almost
+> as if in the release the deck is reading exactly how i released and moving the
+> mouse that way"*
+
+**Confirmed, and it is #1's lift arriving through `Mapper.pointer_delta`, which
+had no release rule at all.** The pointer's only defence was
+`POINTER_JUMP_RAW = 4000`: a single-sample step larger than that is called a
+discontinuity and absorbed. That catches a lift *only when the thumb was further
+than 4000 counts from centre*. Lifting from anywhere nearer produces a step the
+clamp calls ordinary movement, and `int(step / POINTER_DIVISOR)` pixels of real
+cursor travel **toward the pad centre, in the direction the finger happened to be
+sitting** — which is exactly what "reading exactly how i released" describes.
+
+Replaying the same 23 captured lifts through the shipped code:
+
+| | |
+|---|---|
+| lifts that moved the cursor on release | **7 of 23 (30%)** |
+| worst | **26 px** (lift #1, `y` stopped at 3370) |
+| others | 24 px, 21 px, 9 px, 8 px, 6 px, 2 px |
+
+The operator's *"often"* is 30%, and the 16 that did not jump were saved by the
+clamp, not by a rule.
+
+#### The fix reuses #1's rule — there is exactly one release rule in this file
+
+`Mapper.pointer_lifted()` asks `pad_touched("right")`: the same
+`PAD_RELEASE_RESIDUAL` rule, over the same `pad_last` the badges and the aiming
+cursor read. `pointer_delta` now feeds `note_pad_sample` so that state is live on
+the pointer path too. **No second rule was invented** — two release rules that
+disagreed would mean a lift that hides a badge but still moves the cursor.
+
+The rule's documented blind spot (a thumb at dead centre, or on a centre line
+within 256 counts) costs the pointer **one report of motion, ~4 ms at 250 Hz**,
+and then re-baselines. That is a far smaller price than the badge path pays for
+the same blind spot.
+
+#### 🔴 It is asked at the REPORT boundary, not per sample — and that is measured
+
+The rule needs both axes, and a lift delivers them one after the other, `x` then
+`y`. Asked at the `x=0` sample, `y` still holds its pre-lift value, the pad reads
+*touched*, and that is precisely the sample whose motion must be dropped.
+
+**The two zeroes are in one report — read out of the shipped `hid-steam.ko`,
+because the Deck was idle and no live capture could be taken:**
+
+```
+2072:  xor %ecx,%ecx ; mov $0x12,%edx ; mov $0x3,%esi ; call input_event   # ABS_HAT1X = 0
+2090:  xor %ecx,%ecx ; mov $0x13,%edx ; mov $0x3,%esi ; call input_event   # ABS_HAT1Y = 0
+```
+
+No `input_event(EV_SYN, SYN_REPORT, 0)` between them — the driver syncs once per
+HID packet. **A lift can never be split across two `SYN_REPORT`s.** (The left
+pad's pair compiles identically at `2031`.)
+
+main() already buffered a report's motion and drained it on `SYN_REPORT` for an
+unrelated reason (staircasing), so the buffer this needed already existed. Both
+drains now go through one `flush_motion()`, pinned by AST assertions — a gate on
+one of the two boundaries is a gate that can be walked around.
+
+**Bonus:** clearing both baselines at a release also kills the *lift-and-retouch
+inside `POINTER_TOUCH_GAP`* jump, which the clamp only half caught.
+
+### 4. 🆕 Hide the keyboard when the screensaver starts
+
+> *"can we hide the keyboard prior to going into screensaver? right now the
+> screensaver plays and the keyboard is still there"*
+
+#### 🔴 The constraint first: this must not become "hide on lock"
+
+§5.24 records that the power button produces a password screen the user cannot
+answer without this keyboard, and that fix was verified in pixels. Request 1 says
+the same. So the whole question is **what tells the screensaver apart from the
+lock**, and how sure that is.
+
+#### ✅ They are different objects in different `hyprctl` queries
+
+Measured on the Deck 2026-08-12 with the screensaver actually playing:
+
+```
+hyprctl -j clients   ->  [{"class": "org.omarchy.screensaver",
+                           "initialClass": "org.omarchy.screensaver",
+                           "title": "foot", "mapped": true, "fullscreen": 2}]
+hyprctl -j monitors  ->  eDP-1  solitaryBlockedBy: null
+```
+
+The screensaver is an ordinary **toplevel window** — a terminal running
+`omarchy-screensaver`. The lock is an **`ext_session_lock_v1`** held by the
+compositor's session-lock manager, which is what `solitaryBlockedBy` reports.
+A window cannot appear in `solitaryBlockedBy`; a session lock cannot appear in
+`clients`. **Telling them apart is not a heuristic — it is asking two different
+questions of two different objects.**
+
+The app-id is a contract, not an incidental string: `omarchy-launch-screensaver`
+passes `--class=org.omarchy.screensaver` (or `--app-id=`) to all four terminals
+it supports, then identifies its own window by `pgrep -f
+'[o]rg.omarchy.screensaver'` and by `openwindow>>*,org.omarchy.screensaver,*`.
+
+#### And the check still is not allowed to decide alone
+
+`LockWatcher.tick()` now returns a **reason** (`"unlock"`, `"screensaver"`, or
+`None`) from **one** poll, and the lock reading gates the other:
+
+```
+locked          -> latch, hide nothing, screensaver NEVER ASKED
+unknown (None)  -> hide nothing, screensaver NEVER ASKED
+unlock edge     -> "unlock"        (screensaver never asked -- no second exec)
+unlocked, flat  -> "screensaver" iff the client list says so, else None
+```
+
+Nothing past `if state:` runs while the session is locked, so **no sensor —
+present or future — can hide the keyboard a lock prompt needs.** A screensaver
+playing on top of a lock screen is invisible to this. The tests assert not just
+"hides nothing while locked" but "**the screensaver reader was never called**",
+because "asked and ignored" and "never asked" are the same result today and
+diverge the moment someone reorders `tick`.
+
+Cost, measured rather than assumed (Deck, 8 runs each): `hyprctl -j monitors`
+9.1–10.0 ms, `hyprctl -j clients` 9.2–9.9 ms. The addition is **~10 ms once per
+0.75 s**, only while the layer keyboard is on screen in an unlocked session, and
+still bounded at `LOCK_STATE_TIMEOUT` (0.3 s).
+
+### Testing (#3 and #4)
+
+`test/unit/test-deck-input-mapper.py` replays **all 23 captured lift tails**
+through the real `pointer_delta` + `pointer_lifted`, grouped into reports the way
+the driver emits them. Both directions are asserted, and a fixture that cannot
+fail is worthless — so the suite *also* asserts that **≥7 of the 23 moved the
+cursor under the old rule**, and that 20 of the 23 still carry real motion that
+survives the fix. A plain deadband and an unbounded exact-zero rule are both
+pinned as wrong.
+
+⚠️ One latent hole was found and closed in passing: the *existing*
+`read_lock_state` timeout test asserted only the returned `None`, which an
+**unbounded** `subprocess.run` also produces — five seconds later, having blocked
+the only input path on the device. Both timeout tests now assert the **clock**.
+
+**34 mutations, 0 survivors.**
