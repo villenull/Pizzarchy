@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Guards the two ways a `hyprctl` call in this repo fails while LOOKING fine.
+# Guards the three ways a `hyprctl` call in this repo fails while LOOKING fine.
 #
 # WHY THIS EXISTS
 #
-# Both were measured on the Deck, both cost real time, and neither is visible
-# to any other check in this repo, because in both cases the command exits
-# without doing anything and the caller cannot tell that apart from success.
+# All three were measured on the Deck, all three cost real time, and none is
+# visible to any other check in this repo, because in every case the command
+# exits 0 without doing -- or reporting -- anything, and the caller cannot tell
+# that apart from success.
 #
 #   1. 🔴 `hyprctl dispatch`'s old string syntax is a LUA PARSE ERROR on
 #      Hyprland 0.56.2 (what the Deck runs -- `hyprctl version`). It is not an
@@ -28,6 +29,30 @@
 #      configerrors'` prints no config errors -- because it never ran -- and the
 #      operator ticks the checkbox. That is exactly what docs/RECOVERY.md's
 #      lock escape did for two sessions before anyone executed it.
+#
+#   3. 🔴 `hyprctl eval 'return <sentinel>'` NEVER REPORTS THE VALUE. Measured
+#      on the Deck 2026-08-12 (Hyprland 0.56.2): eval prints `ok` -- its own
+#      status, not the expression's result -- and exits 0 for every expression
+#      that does not raise. Negative control, run live:
+#
+#        $ hyprctl eval "return DECK_NOPE"     # a name that has never existed
+#        ok
+#        $ echo $?
+#        0
+#
+#      The only thing eval surfaces is a Lua error: `hyprctl eval 'error("x")'`
+#      prints `error: ...` and exits 7. So a sentinel READBACK passes whether
+#      or not the config loaded -- and the sentinel exists precisely because
+#      Hyprland answers a Lua syntax error by discarding the WHOLE file while
+#      `hyprctl configerrors` stays clean (docs/PROGRESS.md §7). The working
+#      form is an ASSERTION:
+#
+#        hyprctl eval 'if DECK_INPUT_LUA_LOADED == nil then error("input.lua was discarded") end'
+#
+#      exit 0 = loaded, exit 7 = discarded. `verify_osk_kb_layout` in
+#      src/deck-session.sh is the reference implementation; copy its shape.
+#      This one has already misled a session: the readback was cited as proof
+#      that a config change had loaded, and it was not proof (§5.30c).
 #
 # WHAT IT DOES NOT CHECK
 #
@@ -86,13 +111,14 @@ for f in "${TRACKED[@]}"; do in_scope "$f" && SCOPE+=("$f"); done
 
 # The files this suite exists to protect must actually be in scope. If one is
 # renamed, the scan silently stops covering it and everything still passes.
-for must in docs/RECOVERY.md src/deck-session.sh docs/tasks/P2.9-deck-session-runbook.md; do
+for must in docs/RECOVERY.md src/deck-session.sh docs/tasks/P2.9-deck-session-runbook.md \
+            docs/tasks/T5-fork-plan.md; do
   printf '%s\n' "${SCOPE[@]}" | grep -qxF "$must" ||
     fail "the files this suite exists to protect are in scope" \
       "${must} is not in the scan set -- it was renamed, deleted, or newly
 excluded. Update this suite rather than letting its coverage lapse silently."
 done
-pass "scan set built: ${#SCOPE[@]} tracked files, the three load-bearing ones present"
+pass "scan set built: ${#SCOPE[@]} tracked files, the four load-bearing ones present"
 
 # --- scanner 1: old-syntax `hyprctl dispatch` --------------------------------
 #
@@ -135,13 +161,47 @@ scan_ssh_no_signature() {
   done
 }
 
+# --- scanner 3: `hyprctl eval 'return <sentinel>'`, a readback that cannot fail
+#
+# Matches an `eval` whose Lua expression OPENS with `return`. That is the dead
+# readback form of hazard 3 above: eval reports its own status, never the
+# value, so the caller learns nothing and reads it as a pass.
+#
+# `return` must be followed by a NON-WORD character, so `eval 'returns_ok()'`
+# -- an ordinary call to a function whose name starts with those six letters --
+# is not flagged. That is a real distinction and the good fixture pins it.
+#
+# Any leading flags are tolerated (`--instance 0`, `-i 1`) because a runbook
+# that resolves the instance with a flag rather than the environment variable is
+# still running the broken probe. `[^|;&]*` keeps the match inside one command,
+# so a pipeline whose LATER stage happens to say `return` is not attributed to
+# hyprctl.
+#
+# ⚠️ Prose that QUOTES the broken form is not exempted by a comment-stripping
+# rule, deliberately: the defect being guarded lives in a COMMENT inside the
+# Deck's own input.lua, telling a human which command to run. A scanner that
+# skipped comments would miss the exact instance that motivated it. The files
+# whose job is to discuss the hazard (docs/PROGRESS.md, docs/findings/**,
+# docs/START-HERE.md, this file) are excluded by in_scope above; everywhere else
+# the literal shape is reported and the prose is written so it does not use it.
+EVAL_RETURN="hyprctl[[:space:]][^|;&]*eval[[:space:]]+\\\\?['\"][[:space:]]*return[^[:alnum:]_]"
+
+scan_eval_return() {
+  local file
+  for file in "$@"; do
+    [[ -f $REPO_ROOT/$file ]] || continue
+    grep -nE "$EVAL_RETURN" -- "$REPO_ROOT/$file" 2>/dev/null |
+      sed "s|^|${file}:|" || true
+  done
+}
+
 # --- the positive controls ----------------------------------------------------
 #
-# ⚠️ THE LOAD-BEARING PART. Both scanners above are greps, and a grep that has
-# stopped matching reports zero hits -- which is indistinguishable from a clean
-# tree. Every assertion in this file would pass with both regexes replaced by
-# `xyzzy`. So each scanner is first run against a file that is KNOWN BAD and
-# must flag it, and against one that is KNOWN GOOD and must not.
+# ⚠️ THE LOAD-BEARING PART. All three scanners above are greps, and a grep that
+# has stopped matching reports zero hits -- which is indistinguishable from a
+# clean tree. Every assertion in this file would pass with all three regexes
+# replaced by `xyzzy`. So each scanner is first run against a file that is KNOWN
+# BAD and must flag it, and against one that is KNOWN GOOD and must not.
 FIXTURES=$(mktemp -d) || fail "mktemp -d failed"
 trap 'rm -rf "$FIXTURES"' EXIT
 mkdir -p "$FIXTURES/fx"
@@ -152,7 +212,21 @@ hyprctl dispatch workspace 1 >/dev/null 2>&1 || true
 ssh steamdeck 'hyprctl reload && hyprctl configerrors'
 BADEOF
 
+# Scanner 3 gets its OWN bad fixture rather than four more lines in the file
+# above: fx/bad.sh's hit COUNTS are asserted for the other two scanners, and an
+# `ssh ... hyprctl` line added here would silently change scanner 2's expected
+# number from 1 to 2 -- fixing one control by breaking another.
+cat >"$FIXTURES/fx/bad-eval.sh" <<'BADEVALEOF'
+hyprctl eval 'return DECK_INPUT_LUA_LOADED'
+ssh steamdeck 'export HYPRLAND_INSTANCE_SIGNATURE=$(ls -t /run/user/1000/hypr/ | head -1); hyprctl eval "return DECK_OSK_KB_LAYOUT"'
+hyprctl --instance 0 eval 'return  DECK_INPUT_LUA_LOADED'
+ssh deck "export HYPRLAND_INSTANCE_SIGNATURE=x; hyprctl eval \"return DECK_INPUT_LUA_LOADED\""
+BADEVALEOF
+
 cat >"$FIXTURES/fx/good.sh" <<'GOODEOF'
+hyprctl eval 'if DECK_INPUT_LUA_LOADED == nil then error("input.lua was discarded") end'
+hyprctl eval "if DECK_OSK_KB_LAYOUT ~= 'us' then error('the rule did not load') end"
+hyprctl eval 'returns_a_value_and_is_not_the_broken_form()'
 hyprctl dispatch 'hl.dsp.focus({ workspace = 2 })'
 hyprctl dispatch "hl.dsp.window.close({ window = \"address:$a\" })"
 hyprctl -j clients | jq -r '.[].address'
@@ -192,6 +266,25 @@ control_clean=$(REPO_ROOT=$FIXTURES scan_ssh_no_signature fx/good.sh) || true
 ${control_clean}"
 pass "CONTROL: ssh-signature scanner flags the bare form, accepts export and --instance"
 
+control_hits=$(REPO_ROOT=$FIXTURES scan_eval_return fx/bad-eval.sh) || true
+[[ $(grep -c . <<<"${control_hits:-}") == 4 ]] ||
+  fail "CONTROL: the eval-readback scanner flags known-bad lines" \
+    "expected 4 hits in the bad fixture, got:
+${control_hits:-<nothing>}
+This scanner exists because a readback reports nothing and reads as a pass. A
+BROKEN scanner does the same thing one level up: it reports a clean tree and
+every assertion below passes while checking nothing. Fix EVAL_RETURN -- do not
+delete this control."
+
+control_clean=$(REPO_ROOT=$FIXTURES scan_eval_return fx/good.sh) || true
+[[ -z ${control_clean//[[:space:]]/} ]] ||
+  fail "CONTROL: the eval-readback scanner accepts the assertion form" \
+    "the scanner flagged the WORKING probe (or an ordinary call to a function
+whose name merely starts with 'return'), which would make this suite unpassable
+and get it deleted:
+${control_clean}"
+pass "CONTROL: eval-readback scanner flags all four readback spellings, accepts the assertion form"
+
 # --- the actual assertions ----------------------------------------------------
 
 hits=$(scan_old_dispatch "${SCOPE[@]}") || true
@@ -219,5 +312,24 @@ A command that never ran produces no errors, which reads as a pass. Resolve the
 instance first, the way docs/RECOVERY.md does:
   ssh deck 'export HYPRLAND_INSTANCE_SIGNATURE=\$(ls -t /run/user/1000/hypr/ | head -1); hyprctl ...'"
 pass "no 'hyprctl' over ssh without an instance signature"
+
+hits=$(scan_eval_return "${SCOPE[@]}") || true
+[[ -z ${hits//[[:space:]]/} ]] ||
+  fail "no 'hyprctl eval' sentinel READBACK -- the probe must assert, not read" \
+    "${hits}
+
+On Hyprland 0.56.2 'hyprctl eval' prints 'ok' -- its own status, not the value
+-- and exits 0 for every expression that does not raise, including a global that
+has never existed (measured with 'return DECK_NOPE' as the negative control).
+A readback therefore passes whether the config loaded or not, which is the exact
+opposite of what a sentinel is for: Hyprland discards a Lua file with a syntax
+error WHOLESALE and 'hyprctl configerrors' still comes back clean.
+
+Rewrite it as an assertion, which eval does report (exit 7, with the message):
+  hyprctl eval 'if DECK_INPUT_LUA_LOADED == nil then error(\"input.lua was discarded\") end'
+exit 0 = loaded, exit 7 = discarded. Copy the shape from verify_osk_kb_layout in
+src/deck-session.sh rather than inventing a variant, and remember R-46: over ssh
+the call needs HYPRLAND_INSTANCE_SIGNATURE or it never runs at all."
+pass "no 'hyprctl eval' readback of a sentinel -- every probe asserts"
 
 printf 'all hyprctl-syntax tests passed\n'

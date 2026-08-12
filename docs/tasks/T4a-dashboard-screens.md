@@ -228,13 +228,25 @@ for S4.
 **`src/deck-form.sh` already defines a `failure_menu`, and it is dead code on
 the real ISO, right now.** Verified this session:
 
-- `omarchy-install-dashboard` defines its own `failure_menu` (lines 609–661)
-  — the one `docs/tasks/T4-screen-spec.md` §4 S8 is actually about (its own
+- `omarchy-install-dashboard` defines its own `failure_menu` (line 609) — the
+  one `docs/tasks/T4-screen-spec.md` §4 S8 is actually about (its own
   citations are `view_failure_log` line 575 and `failure_menu`'s `gum choose`
-  fallback, both read from *this* file).
+  fallback, both read from *this* file). Re-confirmed 2026-08-12 at
+  `iso/upstream/configs/airootfs/usr/local/bin/omarchy-install-dashboard:609`.
 - `configurator` — the process `deck-form.sh` is actually sourced into —
-  **defines no function named `failure_menu` at all.** `grep -n
-  'failure_menu' configs/airootfs/root/configurator` returns nothing.
+  **defines no function named `failure_menu` at all.**
+
+  ```bash
+  grep -n 'failure_menu' iso/upstream/configs/airootfs/root/configurator; echo "exit=$?"
+  ```
+
+  Exit **1** against a real 1196-line file. ⚠️ **Path corrected 2026-08-12, and
+  the old one made this evidence unable to fail.** It cited
+  `configs/airootfs/root/configurator`, which does not exist at this repo's root
+  — the tree is vendored under `iso/upstream/`. `grep` printed nothing and exited
+  **2** (*no such file*), which looks identical to "the function is absent" if you
+  only read the output. The conclusion survives re-checking against the real
+  path; the citation did not. **Assert the exit code, not the silence.**
 - `grep -rn failure_menu src/ test/` finds exactly one definition in the
   whole repo: `src/deck-form.sh:777`, sourced into the process that never
   calls it.

@@ -454,7 +454,7 @@ already covered by 5.3.
 |---|---|---|
 | Idle timeout | `idle.lock = 86400` | 5.3 |
 | 🔴 `omarchy-sleep-lock.service` — `systemd-inhibit` on logind's `PrepareForSleep`. **Press the power button and it locks.** Enabled unconditionally by `install/user/first-run/enable-user-units.sh` **(READ)** | **mask it** | `configure_deck` writes the mask symlink for the created user **and** into `/etc/skel/.config/systemd/user/` — ⚠️ the enabling happens at **first run**, in the live session, *after* our phase, so masking must be in place before then. A `--global` mask under `/etc/systemd/user/` is the version that cannot lose the race |
-| 🔴 `system.lock` in `omarchy-menu.jsonc:32` — deliberate, but still unanswerable | **`above_lock = 2`** for our OSK | `hl.layer_rule({ match = { namespace = "deck-osk" }, above_lock = 2 })` in `/etc/skel/.config/hypr/` + the created user's, beside the rotation |
+| 🔴 `system.lock` in `omarchy-menu.jsonc:32` — deliberate, but still unanswerable | **`above_lock = 2`** for our OSK | `hl.layer_rule({ match = { namespace = "deck-osk" }, above_lock = 2 })` in `/etc/skel/.config/hypr/input.lua` + the created user's, beside the rotation |
 
 ⚠️ State the security trade-off in the code comment **and** in `docs/RECOVERY.md`:
 **a suspended Deck resumes unlocked, deliberately, because it has no keyboard.**
@@ -463,19 +463,73 @@ already covered by 5.3.
 delta already showed upstream renaming things under us. Assert the rule took;
 do not assume it.
 
+⚠️ **`input.lua` REPLACES upstream's `default/hypr/input.lua` wholesale** —
+Hyprland does not merge a user override with the shipped default, so a file
+carrying only this rule silently drops `kb_layout`, the non-Latin-layout
+handling, `numlock_by_default` and the touchpad block. The stage that writes it
+must mirror the whole upstream file (`docs/findings/T9-lock-wake-and-blank-timing.md`
+§5.1 has the transcription, `luac -p`-clean, plus §5.24a row 1's two `misc`
+lines) and must not clobber 5.3's marker-delimited OSK-layout block.
+
+#### 🔴 The text this must bake in, comment included
+
+The rule is not the whole item. Hyprland answers a **Lua syntax error by
+discarding the entire file**, silently, with `hyprctl configerrors` still clean
+— so the file needs a parse sentinel, and the sentinel needs a probe that can
+actually fail. Both go in:
+
+```lua
+-- docs/PROGRESS.md §5.24: draws deck-osk above a lock surface AND makes it
+-- hit-testable there. Hardware-verified 2026-08-11.
+hl.layer_rule({ match = { namespace = "deck-osk" }, above_lock = 2 })
+
+-- Deliberately the LAST statement. A Lua syntax error ANYWHERE above makes
+-- Hyprland discard this whole file without logging a reason, taking the rule
+-- above with it -- and that rule is what makes the lock screen answerable on a
+-- device with no physical keyboard. Verify the file loaded with an ASSERTION:
+--
+--   hyprctl eval 'if DECK_INPUT_LUA_LOADED == nil then error("input.lua was discarded") end'
+--
+-- exit 0 = loaded, exit 7 = discarded (the message is printed). Over SSH,
+-- export HYPRLAND_INSTANCE_SIGNATURE first or it never runs at all (R-46).
+DECK_INPUT_LUA_LOADED = true
+```
+
+🔴 **Do NOT transcribe the comment currently on the operator's Deck.** That file
+tells the reader to verify with a bare Lua `return` of the sentinel and says *"A
+nil result means this file was discarded"* — **measured false 2026-08-12**:
+`hyprctl eval` prints `ok` and exits **0** for every expression that does not
+raise, a name that has never existed included (`return DECK_NOPE` → `ok`, exit
+0). It reports its own status, never the value. Only a Lua `error()` surfaces.
+That readback has never been able to fail, and it has already been cited once as
+proof that a config change had loaded when it was not proof
+(`docs/PROGRESS.md` §5.30c). `verify_osk_kb_layout` in `src/deck-session.sh` is
+the reference implementation of the working shape — copy it rather than
+inventing a variant, and `test/unit/test-hyprctl-syntax.sh` scanner 3 fails the
+build if the readback form is written down anywhere in this repo again.
+
 **Verified by:**
 - **[V]** after install: `systemctl --user is-enabled omarchy-sleep-lock.service`
   reports `masked` **for the created user** — and separately, that
   `enable-user-units.sh` running afterwards does not un-mask it. The second
   assertion is the one that matters; the first can pass while the race is lost.
-- **[V]** `hyprctl configerrors` is empty after the layer rule is applied, and
-  the exact rule string is present in the file we wrote (unit-testable without
+- **[B]** the exact rule string **and** the sentinel assignment are present in
+  the file we wrote, and the file passes `luac -p` (unit-testable without
   hardware).
+- **[V]** the file **loaded**, asserted against a live compositor in the QEMU
+  target, not merely written:
+  `hyprctl eval 'if DECK_INPUT_LUA_LOADED == nil then error("input.lua was discarded") end'`
+  — exit 7 fails the row.
+  ⚠️ **`hyprctl configerrors` being empty is NOT this check.** It is empty in
+  exactly the case that matters: a discarded file produces no config errors
+  because none of it was ever parsed into config. An earlier version of this row
+  used it, which made the row unable to fail.
 - **[H]** 🔴 T6, and it is the item with the least evidence behind it: press the
   power button, suspend, resume — **no lock screen**. Then choose "Lock" from the
   menu and confirm the OSK is *visible and hit-testable* over the lock surface.
-  `docs/findings/T9-lock-service-mitigation.md` §6 lists this as unverified #4:
-  nobody has ever rendered `above_lock = 2`.
+  `docs/findings/T9-lock-service-mitigation.md` §6 lists this as unverified #4;
+  §5.24 has since verified it in pixels on the operator's Deck, but never from a
+  built image.
 
 ---
 

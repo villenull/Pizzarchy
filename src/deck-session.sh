@@ -249,13 +249,16 @@ readonly OSK_KB_RULE_END="-- <<< deck-session.sh: on-screen keyboard XKB layout 
 # A global assigned by the LAST line of the block, so its presence in a live
 # compositor proves the whole block executed.
 #
-# ⚠️ `hyprctl eval 'return X'` CANNOT read it back: on 0.56.2 eval prints "ok"
-# and exits 0 for every expression that does not raise, including
-# `return <nil global>` -- measured, with a nonexistent name as the negative
-# control. (The readback recipe written into the Deck's own input.lua for the
-# above_lock sentinel is therefore a no-op; see verify_osk_kb_layout.) What
-# eval DOES surface is a Lua error: exit 7, with the message. So the probe is
-# an assertion, not a read.
+# ⚠️ `hyprctl eval` CANNOT read it back with a bare Lua return: on 0.56.2 eval
+# prints "ok" -- its own status, not the value -- and exits 0 for every
+# expression that does not raise, a nil global included. Measured 2026-08-12
+# with a nonexistent name as the negative control. (The readback recipe written
+# into the Deck's own input.lua for the above_lock sentinel is therefore a
+# no-op; docs/tasks/T5-fork-plan.md 5.6 carries the corrected text that a built
+# image must bake in.) What eval DOES surface is a Lua error: exit 7, with the
+# message. So the probe is an assertion, not a read -- see
+# verify_osk_kb_layout, and test/unit/test-hyprctl-syntax.sh scanner 3, which
+# fails the build if the readback shape is written down anywhere again.
 readonly OSK_KB_SENTINEL=DECK_OSK_KB_LAYOUT
 
 # --- Omarchy idle policy (R-38) -------------------------------------------

@@ -1026,9 +1026,11 @@ osk_last=$(grep -vE '^[[:space:]]*(--|$)' "$osk_lua" | tail -1)
 pass "${OSK_KB_SENTINEL} is the block's last statement, so its presence proves the hl.device calls ran"
 
 # And the sentinel must be checked by ASSERTION, not by reading it back.
-# Measured on the Deck 2026-08-12: `hyprctl eval 'return X'` prints "ok" and
-# exits 0 for every expression that does not raise -- including a nil global.
-# Only a Lua error surfaces (exit 7, with the message).
+# Measured on the Deck 2026-08-12: `hyprctl eval` given a bare Lua return prints
+# "ok" -- its own status, not the value -- and exits 0 for every expression that
+# does not raise, including a nil global. Only a Lua error surfaces (exit 7,
+# with the message). test/unit/test-hyprctl-syntax.sh scanner 3 guards the shape
+# repo-wide; this pair of checks guards THIS function's implementation.
 osk_verify_body=$(declare -f verify_osk_kb_layout)
 grep -q "error(" <<<"$osk_verify_body" ||
   fail_test "verify_osk_kb_layout asserts the sentinel with a Lua error()" \

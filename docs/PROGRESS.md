@@ -1753,13 +1753,15 @@ because this is exactly where §5.30b said rules go to die quietly:
 1. **A sentinel as the block's last statement.** `hl.device` raises on a bad
    field and a raise skips the rest of the chunk, so `DECK_OSK_KB_LAYOUT` being
    set in the live compositor proves the whole block executed.
-   ⚠️ **It is asserted, never read back.** Measured 2026-08-12:
-   `hyprctl eval 'return X'` prints `ok` and exits **0** for *any* expression
+   ⚠️ **It is asserted, never read back.** Measured 2026-08-12: `hyprctl eval`
+   given a bare Lua return prints `ok` and exits **0** for *any* expression
    that does not raise — including a nil global — with a nonexistent name as the
    negative control. Only a Lua `error()` surfaces: **exit 7**, with the
    message. **The readback recipe written into the Deck's own `input.lua` for
-   the `above_lock` sentinel is therefore a no-op** and should be corrected the
-   same way.
+   the `above_lock` sentinel is therefore a no-op.** ✅ Corrected 2026-08-12 at
+   the source of truth (`docs/tasks/T5-fork-plan.md` §5.6) and in the runbook;
+   the Deck's own copy is the operator's to change. `test/unit/test-hyprctl-syntax.sh`
+   scanner 3 now fails CI on the readback shape anywhere in this repo.
 2. **The device name is cross-checked against the mapper.**
    `test/unit/test-deck-session.sh` greps `src/deck-input-mapper.py` for the
    exact `UInput(name=…)` string and asserts our matched name is its normalised
@@ -2152,10 +2154,29 @@ already needs for `monitors.lua` instead of adding a `require` line to
 `hyprland.lua`), plus `systemctl --user mask omarchy-sleep-lock.service`.
 
 ⚠️ **A Lua syntax error makes Hyprland discard the whole file silently, and
-`hyprctl configerrors` still comes back clean.** The file therefore ends in a
-sentinel global read back by evaluating Lua that writes it to a file —
-**`hyprctl eval 'return X'` prints `ok`, its own status, not the value**, and
-that nearly recorded a false pass here. Both are in `input.lua`'s comments.
+`hyprctl configerrors` still comes back clean** — clean *because* nothing was
+parsed, which is the case you care about. The file therefore ends in a sentinel
+global, `DECK_INPUT_LUA_LOADED`.
+
+🔴 **CORRECTED 2026-08-12 — the recipe written into `input.lua`'s comment for
+reading that sentinel back is a NO-OP, and it has never been able to fail.**
+`hyprctl eval` prints `ok` — its own status, never the expression's value — and
+exits **0** for anything that does not raise, a global that has never existed
+included (`return DECK_NOPE` → `ok`, exit 0, run live as the negative control).
+Only a Lua `error()` surfaces: exit **7**, with the message. The working form is
+an assertion:
+
+```bash
+hyprctl eval 'if DECK_INPUT_LUA_LOADED == nil then error("input.lua was discarded") end'
+```
+
+exit 0 = loaded, exit 7 = discarded. `verify_osk_kb_layout` in
+`src/deck-session.sh` already used exactly this shape for its own sentinel.
+The Deck's own `input.lua` still carries the wrong comment — **not edited, it is
+the operator's machine** — but the source of truth a built image bakes in,
+`docs/tasks/T5-fork-plan.md` §5.6, now carries the corrected text, and
+`test/unit/test-hyprctl-syntax.sh` scanner 3 fails CI if the readback shape is
+written into this repo again.
 
 ### 🔴 Three defects this session exposed, none of them the lock rule
 
@@ -2790,12 +2811,17 @@ been corrected, the runbook had not. Both fixed.
 
 🔒 **Guarded, so it cannot come back silently:**
 `test/unit/test-hyprctl-syntax.sh` (18th suite → 19) scans every tracked *and*
-untracked file for both hazards and fails on either. It carries positive
-controls for both scanners, because a grep that has stopped matching reports a
-clean tree — the "found nothing reads as found no problems" class that
-`test-duplicated-upstream-facts.sh` also guards against. Mutation-tested four
-ways: injecting a bad dispatch into `src/deck-session.sh`, injecting a bare
-`ssh … hyprctl` into `RECOVERY.md`, and breaking each scanner's regex.
+untracked file for these hazards and fails on any of them. **A third scanner was
+added 2026-08-12** — the dead `eval` sentinel readback (§5.30c) — bringing it to
+three. Each carries positive **and** negative controls, because a grep that has
+stopped matching reports a clean tree — the "found nothing reads as found no
+problems" class that `test-duplicated-upstream-facts.sh` also guards against.
+Mutation-tested: injecting a bad dispatch into `src/deck-session.sh`, injecting a
+bare `ssh … hyprctl` into `RECOVERY.md`, injecting a readback into
+`T5-fork-plan.md` and the P2.9 runbook, breaking each scanner's regex four
+different ways, weakening the negative control, and dropping a protected file out
+of scope. Every one is caught; the only survivors are deleting an assertion or a
+control outright.
 ⚠️ It asserts which *shape* is written down; that the Lua shape works is T10's
 measurement, not the suite's — nothing here talks to a live compositor.
 
@@ -2847,12 +2873,42 @@ careless append could have taken the lock keyboard down with the touchscreen.
 **How it was proven, and how it was NOT.** Forcing `transform` back to `0`,
 running `hyprctl reload`, and watching it return to `3` is the evidence. ⚠️ **I
 first cited the file's `DECK_INPUT_LUA_LOADED` sentinel as proof, and that was
-worthless** — `hyprctl eval 'return X'` prints `ok` and exits **0** for a name
-that has never existed, measured with a negative control. **This file already
-recorded that** (§7, twice) and I used the check anyway without re-reading it.
+worthless** — `hyprctl eval` given a bare return prints `ok` and exits **0** for
+a name that has never existed, measured with a negative control. **This file
+already recorded that** (§7, twice) and I used the check anyway without
+re-reading it.
 ⚠️ The comment inside the Deck's own `input.lua` still says *"A nil result means
 this file was discarded"* — **that is false**, and any procedure resting on it
 is a check that cannot fail.
+
+✅ **CLOSED 2026-08-12 — the recipe is fixed everywhere this repo controls.**
+The working probe is an assertion, `hyprctl eval 'if DECK_INPUT_LUA_LOADED ==
+nil then error("…") end'` (exit 0 loaded / exit 7 discarded), copied from
+`verify_osk_kb_layout`'s shape. It is now the text `docs/tasks/T5-fork-plan.md`
+§5.6 bakes into a built image, the check in `docs/tasks/P2.9-deck-session-runbook.md`
+§4, and `test/unit/test-hyprctl-syntax.sh`'s **scanner 3**, which fails CI if the
+readback shape is written down in any file this project ships or runs. 🔴 **The
+Deck's own `input.lua` is still wrong and was deliberately not touched** — it is
+the operator's machine and every write there needs their approval. It is a
+one-line comment fix whenever they want it.
+
+##### 🔴 This is a CLASS, not an incident — four found on 2026-08-12
+
+Every one has the same signature: **the passing state is indistinguishable from
+the not-having-run state.** Worth grepping for deliberately, because none of
+them ever goes red on its own.
+
+| Where | The check | Why it could not fail | Status |
+|---|---|---|---|
+| the Deck's `input.lua`, and every doc quoting it | read the sentinel back with a bare Lua `return` | `hyprctl eval` reports its own status, never a value — exit 0 for a name that never existed | ✅ corrected at the source of truth; scanner 3 enforces |
+| `T5-fork-plan.md` §5.6 `[V]` | "`hyprctl configerrors` is empty after the layer rule is applied" | it is empty *precisely* when the file was discarded, because nothing was parsed. It catches a renamed **key**, never a discarded **file** | ✅ replaced with the sentinel assertion |
+| `P2.9-deck-session-runbook.md` §0.2 | the pre-flight one-liner ended `&& echo "all suites green"` | printed unconditionally, after a loop that only `echo`ed `RED` — and swallowed the count, so a glob matching nothing also read as green | ✅ now carries a denominator and refuses to affirm a red tree |
+| `T4a-dashboard-screens.md` §"dead code" | "`grep -n 'failure_menu' configs/airootfs/root/configurator` returns nothing" | that path does not exist at this repo's root (the tree is vendored under `iso/upstream/`), so grep exited **2** — *no such file* — which reads exactly like *no match* | ✅ path corrected, exit code asserted; the conclusion survived re-checking |
+
+**The generalisation worth keeping:** a check that proves something is ABSENT
+must also prove it was LOOKING. Assert the exit code, print the denominator, and
+give the scanner a positive control — `test/unit/test-hyprctl-syntax.sh` and
+`test-duplicated-upstream-facts.sh` both do this, and it is why they are trusted.
 
 ⚠️ **Still owed:** this lives in one user's dotfile and is therefore **absent
 from a built image**. `T5-fork-plan.md` §5.2 owes it a bake-in row — it already
@@ -3099,7 +3155,20 @@ backup rescue (the rebuild wipes both).
 - **Hyprland silently discards a Lua config that fails to parse** — falls back
   to defaults, logs nothing past `[cfg] Config is lua, loading lua mgr`, exits
   0. Always `luac -p` a generated Hyprland config; the symptom otherwise looks
-  like "the setting has no effect here".
+  like "the setting has no effect here". ⚠️ **`hyprctl configerrors` does not
+  catch this** — it is empty precisely because nothing was parsed. It catches a
+  renamed *key*, not a discarded *file*.
+- 🔴 **`hyprctl eval` cannot report a VALUE, only an ERROR.** It prints `ok` —
+  its own status — and exits **0** for every expression that does not raise,
+  including a bare Lua return of a global that has never existed (measured
+  2026-08-12 on 0.56.2, `return DECK_NOPE` → `ok`, exit 0, as the negative
+  control). A Lua `error()` is the one thing it surfaces: exit **7**, message
+  printed. **So a sentinel readback is a check that cannot fail.** Verify a
+  config loaded by ASSERTING:
+  `hyprctl eval 'if DECK_INPUT_LUA_LOADED == nil then error("…") end'`.
+  Reference implementation: `verify_osk_kb_layout` in `src/deck-session.sh`.
+  This one was recorded twice and used wrong anyway (§5.30c), so
+  `test/unit/test-hyprctl-syntax.sh` scanner 3 now enforces it.
 - **The Deck panel's transform is 3 (270°). 1 is upside down.** And Omarchy's
   `scale = "auto"` picks **2** on it, leaving a 640×400 logical desktop; 1.25
   is the even divisor of 1280×800.
