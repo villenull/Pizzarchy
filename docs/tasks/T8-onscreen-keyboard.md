@@ -511,11 +511,26 @@ row 5   (Ⓨ) ————————— space (wide) ————————�
 
 #### What the screenshot establishes, and it is a lot
 
-- ✅ **Space is ONE wide key with `Ⓨ` at its left edge.** §9d's clearest
-  divergence is confirmed: ours renders `☺`, a separate `Y`, then space.
+- ✅ **Space is ONE wide key with `Ⓨ` at its left edge.**
+  🔴 **But §9d's "clearest divergence" DOES NOT EXIST, and §9f repeated it
+  without checking the source.** `SPACE_KEY` in `deck_osk_layout.py` has been
+  `act("", "space", span=3, …)` — one wide key — since the layout core landed,
+  and **there is no `☺` key anywhere in this repo** (grepped). §9d described
+  our bottom row from memory and was wrong; I carried it forward as
+  "confirmed". The real gap was only the missing badge, now added.
+  **Check the code, not the note about the code.**
 - ✅ **Dual legends** — shifted face above, base below — on **numbers and
   punctuation alike**, both always visible. We match this.
-- ✅ **`Ⓧ` on Backspace**, top-right, and Backspace is a wide dark key.
+- ⚠️ **`Ⓧ` on Backspace — true for Valve, and it would be a LIE for us.**
+  Measured against our own mapper: `BTN_WEST` (Y) → `KEY_SPACE`, so the `Ⓨ`
+  badge on space is truthful; but `BTN_NORTH` (X) → **`KEY_TAB`**, not
+  Backspace (`deck-input-mapper.py:160-161`). Painting `Ⓧ` on our Backspace
+  would be *confidently wrong*, which §9a establishes is worse than absent, so
+  it is deliberately not drawn.
+  🔴 **Closing this divergence is an OPERATOR decision, not a code one:** it
+  means rebinding X from Tab to Backspace, and Tab is "next field", which
+  archinstall's forms need. Matching Valve's badge costs a real input
+  affordance. **Do not change it without asking.**
 - 🆕 **Two badge SHAPES, and the distinction is semantic:** face buttons are
   drawn in a **white circle** (`Ⓧ`, `Ⓨ`); triggers and stick clicks are drawn
   in a **white rounded rectangle** (`L2`, `R2`, `L3`). That is a convention we
