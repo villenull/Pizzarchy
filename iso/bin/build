@@ -7,10 +7,65 @@
 # reject; run the guards in §6; then omarchy-iso-make's work with the three
 # §3.10 fixes intact."
 #
-# This slice (T5a) ships an EMPTY overlay/ -- no configs/airootfs content, no
-# patches. Its only job is to prove the pipeline reproduces the known-good
-# ISO before anything gets added on top (§7: "Do not start T5c before T5a
-# proves parity").
+# The overlay is still EMPTY (T5a) -- no configs/airootfs content, no patches.
+# T5a's job was to prove the pipeline reproduces the known-good ISO before
+# anything gets added on top (§7: "Do not start T5c before T5a proves
+# parity").
+#
+# --------------------------------------------------------------------------
+# T5b: the runtime pin is now real, and guard 6.4 enforces the coupling
+# --------------------------------------------------------------------------
+#
+# iso/RUNTIME existed before this slice but nothing read it. That is the
+# hole docs/tasks/T5-fork-plan.md §0 is about: the git ref and the package
+# channel are TWO independent pins, and only one of them is expressible in
+# git. `OMARCHY_MIRROR=edge` is a rolling channel with no history -- it
+# served omarchy-dev @6d7826d on 2026-08-10 and @1c9dfc5 the next day, and
+# the rename in between (`omarchy-setup-system` -> `omarchy-apply-system`)
+# means an ISO forked at our UPSTREAM pin but built against today's edge
+# calls a binary the runtime no longer ships. It dies at phase 5 of 14, after
+# partitioning, LUKS, pacstrap and ~1200 packages.
+#
+# Two mechanisms close it, and this slice adds both:
+#
+#   1. --local-source (§2 mechanism A). Upstream's own supported path:
+#      builder/build-omarchy-packages.sh builds omarchy-dev,
+#      omarchy-settings-dev and omarchy-nvim from mounted git checkouts
+#      straight into the offline mirror, and build-iso.sh then EXCLUDES those
+#      three from the network `pacman -Syw`. So the runtime the ISO carries
+#      comes from iso/RUNTIME's sha rather than from whatever the channel
+#      served this morning. It is no longer optional here: a build that falls
+#      back to the channel would have an unpinned runtime, which is the
+#      defect this slice exists to remove.
+#
+#      ⚠️ It pins only the three omarchy-* packages. Arch's core/extra/
+#      multilib still roll through mirror.omarchy.org (§2). "Reproducible"
+#      here means "same inputs by declaration", not bit-identical.
+#
+#   2. Guard 6.4 (§6.4), in two halves, because neither alone is honest:
+#
+#      6.4a  BEFORE docker: every /usr/bin/omarchy-* our (patched)
+#            orchestrator shells out to exists in the pinned runtime
+#            checkout's bin/. Necessary, not sufficient -- the PKGBUILD
+#            decides what actually gets installed -- but it costs a grep and
+#            it refuses the build before six gigabytes of downloads.
+#      6.4b  AFTER docker, on the .pkg.tar.zst files the build actually
+#            produced: the same names exist as usr/bin/<name> members of
+#            omarchy-dev or omarchy-settings-dev. This is the sufficient
+#            half. The two packages are checked as a UNION because that is
+#            how they install: omarchy-dev's PKGBUILD ships all of bin/
+#            EXCEPT omarchy-debug, omarchy-debug-idle and omarchy-upload-log,
+#            which omarchy-settings-dev ships instead, and omarchy-dev
+#            hard-depends on omarchy-settings-dev.
+#
+#      6.4b also asserts the pin TOOK EFFECT: both PKGBUILDs derive pkgver
+#      as <base>.r<count>.g<short sha> from the checkout's git history, so a
+#      built package whose version does not carry iso/RUNTIME's short sha was
+#      not built from the tree we pinned -- whatever else went right.
+#
+# The name list is DERIVED (grepped out of the scratch tree's orchestrator
+# after our patches are applied), never hard-coded, so it cannot go stale
+# against our own edits -- §6.4's requirement.
 #
 # --------------------------------------------------------------------------
 # Why this does not just exec upstream's own bin/omarchy-iso-make
@@ -54,6 +109,21 @@
 # Env vars:
 #   OMARCHY_DECK_ISO_BUILD_DIR   scratch root (default: see above)
 #   OMARCHY_INSTALL_DEBUG        passed through to build-iso.sh unchanged
+#   OMARCHY_DECK_RUNTIME_SRC      path to an existing basecamp/omarchy
+#                                 checkout. Default: a clone this script
+#                                 manages under the scratch root, checked out
+#                                 at iso/RUNTIME's sha. When you point this at
+#                                 a checkout of your own it is VERIFIED, never
+#                                 moved: a HEAD that is not iso/RUNTIME's pin,
+#                                 or a dirty tree, is refused. Your checkout is
+#                                 an input to the packages this builds
+#                                 (makepkg copies the whole tree, untracked
+#                                 files included), so "dirty" really is
+#                                 "unreproducible", not pedantry.
+#   OMARCHY_DECK_PKGS_SRC         path to an existing omacom-io/omarchy-pkgs
+#                                 checkout -- the PKGBUILDs. REQUIRED unless
+#                                 iso/PKGS exists, because this repo does not
+#                                 yet pin that third input; see step 2b.
 #   OMARCHY_DECK_ISO_NO_NETWORK_HOST
 #                                 unset by default. build-iso.sh downloads
 #                                 hundreds of packages; Docker's default
@@ -76,39 +146,93 @@ ISO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 REPO_ROOT=$(cd -- "$ISO_ROOT/.." && pwd)
 
 # ---------------------------------------------------------------------------
+# Pin helpers. Three inputs want the same treatment (iso/UPSTREAM, iso/RUNTIME
+# and -- if it ever exists -- iso/PKGS), and one implementation of "is this
+# checkout exactly at its pin?" is the only way all three stay equally strict.
+# ---------------------------------------------------------------------------
+
+# parse_pin <file> -- sets PIN_SLUG and PIN_SHA from a one-line 'owner/repo@sha'.
+PIN_SLUG=""
+PIN_SHA=""
+parse_pin() {
+  local file=$1 line
+  [[ -f $file ]] || build_fail "missing $file"
+  line=$(head -n1 "$file")
+  [[ $line =~ ^([^/]+/[^@]+)@([0-9a-f]{7,40})$ ]] ||
+    build_fail "$file does not look like 'owner/repo@sha': '$line'"
+  PIN_SLUG=${BASH_REMATCH[1]}
+  PIN_SHA=${BASH_REMATCH[2]}
+}
+
+# verify_checkout_at_pin <dir> <sha> <label> <remedy> -- sets CHECKOUT_HEAD.
+#
+# Sets a global rather than echoing its result: build_fail's `exit 1` inside a
+# command substitution would only kill the subshell, and relying on set -e to
+# turn that into a real exit is exactly the kind of "fails, but only if you
+# read it right" construct this project keeps getting bitten by.
+#
+# Refuses anything that is not a clean git checkout sitting exactly on <sha>.
+# Deliberately NOT "checkout it for us": when the caller supplied the path, a
+# disagreement is a disagreement -- guard 6.1's shape (§6.1) -- and silently
+# moving someone's working tree onto a different commit is the same class of
+# error as silently overriding their OMARCHY_MIRROR. Prints the resolved HEAD
+# so a green line is evidence, not reassurance.
+CHECKOUT_HEAD=""
+verify_checkout_at_pin() {
+  local dir=$1 sha=$2 label=$3 remedy=$4 dirty
+  CHECKOUT_HEAD=""
+  [[ -e "$dir/.git" ]] || build_fail "$label: $dir is not a git checkout. $remedy"
+  CHECKOUT_HEAD=$(git -C "$dir" rev-parse HEAD) ||
+    build_fail "$label: could not read HEAD of $dir"
+  case $CHECKOUT_HEAD in
+    "$sha"*) ;;
+    *) build_fail "$label: $dir is at $CHECKOUT_HEAD, but the pin is $sha. Refusing to build from an unpinned checkout -- $remedy" ;;
+  esac
+  dirty=$(git -C "$dir" status --porcelain)
+  [[ -z $dirty ]] ||
+    build_fail "$label: $dir has local modifications, so it is not 'exactly at the pin'. These files go into the build (makepkg copies the whole tree, untracked included), which makes the result unreproducible:"$'\n'"$dirty"
+}
+
+# ---------------------------------------------------------------------------
 # 1. Verify the submodule is exactly at UPSTREAM. Refuse otherwise.
 # ---------------------------------------------------------------------------
 
-[[ -f "$ISO_ROOT/UPSTREAM" ]] || build_fail "missing $ISO_ROOT/UPSTREAM"
-
-upstream_line=$(head -n1 "$ISO_ROOT/UPSTREAM")
-# Expected shape: owner/repo@shortsha
-[[ $upstream_line =~ ^([^/]+/[^@]+)@([0-9a-f]{7,40})$ ]] ||
-  build_fail "$ISO_ROOT/UPSTREAM does not look like 'owner/repo@sha': '$upstream_line'"
-UPSTREAM_SLUG=${BASH_REMATCH[1]}
-UPSTREAM_PIN=${BASH_REMATCH[2]}
+parse_pin "$ISO_ROOT/UPSTREAM"
+UPSTREAM_SLUG=$PIN_SLUG
+UPSTREAM_PIN=$PIN_SHA
 
 UPSTREAM_DIR="$ISO_ROOT/upstream"
 [[ -e "$UPSTREAM_DIR/.git" ]] ||
   build_fail "$UPSTREAM_DIR is not a checked-out submodule. Run: git -C '$REPO_ROOT' submodule update --init iso/upstream"
 
-upstream_head=$(git -C "$UPSTREAM_DIR" rev-parse HEAD) ||
-  build_fail "could not read HEAD of $UPSTREAM_DIR"
-
-case $upstream_head in
-  "$UPSTREAM_PIN"*) ;;
-  *) build_fail "iso/upstream is at $upstream_head, but iso/UPSTREAM pins $UPSTREAM_SLUG@$UPSTREAM_PIN. Refusing to build from an unpinned checkout -- run 'git -C iso/upstream checkout $UPSTREAM_PIN' (or update UPSTREAM if the pin is meant to move) and re-run." ;;
-esac
-
-upstream_dirty=$(git -C "$UPSTREAM_DIR" status --porcelain)
-[[ -z $upstream_dirty ]] ||
-  build_fail "iso/upstream has local modifications; a dirty pinned checkout is not 'exactly at UPSTREAM'. git -C iso/upstream status:\n$upstream_dirty"
+verify_checkout_at_pin "$UPSTREAM_DIR" "$UPSTREAM_PIN" "iso/upstream" \
+  "run 'git -C iso/upstream checkout $UPSTREAM_PIN' (or update iso/UPSTREAM if the pin is meant to move) and re-run."
+upstream_head=$CHECKOUT_HEAD
 
 build_log "upstream pin OK: $UPSTREAM_SLUG@$upstream_head"
 
-if [[ -f "$ISO_ROOT/RUNTIME" ]]; then
-  build_log "runtime pin (not yet enforced by this slice -- T5b wires --local-source): $(head -n1 "$ISO_ROOT/RUNTIME")"
-fi
+# ---------------------------------------------------------------------------
+# 1b. Read the OTHER pin -- the one the channel cannot express.
+#
+# Parsed here (beside UPSTREAM) so a malformed iso/RUNTIME is refused in the
+# same breath as a malformed iso/UPSTREAM. The checkouts themselves are
+# materialised in step 2b, once the scratch root exists.
+# ---------------------------------------------------------------------------
+
+parse_pin "$ISO_ROOT/RUNTIME"
+RUNTIME_SLUG=$PIN_SLUG
+RUNTIME_PIN=$PIN_SHA
+build_log "runtime pin: $RUNTIME_SLUG@$RUNTIME_PIN (enforced below -- §2 mechanism A)"
+
+# The package names build-iso.sh derives from OMARCHY_ISO_REF (its `case`
+# maps quattro|edge|dev|local -> the -dev packages). Named ONCE here and
+# passed into the container explicitly rather than letting both sides derive
+# them, so the host-side guard 6.4b and the container's package build cannot
+# disagree about which files to look for. Same lesson as §3's S1: three
+# consumers of one list must read one list.
+RUNTIME_PACKAGE=omarchy-dev
+SETTINGS_PACKAGE=omarchy-settings-dev
+NVIM_PACKAGE=omarchy-nvim
 
 # ---------------------------------------------------------------------------
 # Guard 6.1 -- ref and mirror must agree, and this build sets them itself.
@@ -121,6 +245,15 @@ fi
 # caller has already exported -- a caller who set OMARCHY_MIRROR=stable
 # expecting it to take effect must be told no, not built a different ISO
 # than they asked for.
+#
+# T5b note: upstream's `omarchy-iso-make --local-source` sets
+# OMARCHY_ISO_REF=local. We deliberately keep 'quattro' while mounting the
+# same two source trees, because build-iso.sh treats quattro|edge|dev|local
+# identically (all four select the -dev packages) and OMARCHY_ISO_REF's only
+# other effects are the /root/omarchy_iso_ref stamp and the debug build-info.
+# Switching to 'local' would change that stamp, and with it the one file the
+# T5a parity comparison against ~/ISOs/ is measured on
+# (docs/findings/T9-iso-comparison.md §2), for no build behaviour at all.
 # ---------------------------------------------------------------------------
 
 BUILD_ISO_REF=quattro
@@ -156,6 +289,115 @@ RELEASE_DIR="$SCRATCH_ROOT/release"
 
 mkdir -p "$SCRATCH_ROOT" "$PACMAN_CACHE_DIR" "$OFFLINE_MIRROR_CACHE_DIR" "$RELEASE_DIR"
 build_log "scratch root: $SCRATCH_ROOT (outside the repo)"
+
+# ---------------------------------------------------------------------------
+# 2b. The --local-source inputs: the pinned runtime, and the PKGBUILDs.
+#
+# This is what turns iso/RUNTIME from a note into a pin. Both trees are
+# bind-mounted into the container in step 7, where
+# builder/build-omarchy-packages.sh builds omarchy-{dev,settings-dev,nvim}
+# from them straight into the offline mirror and build-iso.sh drops those
+# three from its network download.
+#
+# ⚠️ build-iso.sh keys two DIFFERENT decisions off these mounts: the local
+# package build needs both /omarchy-source and /omarchy-pkgs, but the
+# omarchy-base.packages / setup-form.sh sources switch on /omarchy-source
+# ALONE. Mount only the first and you get an ISO whose package lists came
+# from the pinned checkout while its runtime came from the channel -- the §0
+# split, rebuilt by hand. So this mounts both or neither, and "neither" is
+# not offered.
+#
+# 🔴 The third input nobody pinned. --local-source needs the PKGBUILDs too,
+# and omacom-io/omarchy-pkgs decides what actually lands in /usr/bin (its
+# omarchy-dev recipe ships all of bin/ except three files). T5-fork-plan.md
+# §2 names it as a requirement but pins only two of the three inputs, so
+# there is no iso/PKGS to enforce and choosing its value is an operator
+# decision, not this script's. Until that file exists the path must be given
+# explicitly: an unpinned input is tolerable, an unpinned input nobody
+# noticed is not.
+# ---------------------------------------------------------------------------
+
+# fetch_pinned_checkout <dir> <slug> <sha> <label>
+#
+# Only ever used for the clone this script MANAGES under the scratch root.
+# An operator-supplied checkout is verified and never touched (see
+# verify_checkout_at_pin). Re-runnable: an existing clone is reused, and only
+# fetched again when it does not already contain the pinned commit.
+fetch_pinned_checkout() {
+  local dir=$1 slug=$2 sha=$3 label=$4 url="https://github.com/$2.git"
+  if [[ ! -e "$dir/.git" ]]; then
+    build_log "$label: cloning $slug into $dir (first run; full history -- the PKGBUILDs' pkgver() counts commits)"
+    rm -rf "$dir"
+    git clone --quiet "$url" "$dir" ||
+      build_fail "$label: could not clone $url into $dir"
+  fi
+  if ! git -C "$dir" cat-file -e "$sha^{commit}" 2>/dev/null; then
+    build_log "$label: $sha not present locally; fetching $slug"
+    git -C "$dir" fetch --quiet --tags origin ||
+      build_fail "$label: could not fetch $slug into $dir"
+  fi
+  git -C "$dir" cat-file -e "$sha^{commit}" 2>/dev/null ||
+    build_fail "$label: $slug has no commit $sha even after fetching. Is the pin in the right repository?"
+  git -C "$dir" checkout --quiet --detach "$sha" ||
+    build_fail "$label: could not check $dir out at $sha"
+}
+
+if [[ -n ${OMARCHY_DECK_RUNTIME_SRC:-} ]]; then
+  RUNTIME_SRC=$OMARCHY_DECK_RUNTIME_SRC
+  [[ -d $RUNTIME_SRC ]] ||
+    build_fail "OMARCHY_DECK_RUNTIME_SRC=$RUNTIME_SRC is not a directory"
+  RUNTIME_SRC=$(cd -- "$RUNTIME_SRC" && pwd)
+else
+  RUNTIME_SRC="$SCRATCH_ROOT/runtime-src"
+  fetch_pinned_checkout "$RUNTIME_SRC" "$RUNTIME_SLUG" "$RUNTIME_PIN" "runtime source"
+fi
+
+# Verified the same way whether we checked it out or the caller did -- a
+# managed clone that verifies itself by construction would prove nothing.
+verify_checkout_at_pin "$RUNTIME_SRC" "$RUNTIME_PIN" "runtime source" \
+  "point OMARCHY_DECK_RUNTIME_SRC at a checkout of $RUNTIME_SLUG at $RUNTIME_PIN, unset it to let this script manage one, or update iso/RUNTIME if the pin is meant to move."
+RUNTIME_HEAD=$CHECKOUT_HEAD
+RUNTIME_SHORT=${RUNTIME_HEAD:0:7}
+build_log "runtime pin OK: $RUNTIME_SLUG@$RUNTIME_HEAD ($RUNTIME_SRC)"
+
+if [[ -f "$ISO_ROOT/PKGS" ]]; then
+  parse_pin "$ISO_ROOT/PKGS"
+  PKGS_SLUG=$PIN_SLUG
+  PKGS_PIN=$PIN_SHA
+  if [[ -n ${OMARCHY_DECK_PKGS_SRC:-} ]]; then
+    PKGS_SRC=$OMARCHY_DECK_PKGS_SRC
+    [[ -d $PKGS_SRC ]] || build_fail "OMARCHY_DECK_PKGS_SRC=$PKGS_SRC is not a directory"
+    PKGS_SRC=$(cd -- "$PKGS_SRC" && pwd)
+  else
+    PKGS_SRC="$SCRATCH_ROOT/pkgs-src"
+    fetch_pinned_checkout "$PKGS_SRC" "$PKGS_SLUG" "$PKGS_PIN" "pkgs source"
+  fi
+  verify_checkout_at_pin "$PKGS_SRC" "$PKGS_PIN" "pkgs source" \
+    "point OMARCHY_DECK_PKGS_SRC at a checkout of $PKGS_SLUG at $PKGS_PIN, unset it to let this script manage one, or update iso/PKGS if the pin is meant to move."
+  build_log "pkgs pin OK: $PKGS_SLUG@$CHECKOUT_HEAD ($PKGS_SRC)"
+else
+  [[ -n ${OMARCHY_DECK_PKGS_SRC:-} ]] ||
+    build_fail "no iso/PKGS pin file and no OMARCHY_DECK_PKGS_SRC. --local-source needs the omacom-io/omarchy-pkgs PKGBUILDs as well as the runtime (T5-fork-plan.md §2 mechanism A), and this repo pins only two of the three build inputs. Clone https://github.com/omacom-io/omarchy-pkgs and set OMARCHY_DECK_PKGS_SRC=<path>, or create iso/PKGS containing 'omacom-io/omarchy-pkgs@<sha>' to pin it properly -- which is the operator decision this slice deliberately did not make for you."
+  PKGS_SRC=$OMARCHY_DECK_PKGS_SRC
+  [[ -d $PKGS_SRC ]] || build_fail "OMARCHY_DECK_PKGS_SRC=$PKGS_SRC is not a directory"
+  PKGS_SRC=$(cd -- "$PKGS_SRC" && pwd)
+  [[ -e "$PKGS_SRC/.git" ]] ||
+    build_fail "OMARCHY_DECK_PKGS_SRC=$PKGS_SRC is not a git checkout. Without a sha there is nothing to record and nothing to reproduce."
+  pkgs_dirty=$(git -C "$PKGS_SRC" status --porcelain)
+  [[ -z $pkgs_dirty ]] ||
+    build_fail "OMARCHY_DECK_PKGS_SRC=$PKGS_SRC has local modifications. The PKGBUILDs decide what lands in /usr/bin; an edited copy makes the result unreproducible and guard 6.4b meaningless:"$'\n'"$pkgs_dirty"
+  pkgs_head=$(git -C "$PKGS_SRC" rev-parse HEAD)
+  build_log "⚠️  pkgs source is UNPINNED: using $PKGS_SRC at $pkgs_head"
+  build_log "⚠️  pin it by creating iso/PKGS with: omacom-io/omarchy-pkgs@$pkgs_head"
+fi
+
+# All three, because build-omarchy-packages.sh builds all three and stops on
+# the first one it cannot find -- an hour into a container that has already
+# provisioned an entire Arch image.
+for pkg_name in "$RUNTIME_PACKAGE" "$SETTINGS_PACKAGE" "$NVIM_PACKAGE"; do
+  [[ -d "$PKGS_SRC/pkgbuilds/$pkg_name" ]] ||
+    build_fail "pkgs source $PKGS_SRC has no pkgbuilds/$pkg_name. build-omarchy-packages.sh would fail inside the container after the whole image had been provisioned; refusing here instead."
+done
 
 # ---------------------------------------------------------------------------
 # 3. Fresh scratch clone of the pinned submodule.
@@ -221,6 +463,83 @@ fi
 build_log "guard 6.3 OK: pacman cache is scratch ($PACMAN_CACHE_DIR), host cache untouched"
 
 # ---------------------------------------------------------------------------
+# Guard 6.4a -- the runtime/finalizer coupling, checked before Docker starts.
+#
+# T5-fork-plan.md §6.4: "assert that every /usr/bin/omarchy-* the orchestrator
+# shells out to actually exists in [the runtime]. Derive the list by grepping
+# our patched phases_impl.py ... so the guard cannot go stale against our own
+# edits."
+#
+# Scope is the whole orchestrator directory, not phases_impl.py alone: §3's S3
+# puts our configure_deck phase in a NEW module beside it, and a guard that
+# only ever reads the file that exists today would go blind to exactly the
+# code we are about to add.
+#
+# Scope stops there on purpose, though. configs/airootfs/usr/local/bin/
+# omarchy-install-dashboard also names /usr/bin/omarchy-upload-log, but it
+# probes four candidate paths and carries on without any of them -- treating
+# a deliberately optional lookup as a hard requirement is the false positive
+# that teaches people to ignore a check (docs/PROGRESS.md §5.17). The
+# orchestrator's calls are subprocess.run(..., check=True) into arch-chroot;
+# those are the ones that abort an install two-thirds of the way through.
+#
+# What this half CANNOT prove: that the package built from this checkout ships
+# the file. omarchy-dev's PKGBUILD excludes three names from bin/ (they come
+# from omarchy-settings-dev instead), so bin/ is an over-approximation of
+# /usr/bin. Guard 6.4b closes that against the real artifact after the build.
+# Both are needed; this one is here because it costs a grep and saves ~6 GB.
+# ---------------------------------------------------------------------------
+
+ORCHESTRATOR_DIR="$SCRATCH_SRC/configs/airootfs/usr/share/omarchy-iso/orchestrator"
+[[ -d $ORCHESTRATOR_DIR ]] ||
+  build_fail "guard 6.4a cannot run: no orchestrator at ${ORCHESTRATOR_DIR#"$SCRATCH_SRC"/} in the overlaid tree. Upstream moved it, or the overlay clobbered it. Refusing to pass a guard that cannot see its subject."
+
+# Trailing '.' stripped: a name at the end of a sentence in a comment or log
+# string would otherwise be reported as a missing binary called 'omarchy-foo.'.
+mapfile -t REQUIRED_TARGET_BINS < <(
+  grep -rhoE '/usr/bin/omarchy-[A-Za-z0-9._-]+' "$ORCHESTRATOR_DIR" |
+    sed -E 's|^/usr/bin/||; s/\.+$//' | sort -u
+)
+(( ${#REQUIRED_TARGET_BINS[@]} > 0 )) ||
+  build_fail "guard 6.4a found no /usr/bin/omarchy-* references in the orchestrator at all. The orchestrator does call the runtime (run_system_finalizer, run_chroot_finalizer), so zero matches means the pattern went stale, not that the coupling went away. A guard with an empty subject is not a passing guard."
+
+[[ -d "$RUNTIME_SRC/bin" ]] ||
+  build_fail "guard 6.4a cannot run: the runtime checkout $RUNTIME_SRC has no bin/ directory."
+mapfile -t RUNTIME_BIN_NAMES < <(
+  find "$RUNTIME_SRC/bin" -maxdepth 1 \( -type f -o -type l \) -name 'omarchy-*' -printf '%f\n' | sort -u
+)
+(( ${#RUNTIME_BIN_NAMES[@]} > 0 )) ||
+  build_fail "guard 6.4a cannot run: $RUNTIME_SRC/bin contains no omarchy-* files. That is not a runtime checkout."
+
+missing_bins=()
+for want in "${REQUIRED_TARGET_BINS[@]}"; do
+  found=0
+  for have in "${RUNTIME_BIN_NAMES[@]}"; do
+    [[ $want == "$have" ]] && { found=1; break; }
+  done
+  (( found )) || missing_bins+=("$want")
+done
+
+if (( ${#missing_bins[@]} > 0 )); then
+  build_fail "guard 6.4a: the pinned ISO and the pinned runtime disagree.
+
+  installer   $UPSTREAM_SLUG@$upstream_head (iso/UPSTREAM)
+  runtime     $RUNTIME_SLUG@$RUNTIME_HEAD (iso/RUNTIME, $RUNTIME_SRC)
+
+  The orchestrator shells out to these, and the runtime does not ship them:
+$(printf '    /usr/bin/%s\n' "${missing_bins[@]}")
+  The runtime checkout offers ${#RUNTIME_BIN_NAMES[@]} omarchy-* binaries in bin/, so this is a
+  rename or a removal between the two pins, not an empty checkout.
+
+  This is T5-fork-plan.md §0: the git ref and the package channel are two
+  independent pins and they have drifted apart. Left alone it fails at
+  'Configuring system', phase 5 of 14, AFTER partitioning, LUKS, pacstrap and
+  ~1200 packages. Move both pins together, or neither."
+fi
+
+build_log "guard 6.4a OK: all ${#REQUIRED_TARGET_BINS[@]} orchestrator-called binaries (${REQUIRED_TARGET_BINS[*]}) exist in $RUNTIME_SLUG@$RUNTIME_SHORT's bin/ (${#RUNTIME_BIN_NAMES[@]} candidates)"
+
+# ---------------------------------------------------------------------------
 # 7. The build. Mirrors iso/upstream/bin/omarchy-iso-make's docker invocation
 #    of builder/build-iso.sh, minus the two things guard 6.3 forbids (see the
 #    file header) and minus the interactive "boot it?" prompt at the end.
@@ -243,6 +562,11 @@ DOCKER_ARGS=(
   -e "OMARCHY_ISO_REF=$BUILD_ISO_REF"
   -e "OMARCHY_MIRROR=$BUILD_MIRROR"
   -e "OMARCHY_INSTALL_DEBUG=${OMARCHY_INSTALL_DEBUG:-}"
+  # Stated rather than re-derived from the ref inside the container, so the
+  # names guard 6.4b looks for on the way out are the names that were built.
+  -e "OMARCHY_RUNTIME_PACKAGE=$RUNTIME_PACKAGE"
+  -e "OMARCHY_SETTINGS_PACKAGE=$SETTINGS_PACKAGE"
+  -e "OMARCHY_NVIM_PACKAGE=$NVIM_PACKAGE"
   -e "HOST_UID=$(id -u)"
   -e "HOST_GID=$(id -g)"
   -v "$RELEASE_DIR/:/out/"
@@ -250,6 +574,9 @@ DOCKER_ARGS=(
   -v "$SCRATCH_SRC/archiso:/archiso:ro"
   -v "$SCRATCH_SRC/builder:/builder:ro"
   -v "$SCRATCH_SRC/configs:/configs:ro"
+  # --local-source (step 2b): both mounts, always together.
+  -v "$RUNTIME_SRC:/omarchy-source:ro"
+  -v "$PKGS_SRC:/omarchy-pkgs:ro"
   # Guard 6.3: scratch caches, never the host's.
   -v "$PACMAN_CACHE_DIR:/var/cache/pacman/pkg"
   -v "$OFFLINE_MIRROR_CACHE_DIR:/var/cache/airootfs/var/cache/omarchy"
@@ -259,9 +586,8 @@ build_log "starting docker build (this downloads hundreds of packages; can take 
 docker run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /build-iso.sh
 
 # ---------------------------------------------------------------------------
-# 8. Name and report the result. Matches omarchy-iso-make's own
-#    <name>-<ref>.iso convention so the artifact is unambiguous about which
-#    ref/mirror pair produced it.
+# 8. Locate the result. Naming happens further down, AFTER guard 6.4b -- a
+#    rejected ISO must not be handed a finished-looking name.
 # ---------------------------------------------------------------------------
 
 shopt -s nullglob
@@ -273,6 +599,129 @@ shopt -u nullglob
 # Newest first; mkarchiso writes exactly one per run, but be explicit rather
 # than assume. find -printf avoids ls's non-alphanumeric-filename footguns.
 latest_iso=$(find "${built_isos[@]}" -maxdepth 0 -printf '%T@ %p\n' | sort -rn | head -n1 | cut -d' ' -f2-)
+
+# ---------------------------------------------------------------------------
+# Guard 6.4b -- the same coupling, re-asked of the artifact that will ship.
+#
+# 6.4a read the runtime CHECKOUT; this reads the .pkg.tar.zst files
+# builder/build-omarchy-packages.sh actually produced, which is what the
+# target installs. They can differ: omarchy-dev's PKGBUILD ships bin/*
+# except omarchy-debug, omarchy-debug-idle and omarchy-upload-log, which
+# omarchy-settings-dev ships instead -- so the honest provider set is the
+# UNION of the two packages, and only the packages know it.
+#
+# The packages are readable from here because the container writes the
+# offline mirror into a bind mount (build-iso.sh's
+# /var/cache/airootfs/var/cache/omarchy). Yes, this runs after the expensive
+# part -- 6.4a is the cheap early gate. What this one buys is the difference
+# between shipping an ISO that dies at phase 5 and not shipping one at all.
+#
+# It also answers the question 6.4a cannot: DID THE PIN TAKE EFFECT? Both
+# PKGBUILDs compute pkgver as <base>.r<count>.g<short sha> from the source
+# tree's git history, so a package version that does not carry iso/RUNTIME's
+# short sha means the offline mirror holds a channel build, not ours --
+# --local-source silently not having applied is precisely the failure this
+# slice exists to prevent, and it is invisible in a green build log.
+# ---------------------------------------------------------------------------
+
+OFFLINE_MIRROR_DIR="$OFFLINE_MIRROR_CACHE_DIR/mirror/offline"
+
+reject_iso() {
+  if [[ -f $latest_iso ]]; then
+    mv -f "$latest_iso" "$latest_iso.rejected"
+    build_log "renamed the built ISO to $(basename -- "$latest_iso").rejected -- it must not be flashed, and a later run's *.iso glob must not pick it up"
+  fi
+  build_fail "$1"
+}
+
+# inspect_package <file> -- sets PKG_NAME, PKG_VER, PKG_BINS.
+PKG_NAME=""
+PKG_VER=""
+PKG_BINS=()
+inspect_package() {
+  local file=$1 pkginfo listing
+  # Captured, not piped: bsdtar failing mid-read inside a process
+  # substitution would look exactly like a package with no members.
+  pkginfo=$(bsdtar -xOf "$file" .PKGINFO) ||
+    reject_iso "guard 6.4b: could not read .PKGINFO from $file"
+  listing=$(bsdtar -tf "$file") ||
+    reject_iso "guard 6.4b: could not list the members of $file"
+  PKG_NAME=$(printf '%s\n' "$pkginfo" | sed -n 's/^pkgname = //p' | head -n1)
+  PKG_VER=$(printf '%s\n' "$pkginfo" | sed -n 's/^pkgver = //p' | head -n1)
+  [[ -n $PKG_NAME && -n $PKG_VER ]] ||
+    reject_iso "guard 6.4b: $file has no pkgname/pkgver in .PKGINFO"
+  mapfile -t PKG_BINS < <(printf '%s\n' "$listing" | sed -n 's|^usr/bin/\(..*\)$|\1|p' | sort -u)
+}
+
+command -v bsdtar >/dev/null 2>&1 ||
+  reject_iso "guard 6.4b needs bsdtar (libarchive) to read the built packages and it is not on PATH. Refusing to skip the check that reads the artifact -- install libarchive and re-run."
+[[ -d $OFFLINE_MIRROR_DIR ]] ||
+  reject_iso "guard 6.4b: no offline mirror at $OFFLINE_MIRROR_DIR after a successful build. The container should have written the locally built packages there."
+
+PROVIDED_BINS=()
+for pkg_name in "$RUNTIME_PACKAGE" "$SETTINGS_PACKAGE"; do
+  shopt -s nullglob
+  pkg_candidates=("$OFFLINE_MIRROR_DIR/$pkg_name-"*.pkg.tar.*)
+  shopt -u nullglob
+
+  pkg_file=""
+  pkg_version=""
+  for candidate in "${pkg_candidates[@]}"; do
+    [[ $candidate == *.sig ]] && continue
+    inspect_package "$candidate"
+    # The glob is a prefix match; .PKGINFO is the authority on which package
+    # this file actually is.
+    [[ $PKG_NAME == "$pkg_name" ]] || continue
+    [[ -z $pkg_file ]] ||
+      reject_iso "guard 6.4b: more than one $pkg_name package in $OFFLINE_MIRROR_DIR. Cannot tell which one the ISO carries, so cannot verify either."
+    pkg_file=$candidate
+    pkg_version=$PKG_VER
+    PROVIDED_BINS+=("${PKG_BINS[@]}")
+  done
+
+  [[ -n $pkg_file ]] ||
+    reject_iso "guard 6.4b: no $pkg_name package in $OFFLINE_MIRROR_DIR. --local-source should have built one from $RUNTIME_SLUG@$RUNTIME_SHORT; its absence means the local build did not run and the ISO's runtime came from the '$BUILD_MIRROR' channel instead -- an unpinned runtime, which is the whole thing this slice removes."
+
+  case $pkg_version in
+    *".g$RUNTIME_SHORT"*) ;;
+    *) reject_iso "guard 6.4b: $pkg_name is version '$pkg_version', which does not carry iso/RUNTIME's commit ($RUNTIME_SHORT). Both PKGBUILDs derive pkgver from the source tree's git history, so this package was NOT built from $RUNTIME_SLUG@$RUNTIME_HEAD. The runtime pin did not take effect." ;;
+  esac
+  build_log "guard 6.4b: $pkg_name $pkg_version built from $RUNTIME_SLUG@$RUNTIME_SHORT (${#PKG_BINS[@]} usr/bin entries)"
+done
+
+(( ${#PROVIDED_BINS[@]} > 0 )) ||
+  reject_iso "guard 6.4b: the built packages ship no usr/bin members at all. That is not a runtime; refusing to report a pass."
+
+missing_bins=()
+for want in "${REQUIRED_TARGET_BINS[@]}"; do
+  found=0
+  for have in "${PROVIDED_BINS[@]}"; do
+    [[ $want == "$have" ]] && { found=1; break; }
+  done
+  (( found )) || missing_bins+=("$want")
+done
+
+if (( ${#missing_bins[@]} > 0 )); then
+  reject_iso "guard 6.4b: the ISO's orchestrator calls binaries the packages it carries do not contain.
+
+  installer   $UPSTREAM_SLUG@$upstream_head (iso/UPSTREAM)
+  runtime     $RUNTIME_SLUG@$RUNTIME_HEAD (iso/RUNTIME)
+
+  Missing from $RUNTIME_PACKAGE + $SETTINGS_PACKAGE (${#PROVIDED_BINS[@]} usr/bin entries between them):
+$(printf '    /usr/bin/%s\n' "${missing_bins[@]}")
+  Guard 6.4a passed on the checkout, so the file exists in bin/ and the
+  PKGBUILD did not install it -- check pkgbuilds/$RUNTIME_PACKAGE's package()
+  exclusion list in the pkgs checkout."
+fi
+
+build_log "guard 6.4b OK: all ${#REQUIRED_TARGET_BINS[@]} orchestrator-called binaries are present in the packages this ISO carries"
+
+# ---------------------------------------------------------------------------
+# 9. Name and report the result. Matches omarchy-iso-make's own
+#    <name>-<ref>.iso convention so the artifact is unambiguous about which
+#    ref/mirror pair produced it.
+# ---------------------------------------------------------------------------
+
 case $latest_iso in
   *-"$BUILD_ISO_REF".iso) final_iso=$latest_iso ;;
   *) final_iso="${latest_iso%.*}-$BUILD_ISO_REF.iso"; mv -f "$latest_iso" "$final_iso" ;;
