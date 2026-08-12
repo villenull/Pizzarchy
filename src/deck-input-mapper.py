@@ -423,6 +423,31 @@ OSK_IDLE_TRIGGER: dict[int, str] = {
 }
 OSK_IDLE_TRIGGER_KEYS: dict[str, int] = {"enter": e.KEY_ENTER}
 
+# --- 🔴 CLICKING A PAD COMMITS THAT PAD'S CURSOR -----------------------------
+#
+# Operator, on hardware, 2026-08-12: *"the way the keyboard works in gaming mode
+# is that when i press shift and then aim, i press harder on the trackpad and
+# that's registered as a press"*. Valve's keyboard commits on the PAD CLICK as
+# well as on the trigger, and this is not a third way of doing the same thing --
+# it is the missing half of hold-to-Shift. A click needs no trigger, so the L2
+# that is holding Shift never has to come up, which is the gesture
+# `hold_osk_shift` was written around and previously had to declare unreachable.
+#
+# ⚠️ BTN_THUMB IS THE LEFT PAD'S CLICK AND BTN_THUMB2 THE RIGHT'S -- measured in
+# the same 2026-08-12 capture as the touch rule above (left: press 14.079s,
+# release 14.551s). ⛔ NOT `BTN_THUMBL`/`BTN_THUMBR`, one letter longer, which
+# are the STICK clicks; `BTN_THUMBL` is the Caps binding below. Swapping the two
+# pairs makes Caps latch every time a thumb clicks the pad it is resting on, and
+# makes the click commit nothing.
+#
+# ⚠️ NO KEYCODE OF ITS OWN, so EMITTED_KEYS is deliberately untouched: a click
+# commits through the layout core exactly as a trigger does, and every character
+# key it can reach is already declared there.
+PAD_CLICK_HALF: dict[int, str] = {
+    e.BTN_THUMB: "left",
+    e.BTN_THUMB2: "right",
+}
+
 # ⚠️ The uinput device declares exactly this set, and emits NOTHING else -- the
 # kernel drops an undeclared code without an error. Every character key the OSK
 # can type therefore has to be in here before a renderer ever draws it, which is
@@ -657,16 +682,29 @@ class Mapper:
     #   lowercase letter while the user was visibly holding shift, which §9a
     #   calls the worst failure available -- confidently wrong. So touching the
     #   left pad under a held L2 only AIMS (its cursor and highlight appear,
-    #   both L2 badges gate away). Committing from the left pad needs a fresh
-    #   L2 pull, which by definition means L2 came up first and shift went with
-    #   it. The reachable shifted-typing gestures are therefore:
+    #   both L2 badges gate away), and committing from that pad must not need a
+    #   fresh L2 pull, because pulling L2 again means it came up first and took
+    #   Shift with it.
     #
-    #     two-handed -- hold L2, aim with the RIGHT pad, commit with R2. This is
-    #                   the PC gesture the operator asked for, and it repeats:
-    #                   the hold is a LOCK for its duration, so every key
-    #                   committed while L2 is down is shifted, not just the
-    #                   first.
-    #     one-handed -- the on-screen Shift key, untouched by any of this. It
+    #   🔴 THE PAD CLICK IS WHAT MAKES THAT WHOLE PROBLEM GO AWAY, and this
+    #   paragraph used to say the opposite. Until 2026-08-12 it recorded that
+    #   "hold Shift and aim with the same hand" was a gesture this input model
+    #   could not offer, and left the user a two-handed one. That was true only
+    #   while the trigger was the sole way to commit. `PAD_CLICK_HALF` measured
+    #   the other way -- press harder on the pad you are already aiming with --
+    #   and it touches no trigger, so nothing about it disturbs a held L2. The
+    #   reachable shifted-typing gestures are therefore:
+    #
+    #     one-handed -- hold L2, aim with the LEFT pad, CLICK it. Shift is
+    #                   engaged the whole time, because the only thing that
+    #                   releases it is L2 coming up. This is the operator's own
+    #                   description of Gaming Mode, and it is what Valve's
+    #                   keyboard does.
+    #     two-handed -- hold L2, aim with the RIGHT pad, commit with R2 or with
+    #                   that pad's click. Either way the hold is a LOCK for its
+    #                   duration, so every key committed while L2 is down is
+    #                   shifted, not just the first.
+    #     no trigger -- the on-screen Shift key, untouched by any of this. It
     #                   still cycles off -> once -> locked, so the one-shot the
     #                   trigger used to offer is exactly where it always was.
     #
@@ -852,10 +890,12 @@ class Mapper:
 
         Both pads become cursors, and each trigger EITHER presses the key under
         its own cursor (that pad touched) or acts as Shift/Enter (that pad
-        lifted). X, Y and L3 are unconditional shortcuts, exactly as Valve badges
-        them. Everything else is deliberately swallowed: with the keyboard up, A
-        must not also send Enter underneath, or every press does two things at
-        once.
+        lifted). CLICKING a pad commits that pad's cursor and does nothing else,
+        which is the gesture that lets one hand hold Shift and aim at once
+        (`PAD_CLICK_HALF`). X, Y and L3 are unconditional shortcuts, exactly as
+        Valve badges them. Everything else is deliberately swallowed: with the
+        keyboard up, A must not also send Enter underneath, or every press does
+        two things at once.
 
         🔴 A TRIGGER OVER AN UNTOUCHED PAD NEVER COMMITS, and since the
         operator's 2026-08-12 report that is also what the screen says: an
@@ -892,6 +932,28 @@ class Mapper:
             if self.pad_touched(half):
                 return self.osk.press_at(half, *self.cursors.position(half))
             return self._osk_idle_trigger(code)
+        half = PAD_CLICK_HALF.get(code)
+        if half is not None:
+            # 🔴 THE SAME EMISSION PATH AS THE TRIGGER, on purpose: one call,
+            # `press_at` on that side's cursor. A click and a pull commit
+            # identically or they will drift on shift, caps and the one-shot.
+            #
+            # ⚠️ GATED ON TOUCH, exactly as the trigger is, and for the same
+            # reason the docstring below gives: an untouched pad draws no cursor
+            # and highlights no key, so committing one would type a key nothing
+            # on screen was pointing at. Physically a click IS a touch -- the
+            # switch is under the pad's own surface -- so this only ever bites
+            # in the documented dead-centre blind spot, where the trigger is
+            # equally blind.
+            #
+            # ⚠️ AND A CLICK OVER A LIFTED PAD DOES NOTHING AT ALL, where the
+            # trigger has a second meaning. That asymmetry is the reference's:
+            # Valve badges L2/R2 on Shift and Enter and badges the pad clicks on
+            # nothing, so inventing an idle meaning here would be a behaviour
+            # the keyboard never advertises. §9a: worse than silence.
+            if self.pad_touched(half):
+                return self.osk.press_at(half, *self.cursors.position(half))
+            return []
         if code == OSK_CAPS_BUTTON:
             # Caps is a state, never a keycode: see OSK_CAPS_BUTTON.
             self.osk.caps = not self.osk.caps
@@ -900,6 +962,35 @@ class Mapper:
         if key is not None:
             return [(key, 1), (key, 0)]
         return []
+
+    def press_key_index(self, row: int, key_index: int) -> "list[tuple[int, int]] | None":
+        """Commit the key at (row, key_index) -- what a TOUCH on the overlay asks for.
+
+        🔴 AN INDEX, NOT A COORDINATE, AND THAT IS THE WHOLE DESIGN OF THE TOUCH
+        PATH. `press_at` hit-tests in the layout core's default `CELLS` metric;
+        the overlay DRAWS in `UNITS` and hit-tests its own painted rectangles in
+        the metric it drew them in (`deck_osk_wayland.key_at_pixel`). The two
+        disagree by up to half a key inside a half, so a touch that sent
+        coordinates home would be re-resolved here in the OTHER metric and would
+        sometimes type the neighbour of the key under the finger. The overlay
+        resolves the key it drew; this presses it, and no metric is involved.
+
+        🔴 AND IT IS THE SAME EMISSION PATH. Both routes end in
+        `OnScreenKeyboard.press`, so shift, caps, the one-shot being spent, the
+        layer switch and `closed` all behave identically whether a trigger, a
+        pad click or a finger committed.
+
+        None -- and ONLY None -- means "there is no such key": this process and
+        the overlay disagree about the layout, which is a defect and is said out
+        loud by the caller. An EMPTY LIST is an ordinary answer: Shift and Caps
+        are real keys that type nothing.
+        """
+        if self.osk is None:
+            return None
+        rows = self.osk.layer.rows
+        if not 0 <= row < len(rows) or not 0 <= key_index < len(rows[row]):
+            return None
+        return self.osk.press(rows[row][key_index])
 
     def translate(self, etype: int, code: int, value: int, now: float) -> list[tuple[int, int]]:
         if etype == e.EV_KEY:
@@ -2111,6 +2202,17 @@ def main() -> None:
     osk_tty = None
     osk_stream = None
     osk_layer_proc = None
+    # The overlay's stdout -- the ONE thing that travels UP the pipe, and it
+    # exists only for touch (`deck_osk_wayland.parse_press_line`). Registered in
+    # the selector for exactly the span the overlay is alive, so a finger on the
+    # keyboard wakes this loop the same way a thumb on a pad does.
+    osk_layer_fd = None
+    osk_layer_buffer = b""
+    osk_layer_module = None
+    # How many lines the overlay sent that were not press lines. Counted so the
+    # complaint is made ONCE: this crosses a process boundary, and a chatty or
+    # mismatched overlay must not be able to flood the journal from a keypress.
+    osk_layer_ignored = 0
     # The console width we last complained about being too narrow, or None while
     # the keyboard fits. NOT a cache of the width -- that is re-read every draw
     # (`_console_cols`). It exists so the complaint is made once per distinct
@@ -2140,6 +2242,22 @@ def main() -> None:
                 code: (ai.min, ai.max) for code, ai in pad_abs.items()
                 if code in osk_layout.PAD_AXES
             })
+            # ⚠️ IMPORTED FOR ITS PROTOCOL, NOT RUN. The overlay is a separate
+            # process (see `osk_layer_start`); this is the same trick `AutoShow`
+            # uses with `deck_osk_focus` -- the module that WRITES a line is the
+            # module that parses it, so there is one definition of the format
+            # rather than two that agreed on the day they were written.
+            #
+            # Safe to import here: `deck_osk_wayland` imports `gi` inside its
+            # own main() precisely so its geometry is importable on a machine
+            # with no GTK, and nothing at its module scope touches a display.
+            osk_layer_module = _load_module("deck_osk_wayland")
+            if osk_layer_module is None:
+                # It said why. The keyboard still draws and the pads still
+                # drive it; only TOUCHING the glass is lost.
+                say("the overlay's line protocol could not be imported, so "
+                    "TOUCH on the keyboard is DISABLED; the pads, the triggers "
+                    "and the pad clicks are unaffected")
     if args.osk_backend == "tty":
         osk_tty = _load_module("deck_osk_tty")
         if osk_layout is None or osk_tty is None:
@@ -2263,15 +2381,127 @@ def main() -> None:
         if osk_layer_proc is not None and osk_layer_proc.poll() is None:
             return
         try:
+            # ⚠️ stdout IS A PIPE NOW, AND A PIPE MUST BE DRAINED -- see
+            # `osk_layer_pump`. It carries touches back and nothing else; the
+            # overlay says everything a human needs on stderr, which stays
+            # INHERITED so it lands in this service's own journal.
+            #
+            # ⚠️ ...AND DEVNULL IF WE COULD NOT LOAD ITS PROTOCOL. A pipe with
+            # no reader fills at 64KB and then BLOCKS the writer -- which here
+            # is the overlay's GTK thread, i.e. a keyboard frozen mid-draw on a
+            # device whose only other input path is this process. Discarding is
+            # the only safe thing to do with a stream nothing can parse.
             osk_layer_proc = subprocess.Popen(
                 [sys.executable, str(osk_layer_script)],
-                stdin=subprocess.PIPE, text=True, env=session_environ(),
+                stdin=subprocess.PIPE,
+                stdout=(subprocess.PIPE if osk_layer_module is not None
+                        else subprocess.DEVNULL),
+                text=True, env=session_environ(),
             )
         except OSError as exc:
             osk_layer_proc = None
             osk_fall_back(f"could not start the overlay: {exc}")
             return
+        osk_layer_watch()
         osk_layer_send()
+
+    def osk_layer_watch() -> None:
+        """Select on the overlay's stdout for as long as it lives.
+
+        🔴 IT HAS TO BE IN THE SELECTOR, not polled after pad events. A finger
+        on the glass is often the ONLY thing happening -- both thumbs are off
+        the pads -- so a loop that woke only for the pad would sit in select()
+        holding the keystroke until something else moved.
+        """
+        nonlocal osk_layer_fd, osk_layer_buffer
+        # `stdout is None` is exactly the DEVNULL case above: no protocol, no
+        # touch, nothing to select on -- and nothing that can block, either.
+        if osk_layer_proc is None or osk_layer_proc.stdout is None:
+            return
+        if osk_layer_module is None:
+            return
+        osk_layer_buffer = b""
+        osk_layer_fd = osk_layer_proc.stdout.fileno()
+        try:
+            sel.register(osk_layer_fd, selectors.EVENT_READ)
+        except (KeyError, ValueError, OSError) as exc:
+            osk_layer_fd = None
+            # Not fatal, and not silent: the keyboard still draws and the pads
+            # still commit; only touch is lost.
+            say(f"could not watch the overlay's pipe ({exc}); TOUCH on the "
+                "keyboard is DISABLED for this showing")
+
+    def osk_layer_unwatch() -> None:
+        """Stop selecting on it. Called before anything closes it."""
+        nonlocal osk_layer_fd
+        if osk_layer_fd is None:
+            return
+        try:
+            sel.unregister(osk_layer_fd)
+        except (KeyError, ValueError, OSError):
+            pass
+        osk_layer_fd = None
+
+    def osk_layer_pump() -> None:
+        """A touch arrived on the overlay: commit the key it landed on.
+
+        ⚠️ NEVER BLOCKS. Called only when the selector says this fd is ready, so
+        one `os.read` returns what is there or EOF -- with `lizard_mode=N` this
+        process is the only input path on the device (docs/PROGRESS.md §5.9) and
+        a read that waited would freeze the pad, the pointer and the keys.
+        """
+        nonlocal osk_layer_buffer, osk_layer_ignored
+        if osk_layer_proc is None or osk_layer_proc.stdout is None:
+            return
+        try:
+            chunk = os.read(osk_layer_fd, 4096)
+        except (BlockingIOError, InterruptedError):
+            return
+        except OSError as exc:
+            osk_layer_died(f"the overlay's pipe failed ({exc})")
+            return
+        if not chunk:
+            # EOF: it exited. Previously this was only ever noticed on the next
+            # state line, i.e. the next time a thumb moved.
+            osk_layer_died("the overlay exited")
+            return
+        lines, osk_layer_buffer = osk_layer_module.split_lines(
+            osk_layer_buffer + chunk)
+        pressed = False
+        for line in lines:
+            index = osk_layer_module.parse_press_line(line)
+            strokes = None if index is None else mapper.press_key_index(*index)
+            if strokes is None:
+                osk_layer_ignored += 1
+                if osk_layer_ignored == 1:
+                    say(f"the overlay said {line!r}, which is not a key this "
+                        "keyboard has; ignoring it and any like it")
+                continue
+            for key, value in strokes:
+                emit(key, value)
+            pressed = True
+        if not pressed:
+            return
+        # The press may have latched Shift, toggled Caps, switched layer or
+        # closed the keyboard, and nothing else will redraw until a pad moves --
+        # which after a touch may be never.
+        if mapper.osk.closed:
+            set_osk_visible(False)
+            return
+        osk_layer_send()
+
+    def osk_layer_died(reason: str) -> None:
+        """The overlay is gone. Same handling as a failed write, one place."""
+        nonlocal osk_layer_proc
+        osk_layer_unwatch()
+        try:
+            if osk_layer_proc is not None and osk_layer_proc.stdout is not None:
+                osk_layer_proc.stdout.close()   # or the fd leaks on every failure
+        except OSError:
+            pass
+        osk_layer_proc = None
+        osk_fall_back(reason)
+        osk_dbus_toggle(True)
 
     def osk_layer_send() -> None:
         """One state line. A dead overlay is reported, never fatal."""
@@ -2283,6 +2513,7 @@ def main() -> None:
         # and it looks identical to a healthy one until the pipe is used.
         exited = osk_layer_proc.poll()
         if exited is not None:
+            osk_layer_unwatch()
             osk_layer_proc = None
             osk_fall_back(f"the overlay exited with status {exited}")
             osk_dbus_toggle(True)
@@ -2300,12 +2531,14 @@ def main() -> None:
                                              mapper.pad_touch_state()))
             osk_layer_proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
-            osk_layer_proc = None
-            osk_fall_back(f"the overlay went away: {exc}")
-            osk_dbus_toggle(True)
+            osk_layer_died(f"the overlay went away: {exc}")
 
     def osk_layer_stop() -> None:
         nonlocal osk_layer_proc
+        # ⚠️ BEFORE anything closes the pipe: an fd left in the selector is
+        # ready-with-EOF for ever, which spins this loop at 100% -- and once the
+        # number is reused by the next overlay, it is ready for the WRONG one.
+        osk_layer_unwatch()
         if osk_layer_proc is None:
             return
         try:
@@ -2317,6 +2550,11 @@ def main() -> None:
             osk_layer_proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             osk_layer_proc.kill()
+        try:
+            if osk_layer_proc.stdout is not None:
+                osk_layer_proc.stdout.close()   # or the fd leaks, one per showing
+        except OSError:
+            pass
         osk_layer_proc = None
 
     def osk_fall_back(reason: str) -> None:
@@ -2504,6 +2742,12 @@ def main() -> None:
                     except (KeyError, ValueError, OSError):
                         pass
                     auto_fd = None
+            # ⚠️ DISPATCHED LIKE THE OTHERS, by fd. The overlay's stdout carries
+            # touches (§5.30c made the panel's touch usable at all); a finger on
+            # the glass may be the only thing happening, with both thumbs off
+            # the pads.
+            if osk_layer_fd is not None and osk_layer_fd in ready_fds:
+                osk_layer_pump()
             if pad.fd in ready_fds:
                 # Pointer deltas accumulate across ONE report and are emitted
                 # together on SYN_REPORT. A real mouse sends REL_X and REL_Y in

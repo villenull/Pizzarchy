@@ -431,6 +431,194 @@ check("a valid line with extra whitespace still parses",
       osk.parse_state_line("  state   letters  off  0.25 0.75 0.5 0.5  \n")
       is not None, True)
 
+# --- 🔴 TOUCH: the input region, and the key under a finger ------------------
+#
+# Operator, on hardware, 2026-08-12: *"touch on the keyboard still does not work
+# (works in desktop)"*. It did not work because this surface declared an EMPTY
+# input region -- deliberately, and it is what guaranteed the overlay could
+# never swallow a click meant for the window underneath. That guarantee is the
+# thing being traded, so everything below pins how far the trade goes:
+#
+#   * the region is NON-EMPTY (or touch is dead again, silently -- nothing on
+#     screen changes and no error is produced anywhere);
+#   * it is BOUNDED to the key grid, never the whole surface, so the reserved
+#     stripe band still passes events through;
+#   * and a touch inside it resolves to the key that was DRAWN there, in the
+#     metric it was drawn in.
+
+for width, height in SIZES:
+    x, y, w, h = wl.input_region_rect(width, height)
+    check(f"the input region is not empty ({width}x{height})", w > 0 and h > 0, True)
+    check(f"...and it is integers, which is all a Wayland region can be "
+          f"({width}x{height})",
+          all(isinstance(v, int) for v in (x, y, w, h)), True)
+    top, _grid = wl.grid_origin(height)
+    check(f"...it starts BELOW the reserved stripe, never inside it "
+          f"({width}x{height})", y >= top, True)
+    check(f"...it is bounded by the surface ({width}x{height})",
+          (x, x + w <= width, y + h <= height), (0, True, True))
+    check(f"...and it reaches the bottom edge, where the last row is "
+          f"({width}x{height})", y + h, int(height))
+    # Everything inside the region must BE a key, or the surface would swallow
+    # events over dead paint.
+    corners = ((x, y), (x + w - 1, y), (x, y + h - 1), (x + w - 1, y + h - 1))
+    for layer in LAYERS:
+        check(f"every corner of the region is on a key ({width}x{height}, "
+              f"{layer.name})",
+              [wl.key_at_pixel(layer, width, height, px, py) is None
+               for px, py in corners], [False] * 4)
+
+# The stripe band is what the bound BUYS: it is outside the region, so a touch
+# up there still reaches whatever is underneath.
+check("a pixel in the stripe band is on no key",
+      wl.key_at_pixel(osk.LETTERS, 1280, 358, 640, 0), None)
+check("...and off the surface entirely is on no key either",
+      [wl.key_at_pixel(osk.LETTERS, 1280, 358, px, py)
+       for px, py in ((-1, 100), (1280, 100), (640, 358), (640, -5))],
+      [None] * 4)
+
+# 🔴 THE ROUND TRIP, IN THE METRIC THIS FILE DRAWS IN. Every painted rectangle
+# must hit-test back to the key it was painted for -- the same contract the
+# geometry above holds for the cursor, now for a finger.
+for width, height in SIZES:
+    for layer in LAYERS:
+        misses = []
+        for row, col, rx, ry, rw, rh in wl.key_rects(layer, width, height):
+            got = wl.key_at_pixel(layer, width, height,
+                                  rx + rw / 2.0, ry + rh / 2.0)
+            if got != (row, col):
+                misses.append(((row, col), got))
+        check(f"every drawn key's centre hit-tests back to itself "
+              f"({width}x{height}, {layer.name})", misses, [])
+        # The rectangles TILE: a finger in the 4-5px trough between two keys
+        # commits the nearer one instead of falling through an opaque panel.
+        top, grid_h = wl.grid_origin(height)
+        holes = [(px, py)
+                 for py in (top + 0.5, height - 0.5)
+                 for px in range(0, int(width))
+                 if wl.key_at_pixel(layer, width, height, px + 0.5, py) is None]
+        check(f"no dead pixel anywhere along a row ({width}x{height}, "
+              f"{layer.name})", holes, [])
+
+# A rectangle owns its top-left corner and NOT its bottom-right one, or two
+# adjacent keys would both claim the boundary and the answer would depend on
+# iteration order.
+rects = {(r, k): (x, y, w, h) for r, k, x, y, w, h in
+         wl.key_rects(osk.LETTERS, 1280, 358)}
+rx, ry, rw, rh = rects[(1, 2)]
+check("a key owns its own top-left pixel",
+      wl.key_at_pixel(osk.LETTERS, 1280, 358, rx, ry), (1, 2))
+check("...and its right edge belongs to its NEIGHBOUR, not to it",
+      wl.key_at_pixel(osk.LETTERS, 1280, 358, rx + rw, ry), (1, 3))
+
+# 🔴 AND IT AGREES WITH THE HIGHLIGHT. `draw()` lights the key under a cursor
+# using `locate(..., UNITS)`; a touch must land on the same key, or the keyboard
+# would type one key while showing another as selected -- §9a's confidently
+# wrong. Checked against the WRONG metric too, which has to disagree somewhere,
+# or this check is passing for free.
+SAMPLES = [(half, x, y) for half in ("left", "right")
+           # ⚠️ 0.999 and not 1.0. A cursor at EXACTLY the end of its half sits
+           # on a boundary the rectangles do not include (each owns its left
+           # edge, not its right), so at 1.0 the pixel under the dot belongs to
+           # the next key -- or, on the right half, is one past the surface.
+           # That is the same clamp `locate` makes and not a disagreement about
+           # any key a finger can land on.
+           for x in (0.0, 0.13, 0.37, 0.5, 0.62, 0.88, 0.999)
+           for y in (0.05, 0.3, 0.5, 0.7, 0.95)]
+by_touch, by_units, by_cells = [], [], []
+for half, x, y in SAMPLES:
+    px, py = wl.cursor_pixel(osk.LETTERS, half, (x, y), 1280.0, 358.0)
+    by_touch.append(wl.key_at_pixel(osk.LETTERS, 1280.0, 358.0, px, py))
+    by_units.append(osk.locate(osk.LETTERS, half, x, y, osk.UNITS))
+    by_cells.append(osk.locate(osk.LETTERS, half, x, y, osk.CELLS))
+check("a touch at the cursor's own pixel commits the key the cursor highlights",
+      by_touch, by_units)
+check("...and the OTHER metric really would have disagreed (so that proves "
+      "something)", by_touch == by_cells, False)
+
+# --- the line a touch goes home on -------------------------------------------
+#
+# ⚠️ ONE definition of this protocol, in the file that WRITES it; the mapper
+# imports this module to read it. Both directions are asserted here for the same
+# reason `parse_state_line` is: it crosses a process boundary, and a line the
+# other end cannot read is a key the user pressed and did not get.
+
+check("a press line names its key by index",
+      wl.format_press_line(3, 7), "press 3 7\n")
+check("...and parses back to exactly that",
+      wl.parse_press_line(wl.format_press_line(3, 7)), (3, 7))
+check("...for every key in the layout, round trip",
+      [wl.parse_press_line(wl.format_press_line(r, k)) != (r, k)
+       for r, row in enumerate(osk.LETTERS.rows) for k in range(len(row))],
+      [False] * sum(len(row) for row in osk.LETTERS.rows))
+check("...and it is one line, terminated -- a reader splits on that",
+      wl.format_press_line(0, 0).endswith("\n"), True)
+check("every malformed press line is rejected rather than raising",
+      [line for line in ("", "\n", "press", "press 1", "press 1 2 3",
+                         "state letters off 0 0 0 0", "press x y",
+                         "press -1 0", "press 0 -1", "quit", "press 1.5 2")
+       if wl.parse_press_line(line) is not None], [])
+check("a press line with extra whitespace still parses",
+      wl.parse_press_line("  press   4   1  \n"), (4, 1))
+
+check("split_lines keeps an unterminated remainder for the next read",
+      wl.split_lines(b"press 1 2\npress 3"), (["press 1 2"], b"press 3"))
+check("...hands back several at once",
+      wl.split_lines(b"press 1 2\npress 3 4\n"),
+      (["press 1 2", "press 3 4"], b""))
+check("...and nothing at all when nothing is complete",
+      wl.split_lines(b"pre"), ([], b"pre"))
+check("...and a corrupt byte costs one line, not the reader",
+      wl.split_lines(b"pre\xffss 1 2\n")[0][0].startswith("pre"), True)
+
+# --- the GTK wiring, which no unit test can enter ----------------------------
+#
+# 🔴 EVERY CLAIM ABOVE IS WORTHLESS IF main() DOES NOT APPLY IT. The region is a
+# pure function; the surface is a live Wayland object. Both of the failures this
+# guards against are SILENT -- an empty region gives a keyboard that ignores
+# every finger, and a missing `KeyboardMode.NONE` gives one that steals focus
+# from the field being typed into and looks perfect on screen.
+
+import ast  # noqa: E402 -- local to this block
+
+wl_tree = ast.parse((SRC / "deck_osk_wayland.py").read_text())
+regions = [node for node in ast.walk(wl_tree)
+           if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+           and node.func.attr == "set_input_region"]
+check("the surface's input region is set exactly once", len(regions), 1)
+check("...from a REGION WITH A RECTANGLE IN IT, never `cairo.Region()`",
+      [ast.unparse(node.args[0]) for node in regions],
+      ["cairo.Region(cairo.RectangleInt(rx, ry, rw, rh))"])
+region_sources = {node.func.id for node in ast.walk(wl_tree)
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+check("...whose rectangle comes from input_region_rect, not from the surface",
+      "input_region_rect" in region_sources, True)
+# ⚠️ NOT ON_DEMAND, NOT EXCLUSIVE. This is the half of the design that did NOT
+# change, and the one that keeps the text field focused while we draw over it.
+modes = [ast.unparse(node) for node in ast.walk(wl_tree)
+         if isinstance(node, ast.Attribute)
+         and ast.unparse(node).startswith("LayerShell.KeyboardMode.")]
+check("keyboard focus is still refused outright", modes,
+      ["LayerShell.KeyboardMode.NONE"])
+# The gesture, and the fact that what it produces is a LINE rather than a key
+# event: this process has no uinput device and must never grow one.
+main_fn = next(node for node in ast.walk(wl_tree)
+               if isinstance(node, ast.FunctionDef) and node.name == "main")
+main_calls = {ast.unparse(node.func) for node in ast.walk(main_fn)
+              if isinstance(node, ast.Call)}
+check("a click/touch controller is attached to the drawing area",
+      ("Gtk.GestureClick" in main_calls, "area.add_controller" in main_calls),
+      (True, True))
+check("...and what it produces is a press LINE, not a keystroke",
+      "format_press_line" in main_calls, True)
+check("...written to stdout, which carries nothing else",
+      "sys.stdout.write" in main_calls, True)
+# A region applied once at present() describes the size we ASKED for; a
+# compositor that gives a different one leaves the keyboard partly untouchable.
+check("the region is re-applied when the surface is resized",
+      sum(1 for node in ast.walk(main_fn) if isinstance(node, ast.Call)
+          and ast.unparse(node.func) == "apply_input_region"), 2)
+
 # --- the raster ---------------------------------------------------------------
 
 try:

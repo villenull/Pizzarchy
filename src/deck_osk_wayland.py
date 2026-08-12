@@ -7,24 +7,55 @@ T8 step 5. Same layout core as the installer's TTY keyboard
     deck_osk_wayland.py            # read state lines on stdin (the mapper)
     deck_osk_wayland.py --demo     # draw a fixed pose and stay up, for eyes
 
-⚠️ THIS DOES NOT TAKE INPUT FROM WAYLAND, AND THAT IS THE WHOLE DESIGN.
+⚠️ THIS NEVER TAKES KEYBOARD FOCUS, AND THAT IS STILL THE WHOLE DESIGN. IT
+    DOES, SINCE 2026-08-12, ACCEPT TOUCH INSIDE ITS OWN KEY GRID.
 
     T8's "escalate if" was: the overlay cannot take input without stealing
-    focus from the field being typed into. It is designed away rather than
-    solved. Input arrives from the PAD, over evdev, in the mapper process --
-    this surface only ever draws. So it asks the compositor for nothing:
+    focus from the field being typed into. The focus half is still designed
+    away rather than solved -- the pads drive this over evdev, in the mapper
+    process, and this surface has no reason to be focused:
 
-      * `KeyboardMode.NONE`  -- never focused, so the text field keeps focus
-      * an EMPTY input region -- pointer events pass straight through to
-        whatever is underneath, and the overlay cannot be clicked at all
+      * `KeyboardMode.NONE`  -- never focused, so the text field keeps focus.
+        🔴 THIS DOES NOT MOVE. It is the whole reason typing into somebody
+        else's field works at all.
 
-    Typing leaves through the mapper's uinput keyboard, which the compositor
-    delivers to the focused surface exactly as it would a real one. Nothing
-    under the keyboard knows a controller or an overlay exists.
+    🔴 WHAT CHANGED, AND WHAT IT COST. The surface used to declare an EMPTY
+    input region, so every pointer and touch event passed straight through and
+    the overlay could not be touched at all. The operator tested the reworked
+    keyboard on hardware and reported the gap: *"touch on the keyboard still
+    does not work (works in desktop)"* -- Valve's keyboard takes touch, and the
+    standard for this work is "identical". So the region is now the KEY GRID'S
+    OWN RECTANGLE (`input_region_rect`), and what that buys and costs is:
 
-    This is the property squeekboard cannot have: it IS a surface being
-    pointed at, so it needs the pointer, so a Wayland seat's single pointer
-    is the ceiling (docs/PROGRESS.md §2.6). Ours needs neither.
+      * a touch or click inside the grid is DELIVERED HERE and is consumed --
+        the window underneath no longer sees it in that band. With the
+        exclusive zone on (the default) that band was already reserved and no
+        ordinary window was under it; `--no-exclusive` and full-screen clients
+        are where the cost is real.
+      * everything OUTSIDE the rectangle still passes through, which today is
+        the 3px stripe band reserved at the top of the surface.
+      * ⚠️ OVER A LOCK SCREEN this is exactly what `above_lock = 2` was left
+        room for: Hyprland skips a surface with an EMPTY input region when it
+        hit-tests during a lock (`ViewHitTester.cpp:355-356`, read in
+        `docs/findings/T9-lock-service-mitigation.md` §2.4), so until now the
+        rule bought rendering only. With a real region the keyboard becomes
+        touchable over the lock -- and keyboard focus still stays on the lock
+        surface, so the characters land in the password field. The cost is the
+        mirror image: the locker's own UI is no longer touchable in the band
+        the keyboard covers, while the keyboard is up.
+
+    ⛔ AND THE KEYSTROKE IS STILL NOT OURS TO SEND. A touch here is turned into
+    the KEY INDEX under the finger and written to stdout (`format_press_line`);
+    the mapper presses that key through the same `OnScreenKeyboard.press` a
+    trigger commit goes through, and it leaves through the mapper's uinput
+    keyboard exactly as before. ONE emission path, not two -- a second uinput
+    device here would drift from the first on shift, caps and one-shot state,
+    and would type things the on-screen keyboard did not think it had typed.
+
+    This is still not the corner squeekboard is in: it IS a surface being
+    pointed at, so it NEEDS the seat's single pointer, which is the ceiling
+    (docs/PROGRESS.md §2.6). Ours does not need it -- the two cursors are
+    evdev, and touch is an extra way in, not the way in.
 
 ⚠️ SEPARATE PROCESS, DELIBERATELY. The mapper spawns this and feeds it state
     on stdin. With `lizard_mode=N` the mapper is the ONLY input path on the
@@ -41,6 +72,7 @@ DEPENDENCIES -- both already present on the Deck and both in Arch `extra`,
 from __future__ import annotations
 
 import ctypes.util
+import math
 import os
 import sys
 
@@ -237,6 +269,113 @@ def cursor_pixel(layer: osk.Layer, half: str, position: tuple[float, float],
     top, grid_h = grid_origin(height)
     x0, x1 = half_pixel_range(layer, half, width, cursor_row(layer, position[1]))
     return (x0 + position[0] * (x1 - x0), top + position[1] * grid_h)
+
+
+# --- touch: the only input this surface takes (2026-08-12) --------------------
+#
+# 🔴 THE HIT TEST IS IN THE DRAWN METRIC, BY CONSTRUCTION. `key_at_pixel` walks
+# `key_rects` -- the very rectangles that were painted -- so the key a finger
+# commits is the key the finger is on, to the pixel. That is not a nicety: the
+# layout core's own `key_at` answers in `CELLS` by default, and the header above
+# records that CELLS and UNITS disagree by up to half a key INSIDE a half. A
+# touch path that sent coordinates back to the mapper to be re-resolved would be
+# re-resolved in the other metric and would sometimes type the neighbour. Sending
+# the INDEX is what makes that class of bug unrepresentable.
+#
+# ⚠️ `key_rects` TILES: each rectangle is a full pitch wide and only its painted
+# FILL is inset by the gap, so there are no dead points inside the grid. A finger
+# in the 4-5px trough between two keys commits the nearer one rather than falling
+# through to the window underneath, which is what an opaque panel has to do.
+
+
+def input_region_rect(width: float, height: float) -> tuple[int, int, int, int]:
+    """`(x, y, w, h)` of the ONLY part of this surface that accepts input.
+
+    🔴 THIS REPLACES AN EMPTY REGION, DELIBERATELY AND NARROWLY -- read the
+    header before widening it. Everything outside the returned rectangle still
+    passes through to whatever is underneath, exactly as the whole surface used
+    to; inside it, events are consumed here.
+
+    The rectangle is the KEY GRID, computed from `grid_origin` rather than from
+    the surface: the reserved stripe band at the top is not a keyboard and is
+    left transparent to input. The grid does span the full width and reach the
+    bottom edge, because that is where the keys are -- this is a bound on WHAT
+    IS TAKEN, not a promise that much is left over.
+
+    Integers, and rounded OUTWARD-SAFE: `ceil` on the top edge so the region can
+    never creep up into the stripe by a fraction of a pixel, and the height is
+    whatever is left below it. A Wayland input region is integer pixels; a float
+    here would raise inside pycairo rather than at the call site.
+    """
+    top, _grid_h = grid_origin(height)
+    y = int(math.ceil(top))
+    return (0, y, max(int(width), 0), max(int(height) - y, 0))
+
+
+def key_at_pixel(layer: osk.Layer, width: float, height: float,
+                 x: float, y: float) -> tuple[int, int] | None:
+    """`(row, key)` under a surface pixel, or None if it is on no key.
+
+    None is the honest answer for the stripe band and for anything outside the
+    surface; the caller sends nothing rather than guessing at the nearest key.
+    """
+    for row_index, key_index, rx, ry, rw, rh in key_rects(layer, width, height):
+        if rx <= x < rx + rw and ry <= y < ry + rh:
+            return (row_index, key_index)
+    return None
+
+
+# --- the line the touch goes home on ------------------------------------------
+#
+# ⚠️ THE WHOLE PROTOCOL LIVES IN THIS FILE, both ends of it. The mapper imports
+# this module to parse what it wrote (`AutoShow` does the same with
+# `deck_osk_focus`), so there is exactly ONE definition of the wire format. Two
+# copies that agreed on the day they were written is how a state line loses its
+# third argument for a release (§9f) -- and this direction is worse, because a
+# line the mapper cannot parse is a key the user pressed and did not get.
+#
+# stdin carries state DOWN (`deck_osk_layout.format_state_line`); this is the
+# only thing that ever goes UP, and stdout carries nothing else -- every message
+# this program prints for a human goes to stderr.
+
+PRESS_LINE_PREFIX = "press"
+
+
+def format_press_line(row: int, key: int) -> str:
+    """One touch, as the index of the key that was drawn under the finger."""
+    return f"{PRESS_LINE_PREFIX} {int(row)} {int(key)}\n"
+
+
+def parse_press_line(line: str) -> tuple[int, int] | None:
+    """`(row, key)` out of one line, or None if it is not one.
+
+    ⚠️ None rather than an exception, and never a guess: this crosses a process
+    boundary, and with `lizard_mode=N` the reader is the only input path on the
+    device (docs/PROGRESS.md §5.9). A line it cannot understand must cost that
+    line and nothing else -- the caller says so once and carries on.
+    """
+    parts = line.split()
+    if len(parts) != 3 or parts[0] != PRESS_LINE_PREFIX:
+        return None
+    try:
+        row, key = int(parts[1]), int(parts[2])
+    except ValueError:
+        return None
+    if row < 0 or key < 0:
+        return None
+    return (row, key)
+
+
+def split_lines(buffer: bytes) -> tuple[list[str], bytes]:
+    """Complete lines out of a byte buffer, plus the unterminated remainder.
+
+    A pipe read can split a line anywhere, so the remainder is handed back to be
+    prepended to the next read. Decoded leniently: a corrupt byte must cost one
+    line, not the reader.
+    """
+    text = buffer.split(b"\n")
+    rest = text.pop()
+    return ([chunk.decode("utf-8", "replace") for chunk in text], rest)
 
 
 # --- appearance ---------------------------------------------------------------
@@ -749,14 +888,59 @@ def main() -> int:
         area = Gtk.DrawingArea()
         area.set_draw_func(lambda _a, cr, w, h: draw(cr, keyboard, cursors, w, h))
         window.set_child(area)
-        window.present()
 
-        # Empty input region: every pointer event passes through to whatever is
-        # underneath. Set after present(), because the surface does not exist
-        # until then.
-        surface = window.get_surface()
-        if surface is not None:
-            surface.set_input_region(cairo.Region())
+        # 🔴 A TOUCH TYPES THE KEY IT LANDS ON, THROUGH THE MAPPER.
+        #
+        # `GestureClick` covers touch AND pointer, and both mean the same thing
+        # over a drawn key, so neither is filtered out. It fires on the DOWN
+        # edge, which is what the reference does and what a keyboard should do:
+        # a key that waited for the lift would feel dead under a fast typist.
+        #
+        # ⛔ NOTHING IS EMITTED HERE. The index goes up the pipe and the mapper
+        # presses it -- see the module header. This process has no uinput device
+        # and must never grow one.
+        click = Gtk.GestureClick()
+        click.set_button(0)     # any button, and every touch
+
+        def on_pressed(_gesture, _n_press, x, y):
+            index = key_at_pixel(keyboard.layer, area.get_width(),
+                                 area.get_height(), x, y)
+            if index is None:
+                return          # the stripe band, or off the end of a row
+            try:
+                sys.stdout.write(format_press_line(*index))
+                sys.stdout.flush()
+            except (BrokenPipeError, OSError) as exc:
+                # The mapper is gone or its pipe is broken. Say it once-ish and
+                # keep drawing: our own stdin hitting EOF is what ends us, and
+                # crashing here would take the keyboard off the screen while
+                # the user is still looking at it.
+                print(f"deck-osk-wayland: could not report a touch ({exc})",
+                      file=sys.stderr, flush=True)
+
+        click.connect("pressed", on_pressed)
+        area.add_controller(click)
+
+        # 🔴 THE INPUT REGION IS THE KEY GRID, NOT THE SURFACE AND NOT EMPTY.
+        #
+        # Empty is what this used to be, and it is why touch did nothing (the
+        # operator, on hardware, 2026-08-12). `input_region_rect` owns the
+        # bound; the reasoning, and what it costs over a lock screen, is in the
+        # module header. Applied after present() because the surface does not
+        # exist until then, and re-applied on every resize -- an output change
+        # or a `--height` that the compositor negotiates differently would
+        # otherwise leave a region describing the size we asked for.
+        def apply_input_region(region_width: int, region_height: int) -> None:
+            surface = window.get_surface()
+            if surface is None or region_width <= 0 or region_height <= 0:
+                return
+            rx, ry, rw, rh = input_region_rect(region_width, region_height)
+            surface.set_input_region(
+                cairo.Region(cairo.RectangleInt(rx, ry, rw, rh)))
+
+        area.connect("resize", lambda _a, w, h: apply_input_region(w, h))
+        window.present()
+        apply_input_region(area.get_width(), area.get_height())
 
         if args.demo:
             cursors.update(0x10, -32000)   # ABS_HAT0X, left cursor left

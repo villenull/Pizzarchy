@@ -1172,6 +1172,186 @@ mm.translate(e.EV_ABS, e.ABS_HAT0Y, 0, 0.2)        # ...thumb lifted
 check("after a lift the SAME trigger is Shift again",
       (mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.3), mm.osk_shift), ([], True))
 
+# --- 🔴 CLICKING A PAD COMMITS THAT PAD'S CURSOR (operator, 2026-08-12) ------
+#
+# *"when i press shift and then aim, i press harder on the trackpad and that's
+# registered as a press"*. This is not a convenience: it is the half of
+# hold-to-Shift the trigger cannot provide, because the trigger that would
+# commit the LEFT cursor is the same trigger holding Shift. `PAD_CLICK_HALF`
+# has the measurement and `Mapper.hold_osk_shift` the gesture.
+
+check("the pad CLICKS are BTN_THUMB/BTN_THUMB2, never the stick clicks",
+      m.PAD_CLICK_HALF, {e.BTN_THUMB: "left", e.BTN_THUMB2: "right"})
+check("...so no pad click collides with the Caps binding",
+      m.OSK_CAPS_BUTTON in m.PAD_CLICK_HALF, False)
+
+# Each click commits its OWN side. The mutation this kills is the swap.
+mm = osk_mapper()
+touch(mm, "left", MINV, MAXV)      # left cursor -> top-left
+touch(mm, "right", MAXV, MAXV)     # right cursor -> top-right
+left_key, right_key = key_under(mm, "left"), key_under(mm, "right")
+check("the two cursors are on different keys (or the checks below prove nothing)",
+      left_key != right_key, True)
+check("clicking the LEFT pad types the key under the LEFT cursor",
+      mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.1), [(left_key, 1), (left_key, 0)])
+check("clicking the RIGHT pad types the key under the RIGHT cursor",
+      mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.2),
+      [(right_key, 1), (right_key, 0)])
+check("a click RELEASE types nothing, so no key can stick down",
+      (mm.translate(e.EV_KEY, e.BTN_THUMB, 0, 0.3),
+       mm.translate(e.EV_KEY, e.BTN_THUMB2, 0, 0.4)), ([], []))
+check("...and the pad's own autorepeat is not a second press",
+      mm.translate(e.EV_KEY, e.BTN_THUMB, 2, 0.5), [])
+
+# 🔴 THE WHOLE POINT: a click commits WITHOUT touching the trigger, so a Shift
+# held on L2 is still held afterwards -- and still held for the NEXT key. The
+# one-handed gesture the old design had to declare unreachable.
+mm = osk_mapper()
+mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.0)          # L2 held: Shift engaged
+touch(mm, "left", MINV, -1)                        # aim the SAME hand's pad...
+mm.cursors.pos["left"] = [0.5, 0.5]                # ...at a LETTER, which shifts
+check("the left cursor is on a key that types (or this proves nothing)",
+      bool(key_under(mm, "left")), True)
+strokes = mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.1)
+check("a click under a held L2 commits WITH Shift engaged",
+      strokes[0] if strokes else None, (osk_mod.SHIFT_CODE, 1))
+check("...and Shift is STILL held afterwards -- the trigger never came up",
+      mm.osk_shift, True)
+second = mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.2)
+check("...so the next click is shifted too", second[0] if second else None,
+      (osk_mod.SHIFT_CODE, 1))
+check("...and only L2 coming up ends it",
+      (mm.translate(e.EV_KEY, e.BTN_TL2, 0, 0.3), mm.osk_shift), ([], False))
+
+# The same key, committed both ways, must produce the same strokes -- one
+# emission path. Two paths would drift on shift, caps and the one-shot.
+def committed_by(button, half, at=(0.5, 0.5)):
+    mm = osk_mapper()
+    mm.osk.shift = "once"          # so the ONE-SHOT's spending is compared too
+    touch(mm, half, MINV, -1)
+    mm.cursors.pos[half] = list(at)
+    return (mm.translate(e.EV_KEY, button, 1, 0.1), mm.osk.shift)
+
+
+check("a click and a trigger commit the same key identically, one-shot and all",
+      committed_by(e.BTN_THUMB, "left"), committed_by(e.BTN_TL2, "left"))
+check("...on the right side too",
+      committed_by(e.BTN_THUMB2, "right"), committed_by(e.BTN_TR2, "right"))
+check("...and that comparison is not two empty answers",
+      bool(committed_by(e.BTN_THUMB, "left")[0]), True)
+
+# ⚠️ A CLICK OVER A LIFTED PAD DOES NOTHING, where the trigger has a second
+# meaning. Valve badges the triggers on Shift and Enter and badges the pad
+# clicks on nothing, so an idle meaning here would be behaviour the keyboard
+# never advertises -- and an untouched pad draws no cursor to commit.
+mm = osk_mapper()
+check("clicking a LIFTED left pad types nothing",
+      mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.0), [])
+check("...and does not engage Shift the way the trigger would",
+      (mm.osk_shift, mm.osk_caps), (False, False))
+mm = osk_mapper()
+check("clicking a LIFTED right pad types nothing -- no Enter either",
+      mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.0), [])
+
+# Per-pad in both directions, like the triggers: the other pad's thumb must not
+# arm this pad's click.
+mm = osk_mapper()
+touch(mm, "right", MAXV, MAXV)
+check("a thumb on the RIGHT pad does not make the LEFT click commit",
+      mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.1), [])
+check("...while the right click, on the touched pad, does",
+      bool(mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.2)), True)
+
+# A click on a state key is a real press with no keycode, exactly as the
+# trigger's would be -- not a silent nothing.
+mm = osk_mapper()
+touch(mm, "left", MINV, MAXV)
+mm.cursors.pos["left"] = [0.05, 0.75]              # the left Shift key
+check("clicking the on-screen Shift key emits nothing and arms the one-shot",
+      (mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.1), mm.osk.shift), ([], "once"))
+
+# With the keyboard DOWN a pad click is nobody's business: it is not in
+# BUTTON_MAP and must not become a mouse button by accident.
+mm = fresh()
+check("with the OSK down the left pad click emits nothing",
+      mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.0), [])
+check("...and neither does the right",
+      mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.0), [])
+
+# --- 🔴 TOUCH: the overlay reports a KEY INDEX and this presses it -----------
+#
+# Operator, on hardware, 2026-08-12: *"touch on the keyboard still does not work
+# (works in desktop)"*. The overlay now takes touch inside its own key grid
+# (`deck_osk_wayland.input_region_rect`), hit-tests it against the rectangles it
+# PAINTED, and sends the index home. This end presses it.
+#
+# ⚠️ AN INDEX AND NOT A COORDINATE, deliberately: the overlay draws and
+# hit-tests in `UNITS`, `press_at` resolves in `CELLS`, and the two differ by up
+# to half a key inside a half -- so a coordinate sent home would be re-resolved
+# in the wrong metric and would sometimes type the neighbour of the key under
+# the finger. See `Mapper.press_key_index`.
+
+mm = osk_mapper()
+rows = mm.osk.layer.rows
+letter = next((r, k) for r, row in enumerate(rows)
+              for k, key in enumerate(row) if key.is_letter)
+key = rows[letter[0]][letter[1]]
+check("a touch on a letter types exactly that letter",
+      mm.press_key_index(*letter), [(key.code, 1), (key.code, 0)])
+
+# The same key, committed by a trigger and by a touch, must agree -- ONE
+# emission path. The trigger route goes through press_at; this goes through the
+# index; both must end in OnScreenKeyboard.press.
+mm = osk_mapper()
+touch(mm, "left", MINV, -1)
+mm.cursors.pos["left"] = [0.5, 0.5]
+under = mm.osk.key_at("left", *mm.cursors.position("left"))
+by_index = osk_mapper().press_key_index(
+    *next((r, k) for r, row in enumerate(rows)
+          for k, kk in enumerate(row) if kk is under))
+check("a touch and a trigger commit the same key identically",
+      mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1), by_index)
+
+# The MODIFIERS have to travel that path too, or a touch would type lowercase
+# under a held Shift while the screen showed shift engaged.
+mm = osk_mapper()
+mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.0)          # Shift held on L2
+strokes = mm.press_key_index(*letter)
+check("a touch under a held Shift carries the modifier",
+      strokes[0] if strokes else None, (osk_mod.SHIFT_CODE, 1))
+check("...and Shift is still held afterwards", mm.osk_shift, True)
+
+# A state key answers with an EMPTY LIST, which is not the same as "no such
+# key" -- the caller distinguishes them, and complains about only one.
+mm = osk_mapper()
+shift_index = next((r, k) for r, row in enumerate(rows)
+                   for k, key in enumerate(row) if key.action == "shift")
+check("touching the on-screen Shift key emits nothing and arms the one-shot",
+      (mm.press_key_index(*shift_index), mm.osk.shift), ([], "once"))
+caps_index = next((r, k) for r, row in enumerate(rows)
+                  for k, key in enumerate(row) if key.action == "caps")
+check("touching Caps latches it, emitting no keycode",
+      (mm.press_key_index(*caps_index), mm.osk.caps), ([], True))
+
+# 🔴 None IS RESERVED FOR "no such key" -- the two processes disagreeing about
+# the layout. Anything else would make a real defect indistinguishable from a
+# Shift key, and the journal would never say so.
+mm = osk_mapper()
+OFF_LAYOUT = ((len(rows), 0), (0, len(rows[0])), (-1, 0), (0, -1))
+# Asked FIRST, and as "did it raise": an index error out of here would climb
+# into the input loop, and with lizard_mode=N that is a handheld with no keys.
+check("no index the overlay could send can raise",
+      [raised(lambda r=r, c=c: mm.press_key_index(r, c)) for r, c in OFF_LAYOUT],
+      [None] * 4)
+check("a row past the end of the layout is None, not a crash and not []",
+      mm.press_key_index(len(rows), 0), None)
+check("...a column past the end of its row too",
+      mm.press_key_index(0, len(rows[0])), None)
+check("...and negatives, which no hit test should ever produce",
+      (mm.press_key_index(-1, 0), mm.press_key_index(0, -1)), (None, None))
+check("a mapper with no keyboard attached answers None rather than raising",
+      m.Mapper().press_key_index(0, 0), None)
+
 # --- X, Y and L3: unconditional shortcuts, exactly as Valve badges them ------
 #
 # §9g: only the TRIGGER badges gate on touch. Ⓧ, Ⓨ and L3 are always shown,
@@ -1234,11 +1414,11 @@ check("the left TRACKPAD click does nothing to Caps",
 # --- the ON-SCREEN Shift key is untouched by any of that ---------------------
 #
 # ⚠️ THE ONE-SHOT DID NOT GO AWAY, IT MOVED BACK TO WHERE IT ALWAYS WAS. L2 is
-# now a hold, which is a two-handed gesture (hold L2, aim with the RIGHT pad,
-# commit with R2 -- see `Mapper.hold_osk_shift`). The one-handed route is the
-# Shift KEY on the keyboard, still cycling off -> once -> locked and still spent
-# by the key it modifies. Losing that quietly would leave a left-pad-only user
-# with no way to type a capital at all.
+# now a hold; the one-handed way to use it is to aim with the left pad and CLICK
+# it (see the pad-click block above and `Mapper.hold_osk_shift`), and the route
+# that needs no trigger at all is the Shift KEY on the keyboard, still cycling
+# off -> once -> locked and still spent by the key it modifies. Losing that
+# quietly would leave a user with no way to type a capital at all.
 mm = osk_mapper()
 touch(mm, "left", MINV, MAXV)
 mm.cursors.pos["left"] = [0.05, 0.75]              # the left Shift key
@@ -2116,6 +2296,66 @@ check("...taken from mapper.pad_touch_state(), not invented at the call site",
        if isinstance(node.args[2], ast.Call)
        and isinstance(node.args[2].func, ast.Attribute)],
       ["pad_touch_state"])
+
+# 🔴 THE TOUCH PATH, PINNED THE SAME WAY AND FOR THE SAME REASON. Every one of
+# these lives inside main(), around a live subprocess and a live selector that
+# no unit test can enter, and every one of them fails SILENTLY: the overlay
+# keeps drawing, the pads keep committing, and a finger on the glass does
+# nothing at all with no error on either side. `press_key_index` can be as
+# green as it likes above and touch can still be dead on the device.
+overlay_popen = [node for node in ast.walk(main_def)
+                 if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute)
+                 and node.func.attr == "Popen"]
+check("main() starts exactly one child of its own -- the overlay",
+      len(overlay_popen), 1)
+# Without stdout=PIPE the overlay's touches go to the journal as text and this
+# process never sees one. The pipe IS the touch path.
+check("...and it captures the overlay's stdout, which is where touches arrive",
+      sorted(kw.arg for kw in overlay_popen[0].keywords),
+      ["env", "stdin", "stdout", "text"])
+check("...with a real pipe, not an inherited fd",
+      ["subprocess.PIPE" in ast.unparse(kw.value)
+       for kw in overlay_popen[0].keywords if kw.arg == "stdout"], [True])
+# ...and DEVNULL when the protocol could not be loaded, because a pipe with no
+# reader fills and then BLOCKS the overlay's GTK thread -- a keyboard frozen
+# mid-draw, on a device where this process is the only other input path.
+check("...falling back to DEVNULL rather than to an undrained pipe",
+      ["subprocess.DEVNULL" in ast.unparse(kw.value)
+       for kw in overlay_popen[0].keywords if kw.arg == "stdout"], [True])
+
+# A pipe nobody selects on is a keystroke that waits for the next pad event --
+# which, when the user is typing with a finger, may never come.
+# The input loop, and not `run_pending`'s `while actions` -- the one that blocks
+# in the selector is the one that has to know about this fd.
+loop = next(node for node in ast.walk(main_def)
+            if isinstance(node, ast.While)
+            and any(isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr == "select"
+                    for inner in ast.walk(node)))
+loop_calls = {node.func.id for node in ast.walk(loop)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+loop_names = {node.id for node in ast.walk(loop) if isinstance(node, ast.Name)}
+check("the loop pumps the overlay's pipe when the selector says it is ready",
+      ("osk_layer_pump" in loop_calls, "osk_layer_fd" in loop_names),
+      (True, True))
+main_names = {node.id for node in ast.walk(main_def) if isinstance(node, ast.Name)}
+check("...and that fd is registered and unregistered around the overlay's life",
+      sorted({"osk_layer_watch", "osk_layer_unwatch"} - main_names), [])
+check("...and what arrives is pressed through the mapper, not typed here",
+      sum(1 for node in ast.walk(main_def)
+          if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+          and node.func.attr == "press_key_index"), 1)
+# The protocol is parsed by the module that WROTE it -- one definition, like
+# `AutoShow` and `deck_osk_focus`. A hand-rolled `line.split()` here is two
+# definitions that agree only until one of them moves.
+loaded = [node.args[0].value for node in ast.walk(main_def)
+          if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+          and node.func.id == "_load_module"
+          and node.args and isinstance(node.args[0], ast.Constant)]
+check("main() imports the overlay's own line protocol rather than reinventing it",
+      "deck_osk_wayland" in loaded, True)
 
 # --- the console's WIDTH, read at runtime (T8 §9g) ---------------------------
 #
