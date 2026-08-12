@@ -197,7 +197,7 @@ snapshot() {
     echo "== fstab =="
     cat /etc/fstab
     echo "== pacman.conf (non-comment) =="
-    grep -vE '^[[:space:]]*(#|$)' /etc/pacman.conf
+    LC_ALL=C command grep -avE '^[[:space:]]*(#|$)' /etc/pacman.conf
     echo "== installed packages =="
     pacman -Q 2>/dev/null | LC_ALL=C sort
     echo "== kernel module dirs =="
@@ -222,12 +222,33 @@ snapshot after2
 diff -u "$OUT/state.after1" "$OUT/state.after2" >"$OUT/state.diff" 2>&1
 diff_rc=$?
 
+# ⚠️ THE VERDICT OF THIS ENTIRE SUITE IS `diff_rc == 0`, AND TWO EMPTY FILES
+# DIFF CLEAN. `snapshot` swallows every error into the snapshot file itself
+# (`>"$OUT/state.$tag" 2>&1`), which is deliberate -- an error that reproduces
+# identically in both runs really is identical state -- but it means a probe
+# that could not read /boot at all writes two matching files full of error text
+# and this suite calls that "byte-identical end state, PASS". §6.4 lie #3 with
+# an idempotency label on it.
+#
+# So report what the snapshots actually contain. The line count says they are
+# not empty; the .efi count is the POSITIVE CONTROL that says the snapshot
+# really saw an ESP with kernels on it, which is the state whose stability is
+# the entire claim. Neither is a proxy for the diff -- they are the proof that
+# the diff had something to compare.
+state_facts() {
+  local tag=$1 f="$OUT/state.$tag"
+  echo "state_${tag}_lines=$(LC_ALL=C command grep -ac '' "$f" 2>/dev/null || echo 0)"
+  echo "state_${tag}_efi_lines=$(LC_ALL=C command grep -ac '\.efi' "$f" 2>/dev/null || echo 0)"
+}
+
 {
   echo "=== OMARCHY-DECK-KERNEL IDEMPOTENCY PROBE ==="
   echo "network_resolved=$online"
   echo "run1_exit=$rc1"
   echo "run2_exit=$rc2"
   echo "state_diff_exit=$diff_rc"
+  state_facts after1
+  state_facts after2
   echo "=== RUN 1 OUTPUT ==="
   cat "$OUT/run1.out"
   echo "=== RUN 2 OUTPUT ==="
@@ -336,7 +357,11 @@ tr -d '\0' <"$result_img" >"$result_txt"
 [[ -s $result_txt ]] || fail "the guest wrote nothing to the result device — it never reached the probe. Check $serial_log and $WORK."
 log "report: $result_txt"
 
-get_field() { sed -n "s/^$1=//p" "$result_txt" | head -n1; }
+# LC_ALL=C because $result_txt is a byte stream lifted off a raw block device
+# with `tr -d '\0'`, not a file this host wrote; the sed must be byte-oriented
+# for the same reason every grep in the probe is (see vm-osk-tty-test.sh's
+# header for the measurement).
+get_field() { LC_ALL=C command sed -n "s/^$1=//p" "$result_txt" | head -n1; }
 rc1=$(get_field run1_exit)
 rc2=$(get_field run2_exit)
 diff_rc=$(get_field state_diff_exit)
@@ -345,6 +370,27 @@ status=0
 [[ $rc1 == 0 ]] || { log "run 1 of omarchy-deck-kernel.sh exited $rc1"; status=1; }
 [[ $rc2 == 0 ]] || { log "run 2 of omarchy-deck-kernel.sh exited $rc2"; status=1; }
 [[ $diff_rc == 0 ]] || { log "end state after run 2 differs from end state after run 1 — NOT idempotent"; status=1; }
+
+# ⚠️ THE ANTI-VACUITY HALF, AND IT IS NOT OPTIONAL. `diff_rc == 0` above is
+# satisfied by two IDENTICALLY EMPTY snapshots just as well as by two identical
+# real ones, so it cannot be the only thing this suite asserts. See the comment
+# above `state_facts` in the probe.
+for tag in after1 after2; do
+  lines=$(get_field "state_${tag}_lines")
+  efis=$(get_field "state_${tag}_efi_lines")
+  if [[ $lines =~ ^[0-9]+$ && $lines -gt 0 ]]; then
+    log "ok   state.$tag has $lines lines"
+  else
+    log "FAIL state.$tag has '$lines' lines — the snapshot is empty or missing, so 'byte-identical end state' compared nothing"
+    status=1
+  fi
+  if [[ $efis =~ ^[0-9]+$ && $efis -gt 0 ]]; then
+    log "ok   state.$tag names $efis .efi paths (the snapshot really saw the ESP)"
+  else
+    log "FAIL state.$tag names no .efi path at all — the probe could not read /boot, and two unreadable /boots diff clean"
+    status=1
+  fi
+done
 
 if [[ $status -eq 0 ]]; then
   log "PASS — two consecutive runs, both exit 0, byte-identical end state"

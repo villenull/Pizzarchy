@@ -525,17 +525,17 @@ seen_screenshot=0 seen_key1=0 seen_key2=0
 elapsed=0
 while kill -0 "$qemu_pid" 2>/dev/null; do
   if [[ -f $serial_log ]]; then
-    if (( ! seen_screenshot )) && grep -q 'T4PROBE:SCREENSHOT' "$serial_log"; then
+    if (( ! seen_screenshot )) && LC_ALL=C command grep -qa 'T4PROBE:SCREENSHOT' "$serial_log"; then
       seen_screenshot=1
       qmp "{\"execute\":\"screendump\",\"arguments\":{\"filename\":\"$WORK/screen-A.ppm\"}}" >>"$WORK/qmp.log"
       log "took a host-side screendump of the greeter frame"
     fi
-    if (( ! seen_key1 )) && grep -q 'T4PROBE:WANT-KEY-1' "$serial_log"; then
+    if (( ! seen_key1 )) && LC_ALL=C command grep -qa 'T4PROBE:WANT-KEY-1' "$serial_log"; then
       seen_key1=1
       sleep 1
       sendkey ret
     fi
-    if (( ! seen_key2 )) && grep -q 'T4PROBE:WANT-KEY-2' "$serial_log"; then
+    if (( ! seen_key2 )) && LC_ALL=C command grep -qa 'T4PROBE:WANT-KEY-2' "$serial_log"; then
       seen_key2=1
       sleep 1
       sendkey down

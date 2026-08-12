@@ -234,7 +234,7 @@ read_default() {
 set_default_raw() {
   # Raw write, deliberately NOT via the script under test: boot 2 must verify
   # what LIMINE does with a path-form default, not what the script wrote.
-  if grep -qE '^[[:space:]]*default_entry:' "$CONF"; then
+  if LC_ALL=C command grep -qaE '^[[:space:]]*default_entry:' "$CONF"; then
     sed -i -E "s|^[[:space:]]*default_entry:.*|default_entry: $1|" "$CONF"
   else
     sed -i "1i default_entry: $1" "$CONF"
@@ -245,9 +245,18 @@ set_default_raw() {
 loader_entry_selected() {
   # UTF-16LE EFI variable with a 4-byte attribute prefix; Limine implements
   # the Boot Loader Interface (verified on hardware via bootctl, session 7).
+  #
+  # ⚠️ THE TARGET ENCODING IS UTF-8, NOT ASCII, AND THAT IS A FIX (2026-08-12).
+  # `iconv -t ASCII` fails on the FIRST non-ASCII character and stops there --
+  # and with `2>/dev/null` the failure is invisible, leaving a TRUNCATED entry
+  # name that is then compared against the full menu path from limine.conf. A
+  # single em-dash or accented character in a menu entry title would have made
+  # phase2.selected_matches_chosen report 0 and blamed the bootloader for the
+  # transcoder. UTF-8 is also what `$chosen` already is: it comes from awk over
+  # limine.conf's own bytes, so the two sides are now in the same encoding.
   local var=/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
   [[ -e $var ]] || return 1
-  tail -c +5 "$var" | iconv -f UTF-16LE -t ASCII 2>/dev/null | tr -d '\0'
+  tail -c +5 "$var" | iconv -f UTF-16LE -t UTF-8 | tr -d '\0'
 }
 
 if [[ ! -f /root/defenttest/phase1-done ]]; then
@@ -288,7 +297,7 @@ if [[ ! -f /root/defenttest/phase1-done ]]; then
   mv "$CONF" "$CONF.aside"
   run_isolated "$OUT/f1.out" bash "$SCRIPT" stage-uki
   emit "fail.missing_config_exit=$?"
-  grep -q "no Limine config at any candidate location" "$OUT/f1.out"
+  LC_ALL=C command grep -qa "no Limine config at any candidate location" "$OUT/f1.out"
   emit "fail.missing_config_msg=$((1 - $?))"
   mv "$CONF.aside" "$CONF"
 
@@ -296,18 +305,28 @@ if [[ ! -f /root/defenttest/phase1-done ]]; then
   cp "/boot/EFI/Linux/omarchy_${KP}.efi" "/boot/EFI/Linux/omarchy2_${KP}.efi"
   run_isolated "$OUT/f2.out" bash "$SCRIPT" stage-uki
   emit "fail.dup_uki_exit=$?"
-  grep -q "2 UKIs" "$OUT/f2.out"
+  LC_ALL=C command grep -qa "2 UKIs" "$OUT/f2.out"
   emit "fail.dup_uki_msg=$((1 - $?))"
   rm -f "/boot/EFI/Linux/omarchy2_${KP}.efi"
 
   # --- F3: menu entry missing -> stage-default-entry refuses -----------------
   # Strip the Neptune entry's path: line (keep the file valid otherwise).
-  grep -vE "^[[:space:]]*path:.*/EFI/Linux/omarchy_${KP}\.efi(#|[[:space:]]|$)" "$CONF" >"$CONF.stripped"
+  #
+  # ⚠️ AN INVERTED GREP THAT MATCHES NOTHING IS A COPY, AND A COPY MAKES THIS
+  # WHOLE TEST MEASURE THE HEALTHY CASE. If the pattern ever drifts away from
+  # limine.conf's syntax, `.stripped` is byte-identical to the original, the
+  # stage under test finds its entry and succeeds, and F3 proves nothing about
+  # the failure it is named for. Count both sides so the report can say the
+  # strip really removed a line -- "the check was looking" for a check whose
+  # subject is an absence.
+  LC_ALL=C command grep -avE "^[[:space:]]*path:.*/EFI/Linux/omarchy_${KP}\.efi(#|[[:space:]]|$)" "$CONF" >"$CONF.stripped"
+  emit "fail.strip_lines_before=$(LC_ALL=C command grep -ac '' "$CONF" 2>/dev/null || echo 0)"
+  emit "fail.strip_lines_after=$(LC_ALL=C command grep -ac '' "$CONF.stripped" 2>/dev/null || echo 0)"
   cp "$CONF" "$CONF.aside"
   cp "$CONF.stripped" "$CONF"
   run_isolated "$OUT/f3.out" bash "$SCRIPT" stage-default-entry
   emit "fail.no_menu_entry_exit=$?"
-  grep -q "no Limine menu entry" "$OUT/f3.out"
+  LC_ALL=C command grep -qa "no Limine menu entry" "$OUT/f3.out"
   emit "fail.no_menu_entry_msg=$((1 - $?))"
   cp "$CONF.aside" "$CONF"
   rm -f "$CONF.stripped" "$CONF.aside"
@@ -364,7 +383,7 @@ else
   emit "repair.second_exit=$?"
   h_after=$(sha256sum "$CONF" | cut -d' ' -f1)
   emit "repair.second_writes_nothing=$([[ $h_before == "$h_after" ]] && echo 1 || echo 0)"
-  grep -q "default_entry up to date" "$OUT/repair2.out"
+  LC_ALL=C command grep -qa "default_entry up to date" "$OUT/repair2.out"
   emit "repair.second_says_up_to_date=$((1 - $?))"
 
   # reconcile must also hold the value (the pacman hook re-asserts it).
@@ -524,6 +543,19 @@ check "fail.no_menu_entry_exit"  "$(field fail.no_menu_entry_exit)" 1
 check "fail.no_menu_entry_msg"   "$(field fail.no_menu_entry_msg)" 1
 check "fail.config_restored"     "$(field fail.config_restored)" 1
 
+# ⚠️ F3's subject is an ABSENCE, so prove the absence was MANUFACTURED. The
+# inverted grep that removes the Neptune path: line is a copy when its pattern
+# stops matching, and a copy would make F3 exercise the healthy config. These
+# two say at least one line really left.
+strip_before=$(field fail.strip_lines_before)
+strip_after=$(field fail.strip_lines_after)
+if [[ $strip_before =~ ^[0-9]+$ && $strip_after =~ ^[0-9]+$ && $strip_after -lt $strip_before ]]; then
+  log "ok   fail.strip really removed a line (${strip_before} -> ${strip_after})"
+else
+  log "FAIL fail.strip removed nothing: limine.conf had '${strip_before}' lines and the stripped copy '${strip_after}' — F3 tested the HEALTHY config, so its pass means nothing"
+  status=1
+fi
+
 # THE claim: the bootloader itself says it selected the planted path.
 check "phase2.ran"                     "$(field phase2.ran)" 1
 check "phase2.loader_var_present"      "$(field phase2.loader_var_present)" 1
@@ -537,6 +569,12 @@ check "repair.second_exit"             "$(field repair.second_exit)" 0
 check "repair.second_writes_nothing"   "$(field repair.second_writes_nothing)" 1
 check "repair.second_says_up_to_date"  "$(field repair.second_says_up_to_date)" 1
 check "repair.reconcile_exit"          "$(field repair.reconcile_exit)" 0
+# ⚠️ THE CHECK BELOW COMPARES TWO REPORT FIELDS TO EACH OTHER, WHICH MEANS IT
+# PASSES WHEN BOTH ARE EMPTY. If the probe never reached the reconcile, `field`
+# returns "" twice, "" == "" and the strongest claim in this section -- that
+# the pacman hook's reconcile holds the default_entry it was given -- reports
+# green having compared nothing. Pin the right-hand side non-empty first.
+check_nonempty "repair.expected (before comparing it to anything)" "$(field repair.expected)"
 check "repair.reconcile_default"       "$(field repair.reconcile_default)" "$(field repair.expected)"
 
 if [[ $status -eq 0 ]]; then

@@ -300,7 +300,7 @@ stamp_nonce() {
 stamp_nonce
 sed -i "s|^FILES=()\$|FILES=(${NONCE_FILE})|" /etc/mkinitcpio.conf
 emit "nonce_file_present=$([[ -f $NONCE_FILE ]] && echo 1 || echo 0)"
-emit "nonce_files_configured=$(grep -qxF "FILES=(${NONCE_FILE})" /etc/mkinitcpio.conf && echo 1 || echo 0)"
+emit "nonce_files_configured=$(LC_ALL=C command grep -qaxF "FILES=(${NONCE_FILE})" /etc/mkinitcpio.conf && echo 1 || echo 0)"
 
 # State is read back from the ESP and the Limine config every time, never
 # remembered from a previous step.
@@ -316,9 +316,22 @@ snap() {
   # substring count reads 2 for a correct config -- the exact miscount that
   # failed the first physical hardware run (PROGRESS.md 3.6 bug 1), which
   # this probe itself carried until the substrate could finally expose it.
-  refs=$(grep -cE "^[[:space:]]*path:.*/EFI/Linux/omarchy_${KP}\.efi(#|[[:space:]]|$)" /boot/limine.conf 2>/dev/null || true)
+  #
+  # ⚠️ A CHECK THAT PROVES SOMETHING IS ABSENT MUST ALSO PROVE IT WAS LOOKING.
+  # Both counts below are asserted to be 0 somewhere in this suite
+  # (after_gapB.stale_refs, after_remove.entry_refs), and `grep -c` on a file
+  # that does not exist exits 2 and prints nothing -- which the `|| true` then
+  # swallows. Emit whether the file was even there, so "0 references" and "no
+  # config to reference anything" stop looking identical, and so does "the
+  # config is there but empty".
+  local conf_present=0 conf_lines=0
+  if [[ -f /boot/limine.conf ]]; then
+    conf_present=1
+    conf_lines=$(LC_ALL=C command grep -ac '' /boot/limine.conf 2>/dev/null || echo 0)
+  fi
+  refs=$(LC_ALL=C command grep -acE "^[[:space:]]*path:.*/EFI/Linux/omarchy_${KP}\.efi(#|[[:space:]]|$)" /boot/limine.conf 2>/dev/null || true)
   [[ -f $STALE_UKI ]] && stale_present=1
-  stale_refs=$(grep -cE "^[[:space:]]*path:.*/EFI/Linux/omarchy_${STALE_KP}\.efi(#|[[:space:]]|$)" /boot/limine.conf 2>/dev/null || true)
+  stale_refs=$(LC_ALL=C command grep -acE "^[[:space:]]*path:.*/EFI/Linux/omarchy_${STALE_KP}\.efi(#|[[:space:]]|$)" /boot/limine.conf 2>/dev/null || true)
   nept=$(find /boot/EFI/Linux -maxdepth 1 -name '*linux-neptune-*.efi' 2>/dev/null | wc -l)
   emit "${tag}.uki_present=${present}"
   emit "${tag}.uki_sha=${sha}"
@@ -328,6 +341,8 @@ snap() {
   emit "${tag}.stale_present=${stale_present}"
   emit "${tag}.stale_refs=${stale_refs}"
   emit "${tag}.neptune_ukis=${nept}"
+  emit "${tag}.limine_conf_present=${conf_present}"
+  emit "${tag}.limine_conf_lines=${conf_lines}"
   {
     echo "--- ${tag} ---"
     ls -la /boot/EFI/Linux/ 2>&1
@@ -341,13 +356,22 @@ snap() {
 # Did pacman announce each hook? The Description line pacman prints is the
 # only evidence that a hook was selected and run at all.
 hooks_fired() {
-  local tag=$1 file=$2 up=0 ours=0 ours_rebuilt=0
-  grep -qF 'Updating linux initcpios' "$file" && up=1
-  grep -qF 'Verifying Neptune UKIs and Limine entries' "$file" && ours=1
+  local tag=$1 file=$2 up=0 ours=0 ours_rebuilt=0 log_lines=0
+  # ⚠️ THE ONE BELOW THAT IS ASSERTED TO BE ZERO IS `our_hook_rebuilt`, and a
+  # `grep -q` against a file that does not exist exits 2, which is
+  # indistinguishable here from exit 1 ("looked, found nothing"). A pacman log
+  # that failed to be written would therefore report the healthiest possible
+  # result: hooks fired 0, rebuild 0 -- and only the first of those is checked
+  # against 1. Count the file's lines first so the report can say whether this
+  # function had anything to read at all.
+  [[ -f $file ]] && log_lines=$(LC_ALL=C command grep -ac '' "$file" 2>/dev/null || echo 0)
+  emit "${tag}.log_lines=${log_lines}"
+  LC_ALL=C command grep -qaF 'Updating linux initcpios' "$file" && up=1
+  LC_ALL=C command grep -qaF 'Verifying Neptune UKIs and Limine entries' "$file" && ours=1
   # Did OUR hook fall through to a rebuild, or did it only verify? On a
   # healthy transaction it must only verify -- upstream's hook has already
   # rebuilt by the time a 95- hook runs.
-  grep -qF "[omarchy-deck-kernel] building UKI for ${KP}" "$file" && ours_rebuilt=1
+  LC_ALL=C command grep -qaF "[omarchy-deck-kernel] building UKI for ${KP}" "$file" && ours_rebuilt=1
   emit "${tag}.upstream_hook_fired=${up}"
   emit "${tag}.our_hook_fired=${ours}"
   emit "${tag}.our_hook_rebuilt=${ours_rebuilt}"
@@ -399,7 +423,7 @@ rm -f "$UKI"
 emit "gapA_uki_removed=$([[ -f $UKI ]] && echo 0 || echo 1)"
 "$HOOK_SCRIPT" reconcile >"$OUT/gapA.out" 2>&1
 emit "gapA_exit=$?"
-emit "gapA_rebuilt=$(grep -qF "[omarchy-deck-kernel] building UKI for ${KP}" "$OUT/gapA.out" && echo 1 || echo 0)"
+emit "gapA_rebuilt=$(LC_ALL=C command grep -qaF "[omarchy-deck-kernel] building UKI for ${KP}" "$OUT/gapA.out" && echo 1 || echo 0)"
 snap after_gapA
 
 # --- 4. gap B: stale entry for a kernel that is not installed -----------------
@@ -559,6 +583,19 @@ check() {
     status=1
   fi
 }
+# check_min <what> <got> <floor> -- for the facts whose only job is to prove a
+# later "it is absent" check was LOOKING at something. An exact expected value
+# would have to be updated every time the config or a pacman log grew a line;
+# a floor cannot pass on 0, which is the only value that matters here.
+check_min() {
+  local what=$1 got=$2 floor=$3
+  if [[ $got =~ ^[0-9]+$ ]] && (( got >= floor )); then
+    log "ok   ${what} = ${got} (>= ${floor})"
+  else
+    log "FAIL ${what} = '${got}' (expected a number >= ${floor})"
+    status=1
+  fi
+}
 
 # Checked first and reported as itself: without network the script's
 # stage_repos cannot `pacman -Sy`, and every later assertion fails for a
@@ -601,6 +638,24 @@ check "gapA_exit"               "$(field gapA_exit)" 0
 check "gapA_rebuilt"            "$(field gapA_rebuilt)" 1
 check "after_gapA.uki_present"  "$(field after_gapA.uki_present)" 1
 check "after_gapA.entry_refs"   "$(field after_gapA.entry_refs)" 1
+
+# ⚠️ PROOF THAT THE ABSENCE CHECKS BELOW WERE LOOKING AT SOMETHING.
+# after_gapB.stale_refs and after_remove.entry_refs are both asserted to be 0.
+# `grep -c` against a missing /boot/limine.conf exits 2 and prints nothing, and
+# the probe's `|| true` swallows that, so an ESP that failed to mount would
+# produce the same reassuring zeros. These say the file was there and had
+# content at exactly the two moments those zeros are read.
+check     "after_gapB.limine_conf_present"  "$(field after_gapB.limine_conf_present)" 1
+check_min "after_gapB.limine_conf_lines"    "$(field after_gapB.limine_conf_lines)" 1
+check     "after_remove.limine_conf_present" "$(field after_remove.limine_conf_present)" 1
+check_min "after_remove.limine_conf_lines"   "$(field after_remove.limine_conf_lines)" 1
+
+# Same shape for reinstall1.our_hook_rebuilt, which is asserted to be 0: an
+# absent or empty pacman log greps as "did not rebuild" just as convincingly
+# as a log that really shows no rebuild.
+check_min "reinstall1.log_lines" "$(field reinstall1.log_lines)" 1
+check_min "reinstall2.log_lines" "$(field reinstall2.log_lines)" 1
+check_min "remove.log_lines"     "$(field remove.log_lines)" 1
 
 # 5. gap B — the reconcile prunes a stale entry nobody else will
 check "before_gapB.stale_present" "$(field before_gapB.stale_present)" 1

@@ -171,6 +171,16 @@ ui.close()
 PAD
 
 probe_src="$WORK/omarchy-deck-spike-probe.sh"
+# ⚠️ THIS HEREDOC WAS A SYNTAX ERROR FOR TWO DAYS AND NOTHING NOTICED (fixed
+# 2026-08-12). It carried a stale second copy of sections 3 and 4 -- the
+# pre-`fresh_window` versions, calling a `resync` that no longer exists and
+# killing a `$WITNESS_PID` that is never set -- ending in an unmatched `fi`.
+# `bash -n` on THIS file cannot see inside a quoted heredoc, so the outer script
+# was always clean while the thing it ships to the guest could not be parsed at
+# all. The suite was committed broken (861f922, 2026-08-10) and has never been
+# runnable since; the T2 result it is cited for came from a version that was
+# never committed. test/unit/test-vm-probe-integrity.sh now extracts every
+# in-guest probe in test/vm/ and `bash -n`s it, so this class cannot come back.
 cat >"$probe_src" <<'PROBE'
 #!/usr/bin/env bash
 # In-guest probe. NOT `set -e`: a failure of the thing under test is a result
@@ -188,6 +198,11 @@ set -x
 RESULTS=$OUT/results
 : >"$RESULTS"
 emit() { printf '%s\n' "$*" >>"$RESULTS"; }
+
+# The first fact in the report is that the report's author ran at all. Every
+# other line is meaningless without it, and a report missing it is a hard fail
+# rather than a run with "nothing to disagree with" (T4 §6.4 lie #3).
+emit "unit.ran=1"
 
 finish() {
   {
@@ -305,9 +320,13 @@ cap chain
 if [[ $chain_ok -ne 1 ]]; then
   emit "diag.fgconsole=$(fgconsole 2>/dev/null)"
   cp /proc/bus/input/devices "$OUT/input-devices.txt" 2>/dev/null
-  emit "diag.kb_handlers=$(grep -A4 'deck-input-mapper' "$OUT/input-devices.txt" 2>/dev/null | grep Handlers | tr -d ' ')"
+  emit "diag.kb_handlers=$(LC_ALL=C command grep -aA4 'deck-input-mapper' "$OUT/input-devices.txt" 2>/dev/null | LC_ALL=C command grep -a Handlers | tr -d ' ')"
   kill "$MAPPER_PID" "$PAD_PID" 2>/dev/null
-  emit "done=1"
+  # ⚠️ NOT `probe.done=1`. This is the give-up path: the input chain never
+  # worked, so nothing below it ran. It used to emit the same completion marker
+  # as the happy path, which would have let a probe that bailed at section 2
+  # claim it reached its last line. Distinct field, distinct meaning.
+  emit "probe.aborted_at=chain_sanity"
   exit 0
 fi
 
@@ -398,88 +417,8 @@ else
   cap ai-failed
 fi
 
-kill "$MAPPER_PID" "$PAD_PID" "$WITNESS_PID" 2>/dev/null
-  emit "done=1"
-  exit 0
-fi
-
-# --- 3. gum choose -----------------------------------------------------------
-tmux send-keys -t spike "gum choose Alpha Beta Gamma >/root/gum-single.out; echo GUM1:\$? " Enter
-wait_pane "^> Alpha" 40   # the RENDERED pointer -- "Gamma" would match the echoed command line before gum is even up
-pad hat Y 1; pad sleep 0.15; pad hat Y 0; pad sleep 0.1
-pad hat Y 1; pad sleep 0.15; pad hat Y 0; pad sleep 0.1
-cap gum-before-confirm
-pad tap BTN_SOUTH
-wait_pane "GUM1:0" 20
-emit "gum_single_exit0=$((1 - $?))"
-emit "gum_single_choice=$(tr -d '\n' </root/gum-single.out 2>/dev/null)"
-
-resync
-# multi-select: down, toggle (Y->Space), down, toggle, confirm
-tmux send-keys -t spike "gum choose --no-limit One Two Three >/root/gum-multi.out; echo GUM2:\$? " Enter
-wait_pane "^> " 40
-pad hat Y 1; pad sleep 0.15; pad hat Y 0; pad sleep 0.1
-pad tap BTN_WEST; pad sleep 0.1
-pad hat Y 1; pad sleep 0.15; pad hat Y 0; pad sleep 0.1
-pad tap BTN_WEST; pad sleep 0.1
-cap gum-multi-before-confirm
-pad tap BTN_SOUTH
-wait_pane "GUM2:0" 20
-emit "gum_multi_exit0=$((1 - $?))"
-emit "gum_multi_choice=$(tr '\n' ',' </root/gum-multi.out 2>/dev/null)"
-
-resync
-# stick navigation instead of hat: hold past threshold long enough to repeat
-tmux send-keys -t spike "gum choose R1 R2 R3 R4 >/root/gum-stick.out; echo GUM3:\$? " Enter
-wait_pane "^> R1" 40
-pad abs Y 30000; pad sleep 0.8; pad abs Y 0; pad sleep 0.2   # >= 1 engage + repeats
-cap gum-stick-before-confirm
-pad tap BTN_SOUTH
-wait_pane "GUM3:0" 20
-emit "gum_stick_exit0=$((1 - $?))"
-emit "gum_stick_choice=$(tr -d '\n' </root/gum-stick.out 2>/dev/null)"
-# Distance, not just inequality: >= 2 rows proves the engage AND at least one
-# auto-repeat fired, which is the property that makes long lists navigable.
-stick_pick=$(tr -d '\n' </root/gum-stick.out 2>/dev/null)
-stick_rows=$(( ${stick_pick#R} - 1 ))
-emit "gum_stick_rows_moved=${stick_rows}"
-emit "gum_stick_moved=$([[ -n $stick_pick && $stick_rows -ge 2 ]] && echo 1 || echo 0)"
-
-# --- 4. archinstall's curses menu -------------------------------------------
-resync
-tmux send-keys -t spike "archinstall 2>/root/archinstall.err; echo AI:\$?" Enter
-# First it fetches the package database (can take a minute over NAT), THEN
-# the menu renders. "archinstall" would match the echoed command itself.
-if wait_pane "[Ll]anguage\|[Mm]irror\|[Dd]isk config\|[Pp]rofile" 360; then
-  emit "ai_menu_rendered=1"
-  sleep 2   # let the menu finish drawing before the before-hash
-  cap ai-main
-  # Enter opens the first item's submenu; the screen must change.
-  before=$(tmux capture-pane -pt spike | sha256sum | cut -d' ' -f1)
-  pad tap BTN_SOUTH; sleep 1.5
-  after=$(tmux capture-pane -pt spike | sha256sum | cut -d' ' -f1)
-  cap ai-submenu
-  emit "ai_enter_changes_screen=$([[ $before != "$after" ]] && echo 1 || echo 0)"
-  # Esc returns to the main menu; the screen must change again.
-  pad tap BTN_EAST; sleep 1.5
-  back=$(tmux capture-pane -pt spike | sha256sum | cut -d' ' -f1)
-  cap ai-back
-  emit "ai_esc_changes_screen=$([[ $after != "$back" ]] && echo 1 || echo 0)"
-  # Arrow navigation changes the highlighted row (SGR attributes differ even
-  # when the text layout is identical).
-  b_attr=$(tmux capture-pane -pet spike | sha256sum | cut -d' ' -f1)
-  pad hat Y 1; pad sleep 0.15; pad hat Y 0; sleep 0.7
-  a_attr=$(tmux capture-pane -pet spike | sha256sum | cut -d' ' -f1)
-  cap ai-after-down
-  emit "ai_down_moves_selection=$([[ $b_attr != "$a_attr" ]] && echo 1 || echo 0)"
-else
-  emit "ai_menu_rendered=0"
-  cap ai-failed
-  emit "ai_err=$(head -c 400 /root/archinstall.err 2>/dev/null | tr '\n' ' ')"
-fi
-
 kill "$MAPPER_PID" "$PAD_PID" 2>/dev/null
-emit "done=1"
+emit "probe.done=1"
 PROBE
 
 unit_text="[Unit]
@@ -580,6 +519,12 @@ check() {
   fi
 }
 
+# ⚠️ VACUITY GUARDS FIRST AND LAST. Everything between them is only meaningful
+# if the probe both started and finished; a probe that died in the middle emits
+# a prefix of the fields below, and `field` returning "" for the rest makes
+# those checks fail for a reason that has nothing to do with what they test.
+check "unit.ran (the probe executed at all)" "$(field unit.ran)" 1
+
 check "network_resolved"     "$(field network_resolved)" 1
 check "pkgs_installed"       "$(field pkgs_installed)" 1
 check "uinput_node"          "$(field uinput_node)" 1
@@ -606,6 +551,10 @@ check "ai_menu_rendered"        "$(field ai_menu_rendered)" 1
 check "ai_enter_changes_screen" "$(field ai_enter_changes_screen)" 1
 check "ai_esc_changes_screen"   "$(field ai_esc_changes_screen)" 1
 check "ai_down_moves_selection" "$(field ai_down_moves_selection)" 1
+
+# The other bookend: the probe reached its last line. Without this a probe that
+# died right after the last field above would look identical to a complete run.
+check "done (the probe ran to its last line)" "$(field probe.done)" 1
 
 if [[ $status -eq 0 ]]; then
   log "PASS — a gamepad drives gum (single, multi, stick-with-repeat) and archinstall's menus through the kernel input layer, with no UI-side cooperation"

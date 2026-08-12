@@ -245,7 +245,7 @@ snapshot() {
     echo "== fstab =="
     cat /etc/fstab
     echo "== pacman.conf (non-comment) =="
-    grep -vE '^[[:space:]]*(#|$)' /etc/pacman.conf
+    LC_ALL=C command grep -avE '^[[:space:]]*(#|$)' /etc/pacman.conf
     echo "== installed packages =="
     pacman -Q 2>/dev/null | LC_ALL=C sort
     echo "== kernel module dirs =="
@@ -273,7 +273,7 @@ emit "cli.help_exit=$?"
 
 run_isolated "$OUT/unknown-stage.out" bash "$SCRIPT" stage-nope
 emit "cli.unknown_stage_exit=$?"
-emit "cli.unknown_stage_lists=$(grep -qF 'stage-esp-permissions' "$OUT/unknown-stage.out" && echo 1 || echo 0)"
+emit "cli.unknown_stage_lists=$(LC_ALL=C command grep -qaF 'stage-esp-permissions' "$OUT/unknown-stage.out" && echo 1 || echo 0)"
 
 run_isolated "$OUT/unknown-opt.out" bash "$SCRIPT" --definitely-not-an-option
 emit "cli.unknown_option_exit=$?"
@@ -314,7 +314,7 @@ emit "full_vs_stages_diff_exit=$?"
 # 4a. stage-uki for a kernel that is not installed.
 run_isolated "$OUT/prereq-uki.out" env OMARCHY_DECK_NEPTUNE_SERIES=999 bash "$SCRIPT" stage-uki
 emit "prereq.uki_exit=$?"
-emit "prereq.uki_names_stage_kernel=$(grep -qF 'stage-kernel' "$OUT/prereq-uki.out" && echo 1 || echo 0)"
+emit "prereq.uki_names_stage_kernel=$(LC_ALL=C command grep -qaF 'stage-kernel' "$OUT/prereq-uki.out" && echo 1 || echo 0)"
 
 # 4b. stage-kernel with the Valve repos removed from pacman.conf. Restored
 # immediately afterwards, and the restore is verified -- a test that leaves the
@@ -326,11 +326,19 @@ awk '
   /^\[/ { skip = 0 }
   !skip { print }
 ' "$OUT/pacman.conf.orig" >/etc/pacman.conf
-emit "prereq.repos_stripped=$(grep -qE '^\[jupiter-staging\]' /etc/pacman.conf && echo 0 || echo 1)"
+# ⚠️ ONE OF THESE PROVES AN ABSENCE, SO THE OTHER PROVES IT WAS LOOKING.
+# `repos_stripped` reports 1 when the grep finds nothing -- and `grep -q`
+# against a file it cannot read exits 2, which lands in the same `else` branch.
+# An awk that wrote an empty /etc/pacman.conf would therefore report a perfect
+# strip, and section 4b would then measure a stage failing for the wrong
+# reason. The control greps for a section that must SURVIVE the strip: together
+# they say "jupiter-staging is gone AND this is still a real pacman.conf".
+emit "prereq.repos_stripped=$(LC_ALL=C command grep -qaE '^\[jupiter-staging\]' /etc/pacman.conf && echo 0 || echo 1)"
+emit "prereq.strip_control_core_survived=$(LC_ALL=C command grep -qaE '^\[core\]' /etc/pacman.conf && echo 1 || echo 0)"
 
 run_isolated "$OUT/prereq-repos.out" bash "$SCRIPT" stage-kernel
 emit "prereq.norepos_exit=$?"
-emit "prereq.norepos_names_stage_repos=$(grep -qF 'stage-repos' "$OUT/prereq-repos.out" && echo 1 || echo 0)"
+emit "prereq.norepos_names_stage_repos=$(LC_ALL=C command grep -qaF 'stage-repos' "$OUT/prereq-repos.out" && echo 1 || echo 0)"
 
 # stage-firmware-swap in the same state must stay a no-op: there is nothing of
 # Arch's left to displace, so it never reaches the repo requirement. A no-op
@@ -345,7 +353,7 @@ emit "prereq.repos_restored=$(cmp -s "$OUT/pacman.conf.orig" /etc/pacman.conf &&
 # 4c. a pinned series the repos do not carry.
 run_isolated "$OUT/prereq-series.out" env OMARCHY_DECK_NEPTUNE_SERIES=999 bash "$SCRIPT" stage-kernel
 emit "prereq.badseries_exit=$?"
-emit "prereq.badseries_lists_available=$(grep -qF "linux-neptune-${SERIES}" "$OUT/prereq-series.out" && echo 1 || echo 0)"
+emit "prereq.badseries_lists_available=$(LC_ALL=C command grep -qaF "linux-neptune-${SERIES}" "$OUT/prereq-series.out" && echo 1 || echo 0)"
 
 # --- 5. non-interactivity, actually tested -----------------------------------
 
@@ -372,7 +380,7 @@ setsid --wait timeout 60 su - tester -c 'bash /tmp/omarchy-deck-kernel.sh stage-
   </dev/null >"$OUT/nonint-user.out" 2>&1
 emit "nonint.user_exit=$?"
 emit "nonint.user_seconds=$(( $(date +%s) - start ))"
-emit "nonint.user_message=$(grep -qF 'non-interactive run' "$OUT/nonint-user.out" && echo 1 || echo 0)"
+emit "nonint.user_message=$(LC_ALL=C command grep -qaF 'non-interactive run' "$OUT/nonint-user.out" && echo 1 || echo 0)"
 
 # stdin closed outright.
 setsid --wait timeout "$STAGE_TIMEOUT" bash "$SCRIPT" stage-prune >"$OUT/nonint-closed.out" 2>&1 0<&-
@@ -601,6 +609,9 @@ check "full_vs_stages_diff_exit"  "$(field full_vs_stages_diff_exit)" 0
 check     "prereq.uki_exit"                  "$(field prereq.uki_exit)" 1
 check     "prereq.uki_names_stage_kernel"    "$(field prereq.uki_names_stage_kernel)" 1
 check     "prereq.repos_stripped"            "$(field prereq.repos_stripped)" 1
+# The positive control for the line above: without it, "jupiter-staging is not
+# in pacman.conf" is also satisfied by pacman.conf being empty or unreadable.
+check     "prereq.strip_control_core_survived" "$(field prereq.strip_control_core_survived)" 1
 check     "prereq.norepos_exit"              "$(field prereq.norepos_exit)" 1
 check     "prereq.norepos_names_stage_repos" "$(field prereq.norepos_names_stage_repos)" 1
 check     "prereq.firmware_noop_exit"        "$(field prereq.firmware_noop_exit)" 0

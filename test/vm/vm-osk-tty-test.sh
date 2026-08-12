@@ -81,6 +81,49 @@
 # one key per row whose drawn label has been overwritten by that character. The
 # word grep never catches it at all; only the row count does.
 #
+# ===========================================================================
+# ⚠️ EVERY GREP IN THE IN-GUEST PROBE IS `LC_ALL=C command grep -a`
+# ===========================================================================
+# Added 2026-08-12 by the audit that followed T4's §6.4 lie #7 (the harness,
+# not the wizard, was wrong -- docs/findings/T4-harness-first-run.md).
+#
+# THE ASSUMPTION THAT WAS NOT TRUE. Every grep below reads either a /dev/vcsN
+# snapshot or a program's stderr. `/dev/vcsN` is the kernel's screen buffer:
+# ONE BYTE PER CELL in the console's own charmap, NOT UTF-8. A box-drawing or
+# block glyph on screen is a single high byte (0xB3, 0xB0...) which is invalid
+# UTF-8. It would be comforting to believe the probe runs in the C locale --
+# it does not: test/images/vm-neptune-image.sh writes `LANG=en_US.UTF-8` into
+# the substrate's /etc/locale.conf, systemd hands that to every service, and
+# this probe IS a service. So the guest greps in a UTF-8 locale, over a byte
+# stream that is not UTF-8.
+#
+# MEASURED, on this dev machine's GNU grep, against a 5-line fixture holding
+# one 0xB3 row and one 0xB0/0xB1 row plus the word `shift`, using this file's
+# own `diag.rows_with_keys` pattern:
+#
+#   LC_ALL=C           grep -n  -> rows 1,2,3     (correct)
+#   LC_ALL=C           grep -an -> rows 1,2,3     (correct)
+#   LC_ALL=en_US.UTF-8 grep -n  -> row 1 ONLY, and "binary file matches" on
+#                                  STDERR -- which this probe redirects into
+#                                  probe.log, so the loss is silent
+#   LC_ALL=en_US.UTF-8 grep -an -> rows 1,2,3     (correct)
+#
+# Note which half is load-bearing HERE: for this grep `-a` alone is enough,
+# where for `screens::nonblank_rows` in test/lib/vm-installer-screens.sh it was
+# `LC_ALL=C` alone. Neither flag fixes both cases, so both are always applied.
+#
+# IS IT MISFIRING TODAY? No -- and that is the whole point of writing it down.
+# `deck_osk_tty.render()` was checked while making this change and emits pure
+# ASCII, and `gum input` draws no borders, so the captures currently contain no
+# high bytes and the old greps happened to return the right answers. The
+# keyboard is ONE GLYPH away from that stopping: `deck_osk_layout` already
+# carries `◀ ▶ ▲ ▼ ☺` for the pixel renderer, and the day the tty renderer
+# borrows one, `row.osk_last` starts coming back EMPTY and this suite fails
+# while blaming the mapper. (The same glyph would also break `osk_rows()`
+# below, which decodes the capture as UTF-8 with errors="replace": a single
+# 0xB3 becomes U+FFFD and can never equal the rendered character. That one is
+# in shipped code, `src/deck_osk_tty.py`, and is only recorded here.)
+#
 # Neither side is wrong and neither yields. So the keyboard is summoned for one
 # text-entry prompt and killed after it (`docs/tasks/T4-screen-spec.md` §2.3),
 # which T4 §1's wrap makes sufficient: every text-entry moment is a prompt
@@ -304,6 +347,45 @@ RESULTS=$OUT/results
 : >"$RESULTS"
 emit() { printf '%s\n' "$*" >>"$RESULTS"; }
 
+# The report's first fact is that its author ran at all (T4 §6.4 lie #3): a
+# report with content but no `unit.ran=1` means every other line in it is
+# unexplained, and `finish` writes a report even when the probe dies early.
+emit "unit.ran=1"
+
+# --- the grep canary ---------------------------------------------------------
+#
+# ⚠️ THE ASSUMPTION EVERY LATER GREP RESTS ON, TURNED INTO A MEASUREMENT.
+#
+# It is tempting to argue that these probes are safe because systemd starts
+# them with no LANG, i.e. in the C locale. THAT IS FALSE HERE and it was worth
+# checking rather than asserting: test/images/vm-neptune-image.sh writes
+# `LANG=en_US.UTF-8` into the substrate's /etc/locale.conf, systemd puts that in
+# the manager environment, and every service inherits it. (Verified on the dev
+# machine, which has the same file: `systemctl show-environment` prints
+# LANG=en_US.UTF-8.) So this probe greps a byte stream that is not UTF-8 while
+# sitting in a UTF-8 locale, and nothing but the flags below saves it.
+#
+# Asserting the locale NAME would be the weaker fix -- it pins a proxy, and the
+# suite would still be wrong in a locale nobody thought to enumerate. This
+# instead asserts the BEHAVIOUR, against a fixture built to contain the exact
+# byte that broke T4's extraction (0xB3, CP437's box-drawing vertical, the
+# separator on upstream's real summary screen). Two lines, two controls:
+#
+#   canary.ascii     a NEGATIVE control -- a plain ASCII row must still be
+#                    found. If this ever reads 0 the grep is broken outright
+#                    and every "0" below means nothing.
+#   canary.highbyte  the POSITIVE control -- the row that only a byte-safe
+#                    grep can see. This is the one that goes to 0 the moment
+#                    somebody "simplifies" an `LC_ALL=C command grep -a` back
+#                    to `grep`, and it fails HERE, naming the cause, instead of
+#                    silently subtracting rows from row.osk_last.
+printf 'canary ascii row\n\263 canary highbyte row \263\n' >"$OUT/canary.bin"
+emit "locale.lang=${LANG:-<unset>}"
+emit "locale.lc_all=${LC_ALL:-<unset>}"
+emit "canary.ascii=$(LC_ALL=C command grep -ac 'canary ascii row' "$OUT/canary.bin")"
+emit "canary.highbyte=$(LC_ALL=C command grep -ac 'canary highbyte row' "$OUT/canary.bin")"
+emit "canary.highbyte_rows=$(LC_ALL=C command grep -an 'canary' "$OUT/canary.bin" | cut -d: -f1 | tr '\n' ',')"
+
 finish() {
   {
     echo "=== T8 OSK / TUI CONSOLE-SHARING PROBE ==="
@@ -347,7 +429,7 @@ emit "osk.type_ok=$((1 - $?))"
 mkfifo /tmp/padfifo
 python3 /root/vm-osk-pad.py <>/tmp/padfifo >"$OUT/pad.log" 2>&1 &
 sleep 3
-emit "pad.ready=$(grep -c pad-ready "$OUT/pad.log")"
+emit "pad.ready=$(LC_ALL=C command grep -ac pad-ready "$OUT/pad.log")"
 pad() { printf '%s\n' "$*" >/tmp/padfifo; sleep 0.12; }
 
 # ⚠️ THE LAYOUT UNDER TEST. The console is 25 rows. The TUI is told it has 18,
@@ -385,19 +467,19 @@ emit "vt.active=$(fgconsole 2>/dev/null)"
 snap() { fold -w "$(stty size </dev/tty2 2>/dev/null | cut -d' ' -f2 || echo 80)" \
            </dev/vcs2 >"$OUT/screen.$1" 2>/dev/null; }
 snap 1-gum-only
-emit "gum.drew=$(grep -c 'pass>' "$OUT/screen.1-gum-only")"
+emit "gum.drew=$(LC_ALL=C command grep -ac 'pass>' "$OUT/screen.1-gum-only")"
 
 /usr/local/bin/deck-input-mapper --device 'OSK Virtual Deck Pad' \
   --osk-backend tty --osk-tty /dev/tty2 --osk-top-row "$OSK_TOP" \
   >"$OUT/mapper.out" 2>"$OUT/mapper.err" &
 sleep 3
-emit "mapper.bound=$(grep -c 'reading /dev' "$OUT/mapper.err")"
+emit "mapper.bound=$(LC_ALL=C command grep -ac 'reading /dev' "$OUT/mapper.err")"
 
 # --- 2. summon the keyboard --------------------------------------------------
 pad "key BTN_MODE 1"; pad "key BTN_NORTH 1"; pad "key BTN_NORTH 0"; pad "key BTN_MODE 0"
 sleep 1
 snap 2-osk-shown
-emit "osk.shown=$(grep -c 'shift' "$OUT/screen.2-osk-shown")"
+emit "osk.shown=$(LC_ALL=C command grep -ac 'shift' "$OUT/screen.2-osk-shown")"
 # --- R-49 diagnostics: is the console still 50 rows, and where did all five
 # keyboard rows actually land? Two candidate causes, and these separate them:
 # (a) `stty rows` RESIZED the console, so row 46 does not exist and the kernel
@@ -406,13 +488,13 @@ emit "osk.shown=$(grep -c 'shift' "$OUT/screen.2-osk-shown")"
 emit "diag.stty_at_snap=$(stty size </dev/tty2 2>/dev/null | tr ' ' 'x')"
 emit "diag.vcs2_bytes=$(wc -c </dev/vcs2 2>/dev/null)"
 emit "diag.screen_lines=$(wc -l <"$OUT/screen.2-osk-shown")"
-emit "diag.rows_with_keys=$(grep -n 'q *w *e *r *t\|a *s *d *f *g\|z *x *c *v *b\|shift\|1 *2 *3 *4 *5' "$OUT/screen.2-osk-shown" | cut -d: -f1 | tr '\n' ',')"
-emit "gum.survived=$(grep -c 'pass>' "$OUT/screen.2-osk-shown")"
+emit "diag.rows_with_keys=$(LC_ALL=C command grep -an 'q *w *e *r *t\|a *s *d *f *g\|z *x *c *v *b\|shift\|1 *2 *3 *4 *5' "$OUT/screen.2-osk-shown" | cut -d: -f1 | tr '\n' ',')"
+emit "gum.survived=$(LC_ALL=C command grep -ac 'pass>' "$OUT/screen.2-osk-shown")"
 
 # Which rows does each occupy? The whole question, answered from the kernel's
 # own screen buffer.
-emit "row.gum=$(grep -n 'pass>' "$OUT/screen.2-osk-shown" | head -1 | cut -d: -f1)"
-emit "row.osk_last=$(grep -n 'shift' "$OUT/screen.2-osk-shown" | head -1 | cut -d: -f1)"
+emit "row.gum=$(LC_ALL=C command grep -an 'pass>' "$OUT/screen.2-osk-shown" | head -1 | cut -d: -f1)"
+emit "row.osk_last=$(LC_ALL=C command grep -an 'shift' "$OUT/screen.2-osk-shown" | head -1 | cut -d: -f1)"
 
 # --- 3. type a Wi-Fi passphrase with the trackpads ---------------------------
 # Right cursor -> 'h' on the home row, then type; then shift; then a digit.
@@ -422,14 +504,14 @@ snap 3-typed-h
 # The prompt line as the kernel has it, so the typed character is visible in
 # the report rather than inferred. (grep -c 'pass>' proved nothing: the prompt
 # is there whether or not anything was typed.)
-emit "typed.prompt_line=$(grep -m1 'pass>' "$OUT/screen.3-typed-h" | tr -s ' ' | cut -c1-40)"
+emit "typed.prompt_line=$(LC_ALL=C command grep -am1 'pass>' "$OUT/screen.3-typed-h" | tr -s ' ' | cut -c1-40)"
 
 pad "abs HAT1X 13000"; pad "abs HAT1Y 3000"; sleep 0.3   # -> 'l' (20000 is BACKSPACE)
 pad "key BTN_TR2 1"; pad "key BTN_TR2 0"; sleep 0.4
 pad "abs HAT0X -30000"; pad "abs HAT0Y -30000"; sleep 0.3  # left -> shift
 pad "key BTN_TL2 1"; pad "key BTN_TL2 0"; sleep 0.4
 snap 4-shifted
-emit "osk.shift_shown=$(grep -c 'Shift' "$OUT/screen.4-shifted")"
+emit "osk.shift_shown=$(LC_ALL=C command grep -ac 'Shift' "$OUT/screen.4-shifted")"
 pad "abs HAT1X -20000"; pad "abs HAT1Y 3000"; sleep 0.3   # -> 'h', capitalised
 pad "key BTN_TR2 1"; pad "key BTN_TR2 0"; sleep 0.5
 
@@ -451,7 +533,7 @@ pad "key BTN_TR2 1"; pad "key BTN_TR2 0"; sleep 1.5
 # ⚠️ Counted BEFORE the submit. gum exiting makes `openvt` deallocate VT2, so
 # every later draw hits EIO and the mapper correctly disables the tty keyboard
 # and says so. Counting after would call that expected teardown a defect.
-emit "mapper.errors_before_submit=$(grep -ci 'traceback' "$OUT/mapper.err")"
+emit "mapper.errors_before_submit=$(LC_ALL=C command grep -aci 'traceback' "$OUT/mapper.err")"
 emit "gum.received=$(tr -d '\n' </root/osktest/typed.txt 2>/dev/null)"
 emit "gum.received_len=$(tr -d '\n' </root/osktest/typed.txt 2>/dev/null | wc -c)"
 
@@ -459,9 +541,9 @@ emit "gum.received_len=$(tr -d '\n' </root/osktest/typed.txt 2>/dev/null | wc -c
 pad "key BTN_MODE 1"; pad "key BTN_NORTH 1"; pad "key BTN_NORTH 0"; pad "key BTN_MODE 0"
 sleep 1
 snap 6-dismissed
-emit "osk.gone=$(grep -c 'shift' "$OUT/screen.6-dismissed")"
+emit "osk.gone=$(LC_ALL=C command grep -ac 'shift' "$OUT/screen.6-dismissed")"
 emit "mapper.alive=$(pgrep -cf deck-input-mapper)"
-emit "mapper.errors=$(grep -ci 'traceback\|DISABLED' "$OUT/mapper.err")"
+emit "mapper.errors=$(LC_ALL=C command grep -aci 'traceback\|DISABLED' "$OUT/mapper.err")"
 
 # --- 5. R-52: the same console, but with a FULL-SCREEN curses TUI on it -------
 #
@@ -510,7 +592,7 @@ with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
     print(len(tty.rows_on_screen(fh.read(), rows)))
 PY
 }
-tui_rows() { grep -c '^MENU LINE' "$1"; }
+tui_rows() { LC_ALL=C command grep -ac '^MENU LINE' "$1"; }
 
 # 5a. The TUI alone. Both halves of this are vacuity guards: a TUI that never
 # started would make every later number meaningless, and a counter that finds a
@@ -523,7 +605,7 @@ emit "curses.osk_rows_alone=$(osk_rows "$OUT/screen.7-tui-alone")"
   --osk-backend tty --osk-tty /dev/tty3 --osk-top-row "$OSK_TOP3" \
   >"$OUT/mapper2.out" 2>"$OUT/mapper2.err" &
 sleep 3
-emit "curses.mapper_bound=$(grep -c 'reading /dev' "$OUT/mapper2.err")"
+emit "curses.mapper_bound=$(LC_ALL=C command grep -ac 'reading /dev' "$OUT/mapper2.err")"
 
 # 5b. Summon it, and MOVE A CURSOR before looking. The keyboard draws over a
 # full-screen TUI perfectly well -- that was never the problem.
@@ -551,7 +633,7 @@ sleep 3
 snap3 9-after-partial-repaint
 emit "curses.paints_partial=$(cat "$OUT/tui.paints" 2>/dev/null)"
 emit "curses.osk_rows_after_partial=$(osk_rows "$OUT/screen.9-after-partial-repaint")"
-emit "curses.grep_shift_after_partial=$(grep -c 'shift' "$OUT/screen.9-after-partial-repaint")"
+emit "curses.grep_shift_after_partial=$(LC_ALL=C command grep -ac 'shift' "$OUT/screen.9-after-partial-repaint")"
 
 # 5d. A second character. This repaint covers every line -- and STILL only
 # writes the cells ncurses believes changed, because its model of the physical
@@ -561,7 +643,7 @@ sleep 3
 snap3 10-after-full-repaint
 emit "curses.paints_full=$(cat "$OUT/tui.paints" 2>/dev/null)"
 emit "curses.osk_rows_after_full=$(osk_rows "$OUT/screen.10-after-full-repaint")"
-emit "curses.grep_shift_after_full=$(grep -c 'shift' "$OUT/screen.10-after-full-repaint")"
+emit "curses.grep_shift_after_full=$(LC_ALL=C command grep -ac 'shift' "$OUT/screen.10-after-full-repaint")"
 
 # 5e. A third, and this one is a HARD repaint -- `clearok`, which is what
 # upstream's `clear_logo` does on every validation failure (T4 §2.5). Only now
@@ -571,7 +653,7 @@ sleep 3
 snap3 11-after-hard-repaint
 emit "curses.paints_hard=$(cat "$OUT/tui.paints" 2>/dev/null)"
 emit "curses.osk_rows_after_hard=$(osk_rows "$OUT/screen.11-after-hard-repaint")"
-emit "curses.grep_shift_after_hard=$(grep -c 'shift' "$OUT/screen.11-after-hard-repaint")"
+emit "curses.grep_shift_after_hard=$(LC_ALL=C command grep -ac 'shift' "$OUT/screen.11-after-hard-repaint")"
 emit "curses.tui_rows_after_hard=$(tui_rows "$OUT/screen.11-after-hard-repaint")"
 emit "curses.received=$(tr -d '\n' <"$OUT/tui.received" 2>/dev/null)"
 
@@ -584,7 +666,15 @@ snap3 12-osk-repainted
 emit "curses.osk_rows_after_nudge=$(osk_rows "$OUT/screen.12-osk-repainted")"
 emit "curses.tui_rows_after_nudge=$(tui_rows "$OUT/screen.12-osk-repainted")"
 emit "curses.mapper_alive=$(pgrep -cf deck-input-mapper)"
-emit "curses.mapper_errors=$(grep -ci 'traceback' "$OUT/mapper2.err")"
+emit "curses.mapper_errors=$(LC_ALL=C command grep -aci 'traceback' "$OUT/mapper2.err")"
+
+# ⚠️ The closing bookend. `finish` runs from an EXIT trap, so a probe that dies
+# in section 3 still ships a well-formed report with sections 4 and 5 simply
+# absent -- and every check over those fields would then be comparing "" to a
+# number, which fails, but fails blaming the mapper instead of naming the truth.
+# This field is the difference between "the keyboard misbehaved" and "the probe
+# never got that far".
+emit "probe.done=1"
 PROBE
 
 
@@ -694,7 +784,31 @@ check() {
   fi
 }
 
-check "packages installed"          "$(field pkg.gum | grep -c .)" 1
+# ⚠️ Vacuity bookends, first and last. See the two `emit` calls they read.
+check "unit.ran (the probe executed at all)" "$(field unit.ran)" 1
+
+# ⚠️ THE GREP CANARY, CHECKED BEFORE ANYTHING IT PROTECTS. Every screen check
+# below is a grep over /dev/vcsN bytes; these two say those greps can still see
+# a high byte in whatever locale the guest actually booted with. Checked here,
+# first, because a canary read after the checks it guards explains a failure
+# nobody can act on any more.
+check "canary: an ASCII row is found (the grep works at all)" "$(field canary.ascii)" 1
+check "canary: a CP437 0xB3 row is counted"                   "$(field canary.highbyte)" 1
+# ⚠️ THIS IS THE ONE THAT ACTUALLY CATCHES A REGRESSION, and the two above are
+# not, which is worth stating rather than letting three green lines imply three
+# proofs. Measured against real GNU grep on the fixture this probe writes:
+# `grep -c` on a FIXED string finds the 0xB3 row in either locale, so the two
+# counts above stay 1 even with the flags stripped. `grep -n` does not -- in
+# en_US.UTF-8 it enumerates row 1 and then declares the file binary on stderr,
+# so this reads "1," instead of "1,2,". Same asymmetry the reference library
+# records (test/lib/vm-installer-screens.sh's header): which half of
+# `LC_ALL=C -a` is load-bearing depends on the grep, so both are always used
+# and only the row enumeration is trusted to prove it.
+check "canary: BOTH rows are enumerated by grep -n (the real regression test)" \
+      "$(field canary.highbyte_rows)" "1,2,"
+log "note   the guest ran these greps under LANG=$(field locale.lang) LC_ALL=$(field locale.lc_all) -- recorded, not assumed"
+
+check "packages installed"          "$(field pkg.gum | LC_ALL=C command grep -ac .)" 1
 check "all three OSK modules present" "$(field osk.modules)" "deck_osk_layout.py,deck_osk_tty.py,deck_osk_wayland.py,"
 check "the mapper resolves text"    "$(field osk.type_ok)" 1
 check "the pad came up"             "$(field pad.ready)" 1
@@ -762,6 +876,7 @@ check "...taking five rows back off the TUI -- neither side yields" \
                                                    "$(( curses_rows - 5 ))"
 check "the mapper survived the collision"          "$(field curses.mapper_alive)" 1
 check "with no traceback"                          "$(field curses.mapper_errors)" 0
+check "done (the probe ran to its last line)"      "$(field probe.done)" 1
 log "note   R-52 rows/greps: drawn 5 -> partial $(field curses.osk_rows_after_partial)/grep $(field curses.grep_shift_after_partial) -> full $(field curses.osk_rows_after_full)/grep $(field curses.grep_shift_after_full) -> hard $(field curses.osk_rows_after_hard)/grep $(field curses.grep_shift_after_hard) -> one pad sample $(field curses.osk_rows_after_nudge)"
 
 if [[ $status -eq 0 ]]; then
