@@ -90,34 +90,65 @@ is nothing to type into, so a keyboard would not help even if you had one.
 screen is not running or has died, the compositor keeps the lock but nothing
 renders a way out of it.
 
-**The escape, if you can reach the Deck over SSH:**
+🔴 **CORRECTED 2026-08-11 — the command previously printed here DID NOT WORK,
+in two independent ways. It was tried on a Steam Deck for the first time on that
+date, against a real lock, and failed both times.**
+
+**1. Over SSH, `hyprctl` has no idea which compositor to talk to.** It exits with
+`HYPRLAND_INSTANCE_SIGNATURE not set! (is hyprland running?)`. You must resolve
+the instance first:
 
 ```bash
-hyprctl eval 'hl.clear_crashed_lockscreen()'
+ssh steamdeck 'export HYPRLAND_INSTANCE_SIGNATURE=$(ls -t /run/user/1000/hypr/ | head -1); hyprctl eval "hl.clear_crashed_lockscreen()"'
 ```
 
-That clears the lock outright — the desktop comes straight back, with no
-reboot and nothing lost. If it does not take, kill the lock program first and
-run it again:
+**2. Even then it REFUSES on a healthy lock**, with:
 
-```bash
-killall -9 hyprlock && hyprctl eval 'hl.clear_crashed_lockscreen()'
-```
+> `hl.clear_crashed_lockscreen: session is locked with a client, refusing to unlock`
+
+It clears a **crashed** lock screen. It does **not** clear a working one — and a
+working one is what you get from the power button, which is the case this page
+exists for. ⚠️ **There is no unlock IPC either:** Omarchy's shell exposes
+`lock`, `isLocked`, `status`, `preview` and `hidePreview`, and nothing that
+releases a lock.
+
+### What actually gets you out, in order
+
+1. **Type your password.** ✅ Since 2026-08-11 the on-screen keyboard renders
+   **above** the lock screen and is usable there — press **STEAM+X**, type with
+   the trackpads, submit. Verified on the panel (`docs/PROGRESS.md` §5.24).
+   ⚠️ If the panel is black, press **QAM** or the **power button**; measured
+   2026-08-11, a trackpad touch and the face buttons do **not** wake it.
+2. **Attach a USB keyboard** and type the password. Unglamorous and reliable.
+3. **Hold Power for about ten seconds** to force a shutdown, then power on
+   normally. You lose whatever was unsaved and nothing else.
+
+⚠️ **Killing the lock client is a last resort, not a shortcut.** It converts a
+healthy lock into a crashed one, after which the command above does work — but
+on Omarchy the lock client is the **whole shell** (`quickshell -n -p
+/usr/share/omarchy/shell`), which is **not a systemd unit** (measured: its parent
+is the session, not the user manager), so nothing restarts it for you and you
+lose the bar and background until you start it by hand.
 
 **If you cannot reach it over SSH**, hold Power for about ten seconds to force
 a shutdown, then power on normally. You lose whatever was unsaved, and nothing
 else — this does not damage the install and is not a reason to reimage.
 
-> **Provenance, stated plainly.** ⚠️ **Measured in a nested Hyprland 0.56.0 on
-> a development machine, and NOT yet on a Steam Deck.** In that test the lock
-> cleared, the desktop returned, and the compositor's own lock state went from
-> blocked to clear. Hyprland prints this same command on the stranded screen
-> itself, which is where it was found.
+> **Provenance, and the lesson.** The original text here was measured in a
+> **nested Hyprland on a development machine**, where the lock client genuinely
+> had crashed — so the command worked, honestly, in the case it was tested in.
+> It was then written up as the answer to "my screen is locked", a *different*
+> case, and shipped untested against a real Deck for two sessions.
 >
-> Two honest caveats: `hl.clear_crashed_lockscreen()` is **Hyprland's name on
-> Hyprland's schedule** and can be renamed upstream; and **SSH has to be
-> reachable**, which on a stock install of this project it may not be. The
-> ten-second power hold is the floor that needs nothing.
+> ⚠️ **A recovery procedure nobody has executed is a hypothesis.** This one
+> failed at the first real attempt, twice over, and it is the page someone reads
+> when their handheld is unusable. Everything above was run against an actual
+> locked Deck on 2026-08-11.
+>
+> Remaining caveats, unchanged and still true: `hl.clear_crashed_lockscreen()`
+> is **Hyprland's name on Hyprland's schedule** and can be renamed upstream; and
+> **SSH has to be reachable**, which on a stock install of this project it may
+> not be. The ten-second power hold is the floor that needs nothing.
 >
 > *(Being fixed at the source: the lock-on-sleep behaviour is scheduled to be
 > turned off, and the on-screen keyboard taught to draw above a lock screen, so

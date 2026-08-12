@@ -2070,12 +2070,30 @@ that nearly recorded a false pass here. Both are in `input.lua`'s comments.
    variable nobody recorded on the first one. Two plausible stories, both wrong,
    both killed by changing one variable deliberately.
 
-   **Why QAM and nothing else is the interesting part:** QAM is the only button
-   bound to *spawn a process* (`omarchy-menu toggle`), so it plausibly wakes the
-   display through the shell reacting rather than through the input path at all.
-   That fits the trackpad failing — **the mapper grabs the pad, so its raw events
-   may never reach the compositor's idle notifier.** Unverified mechanism; it is
-   the first thing to check when fixing the three items below.
+   **Why QAM and nothing else — ANSWERED FROM SOURCE 2026-08-11**
+   (`docs/findings/T9-lock-wake-and-blank-timing.md`), and **my recorded
+   hypothesis was wrong on both counts:**
+
+   - ❌ *"The mapper grabs the pad"* — **false twice over.** `--grab` is never
+     passed in production (`src/deck-session.sh`'s `ExecStart=` has no `--grab`),
+     **and it would not have mattered**: libinput has no gamepad/joystick device
+     capability class at all, so the raw `hid-steam` node was never going to
+     reach Hyprland's idle logic no matter who else reads it.
+   - ✅ **QAM emits ZERO input-layer events.** `translate()` returns `[]` for it
+     and only queues `menu-root`, dispatched as a `subprocess.Popen` running
+     `omarchy-menu toggle`. So the "spawns a process" half was right.
+
+   🔴 **And the blanking is not Hyprland's idle timeout or `shell.json` at all.**
+   It is a **hardcoded 5-second `Timer`** — `idleBlankTimer, interval: 5000` — in
+   Omarchy's own `shell/plugins/lock/Service.qml`, which calls `hyprctl dispatch`
+   DPMS via `omarchy-brightness-display`. **That matches the hardware
+   measurement exactly**: `dpmsStatus` went 1→0 between the 5th and 6th
+   one-second sample. Source-read and panel-measured agree on the same number,
+   arrived at independently.
+
+   ⚠️ Still **inferred, not confirmed**: precisely how QAM's IPC path ends up
+   waking the panel — most likely Hyprland's own `mouse_move_enables_dpms`
+   firing from an incidental cursor event as the menu surface takes focus.
 
 ### 5.24a 🆕 Operator requirements from seeing the lock in use (2026-08-11)
 
