@@ -17,9 +17,19 @@ THE INSTALLER PROFILE (deliberately small)
     A (BTN_SOUTH)        Enter        confirm
     B (BTN_EAST)         Esc          back/cancel
     Y (BTN_WEST)         Space        toggle (archinstall multi-select)
-    X (BTN_NORTH)        Tab          next field
+    X (BTN_NORTH)        Backspace    delete  -- ⚠️ WAS Tab; see BUTTON_MAP
     L1 / R1              PageUp/Down  long lists
     Start / Select       Enter / Esc  mirrors, controller-menu convention
+
+WITH THE ON-SCREEN KEYBOARD UP, the buttons match Valve's keyboard exactly
+(docs/tasks/T8-onscreen-keyboard.md §9g, operator decision 2026-08-12)
+    X (BTN_NORTH)        Backspace
+    Y (BTN_WEST)         Space
+    L3 (BTN_THUMBL)      Caps        -- state, not a keycode
+    L2 (BTN_TL2)         left pad TOUCHED -> commit the left cursor's key
+                         left pad LIFTED  -> Shift
+    R2 (BTN_TR2)         right pad TOUCHED -> commit the right cursor's key
+                         right pad LIFTED  -> Enter
 
 DESKTOP MODE ADDS TWO BUTTONS (docs/PROGRESS.md §5.23)
     STEAM (tap, no chord)  `omarchy-menu toggle apps`  the apps menu
@@ -154,11 +164,24 @@ osk_layout = _load_osk_layout()
 
 # --- the mapping tables ------------------------------------------------------
 
+# ⚠️ X IS BACKSPACE, NOT TAB, AND TAB IS DELIBERATELY GIVEN UP.
+#
+# Operator decision 2026-08-12 (docs/tasks/T8-onscreen-keyboard.md, the block
+# above §9f): *"i dont care about the x is supposed to be tab functionality. i
+# want the functionality of the buttons as they appear in the deck images to be
+# matched exactly with our OSK"*. Valve's keyboard paints an Ⓧ badge on its
+# Backspace key, and until this change ours would have been painting a badge
+# that lied -- §9a records that a confidently wrong badge is worse than none.
+#
+# The cost is real and was weighed: §2.3 wanted Tab for archinstall's "next
+# field", and nothing else emits Tab from a face button any more (the OSK still
+# has a Tab KEY, so KEY_TAB stays in EMITTED_KEYS). ⛔ Do not reintroduce it as
+# a binding or a badge without asking the operator.
 BUTTON_MAP: dict[int, int] = {
     e.BTN_SOUTH: e.KEY_ENTER,
     e.BTN_EAST: e.KEY_ESC,
     e.BTN_WEST: e.KEY_SPACE,
-    e.BTN_NORTH: e.KEY_TAB,
+    e.BTN_NORTH: e.KEY_BACKSPACE,
     e.BTN_TL: e.KEY_PAGEUP,
     e.BTN_TR: e.KEY_PAGEDOWN,
     e.BTN_START: e.KEY_ENTER,
@@ -192,6 +215,43 @@ HAT_MAP: dict[tuple[int, int], int] = {
 DECK_LEFT_TRACKPAD = (e.ABS_HAT0X, e.ABS_HAT0Y)
 DECK_RIGHT_TRACKPAD = (e.ABS_HAT1X, e.ABS_HAT1Y)
 DECK_TRIGGERS = (e.ABS_HAT2X, e.ABS_HAT2Y)  # X is R2, Y is L2; both 0..32767
+
+# --- IS A PAD BEING TOUCHED? measured on hardware 2026-08-12 -----------------
+#
+# 🔴 THERE IS NO TOUCH BIT. The native node declares 24 buttons and not one of
+# them is BTN_TOUCH or BTN_TOOL_FINGER -- confirmed by a capability dump AND by
+# a live capture in which no button fired during rest, lift or click. So the
+# question "is a finger on this pad" cannot be asked directly, and T8 §9e warned
+# that without an answer Valve's badge gating could not be reproduced at all.
+#
+# ✅ WHAT DOES WORK, AND IT IS A STATE RATHER THAN A TIMEOUT: a lift reports
+# EXACTLY 0 on BOTH axes, while a resting thumb keeps emitting jittery samples
+# at its real off-centre position. Two captured lifts both terminated at
+# {x: 0, y: 0}; two captured rests sat at {-26331, 6687} and {-25598, 966}.
+#
+#     released  <=>  the last sample on that pad was exactly 0 on BOTH axes
+#
+# A timeout would get the motionless case exactly wrong -- a thumb held still
+# off-centre is still touching, and would have "timed out" into released. This
+# rule keeps it touched.
+#
+# ⚠️ KNOWN AND ACCEPTED FAILURE MODE: a thumb resting at exact dead centre
+# reads as released, because that is byte-for-byte what a lift looks like. It
+# costs one position out of 2^32, half a key away from any hit-test boundary,
+# and `Cursors.update` already makes the same trade for the same reason. Do NOT
+# paper over it with a heuristic (a "recently moved" timer, a jitter detector)
+# without asking -- every such heuristic reintroduces the timeout failure above.
+#
+# ⚠️ BTN_THUMB IS THE LEFT TRACKPAD'S CLICK, not a touch flag and not the left
+# stick. Measured in the same capture (press 14.079s, release 14.551s). The left
+# STICK click is BTN_THUMBL, which is the Caps binding below. This hardware's
+# names mislead in both directions; do not "correct" either one.
+PAD_TOUCH_AXES: dict[int, tuple[str, str]] = {
+    DECK_LEFT_TRACKPAD[0]: ("left", "x"),
+    DECK_LEFT_TRACKPAD[1]: ("left", "y"),
+    DECK_RIGHT_TRACKPAD[0]: ("right", "x"),
+    DECK_RIGHT_TRACKPAD[1]: ("right", "y"),
+}
 
 # The pointer comes from the RIGHT trackpad, matching where a thumb rests and
 # what lizard mode does when it is enabled.
@@ -316,14 +376,68 @@ STICK_RELEASE = 0.35
 REPEAT_DELAY = 0.40
 REPEAT_INTERVAL = 0.15
 
+# --- the OSK's button profile: Valve's, reproduced (T8 §9g) ------------------
+#
+# Operator decision 2026-08-12: match the buttons as they are BADGED on Valve's
+# keyboard, exactly. Every entry below is drawn on that keyboard as a badge, and
+# every badge drawn there is implemented here -- that symmetry is the whole
+# point, because §9a established that a badge nothing implements is worse than
+# no badge at all.
+#
+# ⚠️ THESE APPLY ONLY WHILE THE OSK IS UP. With the keyboard down the triggers
+# are mouse buttons (TRIGGER_BUTTON_MAP) and the pads drive the system pointer;
+# nothing on Valve's keyboard says anything about that state.
+#
+# ⚠️ EMITTED AS A COMPLETE TAP ON THE PRESS, and nothing on the release. Same
+# shape as `OnScreenKeyboard.press()`, and stuck-key-proof by construction: a
+# keyboard dismissed between a button's press and its release cannot leave
+# Backspace held down, which on a password field would empty it. The cost is
+# that holding X does not repeat; the on-screen Backspace key does not repeat
+# either, so the two agree.
+OSK_SHORTCUTS: dict[int, int] = {
+    e.BTN_NORTH: e.KEY_BACKSPACE,   # Ⓧ, drawn on Backspace
+    e.BTN_WEST: e.KEY_SPACE,        # Ⓨ, drawn at the left edge of space
+}
+
+# ⚠️ BTN_THUMBL IS THE LEFT STICK CLICK. BTN_THUMB, one letter shorter, is the
+# left TRACKPAD's click and is a different button entirely (see PAD_TOUCH_AXES).
+# Binding the wrong one makes Caps fire every time a thumb clicks the pad it is
+# already resting on.
+#
+# Caps emits NO KEYCODE. It is a state this process holds and the renderers
+# draw; KEY_CAPSLOCK is deliberately never sent, because a caps lock left latched
+# in the kernel would outlive the keyboard and silently shout into whatever the
+# user typed next. See `Mapper.osk_caps`.
+OSK_CAPS_BUTTON = e.BTN_THUMBL      # L3, drawn on the Caps key
+
+# What a trigger means while ITS OWN pad is UNTOUCHED. Touched, it commits the
+# key under that side's cursor -- which is what it has always done, and what the
+# operator confirmed on hardware ("that's exactly as it should be"). The idle
+# meaning is the second one Valve has and we did not.
+#
+# "shift" changes STATE and emits no keycode; the actual KEY_LEFTSHIFT wrapping
+# happens inside `OnScreenKeyboard.press()` when a character is committed.
+OSK_IDLE_TRIGGER: dict[int, str] = {
+    e.BTN_TL2: "shift",   # L2, drawn on both Shift keys
+    e.BTN_TR2: "enter",   # R2, drawn on Enter
+}
+OSK_IDLE_TRIGGER_KEYS: dict[str, int] = {"enter": e.KEY_ENTER}
+
 # ⚠️ The uinput device declares exactly this set, and emits NOTHING else -- the
 # kernel drops an undeclared code without an error. Every character key the OSK
 # can type therefore has to be in here before a renderer ever draws it, which is
 # why the layout core is imported at module load rather than when the OSK opens.
+#
+# ⚠️ The OSK's own button shortcuts are folded in EXPLICITLY rather than left to
+# overlap with BUTTON_MAP by luck. They do overlap today -- X/Backspace, Y/Space
+# and R2/Enter are all navigation keys as well -- but rebinding either table
+# without the other is exactly how a shortcut goes silently dead.
 EMITTED_KEYS = sorted(
     set(BUTTON_MAP.values())
     | set(HAT_MAP.values())
     | set(TRIGGER_BUTTON_MAP.values())
+    | set(OSK_SHORTCUTS.values())
+    | set(OSK_IDLE_TRIGGER_KEYS.values())
     | (set(osk_layout.OSK_KEYCODES) if osk_layout else set())
 )
 EMITTED_RELS = [e.REL_X, e.REL_Y]
@@ -409,6 +523,99 @@ class Mapper:
     osk_active: bool = False
     osk: "object | None" = None       # deck_osk_layout.OnScreenKeyboard
     cursors: "object | None" = None   # deck_osk_layout.Cursors
+
+    # --- state the RENDERERS read (T8 §9g) -----------------------------------
+    #
+    # The keyboard's look is downstream of all three of these, so they live here
+    # rather than in a renderer: two renderers must agree, and only this object
+    # sees the events that change them.
+    #
+    #   pad_last      the last sample per pad, per axis. `pad_touched(half)` is
+    #                 the badge gate: hide that side's trigger badge while its
+    #                 pad is touched. Starts released, which is the
+    #                 all-badges-visible state §9f screenshotted.
+    #
+    # ⚠️ SHIFT AND CAPS ARE NOT DUPLICATED HERE. `OnScreenKeyboard` owns them --
+    # `shift` ("off"/"once"/"locked") and `caps` (a SEPARATE boolean, letters
+    # only) -- and `format_state_line` already carries both to the renderers.
+    # A second copy on this object would be a second truth to keep in sync, and
+    # the one the renderers read is not this one. L2 and L3 below therefore
+    # TOGGLE the keyboard's own state rather than shadowing it.
+    pad_last: dict[str, list[int]] = field(
+        default_factory=lambda: {"left": [0, 0], "right": [0, 0]}
+    )
+
+    # Whether the X we are holding emitted a real key-down. See translate():
+    # without it, pressing X, then STEAM, then releasing X swallows the release
+    # and leaves Backspace held down forever.
+    chord_key_down: bool = False
+
+    # --- pad touch: the badge gate (measured 2026-08-12, see PAD_TOUCH_AXES) --
+
+    def note_pad_sample(self, code: int, value: int) -> str | None:
+        """Record one raw pad sample. Returns the half it belongs to, or None.
+
+        Records EVERY value including 0 -- unlike `Cursors.update`, which
+        deliberately ignores a 0 so the cursor does not snap to centre on a
+        lift. The two want opposite things from the same sample: the cursor
+        wants the last MEANINGFUL position, this wants the last ACTUAL one.
+        """
+        axis = PAD_TOUCH_AXES.get(code)
+        if axis is None:
+            return None
+        half, which = axis
+        self.pad_last[half][0 if which == "x" else 1] = value
+        return half
+
+    def pad_touched(self, half: str) -> bool:
+        """Is a finger on that pad right now?
+
+        ⚠️ `released` <=> the last sample was exactly 0 on BOTH axes. A single
+        axis crossing 0 mid-stroke is still a touch, which is why both are
+        required; and a motionless off-centre thumb stays touched forever, which
+        is what no timeout could do. The dead-centre blind spot is documented
+        and accepted at PAD_TOUCH_AXES.
+        """
+        sample = self.pad_last.get(half)
+        if sample is None:
+            raise ValueError(f"half must be 'left' or 'right', got {half!r}")
+        return any(sample)
+
+    def reset_pad_touch(self) -> None:
+        """Forget both pads. Called when the keyboard is shown, so a stale
+        sample from the last showing cannot decide the first badge state."""
+        for sample in self.pad_last.values():
+            sample[0] = sample[1] = 0
+
+    def reset_osk_state(self) -> None:
+        """Start a showing from a known state: no modifiers, both pads lifted.
+
+        Called by main() on every show. Without it a keyboard dismissed with
+        Caps latched comes back latched, with nothing on screen having said so
+        while it was gone -- and a lifted-pad reading left over from the last
+        showing decides the first frame's badges.
+        """
+        self.reset_pad_touch()
+        if self.osk is not None:
+            self.osk.shift = "off"
+            self.osk.caps = False
+
+    # --- Shift and Caps: read out of the keyboard, never mirrored ------------
+    #
+    # ⚠️ CAPS IS NOT `shift == "locked"` (T8 §9g). "locked" is a SHIFT lock and
+    # changes symbols and the arrow keys too; Caps changes letter case and
+    # nothing else. The layout core keeps them as two fields for exactly that
+    # reason, and these two accessors exist so nothing here has to remember it.
+
+    @property
+    def osk_shift(self) -> bool:
+        """Is Shift in force? Drawn blue on both Shift keys."""
+        return self.osk is not None and self.osk.shift != "off"
+
+    @property
+    def osk_caps(self) -> bool:
+        """Is Caps latched? Drawn blue on the Caps key."""
+        return self.osk is not None and bool(self.osk.caps)
 
     def pointer_delta(self, code: int, value: int, now: float) -> tuple[int, int]:
         """Right trackpad -> relative pointer motion. Returns (dx, dy).
@@ -518,29 +725,88 @@ class Mapper:
         state.active_key = want
         return out
 
+    def _osk_idle_trigger(self, code: int) -> list[tuple[int, int]]:
+        """A trigger pulled while its own pad is UNTOUCHED -- Valve's second
+        meaning for L2 and R2 (T8 §9g, and the operator's own words in §9e).
+
+        ⚠️ L2 is a ONE-SHOT Shift, not a held one, and it has to be: the same
+        physical trigger commits keys the instant a thumb lands on the left pad,
+        so "hold L2 while aiming" is a gesture this input model cannot offer.
+        Arming it and spending it on the next committed key is what the layout
+        core's `shift == "once"` already means, and what the on-screen Shift key
+        already does -- so both routes to Shift behave identically.
+        """
+        meaning = OSK_IDLE_TRIGGER.get(code)
+        if meaning == "shift":
+            # Toggle, so a mis-pull is undone by a second pull. Deliberately
+            # NOT the Shift key's off -> once -> locked cycle: L3 owns Caps on
+            # this keyboard, and a trigger that could silently reach a shift
+            # LOCK would look identical to Caps and behave differently.
+            self.osk.shift = "off" if self.osk.shift != "off" else "once"
+            return []
+        key = OSK_IDLE_TRIGGER_KEYS.get(meaning)
+        if key is None:
+            return []
+        return [(key, 1), (key, 0)]
+
     def _osk_event(self, etype: int, code: int, value: int) -> list[tuple[int, int]]:
         """Route one event to the on-screen keyboard. Returns keystrokes.
 
-        Both pads become cursors and each trigger presses the key under its OWN
-        cursor. Everything else is deliberately swallowed: with the keyboard up,
-        A must not also send Enter and X must not also send Tab, or every key
-        press does two things at once.
+        Both pads become cursors, and each trigger EITHER presses the key under
+        its own cursor (that pad touched) or acts as Shift/Enter (that pad
+        lifted). X, Y and L3 are unconditional shortcuts, exactly as Valve badges
+        them. Everything else is deliberately swallowed: with the keyboard up, A
+        must not also send Enter underneath, or every press does two things at
+        once.
+
+        ⚠️ THE BUTTONS HERE ARE THE BADGES DRAWN ON THE KEYBOARD. Changing one
+        without changing the other makes the keyboard lie about itself, which
+        §9a records as worse than saying nothing.
         """
         if self.osk is None or self.cursors is None:
             return []
         if etype == e.EV_ABS:
+            # Touch FIRST and unconditionally: `Cursors.update` throws the 0
+            # away, and the 0 is the entire lift signal.
+            self.note_pad_sample(code, value)
             self.cursors.update(code, value)
             return []
-        if etype == e.EV_KEY and value == 1:
-            half = TRIGGER_HALF.get(code)
-            if half is not None:
+        if etype != e.EV_KEY or value != 1:
+            # Releases and the pad's own autorepeat do nothing: every emission
+            # below is already a complete tap.
+            return []
+        half = TRIGGER_HALF.get(code)
+        if half is not None:
+            if self.pad_touched(half):
                 return self.osk.press_at(half, *self.cursors.position(half))
+            return self._osk_idle_trigger(code)
+        if code == OSK_CAPS_BUTTON:
+            # Caps is a state, never a keycode: see OSK_CAPS_BUTTON.
+            self.osk.caps = not self.osk.caps
+            return []
+        key = OSK_SHORTCUTS.get(code)
+        if key is not None:
+            return [(key, 1), (key, 0)]
         return []
 
     def translate(self, etype: int, code: int, value: int, now: float) -> list[tuple[int, int]]:
         if etype == e.EV_KEY:
+            # 🔴 A HELD X ALWAYS GETS ITS RELEASE, whatever changed underneath.
+            #
+            # X's press can be followed by STEAM being grabbed for a chord, or
+            # by the keyboard opening -- and both of those branches below
+            # swallow the release that belongs to a key which is PHYSICALLY
+            # DOWN. Since 2026-08-12 that key is BACKSPACE (see BUTTON_MAP), so
+            # a lost release holds it down and empties whatever field has focus.
+            # Blanket swallowing was survivable while X was Tab; it is not now.
+            #
+            # Checked before everything, because the point is that it does not
+            # care what state was entered in between.
+            if code == OSK_CHORD_PRESS and value == 0 and self.chord_key_down:
+                self.chord_key_down = False
+                return [(BUTTON_MAP[OSK_CHORD_PRESS], 0)]
             # STEAM+X toggles the on-screen keyboard. Checked before every
-            # other key path so the X in the chord does not also type Tab.
+            # other key path so the X in the chord does not also type Backspace.
             #
             # ⚠️ STEAM IS RESOLVED ON RELEASE, and it has to be. It is the
             # chord's hold key AND the apps-menu button, so firing on the press
@@ -601,6 +867,11 @@ class Mapper:
             if key is None:
                 return []
             if value in (0, 1):
+                if code == OSK_CHORD_PRESS:
+                    # Remember that this one really went down, so a release
+                    # arriving after STEAM was grabbed still reaches the
+                    # consumer. See the chord branch above.
+                    self.chord_key_down = bool(value)
                 return [(key, value)]
             return []  # ignore the pad's own autorepeat; we schedule our own
         if etype == e.EV_ABS:
@@ -1837,6 +2108,7 @@ def main() -> None:
             mapper.osk_active = visible
             if visible:
                 mapper.osk.closed = False
+                mapper.reset_osk_state()
                 osk_draw()
             else:
                 osk_erase()
@@ -1845,6 +2117,7 @@ def main() -> None:
             mapper.osk_active = visible
             if visible:
                 mapper.osk.closed = False
+                mapper.reset_osk_state()
                 osk_layer_start()
             else:
                 osk_layer_stop()

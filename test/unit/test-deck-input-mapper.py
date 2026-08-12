@@ -48,6 +48,16 @@ def fresh() -> "m.Mapper":
     return m.Mapper(axis_ranges={e.ABS_X: (-32768, 32767), e.ABS_Y: (-32768, 32767)})
 
 
+def raised(call):
+    """The exception `call` raised, or None. For asserting on the LOUD paths --
+    CLAUDE.md forbids swallowing, so "it complains" is itself a contract."""
+    try:
+        call()
+    except Exception as exc:      # noqa: BLE001 -- the point is to catch anything
+        return exc
+    return None
+
+
 # --- buttons -----------------------------------------------------------------
 
 mm = fresh()
@@ -55,6 +65,16 @@ check("A press -> Enter down", mm.translate(e.EV_KEY, e.BTN_SOUTH, 1, 0.0), [(e.
 check("A release -> Enter up", mm.translate(e.EV_KEY, e.BTN_SOUTH, 0, 0.0), [(e.KEY_ENTER, 0)])
 check("B press -> Esc down", mm.translate(e.EV_KEY, e.BTN_EAST, 1, 0.0), [(e.KEY_ESC, 1)])
 check("Y press -> Space down", mm.translate(e.EV_KEY, e.BTN_WEST, 1, 0.0), [(e.KEY_SPACE, 1)])
+# ⚠️ X IS BACKSPACE, NOT TAB, since the operator's 2026-08-12 decision
+# (docs/tasks/T8-onscreen-keyboard.md, the block above §9f). Tab was §2.3's
+# "next field" for archinstall and was given up deliberately for parity with
+# the Ⓧ badge Valve paints on Backspace.
+check("X press -> Backspace down", mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.0),
+      [(e.KEY_BACKSPACE, 1)])
+check("X release -> Backspace up", mm.translate(e.EV_KEY, e.BTN_NORTH, 0, 0.0),
+      [(e.KEY_BACKSPACE, 0)])
+check("no face button emits Tab any more",
+      e.KEY_TAB in set(m.BUTTON_MAP.values()), False)
 check("pad autorepeat ignored", mm.translate(e.EV_KEY, e.BTN_SOUTH, 2, 0.0), [])
 check("unmapped button ignored", mm.translate(e.EV_KEY, e.BTN_THUMBL, 1, 0.0), [])
 check("unmapped type ignored", mm.translate(e.EV_REL, e.REL_X, 5, 0.0), [])
@@ -232,22 +252,45 @@ check("trigger autorepeat ignored", mm.translate(e.EV_KEY, e.BTN_TR2, 2, 0.3), [
 
 mm = fresh()
 check("STEAM alone emits nothing", mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0), [])
-check("X while STEAM is held does not also type Tab",
+check("X while STEAM is held does not also type Backspace",
       mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.1), [])
 check("the chord queued an OSK toggle", mm.pending_actions, ["toggle-osk"])
+check("and releasing the chord's X types nothing either",
+      mm.translate(e.EV_KEY, e.BTN_NORTH, 0, 0.15), [])
 
-# X on its own must still be Tab, or the chord would cost the installer its
-# next-field key.
+# X on its own must still be Backspace, or the chord would cost the keyboard
+# its delete key.
 mm = fresh()
-check("X alone is still Tab", mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.0), [(e.KEY_TAB, 1)])
+check("X alone is Backspace", mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.0),
+      [(e.KEY_BACKSPACE, 1)])
 check("X alone queues nothing", mm.pending_actions, [])
+
+# 🔴 A HELD X ALWAYS GETS ITS RELEASE. X down, THEN steam grabbed, then X up:
+# the chord branch used to swallow that release wholesale, which left the key
+# held down. Survivable when it was Tab; with Backspace it empties the field.
+mm = fresh()
+check("X down first emits Backspace down",
+      mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.0), [(e.KEY_BACKSPACE, 1)])
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.1)          # STEAM grabbed mid-hold
+check("the release still reaches the consumer, or Backspace sticks down",
+      mm.translate(e.EV_KEY, e.BTN_NORTH, 0, 0.2), [(e.KEY_BACKSPACE, 0)])
+check("and that release did NOT arm the chord",
+      "toggle-osk" in mm.pending_actions, False)
+
+# Same hazard through the other door: the keyboard opening between press and
+# release. `_osk_event` swallows face buttons' releases by design.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.0)
+mm.osk_active = True
+check("a held X released after the keyboard opened is still released",
+      mm.translate(e.EV_KEY, e.BTN_NORTH, 0, 0.1), [(e.KEY_BACKSPACE, 0)])
 
 # Releasing STEAM must disarm the chord.
 mm = fresh()
 mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
 mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.1)
-check("X after STEAM is released is Tab again",
-      mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.2), [(e.KEY_TAB, 1)])
+check("X after STEAM is released is Backspace again",
+      mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.2), [(e.KEY_BACKSPACE, 1)])
 # ⚠️ NOT `pending_actions == []` any more. That bare press-and-release is now a
 # TAP, and a tap queues the apps menu (§5.23, covered in its own section below).
 # What must stay true here is that the CHORD is disarmed -- X arriving after the
@@ -735,6 +778,33 @@ def osk_mapper():
     return mm
 
 
+def touch(mm, half, x=None, y=None):
+    """Put a thumb on a pad at a real, off-centre position.
+
+    ⚠️ Every trigger assertion below needs this first. A trigger only commits
+    while its own pad is TOUCHED, and a fresh Mapper reports both pads lifted --
+    which is correct (§9f's idle screenshot is the all-badges-visible state) and
+    means an untouched trigger means Shift or Enter instead.
+    """
+    axes = {"left": (e.ABS_HAT0X, e.ABS_HAT0Y), "right": (e.ABS_HAT1X, e.ABS_HAT1Y)}
+    ax, ay = axes[half]
+    mm.translate(e.EV_ABS, ax, MINV if x is None else x, 0.0)
+    mm.translate(e.EV_ABS, ay, MAXV if y is None else y, 0.0)
+
+
+def key_under(mm, half):
+    """The keycode the layout says sits under that cursor, right now.
+
+    ⚠️ DERIVED, NOT HARD-CODED. The reference layout (T8 §9g) is being rebuilt
+    in `deck_osk_layout.py`, and which character sits in a corner is that file's
+    business, not this one's. What THIS suite pins is that the LEFT trigger
+    commits the LEFT cursor's key and the right the right's -- so it asks the
+    layout what that key is rather than asserting a character and going red
+    every time a key moves.
+    """
+    return mm.osk.key_at(half, *mm.cursors.position(half)).code
+
+
 mm = osk_mapper()
 check("with the OSK up, a pad axis emits no keystroke",
       mm.translate(e.EV_ABS, e.ABS_HAT1X, MAXV, 0.0), [])
@@ -743,14 +813,15 @@ check("and left the other cursor alone", mm.cursors.position("left"), (0.5, 0.5)
 
 # Each trigger presses the key under its OWN cursor -- the whole point of two.
 mm = osk_mapper()
-mm.translate(e.EV_ABS, e.ABS_HAT0X, MINV, 0.0)   # left cursor -> top-left "1"
-mm.translate(e.EV_ABS, e.ABS_HAT0Y, MAXV, 0.0)
-mm.translate(e.EV_ABS, e.ABS_HAT1X, MAXV, 0.0)   # right cursor -> top-right "0"
-mm.translate(e.EV_ABS, e.ABS_HAT1Y, MAXV, 0.0)
+touch(mm, "left", MINV, MAXV)     # left cursor -> top-left
+touch(mm, "right", MAXV, MAXV)    # right cursor -> top-right
+left_key, right_key = key_under(mm, "left"), key_under(mm, "right")
+check("the two cursors are on different keys (or the check below proves nothing)",
+      left_key != right_key, True)
 check("the LEFT trigger types the key under the LEFT cursor",
-      mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1), [(e.KEY_1, 1), (e.KEY_1, 0)])
+      mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1), [(left_key, 1), (left_key, 0)])
 check("the RIGHT trigger types the key under the RIGHT cursor",
-      mm.translate(e.EV_KEY, e.BTN_TR2, 1, 0.2), [(e.KEY_0, 1), (e.KEY_0, 0)])
+      mm.translate(e.EV_KEY, e.BTN_TR2, 1, 0.2), [(right_key, 1), (right_key, 0)])
 check("a trigger RELEASE types nothing (or every key would double)",
       mm.translate(e.EV_KEY, e.BTN_TR2, 0, 0.3), [])
 
@@ -759,7 +830,7 @@ check("a trigger RELEASE types nothing (or every key would double)",
 mm = osk_mapper()
 check("A no longer sends Enter while the keyboard is up",
       mm.translate(e.EV_KEY, e.BTN_SOUTH, 1, 0.0), [])
-check("Y no longer sends Space", mm.translate(e.EV_KEY, e.BTN_WEST, 1, 0.0), [])
+check("B no longer sends Esc", mm.translate(e.EV_KEY, e.BTN_EAST, 1, 0.0), [])
 check("the d-pad no longer sends arrows",
       mm.translate(e.EV_KEY, e.BTN_DPAD_UP, 1, 0.0), [])
 check("the stick no longer sends arrows",
@@ -786,6 +857,226 @@ check("a STEAM tap still opens the apps menu with the keyboard up",
       (mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.1), mm.pending_actions),
       ([], ["menu-apps"]))
 
+# --- 🔴 PAD TOUCH: `0,0` MEANS LIFTED (measured on hardware 2026-08-12) ------
+#
+# There is NO touch bit on this hardware -- the native node declares 24 buttons
+# and none of them is BTN_TOUCH or BTN_TOOL_FINGER (capability dump AND a live
+# capture in which no button fired during rest, lift or click). What was
+# measured instead: a lift terminates at EXACTLY 0 on BOTH axes, while a resting
+# thumb keeps emitting jittery samples at its real off-centre position.
+#
+# Everything Valve's badge gating and both trigger meanings hang off this rule,
+# so it is asserted in both directions and at the boundary.
+
+mm = osk_mapper()
+check("a fresh mapper reports both pads LIFTED -- §9f's all-badges state",
+      (mm.pad_touched("left"), mm.pad_touched("right")), (False, False))
+
+# The two captured RESTS, replayed verbatim. Neither is centre; both are a thumb.
+mm = osk_mapper()
+mm.translate(e.EV_ABS, e.ABS_HAT0X, -26331, 0.0)
+mm.translate(e.EV_ABS, e.ABS_HAT0Y, 6687, 0.0)
+check("a resting thumb at the first captured position is TOUCHED",
+      mm.pad_touched("left"), True)
+mm.translate(e.EV_ABS, e.ABS_HAT0X, -25598, 1.0)
+mm.translate(e.EV_ABS, e.ABS_HAT0Y, 966, 1.0)
+check("...and still touched a second later without moving -- no timeout",
+      mm.pad_touched("left"), True)
+
+# The lift, and it is the ONLY thing that reports released.
+mm.translate(e.EV_ABS, e.ABS_HAT0X, 0, 2.0)
+check("one axis at 0 is NOT a lift -- a stroke crosses the centre line",
+      mm.pad_touched("left"), True)
+mm.translate(e.EV_ABS, e.ABS_HAT0Y, 0, 2.0)
+check("BOTH axes at exactly 0 is the lift", mm.pad_touched("left"), False)
+# ...and the axes may arrive in either order, since nothing measured says
+# `hid-steam` sends them in one report.
+mm = osk_mapper()
+mm.translate(e.EV_ABS, e.ABS_HAT0Y, 6687, 0.0)
+mm.translate(e.EV_ABS, e.ABS_HAT0X, 0, 0.0)
+check("y-then-x order: still touched on one zero", mm.pad_touched("left"), True)
+mm.translate(e.EV_ABS, e.ABS_HAT0Y, 0, 0.0)
+check("y-then-x order: lifted on the second", mm.pad_touched("left"), False)
+
+# Off by one unit is a touch. This is the whole difference between "exactly 0"
+# and "near centre", and a near-centre threshold would swallow it.
+mm = osk_mapper()
+mm.translate(e.EV_ABS, e.ABS_HAT0X, 1, 0.0)
+check("a thumb ONE unit off centre is touched, not lifted",
+      mm.pad_touched("left"), True)
+mm = osk_mapper()
+mm.translate(e.EV_ABS, e.ABS_HAT0Y, -1, 0.0)
+check("...on either axis and either sign", mm.pad_touched("left"), True)
+
+# ⚠️ THE ACCEPTED FAILURE MODE, pinned so nobody "fixes" it by accident: a thumb
+# resting at exact dead centre is byte-for-byte a lift, and reads as released.
+# Documented at PAD_TOUCH_AXES; do not add a heuristic without asking.
+mm = osk_mapper()
+mm.translate(e.EV_ABS, e.ABS_HAT0X, 0, 0.0)
+mm.translate(e.EV_ABS, e.ABS_HAT0Y, 0, 0.0)
+check("a thumb at EXACT dead centre reads as lifted (known, accepted)",
+      mm.pad_touched("left"), False)
+
+# Per-pad, never shared: §9e's rule is that each trigger's badge is gated on its
+# OWN side's pad, and the operator confirmed that on hardware.
+mm = osk_mapper()
+touch(mm, "left")
+check("touching the left pad does not make the right pad touched",
+      (mm.pad_touched("left"), mm.pad_touched("right")), (True, False))
+touch(mm, "right")
+check("and both can be touched at once",
+      (mm.pad_touched("left"), mm.pad_touched("right")), (True, True))
+
+check("an unknown half is an error, not a quiet False",
+      isinstance(raised(lambda: osk_mapper().pad_touched("middle")), ValueError), True)
+
+# A showing starts from a known state, or a sample left over from the last one
+# decides the first frame's badges.
+mm = osk_mapper()
+touch(mm, "left")
+mm.osk.caps = True
+mm.osk.shift = "once"
+mm.reset_osk_state()
+check("reset_osk_state lifts both pads and clears both modifiers",
+      (mm.pad_touched("left"), mm.osk_shift, mm.osk_caps), (False, False, False))
+
+# --- L2/R2: TWO meanings each, chosen by that pad's touch state (§9g) --------
+
+# TOUCHED -> commit, which is what they have always done.
+mm = osk_mapper()
+touch(mm, "left", MINV, MAXV)
+expected = key_under(mm, "left")
+check("L2 with the left pad TOUCHED commits the left cursor's key",
+      mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1), [(expected, 1), (expected, 0)])
+
+# LIFTED -> Shift. No keycode: the modifier is applied inside the layout core
+# when a character is committed.
+mm = osk_mapper()
+check("L2 with the left pad LIFTED emits no keycode",
+      mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.0), [])
+check("...it arms Shift instead", (mm.osk_shift, mm.osk.shift), (True, "once"))
+check("...and does NOT latch Caps -- Caps is L3's, and they are not the same",
+      mm.osk_caps, False)
+check("a second pull disarms it, so a mis-pull is undoable",
+      (mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1), mm.osk_shift), ([], False))
+# ⚠️ It must never reach a shift LOCK. That state exists in the layout core and
+# looks identical to Caps on screen while behaving differently.
+mm = osk_mapper()
+for i in range(6):
+    mm.translate(e.EV_KEY, e.BTN_TL2, 1, float(i))
+check("pulling L2 repeatedly never reaches a shift LOCK",
+      mm.osk.shift in ("off", "once"), True)
+
+# LIFTED -> Enter, on the right. A full tap: nothing can stay held.
+mm = osk_mapper()
+check("R2 with the right pad LIFTED types Enter",
+      mm.translate(e.EV_KEY, e.BTN_TR2, 1, 0.0),
+      [(e.KEY_ENTER, 1), (e.KEY_ENTER, 0)])
+check("...and its release types nothing, so Enter cannot stick down",
+      mm.translate(e.EV_KEY, e.BTN_TR2, 0, 0.1), [])
+mm = osk_mapper()
+touch(mm, "right", MAXV, MAXV)
+committed = key_under(mm, "right")
+check("R2 with the right pad TOUCHED commits instead of sending Enter",
+      mm.translate(e.EV_KEY, e.BTN_TR2, 1, 0.1), [(committed, 1), (committed, 0)])
+check("...and that really was NOT Enter", committed != e.KEY_ENTER, True)
+
+# The gate is per-pad in both directions: a thumb on the LEFT pad must not turn
+# R2 into a commit, and vice versa (§9e, answered by the operator 2026-08-12).
+mm = osk_mapper()
+touch(mm, "left")
+check("the left pad being touched leaves R2 as Enter",
+      mm.translate(e.EV_KEY, e.BTN_TR2, 1, 0.1),
+      [(e.KEY_ENTER, 1), (e.KEY_ENTER, 0)])
+mm = osk_mapper()
+touch(mm, "right")
+check("the right pad being touched leaves L2 as Shift",
+      (mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1), mm.osk_shift), ([], True))
+
+# Lifting mid-session flips the meaning back, which is the badge reappearing.
+mm = osk_mapper()
+touch(mm, "left", MINV, MAXV)
+mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1)          # committed
+mm.translate(e.EV_ABS, e.ABS_HAT0X, 0, 0.2)
+mm.translate(e.EV_ABS, e.ABS_HAT0Y, 0, 0.2)        # ...thumb lifted
+check("after a lift the SAME trigger is Shift again",
+      (mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.3), mm.osk_shift), ([], True))
+
+# --- X, Y and L3: unconditional shortcuts, exactly as Valve badges them ------
+#
+# §9g: only the TRIGGER badges gate on touch. Ⓧ, Ⓨ and L3 are always shown,
+# so they must always work -- touched, lifted, or one of each.
+
+for state in ("lifted", "left", "right", "both"):
+    mm = osk_mapper()
+    if state in ("left", "both"):
+        touch(mm, "left")
+    if state in ("right", "both"):
+        touch(mm, "right")
+    check(f"X types Backspace with the pads {state}",
+          mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.1),
+          [(e.KEY_BACKSPACE, 1), (e.KEY_BACKSPACE, 0)])
+    check(f"Y types Space with the pads {state}",
+          mm.translate(e.EV_KEY, e.BTN_WEST, 1, 0.2),
+          [(e.KEY_SPACE, 1), (e.KEY_SPACE, 0)])
+    check(f"L3 latches Caps with the pads {state}",
+          (mm.translate(e.EV_KEY, e.BTN_THUMBL, 1, 0.3), mm.osk_caps), ([], True))
+
+# A complete tap on the press, nothing on the release. Anything else can leave
+# Backspace held when the keyboard is dismissed mid-press.
+mm = osk_mapper()
+mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.0)
+check("a face-button shortcut emits nothing on its release",
+      mm.translate(e.EV_KEY, e.BTN_NORTH, 0, 0.1), [])
+check("...and nothing on the pad's own autorepeat either",
+      mm.translate(e.EV_KEY, e.BTN_NORTH, 2, 0.2), [])
+
+# 🔴 CAPS IS NOT SHIFT (§9g). Caps changes letter case only; Shift changes
+# symbols, case AND the arrow keys. The layout core keeps them as two fields
+# for exactly that reason, and L3 must reach the caps one.
+mm = osk_mapper()
+mm.translate(e.EV_KEY, e.BTN_THUMBL, 1, 0.0)
+check("L3 sets `caps`, and leaves `shift` alone",
+      (mm.osk.caps, mm.osk.shift), (True, "off"))
+check("so the mapper reports caps without reporting shift",
+      (mm.osk_caps, mm.osk_shift), (True, False))
+check("L3 again unlatches it",
+      (mm.translate(e.EV_KEY, e.BTN_THUMBL, 1, 0.1), mm.osk.caps), ([], False))
+
+# The two are independent: latching one must not disturb the other.
+mm = osk_mapper()
+mm.translate(e.EV_KEY, e.BTN_THUMBL, 1, 0.0)       # Caps on
+mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1)          # Shift armed (pads lifted)
+check("Caps and Shift can be on at once", (mm.osk_caps, mm.osk_shift), (True, True))
+mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.2)          # Shift disarmed
+check("disarming Shift leaves Caps latched", (mm.osk_caps, mm.osk_shift), (True, False))
+
+# ⚠️ BTN_THUMBL IS THE LEFT STICK CLICK. BTN_THUMB, one letter shorter, is the
+# left TRACKPAD's click -- measured in the same capture (press 14.079s, release
+# 14.551s). Binding the wrong one fires Caps every time a thumb clicks the pad
+# it is already resting on.
+mm = osk_mapper()
+check("the caps binding is the left STICK click, not the left PAD click",
+      m.OSK_CAPS_BUTTON, e.BTN_THUMBL)
+check("the left TRACKPAD click does nothing to Caps",
+      (mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.0), mm.osk_caps), ([], False))
+
+# --- and Shift really does reach the emitted keystrokes ----------------------
+#
+# The assertions above are about STATE. This one is about the wire: arm Shift
+# with a lifted L2, then commit a letter with the right pad, and the shift
+# modifier has to be in the emission or the whole binding is decorative.
+mm = osk_mapper()
+touch(mm, "right", 0, 0)          # (a no-op: 0 is the lift)
+mm.translate(e.EV_ABS, e.ABS_HAT1X, MINV, 0.0)
+mm.translate(e.EV_ABS, e.ABS_HAT1Y, 0 - 1, 0.0)   # somewhere in the letter rows
+mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1)         # left pad lifted -> Shift
+strokes = mm.translate(e.EV_KEY, e.BTN_TR2, 1, 0.2)
+check("a committed key under Shift carries the shift modifier",
+      strokes[0] if strokes else None, (osk_mod.SHIFT_CODE, 1))
+check("...and the one-shot is spent by the key it modified",
+      mm.osk_shift, False)
+
 # --- and none of that may happen with the OSK DOWN ---------------------------
 
 mm = fresh()
@@ -810,7 +1101,11 @@ check("and a mapper with no OSK attached routes nothing even if flagged",
 # mapping tables: deriving it would make the assertion agree with whatever the
 # tables happen to say, which is not a contract.
 
-NAV_KEYS = {e.KEY_ENTER, e.KEY_ESC, e.KEY_SPACE, e.KEY_TAB, e.KEY_PAGEUP,
+# ⚠️ KEY_TAB IS GONE from here and KEY_BACKSPACE has taken its place: X was
+# rebound 2026-08-12 for parity with Valve's Ⓧ badge. KEY_TAB survives in
+# EMITTED_KEYS only because the layout still has a Tab KEY, which is a different
+# thing from a face button that types one.
+NAV_KEYS = {e.KEY_ENTER, e.KEY_ESC, e.KEY_SPACE, e.KEY_BACKSPACE, e.KEY_PAGEUP,
             e.KEY_PAGEDOWN, e.KEY_LEFT, e.KEY_RIGHT, e.KEY_UP, e.KEY_DOWN,
             e.BTN_LEFT, e.BTN_RIGHT}
 
@@ -828,6 +1123,22 @@ check("the shift modifier is advertised -- capitals are silent without it",
 # Spot-check a character key by hand, so this cannot pass by both sides being
 # empty: KEY_A is on no navigation path and must arrive purely from the layouts.
 check("a character key made it into the declared set", e.KEY_A in m.EMITTED_KEYS, True)
+
+# ⚠️ THE OSK's OWN SHORTCUTS, checked separately. They overlap the navigation
+# table today (X/Backspace, Y/Space, R2/Enter are all navigation keys as well),
+# so a shortcut rebound to something the navigation profile does NOT emit would
+# be dropped by the kernel with no error and no test failure anywhere else.
+check("every OSK button shortcut is declared on the uinput device",
+      sorted(set(m.OSK_SHORTCUTS.values()) - set(m.EMITTED_KEYS)), [])
+check("...and so is every idle-trigger key",
+      sorted(set(m.OSK_IDLE_TRIGGER_KEYS.values()) - set(m.EMITTED_KEYS)), [])
+# Backspace must survive the layout core failing to load: with it gone the OSK
+# is disabled but X still has to delete.
+check("Backspace comes from the NAVIGATION table, not only from the layout",
+      e.KEY_BACKSPACE in set(m.BUTTON_MAP.values()), True)
+# Caps is a STATE, not a keycode. A KEY_CAPSLOCK left latched in the kernel
+# would outlive the keyboard and shout into whatever the user typed next.
+check("no caps-lock keycode is ever declared", e.KEY_CAPSLOCK in m.EMITTED_KEYS, False)
 
 # --- the missing-core fallback -----------------------------------------------
 #
@@ -1563,6 +1874,21 @@ envless = sorted(node.lineno for node in spawns
 check("EVERY subprocess call in the mapper names its environment (§5.28)",
       envless, [])
 
+# ⚠️ Same technique, same reason, different invariant. EMITTED_KEYS must be
+# built from the OSK's button tables as well as the navigation ones. Today the
+# two OVERLAP -- Backspace, Space and Enter are navigation keys too -- so
+# deleting the fold changes nothing and no behavioural test can see it. The day
+# a shortcut is rebound to a key the navigation profile does not emit, the
+# kernel drops it with no error on any side. Assert the structure, because the
+# behaviour cannot be asserted until it is already too late.
+emitted = next(node for node in ast.walk(tree)
+               if isinstance(node, ast.Assign)
+               and any(isinstance(t, ast.Name) and t.id == "EMITTED_KEYS"
+                       for t in node.targets))
+emitted_names = {node.id for node in ast.walk(emitted.value) if isinstance(node, ast.Name)}
+check("EMITTED_KEYS is built from the OSK's button tables too",
+      sorted({"OSK_SHORTCUTS", "OSK_IDLE_TRIGGER_KEYS"} - emitted_names), [])
+
 # The resolver is only worth anything if main() actually drives it, and main()
 # is a 400-line function around a live device that no unit test can enter. So
 # its wiring is asserted structurally instead of not at all -- deleting any of
@@ -1581,6 +1907,16 @@ check("main() both asks at startup and keeps asking in the loop",
 # press they make is the one that needed the environment to be ready already.
 check("...and its deadline bounds the select(), so an untouched Deck still polls",
       "next_deadline" in called, True)
+
+# Same problem, same technique: `reset_osk_state()` is only worth anything if
+# main() calls it on every show, and there are two show paths (tty and layer).
+# Without both, a keyboard dismissed with Caps latched comes back latched.
+mapper_calls = [node for node in ast.walk(main_def)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "mapper"]
+check("main() resets the OSK's state on BOTH show paths (tty and layer)",
+      sum(node.func.attr == "reset_osk_state" for node in mapper_calls), 2)
 
 print(f"\n{'PASS' if FAILURES == 0 else 'FAILED'} — {FAILURES} failure(s)")
 sys.exit(1 if FAILURES else 0)
