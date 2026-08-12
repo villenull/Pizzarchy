@@ -400,11 +400,11 @@ fi
 
 echo "--- the patch applies, and lands the source line in the right place -----"
 
-PATCH="$REPO_ROOT/iso/overlay/patches/omarchy-install-dashboard.patch"
-[[ -r $PATCH ]] || fail "iso/overlay/patches/omarchy-install-dashboard.patch is missing"
+PATCH="$REPO_ROOT/src/iso-patches/omarchy-install-dashboard.patch"
+[[ -r $PATCH ]] || fail "src/iso-patches/omarchy-install-dashboard.patch is missing"
 
 command -v patch >/dev/null 2>&1 ||
-  fail "no 'patch' binary available to verify iso/overlay/patches/omarchy-install-dashboard.patch applies -- cannot verify the patch, not skipping silently"
+  fail "no 'patch' binary available to verify src/iso-patches/omarchy-install-dashboard.patch applies -- cannot verify the patch, not skipping silently"
 
 scratch_root="$work/patch-scratch"
 mkdir -p "$scratch_root/configs/airootfs/usr/local/bin"

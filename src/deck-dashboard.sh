@@ -30,7 +30,9 @@
 #
 #     source /usr/share/omarchy-iso/deck-dashboard.sh
 #
-# added by iso/overlay/patches/omarchy-install-dashboard.patch immediately
+# added by src/iso-patches/omarchy-install-dashboard.patch immediately
+# (staged there, NOT in iso/overlay/patches/, until T5a proves parity --
+#  see src/iso-patches/README.md for why that distinction is load-bearing)
 # after `launch_child` (the last function `omarchy-install-dashboard`
 # defines) and before that file's own main flow runs
 # (`[[ -e $TTY_PATH ]] || exit 2`). Bash keeps the LAST definition of a
