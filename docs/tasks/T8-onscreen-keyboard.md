@@ -577,7 +577,7 @@ row 5   (Ⓨ) ————————— space (wide) ————————�
 
 | §9d claimed | The screenshot shows |
 |---|---|
-| *"`◀ ▶` only … no up/down arrows visible, where ours draws four"* | **All four arrows are present.** Ours was right and §9d was wrong — a webcam overlay had hidden them. **Do not "fix" our four arrows.** |
+| *"`◀ ▶` only … no up/down arrows visible, where ours draws four"* | 🔴 **BOTH §9d AND THIS ROW ARE WRONG — see §9g.** Four *glyphs* are present, on **TWO keys**: `▲` over `◀`, `▼` over `▶`, in the same shifted-above-base style as the number row. Confirmed by the Shift capture, where only `▲`/`▼` remain. Ours draws four *separate keys*, which makes up/down reachable without Shift and is not what the reference does. **This row previously said "do not fix our four arrows" — that instruction was wrong and is retracted.** |
 | row 3 left is `Caps⇪` | the key carries an **`L3`** badge and an icon — Caps is bound to the **left stick click**, not a trigger |
 | row 4 right Shift `[obscured]` | it exists, and **both** Shift keys carry an **`L2`** badge |
 
