@@ -3,7 +3,103 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
-> ## Where things stand (updated 2026-08-11, END of session 19)
+> ## Where things stand (updated 2026-08-11, END of session 20)
+>
+> *(Session 20 ran the same calendar day as 19. The date is shared; the session
+> numbers are not. Session 19's block is kept below and is still broadly true —
+> where the two disagree, this one wins.)*
+>
+> ### 🔴 READ THIS FIRST — there is a RELEASE BLOCKER, and it is new
+>
+> **§5.28: on a fresh boot to the desktop, the Deck has NO ON-SCREEN KEYBOARD,
+> no app launcher and no menu.** Measured on hardware by cold-booting and
+> pressing the buttons before touching anything. `systemctl --user restart
+> deck-input-mapper` fixes all three instantly.
+>
+> The mapper starts before uwsm imports the session environment, so its whole
+> environment is `XDG_RUNTIME_DIR=/run/user/1000` — no `WAYLAND_DISPLAY`, no
+> `OMARCHY_PATH`. The mapper does not care; **its children do**, and both the
+> menus and the layer-shell OSK are children.
+>
+> ⚠️ **The obvious fix is a trap.** `After=graphical-session.target` creates an
+> ordering cycle systemd resolves by **deleting the start job**, so the unit
+> silently never runs — already measured, already documented in the unit. The fix
+> is to resolve the environment **at spawn time** (`systemctl --user
+> show-environment`, or `systemd-run --user`). **The test must boot the machine:
+> a mapper restarted by hand always passes.**
+>
+> ### ✅ The P2.9 Deck session is COMPLETE — all seven sections
+>
+> | § | Result |
+> |---|---|
+> | 1 | Live-ISO lizard knob **exists, 0644, write accepted** → **T4's design gate is OPEN** |
+> | 2 | Fallback `Y→N→Y→N` on hardware; Deck runs **systemd 261**, same as the verification bed; 22 ms recovery from cgroup SIGKILL |
+> | 3 | **QAM = `BTN_BASE` (294)**, measured with delimiters, wired, deployed |
+> | 3.1 | All four button behaviours, diagonals included |
+> | 4 | **Lock fix verified IN PIXELS** — keyboard summoned over the lock, password typed with trackpads, unlocked |
+> | 5 | **Both rotations upright**: Limine `interface_rotation: 90`, TTY `fbcon=rotate:1` |
+> | 6 | Boots to Gaming Mode (`Session=gamescope-wayland`) |
+> | 7 | **7/7 parity rows** — P2.2's human rows are closed |
+>
+> **Deck state:** snapshot **#10** (`post-P2.9`), boots to Gaming Mode, lizard
+> `N`, mapper active, `omarchy-sleep-lock` masked, both rotations live.
+>
+> ### Facts worth more than the checkboxes
+>
+> - **`interface_rotation: 270` was 180° WRONG.** `90` is correct. That is the
+>   **second** rotation value in this project inferred, written down, and found
+>   inverted (the desktop's was recorded `1`, is `3`). **Four surfaces, four
+>   mechanisms, four values that do not follow from one another.**
+> - **`limine.conf`'s header SURVIVES `limine-update`** — measured by running it
+>   and re-reading the file. Hand-edited globals persist; only entry blocks are
+>   regenerated. T5 therefore owes **three** rotation bake-ins, not two.
+> - **Live ISO console is `50 160`; the installed TTY is `25 80`.** Same panel.
+>   **Read console geometry at runtime.** 80×25 is the case T4 §8's U3 feared.
+> - **`pgrep -x gamescope` finds nothing while Gaming Mode is running** —
+>   `comm` is `gamescope-wl`. `deck-session.sh` already guards this; it caught me
+>   anyway.
+> - **The live ISO's root shell is zsh WITH AUTOCORRECT** (it blocks on
+>   `correct 'GREP' to 'grep' [nyae]?`) and root logs in with **no password**.
+> - **Steam's Switch-to-Desktop REWRITES the default session** to `omarchy`,
+>   undoing `stage-default-session`. ⚠️ **Open question for the operator:** does
+>   stock SteamOS return to Gaming Mode after a reboot from Desktop Mode? That
+>   decides whether this is a parity defect or a mis-worded checklist item.
+>
+> ### 🔴 `docs/RECOVERY.md` was WRONG and is now corrected
+>
+> Its escape had **never been executed against a real lock**. Over SSH `hyprctl`
+> has no `HYPRLAND_INSTANCE_SIGNATURE`; once supplied,
+> `clear_crashed_lockscreen` **refuses** — it clears a *crashed* lock, not a
+> healthy one, and healthy is what the power button produces. **There is no
+> unlock IPC at all.** Fixed against a real locked Deck.
+>
+> ⚠️ **Three runbook commands also failed as written** (`deck-sync.sh` missing
+> its `src` argument, the QAM probe's `pads[-1]`, the snapshot number). **A
+> procedure nobody has run is a hypothesis.**
+>
+> ### Landed from four parallel agents, all merged, 16 suites green
+>
+> - **T5a**: `iso/` skeleton — pins, submodule at `a12bfea`, `bin/build`, guards
+>   6.1/6.3, `test-iso-build.sh`. ⚠️ **Parity build was still running at session
+>   end — the claim is UNPROVEN.** Do not treat the skeleton as validated.
+> - **T4 harness** and the **lock-wake source trace**
+>   (`docs/findings/T9-lock-wake-and-blank-timing.md`) — the 5 s blank is a
+>   **hardcoded `interval: 5000`** in Omarchy's `lock/Service.qml`, which matches
+>   the hardware measurement exactly.
+> - **OSK auto-hide + SteamOS visual parity** (T8 §9) — `LockWatcher`, glyph
+>   hints, shifted legends. **Committed and merged, NOT deployed, never seen on
+>   the panel.**
+>
+> ### The three operator requests still OPEN (§5.24a)
+>
+> 1. Only the power button should wake the panel *(QAM currently does)*
+> 2. Display-on ~20 s, not ~2 s — **a one-line upstream QML change**, needs a T5
+>    overlay-patch seam that **does not exist yet**
+> 3. OSK auto-hides after unlock — **implemented, not deployed**
+>
+> ---
+>
+> ## Where things stood at the END of session 19 (kept; superseded above where they disagree)
 >
 > ### 🚩 READ THIS FIRST — session 19 was large, and it closed a phase
 >
