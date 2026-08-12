@@ -403,6 +403,17 @@ Since that state is scheduled to be wiped, losing them costs nothing.
 > Desktop layout to Valve's default changed nothing, and Steam never created a
 > virtual mouse or keyboard device — only the gamepad.
 >
+> ✅ **The XTEST half is no longer an inference — MEASURED 2026-08-11**
+> (`docs/findings/P20-steam-xtest-closure.md`, R-53). XTEST driven directly at
+> Hyprland: a Wayland-native client received **nothing**, an XWayland client
+> received **`hello`** (positive control), and `XTestFakeMotionEvent` **could not
+> move the compositor's cursor** — `(637,672)` before and after. R-42 had
+> flagged its own mechanism as *"a strong inference"*; this closes that gap.
+> **The reason matters, because stock SteamOS does exactly this**: SteamOS
+> Desktop Mode is an X11 desktop where XTEST works, and Omarchy is Hyprland. It
+> is an **architecture mismatch, not a tuning problem** — which is why no Steam
+> setting was ever going to help.
+>
 > Worse, a resident Steam is **actively harmful**: it takes the controller and
 > removes lizard mode's pointer and keys (R-41), so adopting it costs Desktop
 > Mode the only input path that works.
