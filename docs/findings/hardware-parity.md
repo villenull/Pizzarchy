@@ -141,3 +141,63 @@ each session and `diff`. Two traps it hit, both worth avoiding:
 - **Time-box every external call.** Over SSH there is no terminal and no session
   bus, so `bluetoothctl` and `pactl` block indefinitely. Export
   `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS` and wrap each call in `timeout`.
+
+---
+
+## P2.3 — TDP, fan, battery. Measured on the Deck 2026-08-12, operator present
+
+**Operator approved the full batch including a fan write** (`CLAUDE.md` requires
+per-item approval every time; this is the record of it). The fan test was
+deliberately run in the **UP** direction only — a commanded increase answers
+"do we control the fan?" identically to a decrease, with no thermal exposure.
+
+| Row | Result |
+|---|---|
+| **Fan control** | ✅ **WORKS.** Commanded `fan1_target=2500` → measured **2568 RPM** steady, `fan1_fault=0`, GPU edge fell 36→35 °C |
+| **Fan, default state** | `fan1_target=0` with the fan at **2862–2897 RPM** at 40 °C |
+| **TDP** | ✅ exposed and writable — `power1_cap` **15 W**, `power1_cap_max` **29 W**, mode 644. **Not written** |
+| **Battery** | ✅ reports capacity and status; **charge limit exposed** as `max_battery_charge_level` / `max_battery_charge_rate`. **Not written** |
+| **Governor / EPP** | `powersave`, available `performance powersave`, EPP `balance_power` |
+| **Temps at idle** | acpitz 32 · GPU edge 32 · NVMe 30 · battery 24 · Wi-Fi 37 °C |
+| **Polkit helpers** | ✅ present: `steamos-priv-write`, `steamos-set-timezone`, `steamos-update` |
+| 🔴 **`jupiter-fan-control`** | **NOT installed, NOT running.** Stock SteamOS ships it |
+
+### 🔑 `fan1_target = 0` means "EC automatic", not "off" — and this was NOT obvious
+
+There is **no `pwm1_enable`**, the standard hwmon manual/automatic switch. So
+after writing a manual RPM, whether writing `0` back means *off* or *return to
+EC control* could not be read off the interface. Getting it wrong in the "off"
+direction is silent under-cooling — the exact failure a snapshot cannot undo.
+
+**The test was therefore designed so the answer did not matter**: restore by
+**reboot**, not by write-back. The reboot then answered it anyway — `target=0`
+with the fan at ~2880 RPM at 40 °C. If `0` meant off, it would read 0 RPM.
+
+⚠️ **Still not proven:** that writing `0` *after* a manual write returns control
+to the EC. The reboot made the question moot rather than answering it. Anyone
+building fan control on this interface must establish that separately, under
+load, with an abort threshold.
+
+### ⚠️ Two "findings" in the first probe were the INSTRUMENT, not the system
+
+Both would have been recorded as parity gaps:
+
+1. **"`steamos-priv-write` ABSENT"** — `command -v` was run against
+   `/usr/bin/steamos-polkit-helpers/`, a **directory**, not a `PATH` entry. All
+   three helpers are present.
+2. **"no charge limit"** — searched `/sys/class/power_supply/*/`, the standard
+   location. Valve exposes it under **`steamdeck_hwmon`** instead.
+
+Sixth and seventh instances of the measurement tool lying rather than the code
+(`docs/PROGRESS.md` §7). Both were caught by re-reading the probe, not the
+result.
+
+### What P2.3 still owes
+
+- **`jupiter-fan-control`'s absence** is a real parity difference. The EC's own
+  curve demonstrably works, so it is not urgent — but T5 should decide whether
+  the image ships the daemon or documents its absence.
+- **TDP and charge-limit WRITES were not exercised.** Both nodes are writable
+  and Steam's own UI drives them through `steamos-priv-write`, which is present.
+  Neither needs a write to establish parity of the *surface*; a write would
+  establish parity of the *path*, and needs its own approval.
