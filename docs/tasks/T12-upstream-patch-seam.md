@@ -145,7 +145,7 @@ src/omarchy-deck-patches/
   patches/0010-lock-blank-timer-20s.{patch,meta}
   patches/0020-limine-interface-rotation.{patch,meta}
 test/fixtures/t12-omarchy-6d7826d/           verbatim upstream @ the RUNTIME pin
-test/unit/test-t12-patch-applier.sh          36 assertions, hermetic
+test/unit/test-t12-patch-applier.sh          38 assertions, hermetic
 test/t12-patch-seam-container-e2e.sh         the destruction test, real pacman
 ```
 
