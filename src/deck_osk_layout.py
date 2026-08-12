@@ -2,8 +2,8 @@
 """deck_osk_layout -- the on-screen keyboard's layout core (T8 steps 1-2).
 
 WHAT THIS IS
-    The pure half of `docs/tasks/T8-onscreen-keyboard.md`: a split keyboard
-    layout, hit-testing in normalised coordinates, shift/layer state, the
+    The pure half of `docs/tasks/T8-onscreen-keyboard.md`: the keyboard's
+    grid, hit-testing in normalised coordinates, shift/caps state, the
     keystroke sequences to emit, and the two cursors that drive it. No
     rendering, no device access, no evdev device -- the same discipline as
     `Mapper.translate()`, so all of it is testable without a screen or a human.
@@ -19,29 +19,66 @@ WHY IT IS A SEPARATE FILE, AND WHY THE NAME HAS UNDERSCORES
     fatal for a module: `import deck-osk-layout` is a syntax error. This one is
     imported, so it gets underscores. Do not "fix" it for consistency.
 
-THE MODEL
-    Two halves, left and right, one per trackpad -- both pads report ABSOLUTE
-    position over +/-32767 (measured, R-29..R-31), so a cursor per half is a
-    direct mapping with no delta accumulation. This core does not care: it
-    takes x/y already normalised to 0..1 WITHIN A HALF and answers which key
-    is there.
+THE MODEL -- ONE CONTINUOUS GRID, NOT TWO HALF-GRIDS (T8 §9g)
+    🔴 This changed on 2026-08-12 and it is the single most visible thing in
+    the module. The keyboard is ONE grid spanning the full width. It used to be
+    two independent half-grids drawn side by side with a gutter between them,
+    and the operator's first words on seeing ours next to Valve's were "i still
+    see a gap between the left half and the right half".
 
-    Rows are equal height; keys within a row are as wide as their `span`. Row
-    counts are per LAYER (the letters layer has five rows, symbols four), so
-    both halves of one layer always line up visually.
+    The two-cursor model never needed a split. Each trackpad's cursor addresses
+    its own CONTIGUOUS RANGE OF CELLS within the one grid:
 
-SHIFT
-    Three states, and the distinction is deliberate:
+        cells [0, split)      <- the left pad's cursor
+        cells [split, width)  <- the right pad's cursor
 
-      off     nothing held
-      once    one-shot -- applies to the next key, then clears. Applies to
-              EVERY key, so `1` types `!`.
-      locked  caps lock -- applies to LETTERS ONLY, so `ABC12` is typeable
-              without toggling. This is what a lock key means everywhere else.
+    A key WIDE ENOUGH TO STRADDLE `split` is reachable from both halves, which
+    is a feature and not an accident: the space bar is exactly that key, and
+    either thumb can hit it. `locate()` maps a normalised x within a half onto
+    that half's cell range, so the arithmetic is identical to before -- what
+    changed is that the cell ranges are two windows onto one row instead of two
+    separate rows.
 
-    `face()` reports the label under the current state, so the screen never
-    shows a character the next press will not type. That property is the whole
-    reason the label function lives in the core rather than in a renderer.
+    Rows are equal height and every row is the same total width in cells
+    (`Layer.__post_init__` refuses a layout where that is not true, because a
+    ragged grid cannot line up on screen and silently drawing one would hide
+    the bug).
+
+    ⚠️ GEOMETRY THE TTY RENDERER MUST LIVE WITH. The grid is 16 cells wide.
+    `docs/PROGRESS.md` §7 measured the two consoles this has to survive: the
+    live ISO's is 50x160 and the installed TTY's is 25x80. 16 cells fit in 80
+    columns at FIVE columns per cell, exactly, with nothing spare -- so the TTY
+    renderer's KEY_CELL cannot stay at 7 (that would be 112 columns and the
+    keyboard would wrap or be clamped, which is R-49's defect returning). Five
+    columns still fits a dual legend on a one-cell key ("1 !" is 3 characters
+    against a highlighted budget of KEY_CELL-2 = 3), so no legend is lost.
+
+SHIFT AND CAPS ARE TWO DIFFERENT MODIFIERS (T8 §9g)
+    ⚠️ THE SUBTLE PART, AND THE ONE §9g SINGLES OUT AS EASY TO GET WRONG.
+    They are not two settings of one dial:
+
+      shift   "off" | "once" (one-shot, spent by the next key) | "locked"
+              Applies to EVERYTHING: letters go uppercase, `1` types `!`, and
+              `◀` becomes `▲`. It also changes the LEGENDS -- under shift a
+              key shows ONLY its shifted face.
+      caps    a separate boolean, latched by its own key (L3 on the reference).
+              Applies to LETTERS AND NOTHING ELSE. `1` still types `1`, the
+              arrows still go left/right, and every dual legend stays exactly
+              as it was drawn unshifted.
+
+    So `caps` is not `shift == "locked"`, and a renderer that treats them as
+    the same thing draws the wrong keyboard in one of the two states.
+
+THE LEGEND RULE (T8 §9g)
+    | state      | number/punctuation/arrow keys        | letters   |
+    | unshifted  | dual: shifted SMALL ABOVE, base big  | lowercase |
+    | shift      | ONLY the shifted face, big, centred  | UPPERCASE |
+    | caps       | dual, unchanged                      | UPPERCASE |
+
+    `face()` returns the LARGE legend; `secondary_face()` returns the small one
+    drawn ABOVE it, or "" when there is none to draw. Both live here rather
+    than in a renderer so the two renderers cannot disagree, and so the screen
+    never shows a character the next press will not type.
 """
 
 from __future__ import annotations
@@ -60,35 +97,90 @@ class Key:
     code: int = 0
     label: str = ""
     shift_label: str = ""  # "" -> shift does not change the face
-    action: str = ""  # "" types; else "shift" | "layer" | "close"
+    # T8 §9g: `▲`/`▼` are the SHIFTED FACES of `◀`/`▶`, and a shifted arrow is
+    # a DIFFERENT KEYCODE rather than the same one with a modifier held --
+    # SHIFT+KEY_LEFT is "extend the selection left", not "up". So a key whose
+    # shifted face is a different key entirely says so here, and `press()`
+    # emits this code with NO modifier wrapped around it.
+    shift_code: int = 0
+    action: str = ""  # "" types; else shift|caps|layer|close|emoji|move
     target: str = ""  # layer name, for action == "layer"
     span: int = 1
-    is_letter: bool = False  # caps lock applies to these and nothing else
-    hint: str = ""  # "" -> no controller-glyph hint; else HINT_LEFT | HINT_RIGHT | HINT_SPACE
-    # T8 §9f: the reference draws two badge SHAPES and the distinction is
-    # semantic, not decorative -- face buttons (Ⓧ/Ⓨ) in a circle, triggers and
-    # stick clicks (L2/R2/L3) in a rounded rectangle. "" whenever hint == "".
+    is_letter: bool = False  # caps applies to these and nothing else
+    # Modifier keycodes held around this key's own code. Paste is the only user
+    # today; it exists as a field rather than a special case so the next one
+    # does not need a second mechanism.
+    modifiers: tuple[int, ...] = ()
+    # T8 §9g: "Action keys (Tab, Caps, Shift, Backspace, Enter, Move) are drawn
+    # BLACK; letter keys are dark grey." That list is a MEASUREMENT, not a rule
+    # to re-derive -- space, Paste, the emoji key and the arrows are absent
+    # from it and are drawn like letter keys -- so it is carried as data.
+    is_action: bool = False
+    hint: str = ""  # "" -> no controller-glyph hint; else one of HINT_*
+    # T8 §9g draws two badge SHAPES and the distinction is semantic, not
+    # decorative -- face buttons (Ⓧ/Ⓨ) in a circle, triggers and stick clicks
+    # (L2/R2/L3) in a rounded rectangle. "" whenever hint == "".
     hint_shape: str = ""
 
     @property
     def types(self) -> bool:
-        return not self.action and self.code != 0
+        return not self.action and (self.code != 0 or self.shift_code != 0)
 
 
 @dataclass(frozen=True)
 class Layer:
-    """One layer's two halves. Each half is a tuple of rows of keys."""
+    """One layer as ONE CONTINUOUS GRID of rows (T8 §9g).
+
+    `split` is the cell index where the RIGHT pad's half begins. It is a
+    cursor-addressing boundary, NOT a visual one: nothing here says to draw a
+    gap, and §9g is explicit that there must not be one.
+    """
 
     name: str
-    left: tuple[tuple[Key, ...], ...]
-    right: tuple[tuple[Key, ...], ...]
+    rows: tuple[tuple[Key, ...], ...]
+    split: int
 
-    def half(self, half: str) -> tuple[tuple[Key, ...], ...]:
+    def __post_init__(self) -> None:
+        if not self.rows:
+            raise ValueError(f"layer {self.name!r} has no rows")
+        widths = {sum(key.span for key in row) for row in self.rows}
+        if len(widths) != 1:
+            # A ragged grid cannot line up on screen. Rendering it anyway would
+            # hide the bug, which is the failure mode CLAUDE.md forbids.
+            raise ValueError(
+                f"layer {self.name!r} has rows of differing widths {sorted(widths)}; "
+                "one continuous grid means every row is the same number of cells"
+            )
+        if not 0 < self.split < self.width:
+            raise ValueError(
+                f"layer {self.name!r} split {self.split} must fall strictly "
+                f"inside 0..{self.width}, or one pad addresses no keys at all"
+            )
+
+    @property
+    def width(self) -> int:
+        """Total cells across, the same for every row."""
+        return sum(key.span for key in self.rows[0])
+
+    def half_cells(self, half: str) -> tuple[int, int]:
+        """The [start, end) cell range this pad's cursor addresses."""
         if half == "left":
-            return self.left
+            return (0, self.split)
         if half == "right":
-            return self.right
+            return (self.split, self.width)
         raise ValueError(f"half must be 'left' or 'right', got {half!r}")
+
+    def cell_bounds(self, row_index: int) -> tuple[tuple[int, int], ...]:
+        """Each key's [start, end) cells in this row -- what a renderer needs
+        to place it across the full width. Derived rather than stored so it
+        cannot drift from `span`.
+        """
+        out: list[tuple[int, int]] = []
+        start = 0
+        for key in self.rows[row_index]:
+            out.append((start, start + key.span))
+            start += key.span
+        return tuple(out)
 
 
 # --- layout construction helpers ---------------------------------------------
@@ -98,93 +190,164 @@ class Layer:
 
 
 def letter(ch: str) -> Key:
-    """A-Z. The only keys caps lock applies to."""
+    """A-Z. The only keys caps applies to."""
     return Key(code=getattr(e, f"KEY_{ch.upper()}"), label=ch.lower(),
                shift_label=ch.upper(), is_letter=True)
 
 
-def sym(code: int, base: str, shifted: str) -> Key:
-    """A key whose two faces are both printable -- digits and punctuation."""
-    return Key(code=code, label=base, shift_label=shifted)
+def sym(code: int, base: str, shifted: str, shift_code: int = 0,
+        span: int = 1) -> Key:
+    """A dual-legend key: two faces, either of which the key can produce.
+
+    `shift_code` is for the arrows, whose shifted face is a DIFFERENT KEY
+    rather than a shifted variant of the same one (T8 §9g).
+    """
+    return Key(code=code, label=base, shift_label=shifted,
+               shift_code=shift_code, span=span)
 
 
 def act(action: str, label: str, span: int = 1, target: str = "", code: int = 0,
-        hint: str = "", hint_shape: str = "") -> Key:
-    """A key that changes state (shift/layer/close) or types a control key."""
-    # A hint with no explicit shape defaults to "rect": every hint that
-    # existed before T8 §9f was a trigger badge (L2/R2), so this keeps every
-    # existing call site below unchanged. Only the space key's new face-button
-    # badge (HINT_SPACE) passes hint_shape explicitly.
+        hint: str = "", hint_shape: str = "", is_action: bool = True,
+        modifiers: tuple[int, ...] = ()) -> Key:
+    """A key that changes state (shift/caps/layer/...) or types a control key.
+
+    `is_action` defaults True because most of these are §9g's black keys, but
+    it is a MEASUREMENT and not a derivation -- space, Paste and the emoji key
+    pass False because §9g's black list does not name them.
+    """
+    # A hint with no explicit shape defaults to "rect": triggers and stick
+    # clicks outnumber face buttons here, and every call site that wants a
+    # circle says so.
     if hint and not hint_shape:
         hint_shape = HINT_SHAPE_RECT
     return Key(code=code, label=label, action=action, target=target, span=span,
-               hint=hint, hint_shape=hint_shape)
+               hint=hint, hint_shape=hint_shape, is_action=is_action,
+               modifiers=modifiers)
 
 
-# --- controller-glyph hints (T8 §9, operator request 2026-08-11) -------------
+# --- controller-glyph hints (T8 §9g) -----------------------------------------
 #
-# ⛔ Not Valve's artwork -- these are two of OUR OWN strings, not an icon lifted
-# from anywhere (docs/findings/P16-redistribution-and-trademark.md). "L2"/"R2"
-# is what this project calls the triggers everywhere else (docs/PROGRESS.md
+# ⛔ Not Valve's artwork -- these are OUR OWN strings, not icons lifted from
+# anywhere (docs/findings/P16-redistribution-and-trademark.md). "L2"/"R2"/"L3"
+# is what this project calls those controls everywhere else (docs/PROGRESS.md
 # §7), so a hint reading "R2" teaches the same vocabulary the rest of the repo
 # already uses rather than inventing a second one.
 #
-# ⚠️ MUST MATCH TRIGGER_HALF, defined further down this file: a hint naming the
-# WRONG trigger would be worse than no hint at all -- confidently wrong rather
-# than merely absent. `test-deck-osk-layout.py` asserts every hinted key's
-# glyph agrees with the half it is actually drawn in, on every layer.
-HINT_LEFT = "L2"
-HINT_RIGHT = "R2"
+# ⚠️ EVERY ONE OF THESE MUST BE TRUE OF THE MAPPER'S REAL BINDINGS. A badge
+# naming a button that does something else is CONFIDENTLY WRONG, which T8 §9a
+# establishes is worse than a badge being absent. The operator's 2026-08-12
+# decision settled the bindings these five assert (§9g, "MATCH VALVE EXACTLY,
+# INCLUDING THE BINDINGS"):
+#
+#     Ⓧ  BTN_NORTH  -> Backspace      (was KEY_TAB; deliberately given up)
+#     Ⓨ  BTN_WEST   -> Space
+#     L3 BTN_THUMBL -> Caps
+#     L2 BTN_TL2    -> commit the left cursor, and Shift while the left pad is
+#                      untouched
+#     R2 BTN_TR2    -> commit the right cursor, and Enter while the right pad
+#                      is untouched
+#
+# `test-deck-osk-layout.py` checks each badge against what its key actually
+# does, written out longhand from §9g rather than read back out of this file.
+HINT_LEFT = "L2"        # shift -- BOTH shift keys carry it, see HINT_PAD_GATE
+HINT_RIGHT = "R2"       # enter
+HINT_CAPS = "L3"        # caps
+HINT_SPACE = "Y"        # space
+HINT_BACKSPACE = "X"    # backspace
 
-# T8 §9a/§9f: a THIRD hint, and it is not a trigger at all. §9a's collision
-# table checked every one of Valve's four face-button badges against the real
-# mapper table (src/deck-input-mapper.py) and found exactly one true: "Y =
-# Space" (BTN_WEST -> KEY_SPACE). "X = Backspace" is NOT true here -- X is Tab
-# and the STEAM+X chord key -- so unlike Y it gets no badge; adding one would
-# be confidently wrong, the exact failure mode HINT_LEFT/RIGHT's own warning
-# names. HINT_SPACE is a face-button shortcut, not a per-half trigger, so it
-# is deliberately absent from TRIGGER_HALF and from the half-agreement check
-# below -- see the "circle badges" section of `test-deck-osk-layout.py`.
-HINT_SPACE = "Y"
+# T8 §9g: two badge SHAPES, and the distinction is semantic -- face buttons in
+# a white CIRCLE, triggers/stick-clicks in a white ROUNDED RECTANGLE.
+# Reproduced with our own glyphs and our own shapes, never Valve's artwork: the
+# renderer draws these primitives itself from `hint_shape`.
+HINT_SHAPE_CIRCLE = "circle"  # face buttons -- HINT_SPACE, HINT_BACKSPACE
+HINT_SHAPE_RECT = "rect"      # triggers and stick clicks -- L2/R2/L3
 
-# T8 §9f: the reference draws two badge SHAPES and the distinction is
-# semantic -- face buttons in a white CIRCLE, triggers/stick-clicks in a white
-# ROUNDED RECTANGLE. Reproduced with our own glyphs and our own shapes, never
-# Valve's artwork (docs/findings/P16-redistribution-and-trademark.md): the
-# renderer draws these primitives itself from `hint_shape`, nothing is copied.
-HINT_SHAPE_CIRCLE = "circle"  # face buttons -- currently just HINT_SPACE
-HINT_SHAPE_RECT = "rect"      # triggers and stick clicks -- HINT_LEFT/RIGHT
+# T8 §9g's badge gating, confirmed symmetric and PER-PAD: touching a pad hides
+# only ITS OWN trigger's badge, because while that pad is in use the trigger
+# means "commit this cursor" rather than the idle meaning the badge advertises.
+# Ⓧ, Ⓨ and L3 never gate -- face buttons and the stick click are unconditional.
+#
+# ⚠️ Both shift keys carry L2 even though one of them is drawn in the RIGHT
+# half. That is deliberate and it is why this module no longer checks a badge
+# against the half its key sits in: L2's idle meaning is Shift wherever the
+# Shift key happens to be drawn.
+HINT_PAD_GATE: dict[str, str] = {HINT_LEFT: "left", HINT_RIGHT: "right"}
+
+
+def hint_visible(key: Key, touched: "frozenset[str] | set[str] | tuple" = ()) -> bool:
+    """Should this key's badge be drawn, given which pads are being touched?
+
+    `touched` is whichever of "left"/"right" currently have a finger on them.
+    Pure, so both renderers ask the same question of the same table.
+
+    ⚠️ §9e's implementation caveat still stands: a lifted pad reports exactly
+    0,0, so "untouched" is a real state, but the CALLER has to derive it. This
+    function only says what to do with the answer.
+    """
+    if not key.hint:
+        return False
+    gate = HINT_PAD_GATE.get(key.hint)
+    return gate is None or gate not in touched
 
 
 def is_action_key(key: Key) -> bool:
-    """T8 §9f: "modifier and action keys are visibly DARKER than letter
-    keys -- a black key face against the letters' dark grey." This is the
-    classification a renderer with colour draws that distinction from.
+    """T8 §9g: "Action keys (Tab, Caps, Shift, Backspace, Enter, Move) are
+    drawn BLACK; letter keys are dark grey."
 
-    A letter is never one. A digit or punctuation key (anything carrying a
-    `shift_label`) prints two characters on its face exactly the way a
-    letter prints one, so it reads as a typing key too and is excluded for
-    the same reason. Everything left -- shift, the layer switch, close,
-    space, tab, backspace, enter, and the symbols layer's editing/arrow
-    keys -- is a modifier or an action, never a character, and darkens.
+    ⚠️ READ FROM DATA, NOT DERIVED. An earlier version computed this as "not a
+    letter and no shifted face", which is a plausible rule and disagrees with
+    the measurement: space, Paste and the emoji key satisfy it and are NOT in
+    §9g's black list, and the arrows fail it (they have shifted faces now) yet
+    are not black either. The transcription wins over the rule.
 
-    Pure and renderer-agnostic on purpose: the Wayland renderer is the only
-    one that can currently PAINT the distinction (a bare console has no
-    colour), but the classification itself belongs in the shared core so
-    both renderers -- and their tests -- read it from one place rather than
-    each guessing which keys count.
+    Pure and renderer-agnostic on purpose: only the Wayland renderer can PAINT
+    the distinction (a bare console has no colour), but the classification
+    belongs in the shared core so both renderers read it from one place.
     """
-    return not key.is_letter and not key.shift_label
+    return key.is_action
 
 
-# --- the layouts -------------------------------------------------------------
+# --- glyphs a bare console cannot draw ---------------------------------------
 #
-# Read these as a keyboard. Left half is what the LEFT trackpad's cursor moves
-# over, right half the right's; each trigger clicks its own side.
+# The arrow and emoji faces are the layout's real labels -- §9g's keyboard
+# draws arrows, so ours does. A Linux VT running the ISO's console font is not
+# guaranteed to have U+25C0 and friends, and mojibake on the installer's only
+# keyboard is worse than a plainer glyph. The TTY renderer substitutes; the
+# Wayland one does not need to.
 #
-# The digit row is repeated on both layers deliberately. A Wi-Fi passphrase --
-# the screen this whole task exists for -- mixes digits with everything else,
-# and a spare row costs nothing.
+# ⚠️ These are lossy on purpose. "<" is also the shifted face of ",", so a
+# console showing "<" is ambiguous between the two. Ambiguous beats unreadable,
+# and only the bare console pays it.
+ASCII_FALLBACK: dict[str, str] = {
+    "◀": "<", "▶": ">", "▲": "^", "▼": "v", "☺": ":)",
+}
+
+
+def ascii_face(text: str) -> str:
+    """`text` with any glyph a bare console may lack swapped for ASCII."""
+    return ASCII_FALLBACK.get(text, text)
+
+
+# --- the layout --------------------------------------------------------------
+#
+# Transcribed from T8 §9g -- six states captured with `grim` from Valve's own
+# keyboard on this Deck, 2026-08-12. ⛔ PLACEMENT ONLY. Not one pixel, glyph or
+# asset is copied (docs/findings/P16-redistribution-and-trademark.md); every
+# face below is a character we chose ourselves.
+#
+#   row 1  [~`][!1][@2][#3][$4][%5][^6] | [&7][*8][(9][)0][_-][+=] [Ⓧ Backspace]
+#   row 2  [Tab   ] q  w  e  r  t       | y  u  i  o  p  [{[][}]][|\]
+#   row 3  [L3 Caps] a  s  d  f  g      | h  j  k  l  [:;]["'] [R2 Enter]
+#   row 4  [L2 Shift] z  x  c  v  b     | n  m  [<,][>.][?/]  [L2 Shift]
+#   row 5  [☺][Ⓨ ————— space ————————— | —] [▲◀][▼▶] [Paste] [Move]
+#
+# The `|` marks cell 8, where the right pad's cursor takes over. It is NOT a
+# gap and nothing draws it. Every row but the last happens to break on a key
+# boundary there; the space bar straddles it deliberately, so either thumb can
+# reach space.
+
+WIDTH = 16
+SPLIT = 8
 
 _D = {  # digits, with their US-layout shifted faces
     "1": sym(e.KEY_1, "1", "!"), "2": sym(e.KEY_2, "2", "@"),
@@ -194,93 +357,117 @@ _D = {  # digits, with their US-layout shifted faces
     "9": sym(e.KEY_9, "9", "("), "0": sym(e.KEY_0, "0", ")"),
 }
 
-DIGITS_LEFT = tuple(_D[c] for c in "12345")
-DIGITS_RIGHT = tuple(_D[c] for c in "67890")
+# ⚠️ Both shift keys are the SAME object, reused. That is safe because
+# `locate()` returns INDICES rather than keys -- highlighting by comparing Key
+# objects would light up both at once, which is exactly why it returns indices.
+SHIFT_KEY = act("shift", "Shift", span=3, hint=HINT_LEFT)
+CAPS_KEY = act("caps", "Caps", span=3, hint=HINT_CAPS)
+TAB_KEY = act("", "Tab", span=3, code=e.KEY_TAB)
+BACKSPACE_KEY = act("", "Backspace", span=3, code=e.KEY_BACKSPACE,
+                    hint=HINT_BACKSPACE, hint_shape=HINT_SHAPE_CIRCLE)
+ENTER_KEY = act("", "Enter", span=2, code=e.KEY_ENTER, hint=HINT_RIGHT)
+# Space is ONE WIDE KEY with the Ⓨ badge at its LEFT EDGE (§9g), not a separate
+# Y key beside a plain space. It straddles SPLIT so either thumb reaches it.
+SPACE_KEY = act("", "space", span=8, code=e.KEY_SPACE,
+                hint=HINT_SPACE, hint_shape=HINT_SHAPE_CIRCLE, is_action=False)
 
-# The function row, shared in shape by both layers so muscle memory carries.
-#
-# Shift, Backspace and Enter carry a controller-glyph hint (T8 §9): they are
-# the three keys a user reaches for constantly while correcting a passphrase,
-# and each lives on exactly one half in EVERY layer it appears in below -- so
-# one hint per key is honest in every layer, not just the one it was written
-# against.
-SHIFT_KEY = act("shift", "shift", span=2, hint=HINT_LEFT)
-CLOSE_KEY = act("close", "close", span=2)
-# T8 §9f's clearest divergence: the reference draws space as ONE wide key
-# with the Ⓨ badge at its LEFT EDGE, not a separate Y key beside a plain
-# space. This key already IS one wide key (span=3) -- what was missing was
-# the badge, which is true to our own mapper (HINT_SPACE's own docs) rather
-# than copied from Valve's icon.
-SPACE_KEY = act("", "space", span=3, code=e.KEY_SPACE,
-                hint=HINT_SPACE, hint_shape=HINT_SHAPE_CIRCLE)
-TAB_KEY = act("", "tab", code=e.KEY_TAB)
-BACKSPACE_KEY = act("", "back", code=e.KEY_BACKSPACE, hint=HINT_RIGHT)
-ENTER_KEY = act("", "enter", code=e.KEY_ENTER, hint=HINT_RIGHT)
+# ⚠️ Shift+Insert rather than Ctrl+V, deliberately. Ctrl+V pastes in a GTK
+# entry and types a literal control character in a terminal; Shift+Insert
+# pastes in BOTH a VTE terminal and a GTK entry, which is the pair this
+# keyboard is actually used in front of. Neither works on a bare Linux VT,
+# which has no clipboard at all -- nothing here can fix that.
+PASTE_KEY = act("", "Paste", span=2, code=e.KEY_INSERT,
+                modifiers=(e.KEY_LEFTSHIFT,), is_action=False)
+
+# ⚠️ TWO KEYS THAT NO RENDERER IMPLEMENTS YET, and they are here on purpose.
+# §9g's keyboard has them and the operator asked for "identical"; leaving a
+# visible hole in the bottom row would be the bigger divergence. `press()`
+# records the request in `OnScreenKeyboard.request` and does NOTHING else --
+# opening an emoji panel and repositioning an overlay are both renderer work,
+# and inventing behaviour for them here would be worse than recording the ask.
+EMOJI_KEY = act("emoji", "☺", is_action=False)
+MOVE_KEY = act("move", "Move", span=3)
 
 LETTERS = Layer(
     name="letters",
-    left=(
-        DIGITS_LEFT,
-        tuple(letter(c) for c in "qwert"),
-        tuple(letter(c) for c in "asdfg"),
-        tuple(letter(c) for c in "zxcvb"),
-        (SHIFT_KEY, act("layer", "?#=", span=2, target="symbols"), TAB_KEY),
-    ),
-    right=(
-        DIGITS_RIGHT,
-        tuple(letter(c) for c in "yuiop"),
-        tuple(letter(c) for c in "hjkl") + (BACKSPACE_KEY,),
-        tuple(letter(c) for c in "nm")
-        + (sym(e.KEY_COMMA, ",", "<"), sym(e.KEY_DOT, ".", ">"), ENTER_KEY),
-        (SPACE_KEY, CLOSE_KEY),
+    split=SPLIT,
+    rows=(
+        (sym(e.KEY_GRAVE, "`", "~"),) + tuple(_D[c] for c in "1234567890")
+        + (sym(e.KEY_MINUS, "-", "_"), sym(e.KEY_EQUAL, "=", "+"),
+           BACKSPACE_KEY),
+
+        (TAB_KEY,) + tuple(letter(c) for c in "qwertyuiop")
+        + (sym(e.KEY_LEFTBRACE, "[", "{"), sym(e.KEY_RIGHTBRACE, "]", "}"),
+           sym(e.KEY_BACKSLASH, "\\", "|")),
+
+        (CAPS_KEY,) + tuple(letter(c) for c in "asdfghjkl")
+        + (sym(e.KEY_SEMICOLON, ";", ":"), sym(e.KEY_APOSTROPHE, "'", '"'),
+           ENTER_KEY),
+
+        (SHIFT_KEY,) + tuple(letter(c) for c in "zxcvbnm")
+        + (sym(e.KEY_COMMA, ",", "<"), sym(e.KEY_DOT, ".", ">"),
+           sym(e.KEY_SLASH, "/", "?"), SHIFT_KEY),
+
+        (EMOJI_KEY, SPACE_KEY,
+         # 🔴 §9g: `▲`/`▼` are the SHIFTED FACES of `◀`/`▶` -- TWO keys with
+         # dual legends, not four keys. Shift is how a user reaches up and
+         # down, and a layout that gave the arrows their own keys would make
+         # shift's arrow behaviour unreachable.
+         sym(e.KEY_LEFT, "◀", "▲", shift_code=e.KEY_UP),
+         sym(e.KEY_RIGHT, "▶", "▼", shift_code=e.KEY_DOWN),
+         PASTE_KEY, MOVE_KEY),
     ),
 )
 
-# Four rows, not five: with shift covering !@#$%^&*() and _+{}|:"<>? there are
-# exactly eleven unshifted punctuation keys left, and the spare cells go to
-# cursor movement -- which is what fixing a typo mid-passphrase actually needs.
-SYMBOLS = Layer(
-    name="symbols",
-    left=(
-        DIGITS_LEFT,
-        (sym(e.KEY_MINUS, "-", "_"), sym(e.KEY_EQUAL, "=", "+"),
-         sym(e.KEY_LEFTBRACE, "[", "{"), sym(e.KEY_RIGHTBRACE, "]", "}"),
-         sym(e.KEY_BACKSLASH, "\\", "|")),
-        (sym(e.KEY_SLASH, "/", "?"),
-         act("", "left", code=e.KEY_LEFT), act("", "up", code=e.KEY_UP),
-         act("", "down", code=e.KEY_DOWN), act("", "right", code=e.KEY_RIGHT)),
-        (SHIFT_KEY, act("layer", "abc", span=2, target="letters"), TAB_KEY),
-    ),
-    right=(
-        DIGITS_RIGHT,
-        (sym(e.KEY_SEMICOLON, ";", ":"), sym(e.KEY_APOSTROPHE, "'", '"'),
-         sym(e.KEY_GRAVE, "`", "~"), sym(e.KEY_COMMA, ",", "<"),
-         sym(e.KEY_DOT, ".", ">")),
-        (act("", "home", code=e.KEY_HOME), act("", "end", code=e.KEY_END),
-         act("", "del", code=e.KEY_DELETE), BACKSPACE_KEY, ENTER_KEY),
-        (SPACE_KEY, CLOSE_KEY),
-    ),
-)
-
-LAYERS: dict[str, Layer] = {layer.name: layer for layer in (LETTERS, SYMBOLS)}
+# One layer, and that is the whole keyboard: with dual legends on all thirteen
+# number-row keys plus the six punctuation keys, every printable ASCII
+# character is reachable without a second layer. The `?#=` symbol layer ours
+# used to carry has no counterpart in §9g and is gone -- its contents are all
+# on this one grid now. `press()` keeps the "layer" action so a future layer
+# needs no new mechanism.
+LAYERS: dict[str, Layer] = {layer.name: layer for layer in (LETTERS,)}
 INITIAL_LAYER = "letters"
 
 SHIFT_CODE = e.KEY_LEFTSHIFT
 
-# Every keycode this keyboard can emit, shift included.
-#
-# ⚠️ LOAD-BEARING. A uinput device emits ONLY the codes it declared when it was
-# created -- an undeclared code is dropped by the kernel with no error anywhere.
-# `deck-input-mapper.py` folds this into its own EMITTED_KEYS for exactly that
-# reason. If this set drifts from the layouts, the affected keys go silently
-# dead, which is the failure mode CLAUDE.md forbids; `test-deck-osk-layout.py`
-# pins it against the tables.
-OSK_KEYCODES: frozenset[int] = frozenset(
-    [SHIFT_CODE]
-    + [key.code for layer in LAYERS.values()
-       for half in (layer.left, layer.right)
-       for row in half for key in row if key.code]
-)
+
+def _all_keys():
+    for layer in LAYERS.values():
+        for row in layer.rows:
+            yield from row
+
+
+def keycodes_for(layers) -> frozenset[int]:
+    """Every keycode these layers can emit, shift included.
+
+    ⚠️ LOAD-BEARING. A uinput device emits ONLY the codes it declared when it
+    was created -- an undeclared code is dropped by the kernel with no error
+    anywhere. `deck-input-mapper.py` folds `OSK_KEYCODES` into its own
+    EMITTED_KEYS for exactly that reason. If this misses a key, that key is
+    dead on the Deck and nothing reports it, which is the failure mode
+    CLAUDE.md forbids.
+
+    THREE places a key can hide a code, and every one of them has bitten
+    something: its own `code`, the `shift_code` of a key whose shifted face is
+    a different key (the arrows), and any `modifiers` it holds (Paste). A
+    function rather than a comprehension so a test can hand it a layer built
+    for the purpose -- the live layout happens to hold only KEY_LEFTSHIFT as a
+    modifier, which is declared anyway, so the modifier arm would otherwise be
+    untestable until the day it mattered.
+    """
+    codes = {SHIFT_CODE}
+    for layer in layers:
+        for row in layer.rows:
+            for key in row:
+                if key.code:
+                    codes.add(key.code)
+                if key.shift_code:
+                    codes.add(key.shift_code)
+                codes.update(key.modifiers)
+    return frozenset(codes)
+
+
+OSK_KEYCODES: frozenset[int] = keycodes_for(LAYERS.values())
 
 
 # --- hit-testing (pure) ------------------------------------------------------
@@ -289,15 +476,20 @@ OSK_KEYCODES: frozenset[int] = frozenset(
 def locate(layer: Layer, half: str, x: float, y: float) -> tuple[int, int] | None:
     """Which (row index, key index) is at (x, y), normalised 0..1 in that half?
 
+    The grid is continuous; `half` selects which CELL RANGE of it this pad's
+    cursor addresses (`Layer.half_cells`). A key straddling the boundary is
+    reachable from both, which is how the space bar works.
+
     Returns None outside the half. A cursor is clamped to its half by
     construction, so None means a caller bug rather than a user miss -- but it
     is still the honest answer, and silently clamping would hide it.
 
     Renderers need the INDICES, not just the key: highlighting by comparing Key
-    objects would light up every cell sharing an instance (space and shift are
-    module-level singletons reused across layers).
+    objects would light up every cell sharing an instance (space and both shift
+    keys are module-level singletons).
     """
-    rows = layer.half(half)
+    start, end = layer.half_cells(half)  # raises on an unknown half
+    rows = layer.rows
     if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0) or not rows:
         return None
 
@@ -309,10 +501,12 @@ def locate(layer: Layer, half: str, x: float, y: float) -> tuple[int, int] | Non
         return None
 
     # Integer cell arithmetic, not accumulated float fractions: with spans of
-    # 2 and 3 in the function row, summing x against fractions drifts at the
+    # 2, 3 and 8 in this grid, summing x against fractions drifts at the
     # boundaries and puts a click on the wrong key.
-    cells = sum(key.span for key in row)
-    cell = min(int(x * cells), cells - 1)
+    reach = end - start
+    if reach <= 0:
+        return None
+    cell = start + min(int(x * reach), reach - 1)
     seen = 0
     for key_index, key in enumerate(row):
         seen += key.span
@@ -326,14 +520,14 @@ def key_at(layer: Layer, half: str, x: float, y: float) -> Key | None:
     found = locate(layer, half, x, y)
     if found is None:
         return None
-    return layer.half(half)[found[0]][found[1]]
+    return layer.rows[found[0]][found[1]]
 
 
 # --- the state machine -------------------------------------------------------
 
 
 class OnScreenKeyboard:
-    """Layer + shift state, and the keystrokes a press produces.
+    """Layer, shift and caps state, and the keystrokes a press produces.
 
     `press()` returns (keycode, value) pairs in the same shape as
     `Mapper.translate()`, so `deck-input-mapper.py` can feed them to the emit
@@ -345,58 +539,84 @@ class OnScreenKeyboard:
             raise ValueError(f"unknown layer {layer!r}")
         self.layer_name = layer
         self.shift = "off"  # "off" | "once" | "locked"
+        self.caps = False   # a SEPARATE modifier -- letters only, see the header
         self.closed = False
+        # The last renderer-owned request a press made ("emoji" | "move"), for
+        # a renderer to pick up and clear. "" once handled.
+        self.request = ""
 
     @property
     def layer(self) -> Layer:
         return LAYERS[self.layer_name]
 
-    def shift_applies_to(self, key: Key) -> bool:
-        """Is shift in force for THIS key right now?
+    @property
+    def shift_active(self) -> bool:
+        """Is SHIFT (not caps) in force? This is what changes the legends."""
+        return self.shift in ("once", "locked")
 
-        `once` is a shift and hits everything. `locked` is a caps lock and hits
-        letters only, so a passphrase can mix capitals and unshifted digits
-        without toggling between them.
+    def shift_applies_to(self, key: Key) -> bool:
+        """Is a shifted face in force for THIS key right now?
+
+        Shift hits everything. Caps hits letters only, so a passphrase can mix
+        capitals with unshifted digits and working arrow keys without toggling.
         """
-        if self.shift == "once":
+        if self.shift_active:
             return True
-        if self.shift == "locked":
-            return key.is_letter
-        return False
+        return self.caps and key.is_letter
 
     def face(self, key: Key) -> str:
-        """The label to draw, under the current shift state.
+        """The LARGE legend to draw, under the current state.
 
-        The shift key reports its OWN state here rather than in a renderer, so
-        both renderers show the same thing and neither has to know the state
-        machine. Without it a user cannot tell one-shot from locked, and the
-        only feedback is typing a character and seeing the wrong case.
+        The screen never shows a character the next press will not type; that
+        property is the whole reason this function lives in the core rather
+        than in a renderer.
+
+        ⚠️ The shift and caps keys keep their own label in every state. They
+        used to spell their state into their face ("shift"/"Shift"/"LOCK"),
+        which §9g's reference does not do -- it turns the key BLUE instead.
+        `modifier_state()` is where that feedback lives now, so a renderer with
+        colour can paint it and one without can spell it.
         """
-        if key.action == "shift":
-            return {"off": "shift", "once": "Shift", "locked": "LOCK"}[self.shift]
         if key.shift_label and self.shift_applies_to(key):
             return key.shift_label
         return key.label
 
     def secondary_face(self, key: Key) -> str:
-        """The OTHER face of a dual-legend key -- the one `face()` is not
-        currently showing -- or "" if this key has none (T8 §9: "shifted
-        symbols shown above the digit on the same key").
+        """The SMALL legend drawn ABOVE `face()`, or "" when there is none.
 
-        Digits and punctuation carry both faces AT ONCE, the way a real
-        keycap does -- "1" and "!" on the same key -- so a renderer with room
-        can draw the one `face()` is not returning as a small secondary
-        legend, without waiting for a shift press to reveal it exists.
+        T8 §9g's legend rule, and the part ours got wrong on every screen:
+
+          unshifted  -> the shifted face, small, above the base face
+          shift      -> "" -- under shift the key shows ONLY its shifted face
+          caps       -> unchanged from unshifted, because caps is not shift
 
         Letters are deliberately excluded: upper and lower case are the same
-        glyph rotated, not a different character, and a redundant "Q" drawn
-        over every one of 26 keys is clutter this was written to avoid. Action
-        keys (space/tab/shift itself/…) have no `shift_label` at all, so they
-        fall out of the `not key.shift_label` check with no special-casing.
+        glyph, not a different character, and a redundant "Q" over every one of
+        26 keys is clutter. Action keys have no `shift_label` at all, so they
+        fall out of the same check with no special-casing.
         """
         if key.is_letter or not key.shift_label:
             return ""
-        return key.shift_label if self.face(key) == key.label else key.label
+        if self.shift_active:
+            return ""
+        return key.shift_label
+
+    def modifier_state(self, key: Key) -> str:
+        """"" unless this key is an ACTIVE modifier, in which case which one.
+
+        T8 §9g: "An active modifier turns BLUE -- both Shift keys under Shift,
+        the Caps key when latched. Nothing else changes colour." A renderer
+        with colour draws blue on any non-empty answer; the TTY renderer, which
+        has neither colour nor a spare row, needs the string to say it in text.
+
+        "once" and "locked" are distinguished because a user who cannot tell a
+        one-shot from a lock finds out by typing the wrong case.
+        """
+        if key.action == "shift":
+            return self.shift if self.shift != "off" else ""
+        if key.action == "caps":
+            return "on" if self.caps else ""
+        return ""
 
     def key_at(self, half: str, x: float, y: float) -> Key | None:
         return key_at(self.layer, half, x, y)
@@ -412,19 +632,43 @@ class OnScreenKeyboard:
         if key.action == "shift":
             self.shift = {"off": "once", "once": "locked"}.get(self.shift, "off")
             return []
+        if key.action == "caps":
+            self.caps = not self.caps
+            return []
         if key.action == "layer":
+            if key.target not in LAYERS:
+                raise ValueError(f"key {key.label!r} targets unknown layer "
+                                 f"{key.target!r}")
             self.layer_name = key.target
             return []
         if key.action == "close":
             self.closed = True
             return []
-        if not key.code:
+        if key.action in ("emoji", "move"):
+            self.request = key.action
             return []
+        if key.action:
+            raise ValueError(f"key {key.label!r} has unknown action {key.action!r}")
 
         shifted = self.shift_applies_to(key)
-        strokes = [(key.code, 1), (key.code, 0)]
-        if shifted:
-            strokes = [(SHIFT_CODE, 1)] + strokes + [(SHIFT_CODE, 0)]
+        if shifted and key.shift_code:
+            # A shifted arrow is a DIFFERENT KEY, not this key with a modifier:
+            # SHIFT+KEY_LEFT extends a selection, KEY_UP moves up.
+            code, hold_shift = key.shift_code, False
+        else:
+            code, hold_shift = key.code, shifted
+        if not code:
+            return []
+
+        # dict.fromkeys de-duplicates while keeping order: Paste already holds
+        # shift, and pressing it with a one-shot armed must not press shift
+        # twice and release it twice.
+        held = list(dict.fromkeys(
+            key.modifiers + ((SHIFT_CODE,) if hold_shift else ())
+        ))
+        strokes = ([(m, 1) for m in held]
+                   + [(code, 1), (code, 0)]
+                   + [(m, 0) for m in reversed(held)])
         # One-shot shift is spent by the key it modified -- including keys with
         # no shifted face, which is what makes it a shift rather than a mode.
         if self.shift == "once":
@@ -458,9 +702,9 @@ PAD_AXES: dict[int, tuple[str, str]] = {
     e.ABS_HAT1Y: ("right", "y"),
 }
 
-# Each trigger clicks its OWN side. Matching lizard mode's convention would put
-# right=left-click, but there are two cursors here and no single pointer to
-# left- or right-click: the side is the meaning.
+# Each trigger commits its OWN side's cursor. Matching lizard mode's convention
+# would put right=left-click, but there are two cursors here and no single
+# pointer to left- or right-click: the side is the meaning.
 TRIGGER_HALF: dict[int, str] = {
     e.BTN_TL2: "left",
     e.BTN_TR2: "right",
@@ -545,18 +789,24 @@ class Cursors:
 
 
 def find_face(ch: str) -> tuple[int, bool] | None:
-    """Which (keycode, shifted) types `ch`? None if the layout cannot."""
+    """Which (keycode, shifted) types `ch`? None if the layout cannot.
+
+    A key needing extra modifiers (Paste) is skipped: this returns one code and
+    one shift flag, and a caller that pressed it would emit the wrong thing.
+    """
     shifted_hit = None
-    for layer in LAYERS.values():
-        for half in (layer.left, layer.right):
-            for row in half:
-                for key in row:
-                    if not key.types:
-                        continue
-                    if key.label == ch:
-                        return (key.code, False)  # prefer the unshifted face
-                    if key.shift_label == ch and shifted_hit is None:
-                        shifted_hit = (key.code, True)
+    for key in _all_keys():
+        if not key.types or key.modifiers:
+            continue
+        if key.label == ch and key.code:
+            return (key.code, False)  # prefer the unshifted face
+        if key.shift_label == ch and shifted_hit is None:
+            # A shifted face that is a different KEY (the arrows) types itself
+            # with no modifier held.
+            if key.shift_code:
+                shifted_hit = (key.shift_code, False)
+            elif key.code:
+                shifted_hit = (key.code, True)
     return shifted_hit
 
 
@@ -594,14 +844,26 @@ def strokes_for_text(text: str) -> list[tuple[int, int]]:
 # `tee`, needs no session bus (the installer has none), and a malformed line
 # can only be ignored -- this crosses a process boundary, so a parser that
 # raised would take the keyboard down with it.
+#
+# ⚠️ CAPS IS AN OPTIONAL EIGHTH FIELD, and that is deliberate rather than lazy.
+# The writer (the mapper) and the readers (both renderers) are separate
+# processes started separately, and during a rolling change one of them is the
+# old build. A seven-field line still parses, with caps off -- which is what an
+# older writer that has no caps state actually means.
+
+STATE_FIELDS = 7  # without the optional trailing caps flag
+
 
 def parse_state_line(line: str) -> dict | None:
-    """`state <layer> <shift> <lx> <ly> <rx> <ry>` -> a dict, or None."""
+    """`state <layer> <shift> <lx> <ly> <rx> <ry> [caps]` -> a dict, or None."""
     parts = line.split()
-    if len(parts) != 7 or parts[0] != "state":
+    if len(parts) not in (STATE_FIELDS, STATE_FIELDS + 1) or parts[0] != "state":
         return None
-    _, layer, shift, lx, ly, rx, ry = parts
+    _, layer, shift, lx, ly, rx, ry = parts[:STATE_FIELDS]
+    caps_field = parts[STATE_FIELDS] if len(parts) > STATE_FIELDS else "off"
     if layer not in LAYERS or shift not in ("off", "once", "locked"):
+        return None
+    if caps_field not in ("on", "off"):
         return None
     try:
         values = [float(v) for v in (lx, ly, rx, ry)]
@@ -609,7 +871,7 @@ def parse_state_line(line: str) -> dict | None:
         return None
     if not all(0.0 <= v <= 1.0 for v in values):
         return None
-    return {"layer": layer, "shift": shift,
+    return {"layer": layer, "shift": shift, "caps": caps_field == "on",
             "left": (values[0], values[1]), "right": (values[2], values[3])}
 
 
@@ -617,12 +879,14 @@ def format_state_line(keyboard: OnScreenKeyboard, cursors: Cursors) -> str:
     """The mapper's side of the same protocol."""
     left, right = cursors.position("left"), cursors.position("right")
     return (f"state {keyboard.layer_name} {keyboard.shift} "
-            f"{left[0]:.4f} {left[1]:.4f} {right[0]:.4f} {right[1]:.4f}\n")
+            f"{left[0]:.4f} {left[1]:.4f} {right[0]:.4f} {right[1]:.4f} "
+            f"{'on' if keyboard.caps else 'off'}\n")
 
 
 def apply_state(keyboard: OnScreenKeyboard, cursors: Cursors,
                 state: dict) -> None:
     keyboard.layer_name = state["layer"]
     keyboard.shift = state["shift"]
+    keyboard.caps = bool(state.get("caps", False))
     for half in ("left", "right"):
         cursors.pos[half] = [state[half][0], state[half][1]]
