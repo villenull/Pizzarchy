@@ -505,6 +505,38 @@ not hours.
 **Do not start T5c before T5a proves parity.** An overlay whose base build was
 never shown to reproduce the known-good ISO cannot attribute any later failure.
 
+### 🔴 Outcome, 2026-08-11 — T5a's first artifact: parity NOT proven. **Swap T5b and T5c.**
+
+`docs/findings/T5a-parity.md` measured the 2026-08-12 build against
+`~/ISOs/omarchy-2026.08.10-…iso`. Split verdict:
+
+- **Pipeline ✅ proven.** The ISO9660 layouts differ by exactly one filename —
+  the build-timestamp `.uuid`. Every `omarchy-iso@a12bfea`-sourced file is
+  byte-identical, including `root/configurator`. No orphan paths, no
+  `__pycache__` artefact, 56/56 offline-package changes are *upgrades* (so the
+  guard-6.3 persisted cache is not serving stale packages), and two runs five
+  hours apart are identical. **Driving `builder/build-iso.sh` instead of
+  `omarchy-iso-make` changed nothing in the artifact.**
+- **Product 🔴 broken.** `iso/RUNTIME` says `6d7826d`; the ISO bundles
+  `omarchy-dev-4.0.0.r1667.g4727bad` — 50 commits later, past the
+  `536fcd5c` rename. §0's **(INFERRED)** prediction is now **MEASURED**: the
+  shipped orchestrator calls `/usr/bin/omarchy-setup-system`, and that package
+  contains **zero** paths matching `setup-system` (no file, no symlink, no
+  `.INSTALL` shim). This ISO cannot finish an install.
+
+**So: T5b first, T5c after.** T5b needs only the pipeline, which is proven, and
+its whole content is the fix. T5c stays blocked because (a) `[V]`-tier
+verification is unreachable through a base that dies at phase 5, and (b) its
+"zero NVIDIA packages" assertion would be measured against a mirror whose
+composition drifts daily — the runtime's `omarchy-base.packages` gained
+`libvips` + `zbar` (and 4 resolved packages) inside this one comparison.
+
+Two notes for T5b: **guard 6.4 now has a real failing case** to test against
+(the check above, run by hand, fires on today's artifact); and `--local-source`
+*builds* the runtime rather than downloading it, so the re-parity check must
+compare the **version string and file list**, never the archive checksum.
+`docs/findings/T5a-parity.md` §7 states the exact re-measurement that closes T5a.
+
 ---
 
 ## 8. The single riskiest unknown that remains

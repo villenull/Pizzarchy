@@ -2415,9 +2415,26 @@ mental model — get it wrong once and it is wrong in both.
 
 ## 5.28 🔴 on a FRESH BOOT the mapper's children are born blind: no menus, and probably no keyboard
 
-> **Status: fix implemented session 21, 🔴 UNVERIFIED — the check needs a cold
-> boot.** Jump to "The fix" below for what was built and what it does not
-> prove.
+> ## ✅ CLOSED 2026-08-11 (session 21) — VERIFIED ON A COLD BOOT, TWICE
+>
+> The operator deployed the fix, powered the Deck **off**, booted it, and
+> pressed the three buttons before touching anything. **All three worked.**
+> The journal shows the race actually happening and the resolver closing it:
+>
+> ```
+> [16.729] Starting deck-input-mapper
+> [18.150] reading /dev/input/event7 (Steam Deck)
+> [18.157] the session environment is not ready yet (missing WAYLAND_DISPLAY,
+>          HYPRLAND_INSTANCE_SIGNATURE) ... which is what this polls for (§5.28)
+> [19.159] session environment resolved
+> ```
+>
+> One service start this boot; nothing restarted by hand. **The second cold
+> case — Gaming Mode → Power → Switch to Desktop — also passes**, tested the
+> same way. That path had never been tested before.
+>
+> 🔴 **But the first fix shipped a NEW defect, caught only by a human looking
+> at the panel — see §5.30.** The keyboard came up *working and wrong*.
 
 **Found on hardware 2026-08-11, by the operator noticing STEAM and QAM did
 nothing after a reboot.** Every check said healthy. This is R-29's shape again,
@@ -2576,6 +2593,82 @@ operator-chosen: if Steam+extest works, most of that desktop work is moot, and
 the layout-parity agent was paused *before* executing its Caps/Shift rework for
 exactly this reason. Our OSK remains the installer's and the lock's keyboard
 regardless of the outcome.
+
+### ✅ T10 WAS RUN, 2026-08-11 (session 21). Rows 1–3, 6, 8 PASS.
+
+Full evidence: **`docs/findings/T10-steam-extest-results.md`**. One sentence:
+**Steam's own keyboard genuinely drives our Wayland desktop through extest —
+letters typed with the trackpads landed in a Wayland-native client's file, not
+just on screen.** The untested link is now tested and it holds.
+
+🔴 **Three corrections to T10's own procedure, each of which alone would have
+produced a WRONG answer:**
+
+1. **The spec deploys one library; both are needed.** `steam` is 32-bit but
+   **nine `steamwebhelper` processes are 64-bit and rejected the i686 build**
+   (`wrong ELF class: ELFCLASS32`). Preload both, colon-separated.
+2. **`extest fake device` does not exist until the first XTEST call.** The
+   step-2 checkbox expects it at launch; its absence is not a failure.
+3. 🔴 **`hyprctl dispatch`'s old string syntax is a Lua SYNTAX ERROR on
+   Hyprland 0.56.2** — see §5.30. Nothing to do with Steam; a live hazard for
+   this repo.
+
+**Row 4 (touch) fails, and it is not Steam's fault** — touch does nothing
+anywhere on this desktop (§5.30). **Row 7 (the lock) was skipped** by operator
+decision; its prediction is recorded as *inferred*, not measured.
+
+**The decision is the operator's and is NOT made.** What is unchanged either
+way: our OSK stays the installer's and the lock screen's keyboard, because
+Steam's is an XWayland window that cannot render above `ext-session-lock`.
+
+---
+
+## 5.30 🆕 Three defects found on 2026-08-11 (session 21), all by looking rather than checking
+
+Grouped because they share one lesson: **each was invisible to every automated
+check in this repo, and each was found by a human looking at the panel or by
+reading another program's real output instead of an imagined one.**
+
+### 5.30a ✅ FIXED — systemd quotes ANSI-C, and the keyboard was working-but-wrong
+
+§5.28's fix parsed `systemctl --user show-environment` and unquoted `'...'` and
+`"..."`. **On a real session that machine emits SIX values as `$'...'` and ZERO
+in either handled form.** So `GDK_BACKEND=$'wayland,x11,*'` reached GTK
+verbatim, GTK reported `No such backend: $'wayland`, and the layer-shell
+keyboard **fell back to an ordinary window** — it appeared, full-screen instead
+of anchored, and would **not** have rendered above `ext-session-lock`, silently
+undoing the §5.24 lock fix that had been verified in pixels.
+`QT_QPA_PLATFORM=$'wayland;xcb'` was mangled identically.
+
+⚠️ **The keyboard worked. Nothing looked broken.** The operator said "the
+keyboard was the size of the entire screen" and that was the whole detection.
+The commit that introduced it had even flagged the gap — *"no quoted value
+appeared in that sample, so the shell-quoting path is covered only by synthetic
+input"* — and the synthetic input was wrong about reality. **Fixtures are now
+the Deck's own six lines, verbatim.** Fixed and re-verified in pixels.
+
+### 5.30b 🔴 OPEN — `hyprctl dispatch`'s old syntax is a SYNTAX ERROR on 0.56.2
+
+Hyprland 0.56.2 (what the Deck runs) replaced dispatch's string arguments with
+a Lua dispatcher API. `hyprctl dispatch movetoworkspacesilent 2,address:0x...`
+now fails with `')' expected near '2'` — **a parse error, not a no-match.**
+Working form: `hyprctl dispatch 'hl.dsp.focus({ workspace = 2 })'`. The full
+namespace listing is in `docs/findings/T10-steam-extest-results.md`.
+
+⚠️ **Audit `docs/RECOVERY.md` and `src/deck-session.sh` for the old syntax.**
+Any such call whose stderr is discarded fails *silently* — the §5.28 shape
+again, and it cost real time this session for exactly that reason.
+
+### 5.30c 🔴 OPEN, NEW — the touchscreen does nothing on the desktop, at all
+
+Discovered as T10 row 4 and then isolated: taps do nothing on Valve's keyboard
+**and nothing anywhere else on the desktop**. Not a Steam problem. The kernel
+exposes the panel (`FTS3528:00 2808:1015`, `event14`/`event15`) and **Hyprland
+has it bound** (`Touch Device ...: fts3528:00-2808:1015`), so this is not a
+missing device.
+
+Nobody had ever tested desktop touch. It affects any future touch plan for our
+own OSK equally, and the approved touch/restyle plan assumes touch works.
 
 ---
 
