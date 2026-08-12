@@ -486,6 +486,56 @@ row 5   ☺        [Ⓨ] ————— space (wide) —————     ◀  �
 - Row 4's right `Shift` and row 5's `Paste`/`Move` are `[obscured]`. An earlier
   still showed all three, so they exist; their exact spans do not.
 
+### 9f. 📸 REFERENCE SCREENSHOT, idle state — supersedes the video transcription
+
+**Operator-supplied 2026-08-12, captured with NO trackpad touched**, i.e. the
+state in which *every* badge is displayed. This is the frame §9d and §9e both
+lacked. **Transcribed, not copied** — §9's constraint stands, and the image is
+deliberately not vendored into this repo.
+
+```
+row 1   [!1] [@2] [#3] [$4] [%5] [^6] [&7] [*8] [(9] [)0] [_-] [+=]   (Ⓧ) Back…
+row 2    q  w  e  r  t  y  u  i  o  p   [{[]  [}]]
+row 3   [L3 + icon]  a  s  d  f  g  h  j  k  l  [:;]  ["']        [R2]
+row 4   [L2]  z  x  c  v  b  n  m  [<,] [>.] [?/]                 [L2]
+row 5   (Ⓨ) ————————— space (wide) —————————   [▲][▼]/[◀][▶]  [Paste]  [M…]
+```
+
+#### 🔴 Corrections to §9d, which was transcribed from two video frames
+
+| §9d claimed | The screenshot shows |
+|---|---|
+| *"`◀ ▶` only … no up/down arrows visible, where ours draws four"* | **All four arrows are present.** Ours was right and §9d was wrong — a webcam overlay had hidden them. **Do not "fix" our four arrows.** |
+| row 3 left is `Caps⇪` | the key carries an **`L3`** badge and an icon — Caps is bound to the **left stick click**, not a trigger |
+| row 4 right Shift `[obscured]` | it exists, and **both** Shift keys carry an **`L2`** badge |
+
+#### What the screenshot establishes, and it is a lot
+
+- ✅ **Space is ONE wide key with `Ⓨ` at its left edge.** §9d's clearest
+  divergence is confirmed: ours renders `☺`, a separate `Y`, then space.
+- ✅ **Dual legends** — shifted face above, base below — on **numbers and
+  punctuation alike**, both always visible. We match this.
+- ✅ **`Ⓧ` on Backspace**, top-right, and Backspace is a wide dark key.
+- 🆕 **Two badge SHAPES, and the distinction is semantic:** face buttons are
+  drawn in a **white circle** (`Ⓧ`, `Ⓨ`); triggers and stick clicks are drawn
+  in a **white rounded rectangle** (`L2`, `R2`, `L3`). That is a convention we
+  can reproduce with our own glyphs without touching Valve's artwork.
+- 🆕 **Modifier and action keys are visibly DARKER than letter keys** — a
+  black key face against the letters' dark grey. Ours does not differentiate.
+- 🆕 **`Paste` is a real labelled key** on the bottom row, right of the arrows.
+
+#### ⚠️ Still unresolved — the capture is cropped, do not invent these
+
+- The **left edge is cut**: whether row 1 has a `` ~` `` key and whether row 2
+  opens with `Tab` cannot be read from this image.
+- The **right edge is cut**: the `R2` key's text (§9d read it as `Enter`) and
+  the key after `Paste` (§9d read `Move`, here only `M…` is visible).
+- The arrow cluster reads as either a **2×2 block of four keys** or **two keys
+  carrying dual legends** (`▲` over `◀`, `▼` over `▶`) in the same
+  shifted-above-base style as the number row. **The second reading fits this
+  keyboard's own convention and is therefore the likelier one — but it is a
+  reading, not a measurement.** One uncropped capture settles it.
+
 ### 9e. 🔬 The badges are CONTEXTUAL — evidence, and the rule is not yet known
 
 | Badge | Frame 1 (3:15) | Frame 2 (3:29) |
@@ -528,10 +578,11 @@ have. Re-read §9a before acting on it.
 
 ⚠️ **UNKNOWN, and both matter before anyone implements this:**
 
-1. **Does `R2` mirror it** — Enter while idle, commit-right-half while the right
-   pad is touched? Symmetry is likely and unmeasured.
-2. **Is the gate per-pad or any-pad?** Does touching the *right* pad change what
-   `L2` shows?
+✅ **BOTH ANSWERED by the operator, 2026-08-12: the gate is PER-PAD.** The left
+trackpad hides the `L2` badge only; the right trackpad hides the `R2` badge
+only. So `R2` mirrors `L2` exactly, and each trigger's badge is gated on *its
+own side's* pad. The idle screenshot in §9f is the all-badges-visible state
+this predicts.
 
 ⚠️ **AND ONE HARD IMPLEMENTATION CAVEAT.** Copying this needs a real
 *touch/no-touch* signal, and §7's measured fact is that **a lifted pad reports
