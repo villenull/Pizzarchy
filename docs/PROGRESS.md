@@ -2837,7 +2837,30 @@ the colon-path string every Hyprland doc uses. Third §5.30b-class trap today.
 Both readings said "the kernel is emitting nothing", which was false both times.
 **The operator's eyes were the only reliable oracle in the whole exchange.**
 
-#### ⚠️ Not persisted, and that is now a defect to fix
+#### ✅ PERSISTED 2026-08-12 in `~/.config/hypr/input.lua`
+
+Appended **before** that file's parse sentinel, deliberately: a Lua syntax error
+makes Hyprland discard the **entire file**, and the file also carries §5.24's
+`above_lock = 2` layer rule — the one that makes the lock screen answerable. A
+careless append could have taken the lock keyboard down with the touchscreen.
+
+**How it was proven, and how it was NOT.** Forcing `transform` back to `0`,
+running `hyprctl reload`, and watching it return to `3` is the evidence. ⚠️ **I
+first cited the file's `DECK_INPUT_LUA_LOADED` sentinel as proof, and that was
+worthless** — `hyprctl eval 'return X'` prints `ok` and exits **0** for a name
+that has never existed, measured with a negative control. **This file already
+recorded that** (§7, twice) and I used the check anyway without re-reading it.
+⚠️ The comment inside the Deck's own `input.lua` still says *"A nil result means
+this file was discarded"* — **that is false**, and any procedure resting on it
+is a check that cannot fail.
+
+⚠️ **Still owed:** this lives in one user's dotfile and is therefore **absent
+from a built image**. `T5-fork-plan.md` §5.2 owes it a bake-in row — it already
+owes three rotations and now owes four. *(An earlier operator decision said not
+to persist it, on the then-correct grounds that it demonstrably changed nothing.
+That basis is gone; they approved persisting once the A/B settled it.)*
+
+#### The FIFTH rotation value, and why that matters
 
 The setting is **runtime-only and dies on every Hyprland restart**. `T5-fork-plan.md`
 §5.2 already owes a bake-in row for it — and note this makes a **FIFTH** rotation
