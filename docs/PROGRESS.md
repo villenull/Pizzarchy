@@ -2647,7 +2647,7 @@ appeared in that sample, so the shell-quoting path is covered only by synthetic
 input"* — and the synthetic input was wrong about reality. **Fixtures are now
 the Deck's own six lines, verbatim.** Fixed and re-verified in pixels.
 
-### 5.30b 🔴 OPEN — `hyprctl dispatch`'s old syntax is a SYNTAX ERROR on 0.56.2
+### 5.30b ✅ AUDITED 2026-08-12 — `hyprctl dispatch`'s old syntax is a SYNTAX ERROR on 0.56.2
 
 Hyprland 0.56.2 (what the Deck runs) replaced dispatch's string arguments with
 a Lua dispatcher API. `hyprctl dispatch movetoworkspacesilent 2,address:0x...`
@@ -2655,9 +2655,43 @@ now fails with `')' expected near '2'` — **a parse error, not a no-match.**
 Working form: `hyprctl dispatch 'hl.dsp.focus({ workspace = 2 })'`. The full
 namespace listing is in `docs/findings/T10-steam-extest-results.md`.
 
-⚠️ **Audit `docs/RECOVERY.md` and `src/deck-session.sh` for the old syntax.**
-Any such call whose stderr is discarded fails *silently* — the §5.28 shape
-again, and it cost real time this session for exactly that reason.
+**Audit result: this repo makes ZERO `hyprctl dispatch` calls of any kind.**
+Every `hyprctl` invocation we ship or run is a *query* — `-j monitors`
+(`src/deck-input-mapper.py`'s lock watcher), `-j activewindow` and `cursorpos`
+(the two `test/xtest-*.py` spikes) — and queries are unaffected; only
+`dispatch` grew the Lua API. `src/deck-session.sh` names `hyprctl` once, in a
+comment, and invokes it nowhere. The generated greeter Lua already uses the
+new API (`hl.config`, `hl.monitor`). `docs/RECOVERY.md` uses `hyprctl eval`,
+which is the Lua entry point and is the form measured against the Deck.
+
+⚠️ **The old form does survive in one place we do not own:**
+`iso/upstream/bin/omarchy-iso-test` — a vendored read-only mirror of
+`basecamp/omarchy` — runs `hyprctl dispatch workspace 1` with stderr discarded
+and `|| true`. Upstream half-migrated that file: its two `window.close` calls
+already try `hl.dsp.window.close({...})` *first* and fall back to the old
+bareword, but the workspace reset never got the treatment. It affects
+upstream's own ISO test, not our boot or install path. Nothing to fix here;
+fixing the mirror would be reverted by the next vendor refresh.
+
+🆕 **What was actually wrong was the *other* hyprctl hazard, in a runbook.**
+All three `ssh steamdeck … hyprctl …` commands in
+`docs/tasks/P2.9-deck-session-runbook.md` omitted `HYPRLAND_INSTANCE_SIGNATURE`
+(R-46), so they exit before running — and §4's is a **checkbox** reading
+"`configerrors` reports nothing", which passes on a command that never ran.
+§0.1 and §4.1 also still offered `clear_crashed_lockscreen` as the lock escape
+*after* session 20 measured it refusing healthy locks; `docs/RECOVERY.md` had
+been corrected, the runbook had not. Both fixed.
+
+🔒 **Guarded, so it cannot come back silently:**
+`test/unit/test-hyprctl-syntax.sh` (18th suite → 19) scans every tracked *and*
+untracked file for both hazards and fails on either. It carries positive
+controls for both scanners, because a grep that has stopped matching reports a
+clean tree — the "found nothing reads as found no problems" class that
+`test-duplicated-upstream-facts.sh` also guards against. Mutation-tested four
+ways: injecting a bad dispatch into `src/deck-session.sh`, injecting a bare
+`ssh … hyprctl` into `RECOVERY.md`, and breaking each scanner's regex.
+⚠️ It asserts which *shape* is written down; that the Lua shape works is T10's
+measurement, not the suite's — nothing here talks to a live compositor.
 
 ### 5.30c 🔴 OPEN, NEW — the touchscreen does nothing on the desktop, at all
 
