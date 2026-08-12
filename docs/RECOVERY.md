@@ -167,6 +167,63 @@ else — this does not damage the install and is not a reason to reimage.
 > turned off, and the on-screen keyboard taught to draw above a lock screen, so
 > this state stops being reachable — `docs/PROGRESS.md` §5.24.)*
 
+## Every reboot goes straight back to Gaming Mode, and Gaming Mode is broken
+
+This is deliberate, and it is undoable in one command.
+
+If `deck-session.sh stage-boot-default-gaming` has been run, a systemd unit
+re-asserts Gaming Mode as the default session **before the display manager
+starts, on every boot** — so Desktop Mode is a one-shot session, exactly as it
+is on stock SteamOS. Steam's own Power → *Switch to Desktop* still works and
+still lasts until you reboot.
+
+The cost of that: if Gaming Mode itself will not start, rebooting does not get
+you out of it. Autologin means there is no session picker to choose anything
+else from.
+
+### Getting out
+
+Reach a terminal with **Ctrl+Alt+F2** — this needs a USB or Bluetooth keyboard,
+as the on-screen keyboard is not available on a TTY — then run **one** of:
+
+```bash
+sudo touch /etc/deck-session/no-boot-default-gaming
+```
+
+The unit checks for that file with `ConditionPathExists=!` and skips itself
+while it exists. Nothing is uninstalled, and `systemctl status
+deck-boot-default-gaming.service` says out loud that a condition skipped it.
+Delete the file to re-arm it.
+
+```bash
+sudo systemctl disable deck-boot-default-gaming.service
+```
+
+The permanent form. `systemctl enable` puts it back.
+
+Either way, then choose the session you want for the next boot:
+
+```bash
+sudo /usr/local/bin/deck-session-select desktop --no-restart
+```
+
+### How to tell whether it ran
+
+`systemctl status deck-boot-default-gaming.service`:
+
+- **active (exited)** — it ran and rewrote the default session.
+- **inactive**, "Condition check resulted in … being skipped" — the marker file
+  above is in place.
+- **failed** — it ran and could not set the session; the likeliest cause is that
+  the Gaming Mode session is not installed. The Deck still boots. Nothing
+  depends on this unit, so a failure is loud (`systemctl --failed` is non-empty
+  from then on) and never fatal.
+
+> ⚠️ **Status: not yet exercised on hardware.** The unit's ordering, its
+> condition, its escape hatch and the failure behaviour above are asserted by
+> `test/unit/test-deck-session*.sh` against a rendered unit and a stubbed
+> systemd. No Deck has booted with this unit installed.
+
 ## If you are mid-install and it went wrong
 
 The installer wipes and repartitions early. If it failed after that point, the

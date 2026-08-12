@@ -1631,13 +1631,19 @@ mm.cursors.pos["left"] = [0.05, 0.75]              # the left Shift key
 check("clicking the on-screen Shift key emits nothing and arms the one-shot",
       (mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.1), mm.osk.shift), ([], "once"))
 
-# With the keyboard DOWN a pad click is nobody's business: it is not in
-# BUTTON_MAP and must not become a mouse button by accident.
+# With the keyboard DOWN the LEFT pad click is still nobody's business: it is
+# not in BUTTON_MAP and must not become a mouse button by accident.
+#
+# ⚠️ THE RIGHT ONE IS NO LONGER SILENT HERE, and this comment is the record of
+# the change rather than a deletion. Since the operator's 2026-08-12 request the
+# right pad's click is the LEFT MOUSE BUTTON while the keyboard is down; it has
+# its own section further down, and the left pad deliberately did NOT get a
+# binding alongside it.
 mm = fresh()
 check("with the OSK down the left pad click emits nothing",
       mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.0), [])
-check("...and neither does the right",
-      mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.0), [])
+check("...and its release emits nothing either -- it was never bound",
+      mm.translate(e.EV_KEY, e.BTN_THUMB, 0, 0.1), [])
 
 # --- 🆕 AND THE CLICK BUZZES (operator, 2026-08-12) -------------------------
 #
@@ -1910,6 +1916,200 @@ arm_def = next(node for node in _ast.walk(main_def)
 check("--dry-run arms no haptics: a buzz is an emission a user would FEEL",
       any(isinstance(node, _ast.Attribute) and node.attr == "dry_run"
           for node in _ast.walk(arm_def)), True)
+
+# --- 🆕 THE RIGHT PAD'S CLICK IS THE LEFT MOUSE BUTTON (operator, 2026-08-12) -
+#
+# *"i should be able to click now with the right trackpad by pressing down (and
+# getting a haptic response) this is the same as what we did for the keyboard
+# but for the mouse"*. The right pad has driven the pointer for two sessions;
+# pressing it reached nothing, so the only click was R2 -- the other finger on
+# the same hand that is doing the pointing.
+#
+# 🔴 `osk_active` IS THE WHOLE CONDITION, AND BOTH SIDES ARE ASSERTED HERE. The
+# same physical switch commits the highlighted key while the keyboard is up
+# (the section above; verified on the panel by the operator) and is the left
+# mouse button while it is down. A suite that only covered the pointer case
+# would let the keyboard's commit be eaten with nothing going red -- so every
+# claim below has a partner on the other side of the gate.
+
+# --- which button, and the one-letter mistakes it must not be ----------------
+check("the mouse click is the RIGHT pad's click, as PAD_CLICK_HALF measured it",
+      m.POINTER_CLICK_BUTTON, e.BTN_THUMB2)
+check("...and NOT either STICK click -- BTN_THUMBR is one letter away",
+      m.POINTER_CLICK_BUTTON in (e.BTN_THUMBL, e.BTN_THUMBR), False)
+check("...nor the Caps binding, nor the LEFT pad's click",
+      (m.POINTER_CLICK_BUTTON == m.OSK_CAPS_BUTTON,
+       m.POINTER_CLICK_BUTTON == e.BTN_THUMB), (False, False))
+# 🔴 DERIVED, so the mouse click and the keyboard's commit are the same switch
+# on the same side by construction. Asserting the literal alone would let the
+# two drift the moment the measurement was corrected in one place.
+check("...and it is derived FROM that table, not spelled a second time",
+      m.PAD_CLICK_HALF[m.POINTER_CLICK_BUTTON], m.POINTER_CLICK_HALF)
+check("the half it clicks is the half the POINTER itself reads",
+      {m.PAD_TOUCH_AXES[code][0] for code in m.POINTER_AXES}, {m.POINTER_CLICK_HALF})
+check("and what it emits is a real mouse button", m.POINTER_CLICK_KEY, e.BTN_LEFT)
+check("...declared on the uinput device, or the kernel drops it in silence",
+      m.POINTER_CLICK_KEY in m.EMITTED_KEYS, True)
+
+# --- a press and a release, never a synthesised tap --------------------------
+mm = fresh()
+check("with the keyboard DOWN, pressing the right pad presses the left button",
+      mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.0), [(e.BTN_LEFT, 1)])
+check("...and the release lets go", mm.translate(e.EV_KEY, e.BTN_THUMB2, 0, 0.1),
+      [(e.BTN_LEFT, 0)])
+check("...leaving nothing held", mm.pad_click_down, False)
+check("the pad's own autorepeat is not a second click",
+      mm.translate(e.EV_KEY, e.BTN_THUMB2, 2, 0.2), [])
+
+# 🔴 THE PAIRING, PROVED OVER A DRAG rather than one event at a time. A press
+# that emitted (down, up) together passes both checks above if they are read as
+# "a click happened"; it cannot pass this one, because the button has to still
+# be DOWN while the pointer moves. Drag, text selection and press-and-hold are
+# all this assertion.
+mm = fresh()
+down = mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.0)
+mm.pointer_delta(e.ABS_HAT1X, 1000, 0.10)
+moved = mm.pointer_delta(e.ABS_HAT1X, 3000, 0.15)
+still_down = mm.pad_click_down
+up = mm.translate(e.EV_KEY, e.BTN_THUMB2, 0, 0.2)
+check("a drag: down, real pointer motion with the button STILL held, then up",
+      (down, moved != (0, 0), still_down, up),
+      ([(e.BTN_LEFT, 1)], True, True, [(e.BTN_LEFT, 0)]))
+
+# ⚠️ NOT GATED ON `pad_touched`, where the keyboard's commit IS. An untouched
+# pad draws no cursor to commit, but the POINTER is always somewhere, so a click
+# always has a target -- and gating would hand the documented dead-centre blind
+# spot the power to swallow a click.
+mm = fresh()
+check("a click over a pad reading LIFTED still clicks (the pointer is somewhere)",
+      (mm.pad_touched("right"), mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.0)),
+      (False, [(e.BTN_LEFT, 1)]))
+
+# --- the other side of the gate: the keyboard's commit is untouched ----------
+mm = osk_mapper()
+touch(mm, "right", MAXV, MAXV)
+expected = key_under(mm, "right")
+strokes = mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.1)
+check("with the keyboard UP the same click still commits the highlighted key",
+      strokes, [(expected, 1), (expected, 0)])
+check("...and that key is not a mouse button", expected in (e.BTN_LEFT, e.BTN_RIGHT), False)
+check("...no mouse button went out underneath it",
+      [stroke for stroke in strokes if stroke[0] == e.BTN_LEFT], [])
+check("...and nothing was left holding one", mm.pad_click_down, False)
+
+# 🔴 THE KEYBOARD OPENING MID-CLICK. STEAM+X is handled above the OSK branch, so
+# a thumb still pressing the pad through the chord is exactly this sequence.
+# Routed into `_osk_event` the release is swallowed and BTN_LEFT stays down at
+# the kernel for ever: every later movement a drag, every later click a no-op.
+mm = fresh()
+check("a click that starts with the keyboard down goes down",
+      mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.0), [(e.BTN_LEFT, 1)])
+mm.osk = osk_mod.OnScreenKeyboard()
+mm.cursors = osk_mod.Cursors()
+mm.osk_active = True
+check("...and its release still lets go after the keyboard opened over it",
+      mm.translate(e.EV_KEY, e.BTN_THUMB2, 0, 0.1), [(e.BTN_LEFT, 0)])
+check("...and the keyboard did not also see it as a commit", mm.osk.shift, "off")
+
+# The same door in the other direction: a click that COMMITTED A KEY must not
+# leave an unpaired mouse-button UP behind when the keyboard closes under it.
+mm = osk_mapper()
+touch(mm, "right", MAXV, MAXV)
+mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.1)          # committed a key
+mm.osk_active = False
+check("a release left over from a keyboard commit does not click the desktop",
+      mm.translate(e.EV_KEY, e.BTN_THUMB2, 0, 0.2), [])
+check("a stray release with no press behind it invents no UP either",
+      fresh().translate(e.EV_KEY, e.BTN_THUMB2, 0, 0.0), [])
+# One down, one up: a repeated press cannot stack a second BTN_LEFT down.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.0)
+check("a duplicate press sends no second down",
+      mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.1), [])
+
+# ⛔ SCOPE: THE RIGHT PAD ONLY. The operator asked for the pad that carries the
+# pointer. A binding invented for the left pad would be a control nothing
+# advertises -- §9a's rule applied to a button instead of a badge.
+mm, rec = fresh(), Recorder()
+mm.haptics = rec
+check("the LEFT pad's click is still unbound with the keyboard down",
+      (mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.0),
+       mm.translate(e.EV_KEY, e.BTN_THUMB, 0, 0.1)), ([], []))
+check("...and buzzes nothing, because nothing happened", rec.buzzed, [])
+
+# --- the buzz: on the PRESS, once, on the right pad --------------------------
+mm, rec = fresh(), Recorder()
+mm.haptics = rec
+check("the mouse click buzzes the RIGHT pad on the press",
+      (mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.0), rec.buzzed),
+      ([(e.BTN_LEFT, 1)], ["right"]))
+check("...and the RELEASE does not buzz again -- one buzz per press, as the OSK's is",
+      (mm.translate(e.EV_KEY, e.BTN_THUMB2, 0, 0.1), rec.buzzed),
+      ([(e.BTN_LEFT, 0)], ["right"]))
+check("...nor does the autorepeat",
+      (mm.translate(e.EV_KEY, e.BTN_THUMB2, 2, 0.2), rec.buzzed), ([], ["right"]))
+# The trigger keeps its own rule: L2/R2 are switches with travel, and the finger
+# already knows they went down.
+mm, rec = fresh(), Recorder()
+mm.haptics = rec
+check("R2's left click still does not buzz -- only the pad, which has no travel",
+      (mm.translate(e.EV_KEY, e.BTN_TR2, 1, 0.0), rec.buzzed),
+      ([(e.BTN_LEFT, 1)], []))
+
+# --- 🔴 A HAPTIC THAT IS MISSING OR FAILING MUST NEVER SWALLOW THE CLICK ------
+#
+# Haptics are best-effort on hardware that may advertise no FF_RUMBLE at all. A
+# click that silently did not happen because a buzz failed is precisely the
+# failure class CLAUDE.md exists to forbid.
+mm = fresh()
+check("a Mapper with NO haptics still clicks, and still lets go",
+      (mm.haptics, mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.0),
+       mm.translate(e.EV_KEY, e.BTN_THUMB2, 0, 0.1)),
+      (None, [(e.BTN_LEFT, 1)], [(e.BTN_LEFT, 0)]))
+
+dev, log = FakeFFDevice(), []
+mm = fresh()
+mm.haptics = m.Haptics(dev, ff_module=real_ff, log=log.append)
+mm.haptics.start()
+dev.write_error = True
+check("a dead actuator costs the buzz and NOT the click",
+      mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.0), [(e.BTN_LEFT, 1)])
+check("...nor the release", mm.translate(e.EV_KEY, e.BTN_THUMB2, 0, 0.1),
+      [(e.BTN_LEFT, 0)])
+check("...having said so, once", len(log), 1)
+
+dev, log = FakeFFDevice(caps=()), []
+mm = fresh()
+mm.haptics = m.Haptics(dev, ff_module=real_ff, log=log.append)
+check("a node advertising no FF_RUMBLE never arms...", mm.haptics.start(), False)
+check("...and the click goes out anyway",
+      mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.0), [(e.BTN_LEFT, 1)])
+
+# --- the one release that never arrives: the pad's node vanishing ------------
+#
+# Every other lost release is caught inside `translate`. A node that is GONE
+# sends nothing at all, so main() has to hand the button back on its behalf --
+# or the replacement pad arrives with BTN_LEFT still down at the kernel.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.0)
+check("release_pointer_click gives back a button the dead node was holding",
+      mm.release_pointer_click(), [(e.BTN_LEFT, 0)])
+check("...once, and then it is empty -- idempotent",
+      (mm.release_pointer_click(), mm.pad_click_down), ([], False))
+check("...and a mapper holding nothing gives back nothing",
+      fresh().release_pointer_click(), [])
+
+# ⚠️ AND main() CALLS IT ON THE ENODEV PATH SPECIFICALLY. A call anywhere else
+# in main() would pass a bare name check while the recovery path stayed broken,
+# so this asks for it inside an `except` handler.
+drain_calls = [node for node in _ast.walk(main_def)
+               if isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute)
+               and node.func.attr == "release_pointer_click"]
+check("main() drains a held mouse button when the pad disappears", len(drain_calls), 1)
+check("...from inside the ENODEV handler, not from somewhere else in the loop",
+      any(sub in drain_calls
+          for handler in _ast.walk(main_def) if isinstance(handler, _ast.ExceptHandler)
+          for sub in _ast.walk(handler)), True)
 
 # --- 🔴 A COMMIT HIT-TESTS IN THE METRIC THE RENDERER DREW IN ---------------
 #

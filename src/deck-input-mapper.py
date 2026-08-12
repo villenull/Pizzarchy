@@ -447,7 +447,8 @@ REPEAT_INTERVAL = 0.15
 # no badge at all.
 #
 # ⚠️ THESE APPLY ONLY WHILE THE OSK IS UP. With the keyboard down the triggers
-# are mouse buttons (TRIGGER_BUTTON_MAP) and the pads drive the system pointer;
+# are mouse buttons (TRIGGER_BUTTON_MAP), the pads drive the system pointer and
+# the RIGHT pad's click is the left mouse button (POINTER_CLICK_BUTTON);
 # nothing on Valve's keyboard says anything about that state.
 #
 # ⚠️ EMITTED AS A COMPLETE TAP ON THE PRESS, and nothing on the release. Same
@@ -505,6 +506,11 @@ OSK_IDLE_TRIGGER_KEYS: dict[str, int] = {"enter": e.KEY_ENTER}
 # ⚠️ NO KEYCODE OF ITS OWN, so EMITTED_KEYS is deliberately untouched: a click
 # commits through the layout core exactly as a trigger does, and every character
 # key it can reach is already declared there.
+#
+# ⚠️ AND IT IS CONSULTED ONLY WHILE THE KEYBOARD IS UP. With the keyboard DOWN
+# the right pad's click is the left mouse button instead (POINTER_CLICK_BUTTON
+# below); `Mapper.translate` routes on `osk_active` and reaches exactly one of
+# the two, never both.
 PAD_CLICK_HALF: dict[int, str] = {
     e.BTN_THUMB: "left",
     e.BTN_THUMB2: "right",
@@ -562,6 +568,38 @@ PAD_HAPTIC_MAGNITUDES: dict[str, tuple[int, int]] = {
     "right": (0, PAD_HAPTIC_MAGNITUDE),
 }
 
+# --- 🆕 WITH THE KEYBOARD DOWN, THE RIGHT PAD'S CLICK IS THE LEFT MOUSE BUTTON
+#
+# Operator, on hardware 2026-08-12: *"i should be able to click now with the
+# right trackpad by pressing down (and getting a haptic response) this is the
+# same as what we did for the keyboard but for the mouse"*. The right pad has
+# driven the pointer since POINTER_AXES existed; pressing it down reached
+# nothing at all, so the only way to click was R2 (TRIGGER_BUTTON_MAP) -- a
+# different finger from the one doing the pointing, on a device where the pad
+# and the trigger are on the same hand.
+#
+# ⛔ DERIVED FROM `PAD_CLICK_HALF`, NOT SPELLED OUT A SECOND TIME. The code is
+# BTN_THUMB2 and it is measured, but this file's entire history with these four
+# names is one-letter mistakes: BTN_THUMBL/BTN_THUMBR are the STICK clicks and
+# BTN_THUMBL is the OSK's Caps binding. Inverting the measured table makes the
+# mouse click and the keyboard's commit the SAME physical switch on the SAME
+# side BY CONSTRUCTION -- they cannot drift, and if the measurement is ever
+# corrected the correction lands in both at once.
+#
+# ⛔ THE RIGHT PAD ONLY. The left pad's click stays the keyboard's alone. The
+# operator asked for the pad that carries the pointer, and a middle- or
+# right-click invented for the other pad would be a binding nothing anywhere
+# advertises -- T8 §9a's rule, applied to a control instead of a badge.
+PAD_CLICK_BUTTONS: dict[str, int] = {half: code for code, half in PAD_CLICK_HALF.items()}
+POINTER_CLICK_HALF = "right"                            # the pad POINTER_AXES reads
+POINTER_CLICK_BUTTON = PAD_CLICK_BUTTONS[POINTER_CLICK_HALF]
+
+# ⚠️ A PRESS AND A RELEASE, NOT A SYNTHESISED TAP -- see `Mapper.translate`. A
+# left button that goes down and straight back up on the press makes dragging, a
+# text selection and every press-and-hold in the installer impossible, and none
+# of that is visible in a test that only asserts "a click happened".
+POINTER_CLICK_KEY = e.BTN_LEFT
+
 # ⚠️ The uinput device declares exactly this set, and emits NOTHING else -- the
 # kernel drops an undeclared code without an error. Every character key the OSK
 # can type therefore has to be in here before a renderer ever draws it, which is
@@ -575,6 +613,11 @@ EMITTED_KEYS = sorted(
     set(BUTTON_MAP.values())
     | set(HAT_MAP.values())
     | set(TRIGGER_BUTTON_MAP.values())
+    # ⚠️ FOLDED IN EXPLICITLY, exactly as the OSK's shortcuts are below and for
+    # the same reason. BTN_LEFT is already here via TRIGGER_BUTTON_MAP today, so
+    # this line changes nothing -- until someone rebinds R2, at which point the
+    # pad click would go dead on the Deck with no error on any side.
+    | {POINTER_CLICK_KEY}
     | set(OSK_SHORTCUTS.values())
     | set(OSK_IDLE_TRIGGER_KEYS.values())
     | (set(osk_layout.OSK_KEYCODES) if osk_layout else set())
@@ -719,6 +762,16 @@ class Mapper:
     # without it, pressing X, then STEAM, then releasing X swallows the release
     # and leaves Backspace held down forever.
     chord_key_down: bool = False
+
+    # Whether a BTN_LEFT we emitted from the RIGHT PAD'S CLICK is still down.
+    #
+    # 🔴 THE INVARIANT, AND IT IS THE WHOLE REASON THIS FIELD EXISTS: true if and
+    # only if we have sent a `POINTER_CLICK_KEY` DOWN with no UP after it. Both
+    # sides of `translate` consult it, so a duplicate press cannot send two
+    # downs and a release we never pressed for cannot send a stray up. A stuck
+    # BTN_LEFT is not a cosmetic fault on a handheld -- it is a machine that
+    # drag-selects everything the pointer passes over and clicks nothing again.
+    pad_click_down: bool = False
 
     # --- pad touch: the badge gate (measured 2026-08-12, see PAD_TOUCH_AXES) --
 
@@ -1211,6 +1264,25 @@ class Mapper:
             return False
         return bool(self.haptics.buzz(half))
 
+    def release_pointer_click(self) -> list[tuple[int, int]]:
+        """Give back a mouse button we are holding. [] if we hold none.
+
+        🔴 FOR THE ONE RELEASE THAT NEVER ARRIVES: the pad's node vanishing
+        (ENODEV) while the thumb is still pressing it. Every other way a release
+        can be lost is caught inside `translate` -- the keyboard opening or
+        closing mid-click routes elsewhere but the guard at the top of that
+        method fires whatever state it is in. A node that is GONE sends nothing
+        at all, ever, so main() has to hand the button back on its behalf before
+        it rebinds. Without this the replacement pad arrives with BTN_LEFT still
+        down at the kernel and every pointer movement from then on is a drag.
+
+        Idempotent, so calling it on a mapper holding nothing is free.
+        """
+        if not self.pad_click_down:
+            return []
+        self.pad_click_down = False
+        return [(POINTER_CLICK_KEY, 0)]
+
     def commit_at(self, half: str) -> list[tuple[int, int]]:
         """Press the key under that side's cursor. THE one commit path.
 
@@ -1269,6 +1341,23 @@ class Mapper:
             if code == OSK_CHORD_PRESS and value == 0 and self.chord_key_down:
                 self.chord_key_down = False
                 return [(BUTTON_MAP[OSK_CHORD_PRESS], 0)]
+            # 🔴 AND SO DOES A HELD MOUSE BUTTON, for the same reason and with a
+            # worse failure. The right pad's click is BTN_LEFT while the keyboard
+            # is DOWN (POINTER_CLICK_BUTTON), and the keyboard can go UP between
+            # that press and its release -- the chord is handled right here,
+            # above the OSK branch, so STEAM+X with a thumb still pressing the
+            # pad is exactly that sequence. Routed to `_osk_event` the release
+            # would be swallowed (it acts on L2's alone) and the desktop would be
+            # left with the left mouse button held down for ever: every
+            # subsequent pointer movement a drag, every click a no-op.
+            #
+            # ⚠️ GATED ON `pad_click_down`, not on the code alone. If we never
+            # emitted the down -- the press landed on the keyboard and committed
+            # a key there -- this must not invent an unpaired UP, and the release
+            # must go on to its normal routing rather than being eaten here.
+            if code == POINTER_CLICK_BUTTON and value == 0 and self.pad_click_down:
+                self.pad_click_down = False
+                return [(POINTER_CLICK_KEY, 0)]
             # STEAM+X toggles the on-screen keyboard. Checked before every
             # other key path so the X in the chord does not also type Backspace.
             #
@@ -1314,6 +1403,41 @@ class Mapper:
         if self.osk_active:
             return self._osk_event(etype, code, value)
         if etype == e.EV_KEY:
+            # --- 🆕 THE RIGHT PAD'S CLICK IS THE LEFT MOUSE BUTTON -----------
+            #
+            # ⚠️ REACHED ONLY WITH THE KEYBOARD DOWN, and that is the entire
+            # condition: `osk_active` above returned into `_osk_event`, where
+            # this same button COMMITS THE HIGHLIGHTED KEY (`PAD_CLICK_HALF`) --
+            # behaviour the operator verified on the panel. One button, two
+            # meanings, and `osk_active` is the only thing choosing between
+            # them; there is no state here that could let both fire.
+            #
+            # ⚠️ NOT GATED ON `pad_touched`, where the keyboard's commit IS.
+            # The reason the commit is gated does not exist here: an untouched
+            # pad draws no cursor and highlights no key, so committing one would
+            # type a letter nothing on screen pointed at -- but the POINTER is
+            # always somewhere, so a click always has a target. Gating it would
+            # buy nothing and hand the documented dead-centre blind spot
+            # (PAD_RELEASE_RESIDUAL) the power to swallow a click, which is the
+            # silent failure this project exists to avoid. A click is also
+            # physically a touch: the switch is under the pad's own surface.
+            if code == POINTER_CLICK_BUTTON:
+                if value != 1:
+                    # A release is handled by the guard at the top of this
+                    # method, whatever state it arrives in; 2 is the pad's own
+                    # autorepeat and is never a new press.
+                    return []
+                if self.pad_click_down:
+                    return []      # already down: one down, one up. See the field.
+                self.pad_click_down = True
+                # 🔴 BUZZ FIRST, EMIT REGARDLESS. `buzz` reports whether anything
+                # was felt and the answer is DELIBERATELY discarded: haptics are
+                # best-effort on hardware that may advertise no FF_RUMBLE at all
+                # (`Haptics.start` says so, once, and disarms). A click that did
+                # not happen because a buzz failed would be a silent swallow of
+                # the one thing the user asked for.
+                self.buzz(POINTER_CLICK_HALF)
+                return [(POINTER_CLICK_KEY, 1)]
             if code in TRIGGER_BUTTON_MAP:
                 if value in (0, 1):
                     return [(TRIGGER_BUTTON_MAP[code], value)]
@@ -3517,6 +3641,15 @@ def main() -> None:
                     print(f"deck-input-mapper: the pad disappeared ({exc}); "
                           "waiting for it to come back",
                           file=sys.stderr, flush=True)
+                    # 🔴 HAND BACK A MOUSE BUTTON THE DEAD NODE WAS HOLDING. A
+                    # pad that vanishes under a pressed thumb never sends the
+                    # release, and `translate` can only give back a release it
+                    # is handed. Left down, BTN_LEFT survives the rebind at the
+                    # KERNEL, and the recovered session drags everything the
+                    # pointer touches. Before anything else here, because the
+                    # keyboard hide below can take a redraw with it.
+                    for key, value in mapper.release_pointer_click():
+                        emit(key, value)
                     # What was on the screen when the pad went away -- read
                     # BEFORE the hide below, because that hide is ours and not
                     # the user's. It decides two things: whether the keyboard

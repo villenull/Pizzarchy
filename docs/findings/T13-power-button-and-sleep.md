@@ -200,6 +200,18 @@ An inhibitor row with `What=handle-power-key` (or `handle-suspend-key`) held by
 a Steam process is the answer. If there is none, `HandlePowerKey=suspend` will
 work in both modes and defect 2 collapses into defect 1's fix.
 
+🆕 **§4.1 lowers the prior on that inhibitor sharply, without closing it.**
+Valve's own design keeps logind out of the way with a **config value**
+(`HandlePowerKey=ignore`) rather than with an inhibitor — that is exactly what
+`steamos-powerbuttond` needs, and Jovian-NixOS says so in a comment on the same
+setting: *"Conflicts with powerbuttond"* (READ). Nothing read in §4 shows Steam
+or gamescope-session taking a `handle-power-key` lock. **Combined with the fact
+that `steamos-powerbuttond` is in none of our three package lists, the simplest
+reading of defect 2 is a MISSING COMPONENT, not a conflict** — and a missing
+component is exactly what a system-wide `HandlePowerKey=suspend` replaces. Still
+INFERRED; the one-command check above is cheap and stays step 1 of the hardware
+batch (`docs/tasks/T13-power-button-and-sleep.md`).
+
 ---
 
 ## 4. Defect 4 — what SteamOS actually does
@@ -456,7 +468,7 @@ has and the project already accepts. Worth a failure-mode row, not a redesign.
 | **2** Gaming Mode dead | Same logind drop-in — **if** nothing holds a `handle-power-key` inhibitor. If Steam does hold one, this row is unresolved and needs §3.2's measurement first | logind drop-in, else **open** | A Hyprland bind cannot reach Gaming Mode at all; the mapper does not run there either (it is `WantedBy=wayland-session@hyprland.desktop.target`, `src/deck-session.sh:423`) |
 | **3/4** no password on resume | Ship the `omarchy-sleep-lock.service` mask instead of leaving it hand-applied | **`src/deck-session.sh`** (a `systemctl --global mask` under `/etc/systemd/user/`) **and** T5 `configure_deck` + `/etc/skel`. `docs/tasks/T5-fork-plan.md` §5.6 already specifies exactly this and calls out the race: upstream enables the unit at **first run**, after our phase, so a `--global` mask "is the version that cannot lose the race" | A per-user `systemctl --user mask` loses to first-run enabling on a fresh install. The hand-applied mask on the test Deck is *not* the shipped fix |
 | **3** resume to the right session | Verification + a note that autologin restores the **default** session, not the last one | Nothing to build if the compositor survives; **`src/deck-session.sh`** if it does not and we decide to persist last-session | — |
-| *(optional)* long press → power off / menu | `HandlePowerKeyLongPress=` in the same drop-in | Same logind drop-in | ⚠️ **Blocked on §2.2's capture** — if the button never reports a sustained hold, this setting is dead on arrival |
+| *(optional)* long press → power off / menu | `HandlePowerKeyLongPress=` in the same drop-in | Same logind drop-in | ⚠️ **Blocked on §2.2's capture** — if the button never reports a sustained hold, this setting is dead on arrival. ⚠️ And SteamOS's **1 s** is `powerbuttond`'s `alarm(1)` (§4.1), **not** systemd's `LONG_PRESS_DURATION`, which is still unread. Do not write either number into code as if it were the other. `docs/tasks/T13-power-button-and-sleep.md` D1 recommends shipping nothing here in v1 |
 | *(unchanged)* the 5 s blank on the lock screen | Already owned by T12 patch `0010-lock-blank-timer-20s` (`src/omarchy-deck-patches/patches/`) | T12 | Not a T13 concern; listed so nobody re-opens it |
 
 **No upstream QML change is needed for any of the four defects.** That is worth
