@@ -347,3 +347,51 @@ keyboard knows a controller exists — the property that makes one layer drive
 - The layer-shell overlay cannot take input without stealing focus from the
   field being typed into — that is a design fork, not a bug
 - Suppressing the system pointer turns out to need compositor cooperation
+
+---
+
+## 9. 🆕 Follow-on: visual parity with SteamOS's keyboard (operator request, 2026-08-11)
+
+**Requested after using ours on hardware.** The operator supplied a screenshot of
+Valve's Desktop-Mode keyboard as the reference. Ours works; it does not *look*
+like the thing a Deck owner recognises.
+
+### The constraint, stated first because it bounds the whole task
+
+⛔ **Do not copy Valve's artwork, icons, glyph images or theme assets.**
+`docs/findings/P16-redistribution-and-trademark.md` already settled this: the ISO
+redistributes whatever it carries, so lifted assets are a licensing problem at
+release rather than a styling question now. **Draw our own glyphs in the same
+visual language.** The affordance is what matters and the affordance is not
+copyrightable; the artwork is.
+
+### What to match — structural, all reimplementable from scratch
+
+| Element | Reference behaviour | Notes |
+|---|---|---|
+| Symbol row | Digits `1`–`0` with their shifted symbols shown **above** the digit on the same key | Ours has the digits; the second legend is the visible difference |
+| Key treatment | Dark rounded keys, light glyphs, one clearly highlighted key under each cursor | We already track two cursors — the highlight is the part users read |
+| Split halves | Left/right halves visually separated, matching the two-trackpad model | Ours is already split logically; make the split *visible* |
+| **Controller-glyph hints** | Modifier keys carry the button that fires them — Backspace, Enter and Shift each show their button | **The highest-value item.** It is what makes the keyboard self-teaching, and it is pure information, no artwork needed |
+| Bottom utility row | Arrows, a paste affordance, a "move the keyboard" affordance | Decide which we actually support before drawing them — a dead key is worse than a missing one |
+
+⚠️ **Match the affordances, not the pixels.** A user who has used a Deck should
+recognise the *shape* of the thing and know which button does what without
+hunting. Pixel-identity is neither required nor wanted.
+
+### Where it lands
+
+`src/deck_osk_layout.py` owns the layout tables and hit-testing;
+`src/deck_osk_wayland.py` and `src/deck_osk_tty.py` render. The legends and glyph
+hints are layout data, so most of this is one file — **and the TTY renderer must
+degrade honestly**, since a bare console cannot draw rounded keys. Do not let a
+styling change break the installer's keyboard, which is the one with no fallback.
+
+### Done when
+
+- [ ] Shifted symbols visible on the digit row, both renderers
+- [ ] Modifier keys show their controller button, using **our** glyphs
+- [ ] The split between halves is visible, not just logical
+- [ ] `test-deck-osk-layout.py` still green, extended to cover the new legends
+- [ ] The TTY renderer still passes `test/osk-tty-e2e.py` by hand
+- [ ] **[H]** the operator looks at it on the Deck and says it reads as familiar
