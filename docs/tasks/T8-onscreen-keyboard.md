@@ -486,6 +486,78 @@ row 5   ☺        [Ⓨ] ————— space (wide) —————     ◀  �
 - Row 4's right `Shift` and row 5's `Paste`/`Move` are `[obscured]`. An earlier
   still showed all three, so they exist; their exact spans do not.
 
+### 9g. 🎯 THE DEFINITIVE REFERENCE — six states captured at native resolution
+
+**Captured 2026-08-12 on the Deck itself** with `grim`, driving Valve's own
+keyboard through the extest bridge: idle, Shift held, Caps latched, left pad
+touched, right pad touched, plus cursor states. Full-resolution and uncropped,
+so **every `[obscured]` item in §9d and every "unresolved" item in §9f is now
+settled**. This section supersedes both where they disagree.
+
+⚠️ **The images are NOT vendored into this repo** — `docs/findings/
+P16-redistribution-and-trademark.md`. Transcribed only, and we draw our own
+glyphs.
+
+#### The layout — ONE CONTINUOUS GRID, full width, no split
+
+```
+row 1  [~`] [!1] [@2] [#3] [$4] [%5] [^6] [&7] [*8] [(9] [)0] [_-] [+=]  (Ⓧ) Backspace
+row 2  [Tab]  q  w  e  r  t  y  u  i  o  p  [{[] [}]] [|\]
+row 3  [Caps + L3 icon]  a  s  d  f  g  h  j  k  l  [:;] ["']      [R2] Enter
+row 4  [Shift  L2]  z  x  c  v  b  n  m  [<,] [>.] [?/]           [L2  Shift]
+row 5  [☺]  (Ⓨ) ———— space, wide ————  [▲/◀] [▼/▶]  [Paste]  [Move + icon]
+```
+
+🔴 **There is NO GAP between a left and right half.** One continuous keyboard
+spanning the full width. Ours renders two half-grids with a gap — the operator
+called this out first, and it is the single most visible difference.
+
+**Resolved unknowns:** `` ~` `` exists · `Tab` exists · the `R2` key reads
+**`Enter`** · the arrow cluster is **two keys with dual legends**, not four
+keys · there **is** an `☺` emoji key at the far left of row 5 (ours has none) ·
+a **`Move`** key with a keyboard icon sits right of `Paste`.
+
+#### 🔴 The legend rule — ours is WRONG, and it is wrong on every screen
+
+Ours draws both faces permanently. Valve swaps them:
+
+| State | Number/punctuation/arrow keys | Letters |
+|---|---|---|
+| **Unshifted** | **dual legend** — shifted small ABOVE, base large below | lowercase |
+| **Shift active** | **ONLY the shifted face**, larger, centred (`~ ! @ #`, `{ } \|`, `▲ ▼`) | UPPERCASE |
+| **Caps active** | **unchanged — dual legends stay** | UPPERCASE |
+
+⚠️ **Caps ≠ Shift, and that is the subtle part.** Caps changes *letter case
+only*; Shift changes symbols, case **and the arrow keys**. Note the
+consequence: **`▲`/`▼` are the SHIFTED faces of `◀`/`▶`** — Shift is how a
+user reaches up/down. Any layout that gives the arrows their own keys makes
+Shift's arrow behaviour unreachable.
+
+#### Active-modifier styling, and the cursor
+
+- **An active modifier turns BLUE** — both `Shift` keys under Shift, the `Caps`
+  key when latched. Nothing else changes colour.
+- **The cursor is a WHITE (inverted) key face PLUS a small BLUE DOT** drawn at
+  the thumb's precise position on that key. Two cursors, one per pad, both
+  visible at once. Ours has no equivalent of the dot.
+- Action keys (`Tab`, `Caps`, `Shift`, `Backspace`, `Enter`, `Move`) are drawn
+  **black**; letter keys are dark grey.
+
+#### ✅ Badge gating — confirmed, symmetric, and per-pad
+
+| Pad touched | Hidden | Still shown |
+|---|---|---|
+| left | **both** `L2` badges (both Shift keys) | `R2`, `Ⓧ`, `Ⓨ`, `L3` |
+| right | the `R2` badge | `L2` ×2, `Ⓧ`, `Ⓨ`, `L3` |
+| neither | — | everything |
+
+**Only the trigger badges gate.** `Ⓧ`, `Ⓨ` and `L3` are always visible, which
+fits §9e's semantics exactly: face buttons and the stick click are unconditional
+shortcuts, triggers are contextual.
+
+✅ **And it is implementable** — see §9e: a lift reports exactly `0,0`,
+measured on hardware, so "untouched" is a real state and not a timeout.
+
 ### 9f. 📸 REFERENCE SCREENSHOT, idle state — supersedes the video transcription
 
 **Operator-supplied 2026-08-12, captured with NO trackpad touched**, i.e. the
