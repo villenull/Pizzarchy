@@ -2429,17 +2429,33 @@ behaviours — the STEAM/QAM bindings that spawn `omarchy-menu` (§5.23), and th
 layer-shell OSK (`deck_osk_wayland.py`, T8 step 7). **A load-bearing justification
 became untrue and nothing failed loudly.**
 
-### Blast radius — one part measured, one part inferred
+### Blast radius — 🔴 ALL OF IT MEASURED, and it is release-blocking
 
-- ✅ **Measured:** STEAM and QAM are dead on a fresh boot until the mapper is
-  restarted.
-- ⚠️ **Inferred, NOT yet measured:** **STEAM+X likely fails too.**
-  `deck_osk_wayland.py` needs `WAYLAND_DISPLAY` to bind a layer surface, and
-  squeekboard — the fallback — needs a Wayland connection as well. If so, **a
-  freshly booted Deck has no on-screen keyboard**, on a device whose entire
-  premise is having no physical one. The operator's "all three work" was
-  recorded **after** the restart, so it does not settle this.
-  ➡️ **One test settles it: reboot, and press STEAM+X before touching anything.**
+Confirmed by a deliberate cold boot 2026-08-11, pressing the buttons **before**
+touching anything else:
+
+| On a fresh boot to the desktop | Result |
+|---|---|
+| **STEAM+X** (raise the keyboard) | 🔴 **nothing** |
+| **STEAM** (app launcher) | 🔴 nothing |
+| **QAM** (Omarchy menu) | 🔴 nothing |
+| All three, after `systemctl --user restart deck-input-mapper` | ✅ all work |
+
+🔴 **A freshly booted Deck therefore has NO ON-SCREEN KEYBOARD**, on a device
+whose entire premise is having no physical one. The squeekboard fallback does
+not save it — it needs a Wayland connection too. **This blocks release**, and it
+is worse than the §5.24 lock defect it resembles, because it needs no unlucky
+timing: it is the *normal* path.
+
+⚠️ **This was recorded as "inferred, probably" for one commit**, because the
+operator's earlier "all three work" came *after* a restart and could not settle
+it. The cold-boot test took two minutes and turned a hedge into a blocker. **The
+hedge was right to exist and wrong to keep.**
+
+⚠️ **The Gaming→Desktop switch path is NOT exempt**, though it is untested: that
+path starts a fresh Hyprland session through sddm, so the same race applies.
+Assume it is broken there too until someone boots into Gaming Mode, switches to
+the desktop, and presses STEAM+X without restarting anything.
 
 ### The fix, not yet implemented
 
