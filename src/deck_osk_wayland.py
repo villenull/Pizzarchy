@@ -148,6 +148,20 @@ ACCENT = {"left": (0.38, 0.78, 0.92, 1.0), "right": (0.98, 0.72, 0.30, 1.0)}
 KEY_PAD = 3.0
 CORNER = 6.0
 
+# --- visual parity with SteamOS's keyboard (T8 §9, operator request) --------
+#
+# ⛔ Not Valve's artwork. Every mark below is drawn with primitives this file
+# already has -- a rounded rect and Cairo's own font API -- naming OUR OWN
+# "L2"/"R2" strings, the same ones the TTY renderer abbreviates to a single
+# letter for lack of room. `docs/findings/P16-redistribution-and-trademark.md`.
+# A wayland surface has pixels the TTY does not, so unlike the console
+# renderer this one shows both dual-legend faces AND every hint regardless of
+# highlight -- there is no width budget forcing a choice here.
+SECONDARY_TEXT = (0.62, 0.62, 0.68, 1.0)   # dimmer than KEY_TEXT: a hint, not the answer
+HINT_BADGE_FILL = (0.30, 0.30, 0.36, 1.0)  # same tone as KEY_EDGE -- part of the key, not a flag
+HINT_BADGE_TEXT = (0.92, 0.92, 0.95, 1.0)
+GUTTER_LINE = (0.30, 0.30, 0.36, 0.6)
+
 
 def draw(cr, keyboard: osk.OnScreenKeyboard, cursors: osk.Cursors,
          width: float, height: float, gutter: float = DEFAULT_GUTTER) -> None:
@@ -155,6 +169,19 @@ def draw(cr, keyboard: osk.OnScreenKeyboard, cursors: osk.Cursors,
     cr.set_source_rgba(*BACKDROP)
     cr.rectangle(0, 0, width, height)
     cr.fill()
+
+    # The split, made VISIBLE rather than only logical (T8 §9): a thin line
+    # down the middle of the gutter, on top of the backdrop and under every
+    # key -- the gutter has no keys drawn in it, so nothing else contests
+    # this pixel column.
+    x0_left, half_w = half_bounds(width, gutter)["left"]
+    if gutter > 0:
+        divider_x = x0_left + half_w + gutter / 2.0
+        cr.set_source_rgba(*GUTTER_LINE)
+        cr.set_line_width(1.5)
+        cr.move_to(divider_x, 4.0)
+        cr.line_to(divider_x, max(4.0, height - 4.0))
+        cr.stroke()
 
     highlights = {
         half: keyboard.locate(half, *cursors.position(half))
@@ -173,6 +200,26 @@ def draw(cr, keyboard: osk.OnScreenKeyboard, cursors: osk.Cursors,
         cr.set_source_rgba(*KEY_EDGE)
         cr.set_line_width(1.0)
         cr.stroke()
+
+        # Shifted-symbol legend (T8 §9): the face a digit/punctuation key is
+        # NOT currently showing, drawn small in the top-right corner -- the
+        # way a real keycap prints both faces at once rather than waiting for
+        # a shift press to reveal the second one exists. Letters are excluded
+        # by `secondary_face` itself, so this line does nothing for them.
+        secondary = keyboard.secondary_face(key)
+        if secondary:
+            cr.set_font_size(max(8.0, h * 0.24))
+            sx = cr.text_extents(secondary)
+            cr.move_to(x + w - sx.width - sx.x_bearing - KEY_PAD - 3,
+                       y + KEY_PAD + 3 - sx.y_bearing)
+            cr.set_source_rgba(*SECONDARY_TEXT)
+            cr.show_text(secondary)
+
+        # Controller-glyph hint (T8 §9's highest-value item): which trigger
+        # fires this key, for the three keys a passphrase correction reaches
+        # for constantly -- shift, backspace, enter.
+        if key.hint:
+            _hint_badge(cr, key.hint, x + KEY_PAD + 2, y + h - KEY_PAD - 2, h)
 
         label = keyboard.face(key)
         cr.set_font_size(_fit(cr, label, w - 2 * KEY_PAD, h - 2 * KEY_PAD))
@@ -205,6 +252,26 @@ def _rounded(cr, x, y, w, h, r) -> None:
     cr.arc(x + r, y + h - r, r, pi / 2, pi)
     cr.arc(x + r, y + r, r, pi, 3 * pi / 2)
     cr.close_path()
+
+
+def _hint_badge(cr, hint: str, x: float, y: float, key_height: float) -> None:
+    """A small pill naming the trigger that fires this key, hanging from
+    `(x, y)` -- the key's bottom-left corner, inside its own padding, so the
+    badge is unmistakably PART of the key rather than a separate mark."""
+    size = max(9.0, key_height * 0.22)
+    cr.set_font_size(size)
+    extents = cr.text_extents(hint)
+    pad_x, pad_y = 3.0, 2.0
+    badge_w = extents.width + 2 * pad_x
+    badge_h = size + 2 * pad_y
+    badge_y = y - badge_h
+    _rounded(cr, x, badge_y, badge_w, badge_h, min(4.0, badge_h / 2))
+    cr.set_source_rgba(*HINT_BADGE_FILL)
+    cr.fill()
+    cr.set_source_rgba(*HINT_BADGE_TEXT)
+    cr.move_to(x + pad_x - extents.x_bearing,
+               badge_y + (badge_h - extents.height) / 2 - extents.y_bearing)
+    cr.show_text(hint)
 
 
 def _fit(cr, label: str, w: float, h: float) -> float:

@@ -64,6 +64,7 @@ class Key:
     target: str = ""  # layer name, for action == "layer"
     span: int = 1
     is_letter: bool = False  # caps lock applies to these and nothing else
+    hint: str = ""  # "" -> no controller-glyph hint; else HINT_LEFT | HINT_RIGHT
 
     @property
     def types(self) -> bool:
@@ -103,9 +104,27 @@ def sym(code: int, base: str, shifted: str) -> Key:
     return Key(code=code, label=base, shift_label=shifted)
 
 
-def act(action: str, label: str, span: int = 1, target: str = "", code: int = 0) -> Key:
+def act(action: str, label: str, span: int = 1, target: str = "", code: int = 0,
+        hint: str = "") -> Key:
     """A key that changes state (shift/layer/close) or types a control key."""
-    return Key(code=code, label=label, action=action, target=target, span=span)
+    return Key(code=code, label=label, action=action, target=target, span=span,
+               hint=hint)
+
+
+# --- controller-glyph hints (T8 §9, operator request 2026-08-11) -------------
+#
+# ⛔ Not Valve's artwork -- these are two of OUR OWN strings, not an icon lifted
+# from anywhere (docs/findings/P16-redistribution-and-trademark.md). "L2"/"R2"
+# is what this project calls the triggers everywhere else (docs/PROGRESS.md
+# §7), so a hint reading "R2" teaches the same vocabulary the rest of the repo
+# already uses rather than inventing a second one.
+#
+# ⚠️ MUST MATCH TRIGGER_HALF, defined further down this file: a hint naming the
+# WRONG trigger would be worse than no hint at all -- confidently wrong rather
+# than merely absent. `test-deck-osk-layout.py` asserts every hinted key's
+# glyph agrees with the half it is actually drawn in, on every layer.
+HINT_LEFT = "L2"
+HINT_RIGHT = "R2"
 
 
 # --- the layouts -------------------------------------------------------------
@@ -129,12 +148,18 @@ DIGITS_LEFT = tuple(_D[c] for c in "12345")
 DIGITS_RIGHT = tuple(_D[c] for c in "67890")
 
 # The function row, shared in shape by both layers so muscle memory carries.
-SHIFT_KEY = act("shift", "shift", span=2)
+#
+# Shift, Backspace and Enter carry a controller-glyph hint (T8 §9): they are
+# the three keys a user reaches for constantly while correcting a passphrase,
+# and each lives on exactly one half in EVERY layer it appears in below -- so
+# one hint per key is honest in every layer, not just the one it was written
+# against.
+SHIFT_KEY = act("shift", "shift", span=2, hint=HINT_LEFT)
 CLOSE_KEY = act("close", "close", span=2)
 SPACE_KEY = act("", "space", span=3, code=e.KEY_SPACE)
 TAB_KEY = act("", "tab", code=e.KEY_TAB)
-BACKSPACE_KEY = act("", "back", code=e.KEY_BACKSPACE)
-ENTER_KEY = act("", "enter", code=e.KEY_ENTER)
+BACKSPACE_KEY = act("", "back", code=e.KEY_BACKSPACE, hint=HINT_RIGHT)
+ENTER_KEY = act("", "enter", code=e.KEY_ENTER, hint=HINT_RIGHT)
 
 LETTERS = Layer(
     name="letters",
@@ -296,6 +321,26 @@ class OnScreenKeyboard:
         if key.shift_label and self.shift_applies_to(key):
             return key.shift_label
         return key.label
+
+    def secondary_face(self, key: Key) -> str:
+        """The OTHER face of a dual-legend key -- the one `face()` is not
+        currently showing -- or "" if this key has none (T8 §9: "shifted
+        symbols shown above the digit on the same key").
+
+        Digits and punctuation carry both faces AT ONCE, the way a real
+        keycap does -- "1" and "!" on the same key -- so a renderer with room
+        can draw the one `face()` is not returning as a small secondary
+        legend, without waiting for a shift press to reveal it exists.
+
+        Letters are deliberately excluded: upper and lower case are the same
+        glyph rotated, not a different character, and a redundant "Q" drawn
+        over every one of 26 keys is clutter this was written to avoid. Action
+        keys (space/tab/shift itself/…) have no `shift_label` at all, so they
+        fall out of the `not key.shift_label` check with no special-casing.
+        """
+        if key.is_letter or not key.shift_label:
+            return ""
+        return key.shift_label if self.face(key) == key.label else key.label
 
     def key_at(self, half: str, x: float, y: float) -> Key | None:
         return key_at(self.layer, half, x, y)

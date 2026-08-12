@@ -1103,5 +1103,159 @@ check("stop() ends a live watcher", live.poll() is not None, True)
 check("and forgets it", auto.fileno(), None)
 check("stop() twice is still a no-op", auto.stop(), None)
 
+# --- lock_state_from_monitors: reading Hyprland's own ground truth -----------
+#
+# `docs/findings/T9-lock-service-mitigation.md` §1.3 traced this straight into
+# Hyprland's source: `solitaryBlockedBy` is `null` with no blockers at all,
+# else a JSON array of names, and "LOCK" appears in it iff
+# `g_pSessionLockManager->isSessionLocked()`. Every shape below is one this
+# module has to tell apart correctly, or the unlock signal is either missed
+# (stuck up) or invented (hidden while still locked -- the one direction
+# CLAUDE.md's request forbids).
+
+LOCKED_ONE_MONITOR = '[{"name": "eDP-1", "solitaryBlockedBy": ["LOCK"]}]'
+UNLOCKED_NULL = '[{"name": "eDP-1", "solitaryBlockedBy": null}]'
+UNLOCKED_OTHER_REASON = '[{"name": "eDP-1", "solitaryBlockedBy": ["WORKSPACE"]}]'
+TWO_MONITORS_ONE_LOCKED = ('[{"name": "eDP-1", "solitaryBlockedBy": null}, '
+                           '{"name": "DP-1", "solitaryBlockedBy": ["LOCK"]}]')
+
+check("a monitor whose solitaryBlockedBy names LOCK reads as locked",
+      m.lock_state_from_monitors(LOCKED_ONE_MONITOR), True)
+check("solitaryBlockedBy: null reads as unlocked, not unknown",
+      m.lock_state_from_monitors(UNLOCKED_NULL), False)
+check("a different blocker (not LOCK) still reads as unlocked",
+      m.lock_state_from_monitors(UNLOCKED_OTHER_REASON), False)
+check("ANY monitor holding the lock is enough on a multi-monitor read",
+      m.lock_state_from_monitors(TWO_MONITORS_ONE_LOCKED), True)
+check("an empty monitor list reads as unlocked", m.lock_state_from_monitors("[]"), False)
+check("malformed JSON is UNKNOWN, not unlocked", m.lock_state_from_monitors("{not json"), None)
+check("a JSON object instead of a list is unknown -- the shape changed",
+      m.lock_state_from_monitors('{"solitaryBlockedBy": ["LOCK"]}'), None)
+check("a non-dict monitor entry is skipped, not fatal",
+      m.lock_state_from_monitors('["not a monitor object"]'), False)
+check("empty input is unknown", m.lock_state_from_monitors(""), None)
+
+# --- read_lock_state: the one bounded, blocking subprocess call --------------
+
+check("a real hyprctl-shaped process's stdout is parsed",
+      m.read_lock_state(argv=(sys.executable, "-c",
+                              f"print({LOCKED_ONE_MONITOR!r})")), True)
+check("a nonzero exit is treated as unknown, not unlocked",
+      m.read_lock_state(argv=(sys.executable, "-c",
+                              f"import sys; print({UNLOCKED_NULL!r}); sys.exit(1)")),
+      None)
+check("a binary that does not exist is unknown, never raises",
+      m.read_lock_state(argv=("/nonexistent/hyprctl", "-j", "monitors")), None)
+check("a process that outlasts the timeout is unknown, never blocks forever",
+      m.read_lock_state(argv=(sys.executable, "-c", "import time; time.sleep(5)"),
+                        timeout=0.2),
+      None)
+
+# --- LockWatcher: the edge-trigger, throttled and self-correcting -----------
+
+
+def queue_reader(*results):
+    """A fake `reader` -- each call to tick() that actually polls consumes
+    one queued result, in order. Running out raises, so a test that expected
+    fewer polls than it got fails loudly instead of returning a stale value."""
+    values = list(results)
+
+    def reader():
+        return values.pop(0)
+    return reader
+
+
+lw = m.LockWatcher(interval=10.0)
+check("a fresh watcher is not armed", lw.armed, False)
+check("an unarmed watcher never polls or fires, however long is passed",
+      lw.tick(1_000_000.0, reader=queue_reader()), False)
+check("...and its deadline is None -- nothing to wait for", lw.next_deadline(), None)
+
+lw.start(now=0.0)
+check("start() arms it", lw.armed, True)
+check("start() checks right away -- summoned-while-locked is the common case",
+      lw.next_deadline(), 0.0)
+check("start() clears any earlier saw_lock", lw.saw_lock, False)
+
+# The FIRST poll observes LOCKED: no edge yet, but the state latches.
+check("a LOCKED reading reports no edge -- it must not hide the keyboard",
+      lw.tick(0.0, reader=queue_reader(True)), False)
+check("...and is remembered", lw.saw_lock, True)
+check("the next check is scheduled one interval out", lw.next_deadline(), 10.0)
+
+# Asking again before the interval elapses must NOT poll -- queue_reader()
+# with no values raises if it is called, so this also proves the throttle.
+check("polling again before the interval is due does nothing, and does not "
+      "even call the reader", lw.tick(5.0, reader=queue_reader()), False)
+check("saw_lock is unaffected by a tick that did not poll", lw.saw_lock, True)
+
+# Still locked on the next legitimate poll: still no edge.
+check("a SECOND locked reading still reports no edge",
+      lw.tick(10.0, reader=queue_reader(True)), False)
+check("saw_lock stays latched", lw.saw_lock, True)
+
+# NOW it unlocks. This is the one and only case that must report True.
+check("LOCKED -> UNLOCKED is exactly the edge that fires",
+      lw.tick(20.0, reader=queue_reader(False)), True)
+check("the edge consumes saw_lock -- it will not fire twice for one unlock",
+      lw.saw_lock, False)
+check("a further UNLOCKED reading reports no edge -- there was nothing to "
+      "transition FROM", lw.tick(30.0, reader=queue_reader(False)), False)
+
+# ⚠️ THE PROPERTY THE WHOLE DESIGN EXISTS FOR: a keyboard shown in an ALREADY
+# unlocked desktop, that never observes a LOCK, must NEVER report an edge --
+# there is nothing to have unlocked from. Getting this backwards would hide
+# the keyboard on some other read entirely, which is the failure this
+# mechanism must not have.
+lw2 = m.LockWatcher(interval=10.0)
+lw2.start(now=0.0)
+never_locked = queue_reader(False, False, False, False)
+saw_edge = False
+t = 0.0
+for _ in range(4):
+    if lw2.tick(t, reader=never_locked):
+        saw_edge = True
+    t += 10.0
+check("a keyboard that never observed LOCK never reports an unlock edge",
+      saw_edge, False)
+
+# A reading of None (hyprctl missing, wrong compositor, timed out) must leave
+# saw_lock exactly where it was -- CLAUDE.md's "cannot leave the keyboard
+# stuck" requirement, applied to the state machine directly: the safe
+# failure is "does not auto-hide", never a spurious hide while still locked.
+lw3 = m.LockWatcher(interval=10.0)
+lw3.start(now=0.0)
+lw3.tick(0.0, reader=queue_reader(True))
+check("still locked before the unknown reading", lw3.saw_lock, True)
+check("an unknown reading (None) reports no edge",
+      lw3.tick(10.0, reader=queue_reader(None)), False)
+check("...and does not clear saw_lock -- a later real reading can still fire",
+      lw3.saw_lock, True)
+check("the very next legitimate poll can still detect the real unlock",
+      lw3.tick(20.0, reader=queue_reader(False)), True)
+
+# stop() disarms unconditionally, from any state.
+lw4 = m.LockWatcher(interval=10.0)
+lw4.start(now=0.0)
+lw4.tick(0.0, reader=queue_reader(True))
+lw4.stop()
+check("stop() disarms", lw4.armed, False)
+check("stop() clears saw_lock too -- a re-show must start from scratch",
+      lw4.saw_lock, False)
+check("a stopped watcher's deadline is None", lw4.next_deadline(), None)
+check("ticking a stopped watcher never polls or fires",
+      lw4.tick(999.0, reader=queue_reader()), False)
+
+# start() while already armed re-arms cleanly -- the shape a real re-show
+# takes (hide, then show again) rather than a fresh object every time.
+lw5 = m.LockWatcher(interval=10.0)
+lw5.start(now=0.0)
+lw5.tick(0.0, reader=queue_reader(True))
+check("mid-sequence: locked once", lw5.saw_lock, True)
+lw5.start(now=100.0)   # hidden and re-shown
+check("re-starting clears the earlier LOCK -- it belongs to the last showing",
+      lw5.saw_lock, False)
+check("re-starting resets the poll clock too", lw5.next_deadline(), 100.0)
+
 print(f"\n{'PASS' if FAILURES == 0 else 'FAILED'} — {FAILURES} failure(s)")
 sys.exit(1 if FAILURES else 0)
