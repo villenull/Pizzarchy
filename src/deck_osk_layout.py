@@ -53,6 +53,43 @@ THE MODEL -- ONE CONTINUOUS GRID, NOT TWO HALF-GRIDS (T8 §9g)
     columns still fits a dual legend on a one-cell key ("1 !" is 3 characters
     against a highlighted budget of KEY_CELL-2 = 3), so no legend is lost.
 
+TWO WIDTHS PER KEY, AND THAT IS DELIBERATE (T8 §9g, metrics §2)
+    🔴 Added 2026-08-12. A key carries BOTH `span` (integer cells) and `units`
+    (a float, visual width). They are not redundant and neither can be derived
+    from the other -- the backtick key is one CELL and 0.52 UNITS; Tab is
+    three cells and 1.03 units. They exist because the cell grid was doing two
+    unrelated jobs:
+
+      `span`   ADDRESSING and the TTY's own layout. Integer, because a text
+               console has integer columns and because 16 x 5 = 80 is the
+               installed TTY's entire width with nothing spare. Not negotiable:
+               `test-deck-osk-tty.py` and `test-osk-install-layout.sh` assert
+               that 80 as an equality, and this keyboard is how a user types a
+               Wi-Fi passphrase with no physical keyboard.
+      `units`  VISUAL WIDTH for a pixel renderer, in multiples of one letter
+               key. Measured off Valve's own keyboard; a 16-cell integer grid
+               cannot express 0.52 or 1.71, and forcing it to try is what made
+               ours draw `Tab` and `Caps` three times a letter's width when the
+               reference draws them at 1.03 and 1.36.
+
+    ⚠️ ROWS DIFFER IN UNITS, AND EACH ROW IS NORMALISED TO THE FULL WIDTH ON
+    ITS OWN. `Layer.width` (cells) is identical for every row; `row_units` is
+    NOT -- 14.02 to 14.23 across the five. That is not sloppiness in the
+    measurement, it is what Valve's pixels do: re-measured from `01-idle.png`,
+    every row's fill spans exactly x=5..1273, while a unit key is 85px wide in
+    row 1 and 86-87px in rows 2-4. The fixed keys are fixed and the unit keys
+    absorb the remainder, which is why the rows do not line up vertically.
+
+    A renderer therefore scales EACH ROW by `width / row_units(row)`. Doing it
+    once for the whole layer would reintroduce a ragged right edge.
+
+    ⚠️ A PIXEL RENDERER MUST ALSO HIT-TEST IN UNITS -- `locate(..., metric=
+    "units")`. Drawing by units while hit-testing by cells puts the cursor's
+    dot up to half a key away from the key it lights up. The two metrics agree
+    on WHICH KEYS each pad can reach (`half_units` interpolates the cell split
+    onto the row's own key boundaries); they disagree on where the boundaries
+    fall inside a half, and each renderer must ask for the one it draws.
+
 SHIFT AND CAPS ARE TWO DIFFERENT MODIFIERS (T8 §9g)
     ⚠️ THE SUBTLE PART, AND THE ONE §9g SINGLES OUT AS EASY TO GET WRONG.
     They are not two settings of one dial:
@@ -89,6 +126,12 @@ from evdev import ecodes as e
 
 # --- the pieces --------------------------------------------------------------
 
+# How far apart the widest and narrowest rows may be, in units, before a layer
+# is refused. The reference's own five rows span 0.21 (14.02..14.23), so this
+# has to admit that; adding, dropping or fat-fingering a key moves a row by at
+# least 0.5, so it still catches every mistake that matters.
+ROW_UNITS_TOLERANCE = 0.4
+
 
 @dataclass(frozen=True)
 class Key:
@@ -106,15 +149,25 @@ class Key:
     action: str = ""  # "" types; else shift|caps|layer|close|emoji|move
     target: str = ""  # layer name, for action == "layer"
     span: int = 1
+    # VISUAL width, in multiples of one letter key, measured off the reference
+    # (metrics §2 + the re-measurement in this module's header). Independent of
+    # `span`, which is the ADDRESSING/TTY width -- see the header. A key that
+    # gives one and not the other is a key drawn at the wrong size, so every
+    # non-unit key below states both.
+    units: float = 1.0
     is_letter: bool = False  # caps applies to these and nothing else
     # Modifier keycodes held around this key's own code. Paste is the only user
     # today; it exists as a field rather than a special case so the next one
     # does not need a second mechanism.
     modifiers: tuple[int, ...] = ()
-    # T8 §9g: "Action keys (Tab, Caps, Shift, Backspace, Enter, Move) are drawn
-    # BLACK; letter keys are dark grey." That list is a MEASUREMENT, not a rule
-    # to re-derive -- space, Paste, the emoji key and the arrows are absent
-    # from it and are drawn like letter keys -- so it is carried as data.
+    # T8 §9g: some keys are drawn BLACK (#000000), the rest dark grey
+    # (#0E141B). ⚠️ THIS IS A MEASUREMENT AND IT DOES NOT REDUCE TO A RULE --
+    # metrics §2 sampled row 5 twice, at two heights, to rule out a sampling
+    # artifact, and got: `☺`, `◀`, `▶` and `Paste` BLACK; `space` and `Move`
+    # GREY. So `Move` is grey despite being a special-function key and `Paste`
+    # is black despite not modifying anything. Carried as data per key; do not
+    # invent a predicate that "explains" it, because the next key added would
+    # then be classified by a rule that is not true.
     is_action: bool = False
     hint: str = ""  # "" -> no controller-glyph hint; else one of HINT_*
     # T8 §9g draws two badge SHAPES and the distinction is semantic, not
@@ -156,6 +209,26 @@ class Layer:
                 f"layer {self.name!r} split {self.split} must fall strictly "
                 f"inside 0..{self.width}, or one pad addresses no keys at all"
             )
+        if any(key.units <= 0 for row in self.rows for key in row):
+            # A zero- or negative-width key is invisible or inverts the row's
+            # cumulative bounds, and either would be drawn without complaint.
+            raise ValueError(
+                f"layer {self.name!r} has a key with units <= 0; a visual "
+                "width must be positive"
+            )
+        totals = [self.row_units(i) for i in range(len(self.rows))]
+        if max(totals) - min(totals) > ROW_UNITS_TOLERANCE:
+            # ⚠️ NOT an equality, unlike the cell check above: the reference's
+            # own rows really do differ, 14.02 to 14.23 (0.21). Each row is
+            # normalised to the full width on its own, so a wrong `units`
+            # rescales that row silently instead of leaving a visible hole.
+            # This is the only thing that can catch it. The tolerance is loose
+            # enough for the measurement and far tighter than adding, dropping
+            # or mis-typing a key, which all move a row by >= 0.5.
+            raise ValueError(
+                f"layer {self.name!r} has row unit totals {totals} spanning "
+                f"more than {ROW_UNITS_TOLERANCE}; one of them is mis-measured"
+            )
 
     @property
     def width(self) -> int:
@@ -182,6 +255,62 @@ class Layer:
             start += key.span
         return tuple(out)
 
+    # --- the visual metric (metrics §2) --------------------------------------
+    #
+    # The same three questions as above, asked in UNITS instead of cells. A
+    # pixel renderer uses these; the TTY renderer uses the cell ones. Neither
+    # set is derivable from the other -- see the module header.
+
+    def row_units(self, row_index: int) -> float:
+        """This row's total visual width, in letter-key units.
+
+        ⚠️ ROW-SPECIFIC, unlike `width`. Rows differ (14.02..14.23 measured),
+        and a renderer scales each row by `pixels / row_units(row)` so every
+        row still ends flush at the right edge -- which is exactly what the
+        reference does.
+        """
+        return sum(key.units for key in self.rows[row_index])
+
+    def unit_bounds(self, row_index: int) -> tuple[tuple[float, float], ...]:
+        """Each key's [start, end) in units -- `cell_bounds`' visual twin.
+
+        Derived rather than stored, for the same reason: it cannot drift from
+        `units`.
+        """
+        out: list[tuple[float, float]] = []
+        start = 0.0
+        for key in self.rows[row_index]:
+            out.append((start, start + key.units))
+            start += key.units
+        return tuple(out)
+
+    def _cells_to_units(self, row_index: int, cell: float) -> float:
+        """A position on the cell grid, in units, for THIS row.
+
+        Piecewise-linear through the row's own key boundaries, so a boundary
+        that falls between two keys in cells falls between the SAME two keys in
+        units. Inside a straddling key (the space bar spans cells 1..8 while
+        the split is 8) it interpolates across that key, which is the only
+        answer that keeps both halves able to reach it.
+        """
+        cells = self.cell_bounds(row_index)
+        units = self.unit_bounds(row_index)
+        for (c0, c1), (u0, u1) in zip(cells, units):
+            if cell < c1:
+                return u0 + (u1 - u0) * (cell - c0) / (c1 - c0)
+        return units[-1][1]
+
+    def half_units(self, row_index: int, half: str) -> tuple[float, float]:
+        """The [start, end) UNIT range this pad's cursor addresses in this row.
+
+        The cell split mapped onto this row's key boundaries, so the two
+        metrics agree on which keys a thumb can reach even though they
+        disagree on where the boundaries sit inside a half.
+        """
+        start, end = self.half_cells(half)  # raises on an unknown half
+        return (self._cells_to_units(row_index, start),
+                self._cells_to_units(row_index, end))
+
 
 # --- layout construction helpers ---------------------------------------------
 #
@@ -196,24 +325,33 @@ def letter(ch: str) -> Key:
 
 
 def sym(code: int, base: str, shifted: str, shift_code: int = 0,
-        span: int = 1) -> Key:
+        span: int = 1, units: float = 1.0, is_action: bool = False) -> Key:
     """A dual-legend key: two faces, either of which the key can produce.
 
     `shift_code` is for the arrows, whose shifted face is a DIFFERENT KEY
     rather than a shifted variant of the same one (T8 §9g).
+
+    `is_action` is here because the arrows need it: metrics §2 measures them
+    BLACK even though they are dual-legend keys like the digits, which are
+    grey. Data, not a rule -- see `Key.is_action`.
     """
     return Key(code=code, label=base, shift_label=shifted,
-               shift_code=shift_code, span=span)
+               shift_code=shift_code, span=span, units=units,
+               is_action=is_action)
 
 
 def act(action: str, label: str, span: int = 1, target: str = "", code: int = 0,
         hint: str = "", hint_shape: str = "", is_action: bool = True,
-        modifiers: tuple[int, ...] = ()) -> Key:
+        modifiers: tuple[int, ...] = (), units: float = 1.0) -> Key:
     """A key that changes state (shift/caps/layer/...) or types a control key.
 
     `is_action` defaults True because most of these are §9g's black keys, but
-    it is a MEASUREMENT and not a derivation -- space, Paste and the emoji key
-    pass False because §9g's black list does not name them.
+    it is a MEASUREMENT and not a derivation -- `space` and `Move` measure
+    GREY and pass False, while `Paste` and the emoji key measure BLACK and
+    take the default.
+
+    `units` defaults to one letter-key width, which is right for none of the
+    keys built here -- every call site states its own measured value.
     """
     # A hint with no explicit shape defaults to "rect": triggers and stick
     # clicks outnumber face buttons here, and every call site that wants a
@@ -221,8 +359,8 @@ def act(action: str, label: str, span: int = 1, target: str = "", code: int = 0,
     if hint and not hint_shape:
         hint_shape = HINT_SHAPE_RECT
     return Key(code=code, label=label, action=action, target=target, span=span,
-               hint=hint, hint_shape=hint_shape, is_action=is_action,
-               modifiers=modifiers)
+               units=units, hint=hint, hint_shape=hint_shape,
+               is_action=is_action, modifiers=modifiers)
 
 
 # --- controller-glyph hints (T8 §9g) -----------------------------------------
@@ -291,14 +429,16 @@ def hint_visible(key: Key, touched: "frozenset[str] | set[str] | tuple" = ()) ->
 
 
 def is_action_key(key: Key) -> bool:
-    """T8 §9g: "Action keys (Tab, Caps, Shift, Backspace, Enter, Move) are
-    drawn BLACK; letter keys are dark grey."
+    """Is this key drawn BLACK (#000000) rather than dark grey (#0E141B)?
 
-    ⚠️ READ FROM DATA, NOT DERIVED. An earlier version computed this as "not a
-    letter and no shifted face", which is a plausible rule and disagrees with
-    the measurement: space, Paste and the emoji key satisfy it and are NOT in
-    §9g's black list, and the arrows fail it (they have shifted faces now) yet
-    are not black either. The transcription wins over the rule.
+    ⚠️ READ FROM DATA, NOT DERIVED, AND EVERY RULE PROPOSED SO FAR HAS BEEN
+    WRONG. "Not a letter and no shifted face" fails on the arrows (dual legends
+    and black) and on space (neither, and grey). "Special-function key" fails
+    on `Move`, which is grey. "Types nothing" fails on Paste and Backspace,
+    which both type and are black. metrics §2 measured row 5 twice, at two
+    heights, precisely because the result looks like a bug: `☺ ◀ ▶ Paste` are
+    black; `space` and `Move` are grey. The transcription wins over the rule,
+    so this reads one flag and does not think.
 
     Pure and renderer-agnostic on purpose: only the Wayland renderer can PAINT
     the distinction (a bare console has no colour), but the classification
@@ -349,6 +489,35 @@ def ascii_face(text: str) -> str:
 WIDTH = 16
 SPLIT = 8
 
+# --- visual widths (metrics §2, re-measured) ---------------------------------
+#
+# 🔴 THESE ARE NOT metrics §2's "x unit" COLUMN, AND THE DIFFERENCE MATTERS.
+# That column divides one key's FILL by another key's FILL (149/85 = 1.75 for
+# Backspace), which drops the inter-key gap -- so laying a row out with those
+# numbers overshoots every wide key by 2-4px and undershoots `~\``. The numbers
+# below are PITCH ratios: fill + one gap, over fill + one gap, which is the
+# quantity a renderer actually lays out with. They were re-derived by rescanning
+# `01-idle.png` row by row for runs of non-gap colour (metrics §1's #23262E),
+# reading each key's fill start and end directly.
+#
+# Reconstructing the reference from them -- five rows, each scaled to
+# `1273.5 / row_units`, each key drawn `units * pitch - 4.5` wide -- reproduces
+# every measured fill width in metrics §2 to within 1.3px at 1280 (worst case
+# the 725px space bar, 0.18%). `test-deck-osk-layout.py` re-runs that
+# reconstruction against §2's pixel table rather than trusting these constants.
+#
+# ⚠️ Row 5 has no unit key in it, so only the RATIOS within that row are
+# measured; its absolute scale is chosen to put its total (14.08) among the
+# other four rows' (14.02..14.23) rather than derived.
+UNITS_GRAVE = 0.52       # 42px fill  -- metrics §2 says 0.49x, see above
+UNITS_TAB = 1.03         # 89px fill  -- §2 says 1.05x
+UNITS_BACKSPACE = 1.71   # 149px fill -- §2 says 1.75x
+UNITS_CAPS = 1.36        # 119px fill -- §2 says 1.40x
+UNITS_ENTER = 1.69       # 149px fill -- §2 says 1.75x
+UNITS_SHIFT = 2.01       # 178px fill -- §2 says 2.09x
+UNITS_ROW5 = 1.20        # 104px fill -- §2 says 1.22x; ☺ ◀ ▶ Paste Move alike
+UNITS_SPACE = 8.08       # 725px fill -- §2 says 8.53x, the largest divergence
+
 _D = {  # digits, with their US-layout shifted faces
     "1": sym(e.KEY_1, "1", "!"), "2": sym(e.KEY_2, "2", "@"),
     "3": sym(e.KEY_3, "3", "#"), "4": sym(e.KEY_4, "4", "$"),
@@ -360,15 +529,19 @@ _D = {  # digits, with their US-layout shifted faces
 # ⚠️ Both shift keys are the SAME object, reused. That is safe because
 # `locate()` returns INDICES rather than keys -- highlighting by comparing Key
 # objects would light up both at once, which is exactly why it returns indices.
-SHIFT_KEY = act("shift", "Shift", span=3, hint=HINT_LEFT)
-CAPS_KEY = act("caps", "Caps", span=3, hint=HINT_CAPS)
-TAB_KEY = act("", "Tab", span=3, code=e.KEY_TAB)
-BACKSPACE_KEY = act("", "Backspace", span=3, code=e.KEY_BACKSPACE,
+SHIFT_KEY = act("shift", "Shift", span=3, units=UNITS_SHIFT, hint=HINT_LEFT)
+CAPS_KEY = act("caps", "Caps", span=3, units=UNITS_CAPS, hint=HINT_CAPS)
+TAB_KEY = act("", "Tab", span=3, units=UNITS_TAB, code=e.KEY_TAB)
+BACKSPACE_KEY = act("", "Backspace", span=3, units=UNITS_BACKSPACE,
+                    code=e.KEY_BACKSPACE,
                     hint=HINT_BACKSPACE, hint_shape=HINT_SHAPE_CIRCLE)
-ENTER_KEY = act("", "Enter", span=2, code=e.KEY_ENTER, hint=HINT_RIGHT)
+ENTER_KEY = act("", "Enter", span=2, units=UNITS_ENTER, code=e.KEY_ENTER,
+                hint=HINT_RIGHT)
 # Space is ONE WIDE KEY with the Ⓨ badge at its LEFT EDGE (§9g), not a separate
 # Y key beside a plain space. It straddles SPLIT so either thumb reaches it.
-SPACE_KEY = act("", "space", span=8, code=e.KEY_SPACE,
+# ⚠️ GREY, not black, despite being the widest special key on the board --
+# metrics §2, measured twice. See `Key.is_action`.
+SPACE_KEY = act("", "space", span=8, units=UNITS_SPACE, code=e.KEY_SPACE,
                 hint=HINT_SPACE, hint_shape=HINT_SHAPE_CIRCLE, is_action=False)
 
 # ⚠️ Shift+Insert rather than Ctrl+V, deliberately. Ctrl+V pastes in a GTK
@@ -376,8 +549,11 @@ SPACE_KEY = act("", "space", span=8, code=e.KEY_SPACE,
 # pastes in BOTH a VTE terminal and a GTK entry, which is the pair this
 # keyboard is actually used in front of. Neither works on a bare Linux VT,
 # which has no clipboard at all -- nothing here can fix that.
-PASTE_KEY = act("", "Paste", span=2, code=e.KEY_INSERT,
-                modifiers=(e.KEY_LEFTSHIFT,), is_action=False)
+#
+# ⚠️ BLACK, despite modifying nothing and belonging to no group Tab/Backspace/
+# Shift/Enter belong to -- metrics §2, measured twice. See `Key.is_action`.
+PASTE_KEY = act("", "Paste", span=2, units=UNITS_ROW5, code=e.KEY_INSERT,
+                modifiers=(e.KEY_LEFTSHIFT,))
 
 # ⚠️ TWO KEYS THAT NO RENDERER IMPLEMENTS YET, and they are here on purpose.
 # §9g's keyboard has them and the operator asked for "identical"; leaving a
@@ -385,14 +561,21 @@ PASTE_KEY = act("", "Paste", span=2, code=e.KEY_INSERT,
 # records the request in `OnScreenKeyboard.request` and does NOTHING else --
 # opening an emoji panel and repositioning an overlay are both renderer work,
 # and inventing behaviour for them here would be worse than recording the ask.
-EMOJI_KEY = act("emoji", "☺", is_action=False)
-MOVE_KEY = act("move", "Move", span=3)
+#
+# ⚠️ And these two land on OPPOSITE SIDES of the black/grey split, which is the
+# clearest evidence that it is not a rule: ☺ is black, Move is grey, and they
+# are the same width and the same kind of key (metrics §2, measured twice).
+EMOJI_KEY = act("emoji", "☺", units=UNITS_ROW5)
+MOVE_KEY = act("move", "Move", span=3, units=UNITS_ROW5, is_action=False)
 
 LETTERS = Layer(
     name="letters",
     split=SPLIT,
     rows=(
-        (sym(e.KEY_GRAVE, "`", "~"),) + tuple(_D[c] for c in "1234567890")
+        # ⚠️ `~` is HALF a letter key wide and one WHOLE cell -- the sharpest
+        # case of the two metrics disagreeing (module header).
+        (sym(e.KEY_GRAVE, "`", "~", units=UNITS_GRAVE),)
+        + tuple(_D[c] for c in "1234567890")
         + (sym(e.KEY_MINUS, "-", "_"), sym(e.KEY_EQUAL, "=", "+"),
            BACKSPACE_KEY),
 
@@ -413,8 +596,12 @@ LETTERS = Layer(
          # dual legends, not four keys. Shift is how a user reaches up and
          # down, and a layout that gave the arrows their own keys would make
          # shift's arrow behaviour unreachable.
-         sym(e.KEY_LEFT, "◀", "▲", shift_code=e.KEY_UP),
-         sym(e.KEY_RIGHT, "▶", "▼", shift_code=e.KEY_DOWN),
+         # ⚠️ BLACK, unlike every other dual-legend key on the board (metrics
+         # §2, measured twice). See `Key.is_action`.
+         sym(e.KEY_LEFT, "◀", "▲", shift_code=e.KEY_UP, units=UNITS_ROW5,
+             is_action=True),
+         sym(e.KEY_RIGHT, "▶", "▼", shift_code=e.KEY_DOWN, units=UNITS_ROW5,
+             is_action=True),
          PASTE_KEY, MOVE_KEY),
     ),
 )
@@ -473,12 +660,30 @@ OSK_KEYCODES: frozenset[int] = keycodes_for(LAYERS.values())
 # --- hit-testing (pure) ------------------------------------------------------
 
 
-def locate(layer: Layer, half: str, x: float, y: float) -> tuple[int, int] | None:
+CELLS = "cells"
+UNITS = "units"
+
+
+def locate(layer: Layer, half: str, x: float, y: float,
+           metric: str = CELLS) -> tuple[int, int] | None:
     """Which (row index, key index) is at (x, y), normalised 0..1 in that half?
 
-    The grid is continuous; `half` selects which CELL RANGE of it this pad's
-    cursor addresses (`Layer.half_cells`). A key straddling the boundary is
-    reachable from both, which is how the space bar works.
+    The grid is continuous; `half` selects which range of it this pad's cursor
+    addresses. A key straddling the boundary is reachable from both under
+    EITHER metric, which is how the space bar works.
+
+    ⚠️ `metric` MUST MATCH WHAT THE CALLER DRAWS, and the default is the
+    historical answer so no existing caller changes meaning:
+
+        "cells"  the integer addressing grid -- what `deck_osk_tty.py` draws
+                 from (`Layer.cell_bounds`), and what the mapper used before
+                 this parameter existed.
+        "units"  the measured visual widths -- what a pixel renderer draws from
+                 (`Layer.unit_bounds`).
+
+    They agree on which KEYS each half can reach and disagree on where the
+    boundaries fall inside it, by up to half a key. A renderer that draws one
+    and hit-tests the other lights up a key its cursor is not sitting on.
 
     Returns None outside the half. A cursor is clamped to its half by
     construction, so None means a caller bug rather than a user miss -- but it
@@ -488,7 +693,10 @@ def locate(layer: Layer, half: str, x: float, y: float) -> tuple[int, int] | Non
     objects would light up every cell sharing an instance (space and both shift
     keys are module-level singletons).
     """
-    start, end = layer.half_cells(half)  # raises on an unknown half
+    if metric not in (CELLS, UNITS):
+        # Guessing a metric would silently mis-place every hit test.
+        raise ValueError(f"metric must be {CELLS!r} or {UNITS!r}, got {metric!r}")
+    layer.half_cells(half)  # raises on an unknown half, in EITHER metric
     rows = layer.rows
     if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0) or not rows:
         return None
@@ -500,24 +708,52 @@ def locate(layer: Layer, half: str, x: float, y: float) -> tuple[int, int] | Non
     if not row:
         return None
 
-    # Integer cell arithmetic, not accumulated float fractions: with spans of
-    # 2, 3 and 8 in this grid, summing x against fractions drifts at the
-    # boundaries and puts a click on the wrong key.
-    reach = end - start
-    if reach <= 0:
+    if metric == CELLS:
+        start, end = layer.half_cells(half)
+        # Integer cell arithmetic, not accumulated float fractions: with spans
+        # of 2, 3 and 8 in this grid, summing x against fractions drifts at the
+        # boundaries and puts a click on the wrong key.
+        reach = end - start
+        if reach <= 0:
+            return None
+        cell = start + min(int(x * reach), reach - 1)
+        seen = 0
+        for key_index, key in enumerate(row):
+            seen += key.span
+            if cell < seen:
+                return (row_index, key_index)
+        return (row_index, len(row) - 1)  # unreachable while span >= 1
+
+    start_u, end_u = layer.half_units(row_index, half)
+    reach_u = end_u - start_u
+    if reach_u <= 0:
         return None
-    cell = start + min(int(x * reach), reach - 1)
-    seen = 0
-    for key_index, key in enumerate(row):
-        seen += key.span
-        if cell < seen:
+    where = start_u + x * reach_u
+    last = 0
+    for key_index, (key_start, key_end) in enumerate(layer.unit_bounds(row_index)):
+        if key_start >= end_u:
+            break   # this key and every one after it is in the other half
+        # STRICTLY less-than: a key owns its LEFT edge and not its right, which
+        # is the rule the cell branch gets from `int()`. 50 of this layout's
+        # interior boundaries are reachable at an exactly-representable x, so
+        # this is a case a cursor really does land on, not a limit argument.
+        if where < key_end:
             return (row_index, key_index)
-    return (row_index, len(row) - 1)  # unreachable while span >= 1
+        last = key_index
+    # No left-hand skip is needed: `where >= start_u`, and a key entirely in
+    # the other half has `key_end <= start_u`, so it can never win the test
+    # above -- it only walks past.
+    #
+    # Falling out means x == 1.0, which puts `where` exactly on the half's
+    # closing edge. That belongs to the LAST key of this half rather than the
+    # first of the next one -- again what the cell branch gets from clamping.
+    return (row_index, last)
 
 
-def key_at(layer: Layer, half: str, x: float, y: float) -> Key | None:
+def key_at(layer: Layer, half: str, x: float, y: float,
+           metric: str = CELLS) -> Key | None:
     """Which key is at (x, y), normalised 0..1 WITHIN that half?"""
-    found = locate(layer, half, x, y)
+    found = locate(layer, half, x, y, metric)
     if found is None:
         return None
     return layer.rows[found[0]][found[1]]
@@ -627,11 +863,13 @@ class OnScreenKeyboard:
             return "on" if self.caps else ""
         return ""
 
-    def key_at(self, half: str, x: float, y: float) -> Key | None:
-        return key_at(self.layer, half, x, y)
+    def key_at(self, half: str, x: float, y: float,
+               metric: str = CELLS) -> Key | None:
+        return key_at(self.layer, half, x, y, metric)
 
-    def locate(self, half: str, x: float, y: float) -> tuple[int, int] | None:
-        return locate(self.layer, half, x, y)
+    def locate(self, half: str, x: float, y: float,
+               metric: str = CELLS) -> tuple[int, int] | None:
+        return locate(self.layer, half, x, y, metric)
 
     def press(self, key: Key | None) -> list[tuple[int, int]]:
         """Apply a press. Returns the keystrokes to emit, possibly empty."""

@@ -224,6 +224,148 @@ check("cell_bounds places keys across the full width, contiguously",
       ((0, 1), (1, 9), (9, 10), (10, 11), (11, 13), (13, 16)))
 
 
+# --- the SECOND width: visual units, measured off the reference ---------------
+#
+# 🔴 The largest remaining visual difference from Valve's keyboard, and the
+# reason a key now carries two widths. Ours drew a uniform 16-cell grid, which
+# makes Tab and Caps THREE TIMES a letter where the reference draws them at
+# 1.03 and 1.36. A 16-cell integer grid cannot express 0.52 or 1.71, and the
+# grid cannot simply be refined: 16 cells x KEY_CELL=5 is exactly the installed
+# TTY's 80 columns with nothing spare (`docs/PROGRESS.md` §7), and that
+# keyboard is how a user types a Wi-Fi passphrase with no physical keyboard.
+#
+# ⚠️ THE NUMBERS BELOW ARE metrics §2's PIXEL TABLE, NOT ITS RATIO COLUMN.
+# §2 reports both: measured FILL WIDTHS in px (42, 89, 149, 119, 149, 178, 104,
+# 725 against an 85px unit key) and a derived "x unit" column (0.49, 1.05,
+# 1.75, ...). The ratio column divides fill by fill and so drops the inter-key
+# gap; the pixel widths are the primary measurement. This test rebuilds the
+# reference's geometry from the module's `units` and compares against the PIXEL
+# widths, which is the only form that can be checked without re-deriving the
+# thing under test.
+#
+# The reconstruction, all from metrics §2: the panel's key fill spans x=5..1273
+# on a 1280-wide screen (1269px), the inter-key gap is ~4.5px, and EVERY ROW IS
+# SCALED TO THE FULL WIDTH ON ITS OWN -- §2 measures a unit key at 85px in row 1
+# and 86-87px in rows 2-4, which is what per-row normalisation looks like.
+
+REF_FILL_SPAN = 1269.0   # metrics §2: fill x=5..1273 inclusive, 1280-wide screen
+REF_GAP = 4.5            # metrics §2: inter-key gap alternates 4-5px
+
+# Every key's measured FILL WIDTH in px, written out longhand from metrics §2
+# rather than read back out of the module.
+REF_FILL_PX = {
+    0: [("`", 42)] + [(d, 85) for d in "1234567890"]
+       + [("-", 85), ("=", 85), ("Backspace", 149)],
+    1: [("Tab", 89)] + [(c, 86) for c in "qwertyuiop"]
+       + [("[", 86), ("]", 86), ("\\", 86)],
+    2: [("Caps", 119)] + [(c, 86) for c in "asdfghjkl"]
+       + [(";", 86), ("'", 86), ("Enter", 149)],
+    3: [("Shift", 178)] + [(c, 86) for c in "zxcvbnm"]
+       + [(",", 86), (".", 86), ("/", 86), ("Shift", 178)],
+    4: [("☺", 104), ("space", 725), ("◀", 104), ("▶", 104),
+        ("Paste", 104), ("Move", 104)],
+}
+
+
+def rebuild_row(row_index: int) -> list[tuple[str, float]]:
+    """(label, fill width in px) for one row, laid out the way a renderer must.
+
+    Scale the row by `(span + gap) / row_units`, then each key's painted fill
+    is `units * pitch - gap`. If this does not reproduce metrics §2's pixel
+    table, `units` is wrong.
+    """
+    pitch = (REF_FILL_SPAN + REF_GAP) / LETTERS.row_units(row_index)
+    return [(key.label, key.units * pitch - REF_GAP)
+            for key in LETTERS.rows[row_index]]
+
+
+for r in range(5):
+    check(f"row {r}'s units name the same keys metrics §2 measured, in order",
+          [k.label for k in LETTERS.rows[r]], [n for n, _ in REF_FILL_PX[r]])
+    rebuilt = rebuild_row(r)
+    check(f"row {r} rebuilds metrics §2's measured fill widths to within 1.5px",
+          [n for (n, got), (_, want) in zip(rebuilt, REF_FILL_PX[r])
+           if abs(got - want) > 1.5], [])
+    # A row that reproduced every key and still ended short would leave a
+    # ragged right edge -- the defect this replaced, in a new place.
+    check(f"row {r} ends flush at the panel's right edge",
+          round(sum(w for _n, w in rebuilt) + REF_GAP * (len(rebuilt) - 1)),
+          round(REF_FILL_SPAN))
+
+# ⚠️ WHY THE RATIO COLUMN IS NOT USED, asserted rather than asserted-in-a-
+# comment. Laying row 0 out with metrics §2's "x unit" column instead misplaces
+# the widest key by more than the 1.5px tolerance above -- that is the entire
+# reason this module carries pitch ratios and the finding does not.
+RATIO_COLUMN = {"`": 0.49, "Backspace": 1.75}
+ratio_units = [RATIO_COLUMN.get(k.label, 1.0) for k in LETTERS.rows[0]]
+ratio_pitch = (REF_FILL_SPAN + REF_GAP) / sum(ratio_units)
+check("metrics §2's ratio column would misplace Backspace by >1.5px",
+      abs((RATIO_COLUMN["Backspace"] * ratio_pitch - REF_GAP) - 149) > 1.5, True)
+
+# The two widths are INDEPENDENT, and these three keys are the proof: one cell
+# and half a unit, three cells and one unit, three cells and two units. Any
+# attempt to derive one from the other fails on this row alone.
+check("span and units are independent -- backtick, Tab and Shift prove it",
+      [(k.span, k.units) for k in
+       (LETTERS.rows[0][0], osk.TAB_KEY, osk.SHIFT_KEY)],
+      [(1, 0.52), (3, 1.03), (3, 2.01)])
+check("a letter key is exactly one unit -- what every other width is measured against",
+      {k.units for r in LETTERS.rows for k in r if k.is_letter}, {1.0})
+
+check("unit_bounds places keys contiguously from 0 to the row's own total",
+      (LETTERS.unit_bounds(4)[0][0],
+       abs(LETTERS.unit_bounds(4)[-1][1] - LETTERS.row_units(4)) < 1e-9,
+       [round(b, 2) for _a, b in LETTERS.unit_bounds(4)]),
+      (0.0, True, [1.2, 9.28, 10.48, 11.68, 12.88, 14.08]))
+check("unit_bounds leaves no overlap and no hole in any row",
+      [(r, i) for r in range(5)
+       for i, ((_, end), (start, _)) in
+       enumerate(zip(LETTERS.unit_bounds(r), LETTERS.unit_bounds(r)[1:]))
+       if abs(end - start) > 1e-9], [])
+
+# 🔴 ROWS DIFFER IN UNITS AND THAT IS THE MEASUREMENT, not a bug: the reference
+# fixes its special keys and lets the unit keys absorb the remainder, which is
+# why a unit key is 85px in row 1 and 86-87px in rows 2-4. `width` (cells) is
+# still identical on every row; `row_units` is not.
+row_unit_totals = [round(LETTERS.row_units(r), 2) for r in range(5)]
+check("every row is the same width in CELLS", {LETTERS.width}, {16})
+check("the rows are NOT the same width in units", len(set(row_unit_totals)), 5)
+check("but they stay within the tolerance a layer will accept",
+      max(row_unit_totals) - min(row_unit_totals) <= osk.ROW_UNITS_TOLERANCE,
+      True)
+check("and the tolerance still admits the reference's own 0.21 spread",
+      osk.ROW_UNITS_TOLERANCE >= 0.21, True)
+
+check("a key with zero visual width is refused",
+      raises(lambda: osk.Layer(name="bad", split=1,
+                               rows=((osk.letter("a"),
+                                      osk.Key(label="b", units=0.0)),))), True)
+check("a key with negative visual width is refused",
+      raises(lambda: osk.Layer(name="bad", split=1,
+                               rows=((osk.letter("a"),
+                                      osk.Key(label="b", units=-1.0)),))), True)
+# ⚠️ Same cell width on both rows, so ONLY the units check can reject this.
+check("a layer whose rows disagree wildly in units is refused",
+      raises(lambda: osk.Layer(name="bad", split=1,
+                               rows=((osk.letter("a"), osk.letter("b")),
+                                     (osk.letter("a"),
+                                      osk.Key(label="wide", units=5.0))))),
+      True)
+
+# --- the 80-column fit, which the visual widths must not have disturbed -------
+#
+# `docs/PROGRESS.md` §7: the installed TTY is 25x80. `deck_osk_tty.py`'s
+# KEY_CELL is 5 and 16 x 5 = 80 EXACTLY -- `test-deck-osk-tty.py` and
+# `test-osk-install-layout.sh` both assert that as an equality. Restated here
+# because this file is where a change to `span` would originate.
+check("16 cells at 5 columns each is exactly the installed TTY's 80",
+      LETTERS.width * 5, 80)
+check("no key's span changed -- every row still totals 16 cells",
+      {sum(k.span for k in row) for row in LETTERS.rows}, {16})
+check("and spans are still integers, which a text console requires",
+      {type(k.span) for _n, _r, _i, k in every_key()}, {int})
+
+
 # --- hit-testing: rows AND columns together ----------------------------------
 #
 # T8's first named failure mode is testing one axis at a time -- session 17's
@@ -315,6 +457,149 @@ check("the two Shift keys are the same object",
 check("but they locate to different indices",
       (osk.locate(LETTERS, "left", 0.0, 0.7), osk.locate(LETTERS, "right", 1.0, 0.7)),
       ((3, 0), (3, 11)))
+
+
+# --- hit-testing in the OTHER metric ------------------------------------------
+#
+# 🔴 A pixel renderer draws from `unit_bounds` and MUST hit-test from the same
+# thing. Drawing units while hit-testing cells lights up a key the cursor's dot
+# is not sitting on -- up to half a key away, because Tab is 3/16 of a row in
+# cells and 1.03/14.03 of it in units.
+#
+# The two metrics must agree on WHICH KEYS each thumb can reach and must NOT
+# agree on where the boundaries fall inside a half. Both halves of that are
+# asserted: the first is the property a user depends on, the second is the
+# whole reason the parameter exists.
+
+REACHABLE_LEFT = [
+    ["`", "1", "2", "3", "4", "5", "6", "7"],
+    ["Tab", "q", "w", "e", "r", "t"],
+    ["Caps", "a", "s", "d", "f", "g"],
+    ["Shift", "z", "x", "c", "v", "b"],
+    ["☺", "space"],
+]
+REACHABLE_RIGHT = [
+    ["8", "9", "0", "-", "=", "Backspace"],
+    ["y", "u", "i", "o", "p", "[", "]", "\\"],
+    ["h", "j", "k", "l", ";", "'", "Enter"],
+    ["n", "m", ",", ".", "/", "Shift"],
+    ["space", "◀", "▶", "Paste", "Move"],
+]
+
+
+def sweep(half: str, row: int, metric: str) -> list[str]:
+    """Every key a thumb can reach on this row, in order, under this metric.
+
+    Swept at 1/500 of a half rather than sampled at cell centres: a key 0.52
+    units wide is narrower than any cell, so a centre-sampling walk would step
+    straight over it.
+    """
+    y = (2 * row + 1) / 10
+    seen = []
+    for i in range(501):
+        label = osk.key_at(LETTERS, half, i / 500, y, metric).label
+        if not seen or seen[-1] != label:
+            seen.append(label)
+    return seen
+
+
+for r in range(5):
+    check(f"row {r}: both metrics reach exactly the same keys from the left pad",
+          (sweep("left", r, osk.CELLS), sweep("left", r, osk.UNITS)),
+          (REACHABLE_LEFT[r], REACHABLE_LEFT[r]))
+    check(f"row {r}: both metrics reach exactly the same keys from the right pad",
+          (sweep("right", r, osk.CELLS), sweep("right", r, osk.UNITS)),
+          (REACHABLE_RIGHT[r], REACHABLE_RIGHT[r]))
+
+# ...and they place the boundaries differently, which is the point. In cells
+# Tab owns the left half's first 3/8; in units it owns 1.03/6.03, so x=0.30 is
+# past it. A renderer that mixed the two would be wrong by exactly this much.
+check("cells and units disagree inside a half -- x=0.30 on row 1",
+      (osk.key_at(LETTERS, "left", 0.30, 0.3, osk.CELLS).label,
+       osk.key_at(LETTERS, "left", 0.30, 0.3, osk.UNITS).label),
+      ("Tab", "q"))
+check("and on row 0, where the backtick key is half a letter wide",
+      (osk.key_at(LETTERS, "left", 0.10, 0.1, osk.CELLS).label,
+       osk.key_at(LETTERS, "left", 0.10, 0.1, osk.UNITS).label),
+      ("`", "1"))
+
+# The closing edge belongs to the LAST key of the half in BOTH metrics -- in
+# units that needs its own clamp, because x=1.0 lands exactly on a boundary
+# that is also the next key's start.
+check("x=1.0 in units lands on the half's last key, not the next half's first",
+      (osk.key_at(LETTERS, "left", 1.0, 0.1, osk.UNITS).label,
+       osk.key_at(LETTERS, "left", 1.0, 0.3, osk.UNITS).label,
+       osk.key_at(LETTERS, "right", 1.0, 1.0, osk.UNITS).label),
+      ("7", "t", "Move"))
+check("x=0.0 in units lands on the half's first key",
+      (osk.key_at(LETTERS, "left", 0.0, 0.1, osk.UNITS).label,
+       osk.key_at(LETTERS, "right", 0.0, 0.1, osk.UNITS).label),
+      ("`", "8"))
+# The space bar straddles the split in cells; `half_units` interpolates that
+# split ACROSS the key, so it still straddles in units.
+check("space straddles the split in units too",
+      (osk.key_at(LETTERS, "left", 1.0, 0.9, osk.UNITS).label,
+       osk.key_at(LETTERS, "right", 0.0, 0.9, osk.UNITS).label),
+      ("space", "space"))
+check("and it is the same object from either side, as in cells",
+      osk.key_at(LETTERS, "left", 1.0, 0.9, osk.UNITS)
+      is osk.key_at(LETTERS, "right", 0.0, 0.9, osk.UNITS), True)
+
+# 🔴 WHICH KEY OWNS A BOUNDARY. A key owns its LEFT edge and not its right --
+# the rule the cell metric gets for free from `int()`, and one the unit metric
+# has to state. This is not a limit argument: 50 of this layout's interior
+# boundaries sit at an x that is exactly representable, so `x = (boundary -
+# start) / reach` round-trips to the boundary itself and a cursor really does
+# land there. Off by one key, every time, if the comparison is `<=`.
+boundary_owners = []
+for r in range(5):
+    for half in ("left", "right"):
+        lo, hi = LETTERS.half_units(r, half)
+        reach = hi - lo
+        for i, (_start, end) in enumerate(LETTERS.unit_bounds(r)):
+            if not lo < end < hi:
+                continue
+            x = (end - lo) / reach
+            if lo + x * reach != end:
+                continue      # not exactly representable; not a real case
+            got = osk.locate(LETTERS, half, x, (2 * r + 1) / 10, osk.UNITS)[1]
+            boundary_owners.append((r, half, LETTERS.rows[r][i].label, got == i + 1))
+check("every exactly-reachable boundary belongs to the key on its RIGHT",
+      [b for b in boundary_owners if not b[3]], [])
+check("and there are enough of them for that to be worth asserting",
+      len(boundary_owners) >= 40, True)
+
+check("half_units meets in the middle: the left half ends where the right begins",
+      [LETTERS.half_units(r, "left")[1] == LETTERS.half_units(r, "right")[0]
+       for r in range(5)], [True] * 5)
+check("half_units spans the whole row, 0 to its own total",
+      [(LETTERS.half_units(r, "left")[0],
+        abs(LETTERS.half_units(r, "right")[1] - LETTERS.row_units(r)) < 1e-9)
+       for r in range(5)], [(0.0, True)] * 5)
+check("the split falls INSIDE the space bar on row 4, not on a key boundary",
+      LETTERS.unit_bounds(4)[1][0] < LETTERS.half_units(4, "left")[1]
+      < LETTERS.unit_bounds(4)[1][1], True)
+check("half_units rejects an unknown half rather than guessing a side",
+      raises(lambda: LETTERS.half_units(0, "middle")), True)
+
+# An unknown metric must raise. Defaulting to either one silently mis-places
+# every hit test in whichever renderer got it wrong.
+check("an unknown metric raises rather than picking one",
+      raises(lambda: osk.key_at(LETTERS, "left", 0.5, 0.5, "pixels")), True)
+check("the default metric is still cells, so no existing caller changed meaning",
+      (osk.key_at(LETTERS, "left", 0.30, 0.3).label,
+       osk.OnScreenKeyboard().key_at("left", 0.30, 0.3).label),
+      ("Tab", "Tab"))
+check("OnScreenKeyboard passes the metric through rather than dropping it",
+      (osk.OnScreenKeyboard().key_at("left", 0.30, 0.3, osk.UNITS).label,
+       osk.OnScreenKeyboard().locate("left", 0.30, 0.3, osk.UNITS)),
+      ("q", (1, 1)))
+check("an unknown half still raises in the units metric",
+      raises(lambda: osk.key_at(LETTERS, "middle", 0.5, 0.5, osk.UNITS)), True)
+check("out-of-range coordinates still miss in the units metric",
+      [osk.key_at(LETTERS, "left", x, y, osk.UNITS)
+       for x, y in ((-0.01, 0.5), (1.01, 0.5), (0.5, -0.01), (0.5, 1.01))],
+      [None] * 4)
 
 
 # --- typing, decoded independently -------------------------------------------
@@ -739,25 +1024,47 @@ check("and each gates on its OWN side's pad",
       (osk.HINT_PAD_GATE["L2"], osk.HINT_PAD_GATE["R2"]), ("left", "right"))
 
 
-# --- is_action_key: T8 §9g's black-versus-dark-grey classification -----------
+# --- is_action_key: the black-versus-dark-grey classification ----------------
 #
-# §9g names exactly six: Tab, Caps, Shift, Backspace, Enter, Move. Space,
-# Paste, the emoji key and the arrows are NOT in that list. Written out
-# longhand, because the plausible RULE ("not a letter, no shifted face")
-# disagrees with the measurement on four keys.
+# 🔴 CORRECTED 2026-08-12 AGAINST `docs/findings/T8-reference-metrics.md` §2,
+# which pixel-sampled row 5 TWICE (y=779 and y=750, to rule out a corner
+# artifact) and disagrees with §9g's earlier prose list on five keys:
+#
+#     §9g's prose  black = Tab, Caps, Shift, Backspace, Enter, Move
+#     metrics §2   black = Tab, Caps, Shift, Backspace, Enter,
+#                          ☺, ◀, ▶, Paste          Move is GREY
+#
+# Written out longhand from the measurement, and deliberately NOT as a rule:
+# metrics §2 states it does not reduce to one, and every rule tried so far
+# fails on ☺/Move (same width, same kind of key, opposite colours) or on
+# space (grey) versus Paste (black).
 
-BLACK = {"Tab", "Caps", "Shift", "Backspace", "Enter", "Move"}
+BLACK = {"Tab", "Caps", "Shift", "Backspace", "Enter", "☺", "◀", "▶", "Paste"}
+GREY = {"space", "Move", "`"}
 wrong_colour = [(k.label, osk.is_action_key(k))
                 for _n, _r, _i, k in every_key()
                 if osk.is_action_key(k) != (k.label in BLACK)]
-check("exactly §9g's six keys are drawn as action keys", wrong_colour, [])
-check("space is NOT an action key -- §9g does not list it",
+check("exactly metrics §2's nine keys are drawn as action keys", wrong_colour, [])
+check("space is GREY, despite being the widest special key on the board",
       osk.is_action_key(osk.SPACE_KEY), False)
-check("Paste is NOT an action key either", osk.is_action_key(osk.PASTE_KEY), False)
-check("the arrows are NOT action keys",
-      [osk.is_action_key(k) for k in arrow_keys], [False, False])
+check("Move is GREY -- §9g's prose listed it as black and the pixels disagree",
+      osk.is_action_key(osk.MOVE_KEY), False)
+check("Paste is BLACK, despite modifying nothing",
+      osk.is_action_key(osk.PASTE_KEY), True)
+check("the emoji key is BLACK", osk.is_action_key(osk.EMOJI_KEY), True)
+check("both arrows are BLACK, unlike every other dual-legend key",
+      [osk.is_action_key(k) for k in arrow_keys], [True, True])
 check("a letter is never an action key", osk.is_action_key(q), False)
 check("a digit is never an action key", osk.is_action_key(one), False)
+# ☺ and Move are the same width, sit in the same row and do the same KIND of
+# thing (both are renderer requests, `press()` handles them on one line), and
+# they are opposite colours. That pair is the standing proof that no predicate
+# derives this, so it is asserted rather than left as a comment.
+check("☺ and Move are the same kind of key and opposite colours",
+      (osk.EMOJI_KEY.units == osk.MOVE_KEY.units,
+       osk.is_action_key(osk.EMOJI_KEY), osk.is_action_key(osk.MOVE_KEY)),
+      (True, True, False))
+check("no key is both black and grey in the transcription", BLACK & GREY, set())
 
 
 # --- a real Wi-Fi passphrase, end to end --------------------------------------
