@@ -786,6 +786,38 @@ got=$(DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" deck_form_disk_label /dev/sda)
 [[ $got == "/dev/sda (256G)" ]] || fail "disk_label must fall back to the bare device path when lsblk has no vendor/model" "got: $got"
 pass "disk_label falls back to the device path when vendor/model are both empty"
 
+# ⚠️ MUTATION-FOUND GAP, closed: the two cases above (vendor+model both
+# present, and both absent) never exercise the MODEL-ONLY or VENDOR-ONLY
+# branches individually -- a mutation that swapped which of $model/$vendor
+# each branch assigns left every earlier assertion here green. Real disks
+# regularly report only one of the two (a no-name/generic vendor field is
+# common on internal eMMC).
+cat >"$work/bin-fakelsblk/lsblk" <<'EOF'
+#!/usr/bin/env bash
+field=$2
+case "$field" in
+  SIZE)  echo "64G" ;;
+  MODEL) echo "eMMC-Card" ;;
+  *) : ;;
+esac
+EOF
+got=$(DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" deck_form_disk_label /dev/mmcblk0)
+[[ $got == "eMMC-Card (64G)" ]] || fail "disk_label must use MODEL when VENDOR is empty" "got: $got"
+pass "disk_label uses the model alone when vendor is empty"
+
+cat >"$work/bin-fakelsblk/lsblk" <<'EOF'
+#!/usr/bin/env bash
+field=$2
+case "$field" in
+  SIZE)   echo "1T" ;;
+  VENDOR) echo "Acme" ;;
+  *) : ;;
+esac
+EOF
+got=$(DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" deck_form_disk_label /dev/nvme1n1)
+[[ $got == "Acme (1T)" ]] || fail "disk_label must use VENDOR when MODEL is empty" "got: $got"
+pass "disk_label uses the vendor alone when model is empty"
+
 echo "--- S4 the mutation-named targets: default cursor and encryption constant ----"
 
 [[ $(deck_form_disk_encryption_mode) == false ]] ||
@@ -818,6 +850,15 @@ rc=$?
 [[ $encrypt_installation == false ]] || fail "encrypt_installation must be false after an AFFIRMATIVE confirm" "got: $encrypt_installation"
 pass "confirm_disk_overwrite: affirmative -> returns 0, encrypt_installation is false"
 
+# ⚠️ MUTATION-FOUND GAP, closed: `encrypt_installation` is a GLOBAL that
+# the previous (affirmative) case already set to "false" -- if this test
+# left it alone, a mutation that only sets it inside the affirmative branch
+# (never on decline) would still see "false" here, left over from the prior
+# case, and PASS for the wrong reason. Poisoned to a value the correct
+# behaviour can never produce ("unset") before the call, so only the
+# function itself setting it, on THIS call, on THIS path, can make the
+# assertion below true.
+encrypt_installation=poisoned-by-test-do-not-trust
 set +e
 PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
 DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" \
@@ -908,6 +949,81 @@ PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
 [[ $disk == /dev/mmcblk0 ]] || fail "disk_form must set 'disk' to whatever the (faked) picker returned" "got: ${disk:-unset}"
 LC_ALL=C grep -qF "choose" "$work/gum.log" || fail "disk_form must have actually invoked a picker when two disks were eligible" "$(cat "$work/gum.log")"
 pass "disk_form shows a picker (and honours its answer) when more than one disk is eligible"
+
+echo "--- S4 disk_form: zero eligible disks -> dead-end, NEVER falls through to a picker ---"
+
+# ⚠️ MUTATION-FOUND GAP, closed: neither test above ever drives disk_form
+# with ZERO eligible disks. A mutation that drops the
+# `if ! eligible=$(deck_form_disk_list ...); then ... fi` guard entirely
+# (falling through with eligible="" instead of routing to the dead-end
+# screen) survived every earlier assertion, because none of them exercise
+# this path at all -- it would silently show an EMPTY gum choose picker
+# instead of the "Reboot / Power off, never a shell" screen §4 S4 requires.
+#
+# The real dead-end screen (deck_form_disk_dead_end) is a `while true`
+# loop -- same [V]-only precedent as S8's failure_menu, not driven live
+# here. Shadowed with a logging stub so THIS test proves disk_form CALLS
+# it, without needing to survive dead_end's own infinite loop.
+: >"$work/dead-end.log"
+deck_form_disk_dead_end() { printf 'DEAD_END_CALLED\n' >>"$work/dead-end.log"; return 0; }
+
+cat >"$work/bin-fakelsblk/lsblk" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM" ]]; then
+  printf '/dev/sda disk 1\n'   # removable only -- nothing eligible
+  exit 0
+fi
+exit 0
+EOF
+unset disk 2>/dev/null || true
+: >"$work/gum.log"
+DECK_TEST_ROOT_DISK="" \
+DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" \
+FAKE_GUM_LOG="$work/gum.log" \
+PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
+  disk_form || true
+LC_ALL=C grep -qF "DEAD_END_CALLED" "$work/dead-end.log" ||
+  fail "disk_form must call the dead-end screen when no disk is eligible"
+if LC_ALL=C grep -qF "choose" "$work/gum.log"; then
+  fail "disk_form must NEVER show the picker when no disk is eligible -- it must reach the dead end, not silently fall through to an empty gum choose"
+fi
+[[ -z ${disk:-} ]] || fail "disk_form must not set 'disk' to anything when no disk was eligible" "got: $disk"
+pass "disk_form calls the dead-end screen (never falls through to an empty picker) when no disk is eligible"
+
+echo "--- S4 disk_form: the boot/install medium is actually excluded end-to-end ----"
+
+# ⚠️ MUTATION-FOUND GAP, closed: every earlier disk_form test above uses
+# DECK_TEST_ROOT_DISK="" (the get_root_disk stub returns nothing), so a
+# mutation that stopped wiring exclude_disk into deck_form_disk_list at all
+# (e.g. `exclude_disk=""` hardcoded, ignoring get_root_disk's answer)
+# survived every one of them -- they never gave it a real value to drop.
+# Two disks are eligible by RM alone; get_root_disk is stubbed to name ONE
+# of them as the boot medium, so only exclusion (not the RM filter, already
+# proven above) can be what narrows it down to a single auto-select.
+cat >"$work/bin-fakelsblk/lsblk" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM" ]]; then
+  printf '/dev/nvme0n1 disk 0\n/dev/mmcblk0 disk 0\n'
+  exit 0
+fi
+field=$3
+case "$field" in
+  SIZE) echo "512G" ;;
+  *) : ;;
+esac
+EOF
+unset disk 2>/dev/null || true
+: >"$work/gum.log"
+DECK_TEST_ROOT_DISK="/dev/nvme0n1" \
+DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" \
+FAKE_GUM_LOG="$work/gum.log" \
+PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
+  disk_form
+[[ $disk == /dev/mmcblk0 ]] || fail "disk_form must exclude the boot/install medium (get_root_disk's answer), leaving only the other disk to auto-select" "got: ${disk:-unset}"
+if LC_ALL=C grep -qF "choose" "$work/gum.log"; then
+  fail "with the boot medium excluded, only ONE disk should remain -- the picker must not have been shown"
+fi
+pass "disk_form actually excludes the boot/install medium (not just deck_form_disk_list in isolation) -- both eligible disks pass RM, only exclusion narrows it to one"
 
 # ===========================================================================
 # S5: Summary
