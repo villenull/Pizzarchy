@@ -16,6 +16,23 @@
 
 set -euo pipefail
 
+# ⚠️ SUITE-LEVEL WATCHDOG -- this suite tests a WAIT LOOP, so its regressions
+# hang rather than return wrong. `deck_form_wait_for_marker` polls until a
+# marker appears or a deadline passes; break the deadline and every assertion
+# that reaches it (directly, and indirectly through deck_form_text_prompt)
+# blocks forever. In CI that is not a red test, it is a stuck job that
+# reports NOTHING -- strictly worse than a failure, and the same class of
+# problem as a check that passes while asserting nothing.
+#
+# Proven, not assumed: disabling the deadline branch in deck-form.sh hangs
+# this suite past 120s. With this line it exits 124 instead, which is a
+# failure CI already knows how to read. Re-exec rather than backgrounding a
+# killer process, so there is nothing to leak if the suite exits early.
+if [[ -z ${DECK_FORM_TEST_WATCHDOG:-} ]]; then
+  export DECK_FORM_TEST_WATCHDOG=1
+  exec timeout --signal=KILL 120 "$0" "$@"
+fi
+
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 
 pass() { printf 'ok - %s\n' "$1"; }
@@ -346,17 +363,29 @@ echo "--- S3 hostname/identity constants and overrides -------------------------
 [[ $DECK_HOSTNAME == steamdeck ]] || fail "DECK_HOSTNAME must be the constant 'steamdeck'"
 pass "DECK_HOSTNAME is the constant 'steamdeck'"
 
-for fn in _identity omarchy_prompt_identity; do
-  declare -f "$fn" >/dev/null || fail "$fn must be defined (the spec's own two names disagree; both are covered)"
+# ⚠️ THE NAMES ARE THE WHOLE MECHANISM, so they are asserted against what
+# upstream actually calls, not against what the spec's prose looked like.
+# `configurator` lines 258-259 in the pinned iso/upstream tree call
+# `omarchy_prompt_identity` and `omarchy_prompt_hostname`; T4-screen-spec.md
+# §1.1's `_identity` / `_hostname` is that list with the prefix ELIDED after
+# its first entry, not a second naming convention. A definition under a name
+# upstream never calls is a screen that silently never appears -- the exact
+# failure mode T4 §6.4 exists to catch -- so the wrong names must NOT be
+# defined, and that is asserted here too.
+for fn in omarchy_prompt_identity omarchy_prompt_hostname; do
+  declare -f "$fn" >/dev/null || fail "$fn must be defined -- it is the name upstream's configurator actually calls"
 done
-for fn in _hostname omarchy_prompt_hostname; do
-  declare -f "$fn" >/dev/null || fail "$fn must be defined (the spec's own two names disagree; both are covered)"
-done
-pass "both name variants of the identity/hostname overrides are defined"
+pass "the identity/hostname overrides use the names upstream's configurator calls"
 
-out=$(_hostname)
-[[ $out == steamdeck ]] || fail "_hostname must output the constant hostname" "got: $out"
-pass "_hostname outputs 'steamdeck' and prompts for nothing (no read, no blocking)"
+for fn in _identity _hostname; do
+  declare -f "$fn" >/dev/null &&
+    fail "$fn must NOT be defined -- upstream never calls it, so it overrides nothing and only looks like it works"
+done
+pass "the elided-prefix names are NOT defined (they would override nothing)"
+
+out=$(omarchy_prompt_hostname)
+[[ $out == steamdeck ]] || fail "omarchy_prompt_hostname must output the constant hostname" "got: $out"
+pass "omarchy_prompt_hostname outputs 'steamdeck' and prompts for nothing (no read, no blocking)"
 
 # ===========================================================================
 # S1: Wi-Fi (SSID list builder only)

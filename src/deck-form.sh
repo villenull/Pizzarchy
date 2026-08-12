@@ -472,15 +472,18 @@ _password() {
   done
 }
 
-# _identity / omarchy_prompt_identity, _hostname / omarchy_prompt_hostname:
-# T4-screen-spec.md §1.1 names these `_identity` / `_hostname`; §4 S3's own
-# "Deviations" paragraph names them `omarchy_prompt_identity` /
-# `omarchy_prompt_hostname` -- the SAME spec document uses two different
-# names for what is presumably the same pair of functions. That
-# inconsistency is flagged here rather than silently resolved by guessing:
-# both names are defined below, as thin aliases sharing one body each, so
-# whichever name upstream actually uses is the one that gets overridden.
-# See this session's final report.
+# The names are `omarchy_prompt_identity` and `omarchy_prompt_hostname`, and
+# that is MEASURED, not chosen: upstream's own `configurator` calls them at
+# lines 258-259 of `configs/airootfs/root/configurator` in the pinned
+# `iso/upstream` tree.
+#
+# ⚠️ This was briefly written as `_identity` / `_hostname` too, on the reading
+# that T4-screen-spec.md §1.1 and §4 S3 disagreed. They do not: §1.1 writes
+# `omarchy_prompt_keyboard, _username, _password, _identity, ...` -- the
+# prefix is ELIDED after the first entry, not replaced. Overriding a name
+# upstream never calls is a screen that silently never appears, which is the
+# whole failure mode T4 §6.4 is built around, so the aliases are gone rather
+# than kept "just in case".
 deck_form_identity_body() {
   # (INFERRED variable names -- see the block comment above)
   # shellcheck disable=SC2034
@@ -489,7 +492,6 @@ deck_form_identity_body() {
   email_address=""
   printf '\n'
 }
-_identity() { deck_form_identity_body; }
 omarchy_prompt_identity() { deck_form_identity_body; }
 
 deck_form_hostname_body() {
@@ -498,7 +500,6 @@ deck_form_hostname_body() {
   hostname_value=$DECK_HOSTNAME
   printf '%s\n' "$DECK_HOSTNAME"
 }
-_hostname() { deck_form_hostname_body; }
 omarchy_prompt_hostname() { deck_form_hostname_body; }
 
 # ===========================================================================
