@@ -699,110 +699,33 @@ deck_form_build_network_rows() {
 }
 
 # ===========================================================================
-# S8 -- Failure (the screen §6.1a never specified)
+# S8 -- Failure: MOVED. It was never in the right process, and the rows here
+# were the wrong rows.
 # ===========================================================================
-
-# T4-screen-spec.md §4 S8, all (READ) this session by the spec's own
-# author: upstream's failure_menu maps a CANCELLED `gum choose` --
-# including a plain Esc/B press -- to "Drop to shell"
-# (`choice=$(gum choose ...) || choice="Drop to shell"`, line ~628). On a
-# controller-only Deck there is no Ctrl-C and B is the ONLY way to send
-# that cancellation, so the natural "get me out of here" button would drop
-# a keyboard-less handheld at a bash prompt. Neither this array nor the
-# cancel fallback below may ever contain that string.
-readonly -a DECK_FAILURE_MENU_ITEMS=(
-  "Retry install"
-  "Show the log"
-  "Reboot"
-  "Power off"
-)
-readonly DECK_FAILURE_CANCEL_ACTION="redraw"
-
-deck_form_failure_menu_items() {
-  printf '%s\n' "${DECK_FAILURE_MENU_ITEMS[@]}"
-}
-
-# deck_form_failure_action_for <gum-choose-output-or-empty>
 #
-# The pure decision layer, deliberately split out of failure_menu (which
-# also calls systemctl/gum and is not meaningfully unit-testable). An empty
-# argument stands for "gum choose was cancelled" -- which is also what a
-# real cancelled `gum choose` prints on stdout, matching upstream's own
-# `... || choice="Drop to shell"` shape closely enough that swapping
-# DECK_FAILURE_CANCEL_ACTION for the literal string "Drop to shell" is
-# EXACTLY the single-string mutation T4-screen-spec.md §4 S8 warns a naive
-# test would not notice -- see this session's mutation-testing report.
-# Anything not recognised (a future menu item added here without a case
-# arm here) also redraws rather than guessing at an action -- never act on
-# an unmapped choice.
-deck_form_failure_action_for() {
-  local choice=$1
-  if [[ -z $choice ]]; then
-    printf '%s\n' "$DECK_FAILURE_CANCEL_ACTION"
-    return 0
-  fi
-  case $choice in
-    "Retry install") printf 'retry\n' ;;
-    "Show the log")  printf 'show-log\n' ;;
-    "Reboot")        printf 'reboot\n' ;;
-    "Power off")     printf 'poweroff\n' ;;
-    *)               printf '%s\n' "$DECK_FAILURE_CANCEL_ACTION" ;;
-  esac
-}
-
-readonly DECK_LOG_TAIL_LINES=200
-
-# deck_form_show_log [<logfile>]
-# `gum pager` is the candidate per T4-screen-spec.md §4 S8 (gum widgets
-# exit on Esc by contract -- (INFERRED, not independently confirmed this
-# session; the spec itself flags this as unread, "gum's own key table has
-# not been read"). Falls back to a plain `tail` + "press A to continue"
-# when gum/gum-pager is unavailable or exits non-zero, which is upstream's
-# OWN fallback shape (`prompt_enter`) and needs no pager at all -- the
-# fallback this screen exists to guarantee even if U5 resolves unfavourably.
-deck_form_show_log() {
-  local logfile=${1:-${DECK_INSTALL_LOG:-/var/log/omarchy-install.log}}
-  local tty=${DECK_S0_TTY:-/dev/tty}
-  if command -v gum >/dev/null 2>&1; then
-    if gum pager <"$logfile" 2>/dev/null; then
-      return 0
-    fi
-    deck_form_warn "gum pager exited non-zero (or gum is not actually present) reading $logfile; falling back to a plain tail"
-  fi
-  tail -n "$DECK_LOG_TAIL_LINES" "$logfile" 2>/dev/null
-  printf 'Press A to continue\n'
-  IFS= read -r _ <"$tty" 2>/dev/null || true
-}
-
-# 🔴 NOT `failure_menu`, AND IT CANNOT BE. Upstream's `failure_menu` is
-# defined at `omarchy-install-dashboard:609` and called at `:735` -- a
-# SEPARATE PROCESS that never sources this file (`configurator` contains no
-# mention of the name at all; both files were grepped, not assumed). A
-# function named `failure_menu` here would be loaded into the wrong process
-# and never run: S8 would silently never appear, while every unit test on the
-# pure helpers below stayed green. That is §6.4's own failure mode, and this
-# file had already shipped it twice.
+# 🔴 REMOVED 2026-08-12, and the removal is the point. This file used to
+# define `failure_menu` plus a row list and a decision layer for it, all
+# fully unit-tested and all DEAD: upstream's `failure_menu` lives at
+# `omarchy-install-dashboard:609` and is called at `:735` -- a SEPARATE
+# PROCESS that never sources this file. `configurator` does not contain the
+# name at all.
 #
-# The loop is kept because it is correct and because `docs/tasks/
-# T4a-dashboard-screens.md` specifies the seam that will call it -- a one-hunk
-# patch sourcing a dashboard overlay. It is named `deck_form_*` like every
-# other helper here so that nothing can mistake it for a live override.
-# ⚠️ Until T4a lands, S8 is NOT wired up on a real ISO. Do not claim it is.
-deck_form_failure_menu() {
-  local choice action
-  while true; do
-    choice=$(deck_form_failure_menu_items | gum choose --header "Installation failed") || choice=""
-    action=$(deck_form_failure_action_for "$choice")
-    case $action in
-      retry)    return 0 ;;
-      show-log) deck_form_show_log ;;
-      reboot)   systemctl reboot ;;
-      poweroff) systemctl poweroff ;;
-      *)        : ;;   # redraw: loop again, menu redraws, nothing acted on
-    esac
-  done
-}
-
+# ⚠️ And the rows were wrong on top of being unreachable. Ours offered
+# "Retry install", which the dashboard has no mechanism to perform, and
+# omitted upstream's own "Upload log for support". So relocating this code
+# unchanged -- which `docs/tasks/T4a-dashboard-screens.md` §4 originally
+# suggested -- would have shipped a menu that lies about what it can do.
+#
+# ➡️ S8 now lives in `src/deck-dashboard.sh`, which wraps upstream's REAL
+# menu (Upload log / View full log / Reboot / Power off, reusing upstream's
+# own helpers) and fixes only the actual defect: "Drop to shell" is removed,
+# and a cancelled `gum choose` -- the one thing a controller-only Deck can
+# express, via B/Esc -- now redraws instead of dropping to a bare shell.
+#
+# Deleting tested code feels like a loss. It is not: every one of those
+# assertions passed against a function nothing could ever call, in a shape
+# that contradicted upstream. That is the exact false confidence
+# T4-screen-spec.md §6.4 exists to prevent.
 # ===========================================================================
 # S2 -- Region (timezone)
 # ===========================================================================

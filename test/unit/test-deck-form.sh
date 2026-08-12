@@ -600,55 +600,25 @@ open_row=$(LC_ALL=C command grep -F "OpenGuest" "$work/rows.txt")
 [[ $open_row != *$'\360\237\224\222'* ]] ||
   fail "an open network's row must NOT carry the lock glyph" "got: $open_row"
 pass "the lock glyph is present for secured networks and absent for open ones"
-
 # ===========================================================================
-# S8: Failure
+# S8: Failure -- ITS ASSERTIONS WERE DELETED WITH THE CODE, ON PURPOSE
 # ===========================================================================
-
-echo "--- S8 failure menu -------------------------------------------------------"
-
-menu=$(deck_form_failure_menu_items)
-if LC_ALL=C grep -qF "Drop to shell" <<<"$menu"; then
-  fail "the failure menu must NEVER contain 'Drop to shell' (T4-screen-spec.md §4 S8 item 1)"
-fi
-LC_ALL=C grep -qF "Retry install" <<<"$menu" || fail "failure menu must offer Retry install"
-LC_ALL=C grep -qF "Power off" <<<"$menu" || fail "failure menu must offer Power off"
-pass "the failure menu has no shell escape and offers Retry/Power off"
-
-got=$(deck_form_failure_action_for "")
-[[ $got == redraw ]] || fail "a cancelled choose (empty) must map to 'redraw', never an action" "got: $got"
-pass "cancel (Esc/B) maps to redraw, never to an action -- the exact fallback upstream gets wrong"
-
-got=$(deck_form_failure_action_for "Retry install")
-[[ $got == retry ]] || fail "'Retry install' must map to 'retry'" "got: $got"
-pass "'Retry install' resolves to retry"
-
-got=$(deck_form_failure_action_for "Power off")
-[[ $got == poweroff ]] || fail "'Power off' must map to 'poweroff'" "got: $got"
-pass "'Power off' resolves to poweroff"
-
-got=$(deck_form_failure_action_for "something nobody put in the menu")
-[[ $got == redraw ]] || fail "an unrecognised choice must map to 'redraw', never a guessed action" "got: $got"
-pass "an unmapped choice redraws rather than being guessed at"
-
-echo "--- S8 log fallback (no gum available) -------------------------------------"
-
-printf 'line one\nline two\nline three\n' >"$work/install.log"
-printf '\n' >"$work/fake-tty-input2"
-
-# Build a PATH that genuinely has NO gum on it -- this dev machine has a
-# real /usr/bin/gum, so merely listing /usr/bin would silently exercise the
-# real `gum pager` instead of the fallback (and `gum pager` reading a file
-# with no real terminal attached is not a thing this test wants to risk
-# hanging on). Only what show_log's fallback actually needs (`tail`) is
-# made reachable.
-mkdir -p "$work/bin-nogum"
-ln -sf "$(command -v tail)" "$work/bin-nogum/tail"
-out=$(PATH="$work/bin-nogum" DECK_S0_TTY="$work/fake-tty-input2" deck_form_show_log "$work/install.log" 2>/dev/null)
-LC_ALL=C grep -qF "line one" <<<"$out" || fail "show_log's fallback must actually show the log content" "$out"
-LC_ALL=C grep -qF "Press A to continue" <<<"$out" || fail "show_log's fallback must show the 'press A to continue' prompt"
-pass "show_log falls back to tail + 'press A to continue' when gum is unavailable"
-
+#
+# This suite used to prove a failure menu that could never run: upstream's
+# `failure_menu` is defined at `omarchy-install-dashboard:609` and called at
+# `:735`, in a process that never sources deck-form.sh. Worse, the rows were
+# wrong -- ours offered "Retry install", which the dashboard cannot perform,
+# and omitted upstream's "Upload log for support".
+#
+# ⚠️ **Nine assertions passed against it, including a mutation-tested
+# cancel-fallback check.** They were rigorous about the wrong thing, which is
+# the failure mode T4-screen-spec.md §6.4 names: a test that is green while
+# asserting nothing a user could reach. The override-name contract above now
+# makes this class of mistake impossible to reintroduce silently -- it fails
+# if this file defines a name upstream's configurator never calls.
+#
+# S8 now lives in `src/deck-dashboard.sh` and is proven by
+# `test/unit/test-deck-dashboard.sh`, against upstream's real menu.
 # ===========================================================================
 # Stubs for upstream `configurator` helpers this file's screen OVERRIDES
 # call but does not itself define -- clear_logo/say/step/abort/
