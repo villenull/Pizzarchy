@@ -521,7 +521,39 @@ row 5   (Ⓨ) ————————— space (wide) ————————�
   **Check the code, not the note about the code.**
 - ✅ **Dual legends** — shifted face above, base below — on **numbers and
   punctuation alike**, both always visible. We match this.
-- ⚠️ **`Ⓧ` on Backspace — true for Valve, and it would be a LIE for us.**
+### ✅ OPERATOR DECISION 2026-08-12 — MATCH VALVE EXACTLY, INCLUDING THE BINDINGS
+
+> *"i dont care about the x is supposed to be tab functionality. i want the
+> functionality of the buttons as they appear in the deck images to be matched
+> exactly with our OSK"* — and, on the look: *"its still way off the mark …
+> i still see a gap between the left half and the right half"*.
+
+**This settles the open question below and reverses it.** The target is not
+"our model, badged honestly" — it is **Valve's model, reproduced**. Concretely:
+
+| Button | Was | **Now must be** |
+|---|---|---|
+| `X` (`BTN_NORTH`) | `KEY_TAB` | **Backspace** |
+| `Y` (`BTN_WEST`) | `KEY_SPACE` | Space *(already correct)* |
+| `L2` | commit left cursor | commit left cursor **+ Shift while the left pad is untouched** |
+| `R2` | commit right cursor | commit right cursor **+ Enter while the right pad is untouched** |
+| `L3` (`BTN_THUMBL`) | unbound | **Caps** |
+
+⚠️ **Tab is deliberately given up.** §2.3 wanted it for archinstall's "next
+field"; the operator has weighed that and chosen parity. **Do not reintroduce
+it as a badge or a binding without asking.**
+
+🔴 **The visual gap between the halves must go.** Ours renders two half-grids
+with a gap; Valve's is one continuous keyboard. The two-cursor model does not
+require a visual split — each cursor addresses its own half of a *continuous*
+grid — so this is a rendering change, not an input-model change.
+
+✅ **And the badge gating is now implementable** — see §9e: a lift reports
+exactly `0,0`, measured on hardware 2026-08-12, so "untouched" is a real state
+rather than a timeout.
+
+- ⚠️ **`Ⓧ` on Backspace — was true for Valve and a lie for us; the decision
+  above makes it TRUE for us too, by changing the binding.**
   Measured against our own mapper: `BTN_WEST` (Y) → `KEY_SPACE`, so the `Ⓨ`
   badge on space is truthful; but `BTN_NORTH` (X) → **`KEY_TAB`**, not
   Backspace (`deck-input-mapper.py:160-161`). Painting `Ⓧ` on our Backspace
