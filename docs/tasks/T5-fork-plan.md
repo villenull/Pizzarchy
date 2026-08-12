@@ -656,6 +656,44 @@ Two notes for T5b: **guard 6.4 now has a real failing case** to test against
 compare the **version string and file list**, never the archive checksum.
 `docs/findings/T5a-parity.md` §7 states the exact re-measurement that closes T5a.
 
+### 🟢 Outcome, 2026-08-12 — T5a is CLOSED. Parity proven. **T5c is unblocked.**
+
+The four-test re-measurement ran against T5b's pinned build
+(`8ac3502a…`, runtime `4.0.0.r1617.g6d7826d-1`) — `docs/findings/T5a-parity.md`
+**Appendix A**. **P1, P2, P3 and P4 all pass.** Every difference from
+`~/ISOs/omarchy-2026.08.10-…iso` is temporal; **none is attributable to our
+build path.** Headline numbers, all MEASURED:
+
+- **P1** the ISO9660 diff is still one filename, the build-timestamp `.uuid`;
+  20 of 21 upstream-sourced files byte-identical and the 21st (`os-release`)
+  differs in `IMAGE_VERSION` alone. Zero paths of our own in a 645-line rootfs
+  path diff.
+- **P2** all four pins equal, `BUILD_ID="4.0.0.r1617.g6d7826d"` in both.
+- **P3** offline mirror **1244 / 1244, zero exclusive either way**, 64 upgrades
+  and 0 downgrades, zero Omarchy-authored version changes, boot chain
+  byte-identical. Sharper than the bar asked: of **1180** packages present at
+  the same version in both images, **1177 are byte-identical** — the only 3 that
+  differ are exactly the three `--local-source` builds.
+- **P4** all 3 orchestrator-called binaries present; `apply-system` absent.
+
+So the two reasons this section gave for blocking T5c are gone: the base build
+*does* reproduce the reference, and `omarchy-base.packages` is now
+**byte-identical** to it (`expected-packages` = `934` in both), so T5c's
+denominator no longer drifts.
+
+**⚠️ Two constraints T5c inherits.** (1) `iso/PKGS` pins only the three
+locally-built packages' *sources*; the other ~1241 offline packages still come
+from rolling `edge`, so write §7's NVIDIA check as a **shape** assertion ("no
+package matching `nvidia*` resolves into the mirror"), never a count or a
+version. (2) `omarchy-nvim` clones plugin git HEADs at build time, so its
+payload under `etc/skel/.local/share/nvim/` drifts per build even at a pinned
+PKGBUILD — **no slice may assert byte-stability across rebuilds.** Neither
+touches the boot chain, the orchestrator or `/usr/bin`.
+
+🔴 Unchanged and still INFERRED: **nobody has booted this ISO.** That an install
+now runs past phase 5 is an argument from ingredients, not an execution. `[V]`
+tier (`test/vm/`) still owes that.
+
 ---
 
 ## 8. The single riskiest unknown that remains
