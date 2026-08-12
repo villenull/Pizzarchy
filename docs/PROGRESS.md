@@ -2472,6 +2472,15 @@ backup rescue (the rebuild wipes both).
   shell there can block on a prompt that looks nothing like the screen it was
   aiming at — the same class as an interactive pager with no controller exit
   (§5.26a). Measured 2026-08-11.
+- **`pgrep -x gamescope` FINDS NOTHING while Gaming Mode is on screen.** The
+  binary's `argv[0]` is `gamescope` but its **`comm` is `gamescope-wl`** —
+  measured 2026-08-11 on `/proc/<pid>/comm` — and `pgrep -x` matches `comm`, not
+  argv. ✅ `src/deck-session.sh` (~line 882) already documents this and matches
+  `gamescope-wl`, with an assertion pinning it in `test/unit/test-deck-session.sh`.
+  **This entry exists because it was re-derived anyway**, mid-session, and read
+  as "Gaming Mode failed to start" for several minutes while the operator was
+  looking straight at it. Use `pgrep -f`, or the session's
+  `loginctl show-session -p Desktop`, which reports `gamescope` regardless.
 - **An evdev node can be enumerated and permanently silent.** Counting nodes,
   `systemctl is-active`, and a log line naming the bound device all reported
   health while the mapper delivered nothing for an entire session (§R-31).
