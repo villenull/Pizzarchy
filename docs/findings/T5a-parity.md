@@ -519,3 +519,48 @@ cd ~ && rm -rf "$BIG"
   the offline mirror, one package archive, and about eight small files. Nothing
   here needed a root filesystem unpacked wholesale.
 - Peak disk: ~12 GiB for the two `.sfs`, plus ~1 GiB of extractions.
+
+---
+
+## ✅ RESOLVED 2026-08-12 by T5b's `--local-source` — the decisive gate is open
+
+The failure above was **the runtime drifting off its pin**, and pinning it fixes
+it. A build with T5b's `--local-source` wiring, and `iso/PKGS` pinned to
+`omacom-io/omarchy-pkgs@ae07234a016c` (operator decision, same day), produced:
+
+```
+runtime pin OK: basecamp/omarchy@6d7826d635d0ba57a6a7b0e8a29d04411da77ced
+guard 6.4a OK: all 3 orchestrator-called binaries exist in 6d7826d's bin/ (408 candidates)
+guard 6.4b: omarchy-dev 4.0.0.r1617.g6d7826d-1 built from basecamp/omarchy@6d7826d
+guard 6.4b OK: all 3 orchestrator-called binaries are present in the packages this ISO carries
+build complete: omarchy-2026.08.12-x86_64-quattro.iso   5.9G
+```
+
+**Verified independently of the guard**, by reading the built package rather
+than trusting the log:
+
+| | Runtime | `omarchy-setup-system` | `omarchy-apply-system` |
+|---|---|---|---|
+| Reference ISO (known-good) | `4.0.0.r1617.g6d7826d-1` | present | — |
+| The broken unpinned build (above) | `4.0.0.r1667.g4727bad` | **absent** | present |
+| **This build** | **`4.0.0.r1617.g6d7826d-1`** | **present** | **0 matches** |
+
+The version string carries the pinned commit, which is T5b's own strongest
+check (§3 of its report): `--local-source` silently failing to apply would
+otherwise be invisible in a green log.
+
+### ⚠️ What this does and does not settle
+
+✅ **The P4 coherence test passes** — the ISO no longer bundles a runtime
+missing the binary its own installer shells out to, so it can no longer die at
+phase 5 of 14. **That was the blocker, and it is open.**
+
+🟡 **Full parity under §7's four tests has NOT been re-measured.** P1/P2/P3
+(structural, inputs, manifest) still need a run. ⚠️ And per T5b's own caveat,
+that re-measurement **must compare the version string and file list, never the
+archive checksum** — `--local-source` *builds* the runtime rather than
+downloading it, so a byte-comparison is meaningless by construction.
+
+🔴 **Nobody has booted this ISO.** That an install now completes past phase 5
+is an inference from the ingredients, exactly as the failure was. The [V] tier
+(`test/vm/`) is where that gets settled.
