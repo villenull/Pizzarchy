@@ -2693,44 +2693,57 @@ ways: injecting a bad dispatch into `src/deck-session.sh`, injecting a bare
 ⚠️ It asserts which *shape* is written down; that the Lua shape works is T10's
 measurement, not the suite's — nothing here talks to a live compositor.
 
-### 5.30c ✅ SOLVED 2026-08-12 — the touchscreen was UNROTATED, and our OSK opts out of input
+### 5.30c 🟡 PARTLY EXPLAINED 2026-08-12 — the OSK opts out of input; the desktop half is NOT explained
 
-**Two separate causes, both measured, neither one "broken hardware".**
+⚠️ **This section claimed "SOLVED — the touchscreen was UNROTATED" for one
+commit. That claim was WRONG and is retracted.** The operator corrected it
+immediately: *"touch was working exactly the way i described even before you
+applied the transform. so not sure the transform did anything."* I changed a
+setting, observed the desired behaviour, and wrote down a causal claim **without
+ever taking a before/after measurement**. That is the same error this project
+keeps recording in others' work.
 
-**1. The desktop: `input:touchdevice:transform` was `0` while the display runs
-`transform = 3`.** Touches were arriving the whole time — `cat /dev/input/event9`
-produced **24,648 bytes in six seconds** — they just landed ~90° from where the
-finger was. Setting the transform to match made touch work immediately
-(operator confirmed: window controls, the Wi-Fi button, links).
+#### ✅ What IS established (measured, and it is the actionable half)
 
-⚠️ **Applied at RUNTIME only; it reverts on the next Hyprland restart.** The
-persistent fix belongs with the other rotation surfaces — §5.11 already records
-**four** rotation values across four mechanisms that do not follow from one
-another, and this is a **fifth**. T5's bake-in list (`T5-fork-plan.md` §5.2)
-owes it a row.
-
-🔴 **And the syntax to set it is a §5.30b trap:** `hyprctl keyword` answers
-*"keyword can't work with non-legacy parsers. Use eval."* The working form is a
-**nested table**, not the colon-path string every Hyprland doc uses:
-
-```bash
-hyprctl eval 'hl.config{ input = { touchdevice = { transform = 3 } } }'
-```
-
-**2. Our OSK: it is input-transparent ON PURPOSE.** Touch works on the desktop
-but not on our keyboard, because `src/deck_osk_wayland.py:402` sets
+**Our OSK is input-transparent ON PURPOSE.** `src/deck_osk_wayland.py:402` sets
 `surface.set_input_region(cairo.Region())` — an **empty** region — alongside
-`KeyboardMode.NONE`. That is what stops the overlay stealing focus or swallowing
-clicks from the app beneath it (T8 step 7's whole safety argument). Nothing is
-broken; we told the compositor to send it nothing.
+`KeyboardMode.NONE`. Touch, and pointer, are deliberately not delivered to it.
+That is what stops the overlay stealing focus or swallowing clicks from the app
+beneath (T8 step 7's safety argument). **Nothing is broken; we told the
+compositor to send it nothing.**
 
-➡️ **Supporting touch is therefore a scoped change, not a bug fix:** give the
+➡️ Supporting touch is therefore a **scoped change, not a bug fix**: give the
 surface a real input region and handle touch-down → key press. Valve's keyboard
-accepts touch, so this is on the path to §9g parity. ⚠️ It trades away the
-"can never swallow a click" property — re-read T8 step 7 before doing it.
+accepts touch, so it is on the path to §9g parity. ⚠️ It trades away the "can
+never swallow a click" property — re-read T8 step 7 first.
 
-*(Superseded: this section previously read "the touchscreen does nothing on the
-desktop, at all" and listed it as an unexplained open issue.)*
+Also measured, and independent of any of the above:
+
+- The kernel node produces touch data: `cat /dev/input/event9` → **24,648 bytes
+  in six seconds**.
+- Hyprland has the panel bound (`Touch Device …: fts3528:00-2808:1015`) and
+  `input:touchdevice:enabled` is `true`.
+- `input:touchdevice:transform` reads `0` while the output runs `transform=3`.
+  **Whether that matters is UNKNOWN** — `0` may well mean "inherit the output's
+  transform" rather than "rotate by zero", which would explain why setting it to
+  `3` changed nothing observable. Nobody has tested that.
+
+#### 🔴 What is NOT explained — the original observation
+
+2026-08-11, during T10, taps did nothing **anywhere** on the desktop. 2026-08-12,
+after a reboot and with Steam stopped, desktop touch worked normally. ⚠️ **The
+confound is Steam:** the first observation was taken while Steam was resident and
+holding the controller, the second was not. A resident Steam taking or breaking
+touch would be consistent with R-41 (*"a resident Steam is actively HARMFUL, not
+neutral"*), but **that is a hypothesis, not a measurement.**
+
+**To settle it, one cheap Deck test:** tap the desktop with Steam stopped
+(expect: works), start Steam resident, tap again (does it stop?), stop Steam,
+tap again. Three readings, no config changes. Until someone runs it, do not
+record a cause.
+
+**Do not persist any touch transform** — operator decision 2026-08-12, on the
+grounds that it demonstrably changed nothing.
 
 ### 5.30d 🔵 (was 5.30c's placeholder)
 
