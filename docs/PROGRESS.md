@@ -1995,19 +1995,52 @@ that nearly recorded a false pass here. Both are in `input.lua`'s comments.
 
 ### 🔴 Three defects this session exposed, none of them the lock rule
 
-1. 🔴 **A locked Deck whose panel is asleep may be unwakeable by its own
-   controls.** Observed once, reproducibly enough to matter: the screen was
-   **completely black** — no artwork, no password field — and **a trackpad touch
-   and an A press did nothing**. Only a **USB keyboard** keypress brought the
-   lock screen up. Backlight was on at 33% and `bl_power` was 0, so the panel was
-   lit and the compositor was drawing black; this is not DPMS and not brightness.
-   On the second attempt, with the panel already awake, everything worked. **The
-   suspected trigger is locking while the display has idle-blanked** (screensaver
-   is 150 s). ⚠️ If the mapper's uinput events genuinely cannot wake a locked
-   panel, this is the §5.24 scenario again by another route, and it is a release
-   blocker for a device with no keyboard. **Not yet isolated** — the alternative
-   explanation is the `lock-pending: screen-stabilizing` phase seen in the
-   journal resolving coincidentally. Distinguishing them is one deliberate test.
+1. 🟡 **ISOLATED 2026-08-11, and it is a usability defect, NOT the unanswerable
+   screen.** Reproduced deliberately with the variables recorded. **Locking
+   blanks the panel about 5–6 s later** (`dpmsStatus` sampled ~1 s apart read
+   `1,1,1,1,1` then `0` for the remaining 19 samples; the operator saw the prompt
+   "for 1 or 2 seconds then it went black"). Repeatable.
+
+   **What wakes it, measured by pressing things:**
+
+   | Input | Wakes the panel? |
+   |---|---|
+   | Right trackpad | ❌ no |
+   | Ordinary face buttons | ❌ no |
+   | **QAM (`BTN_BASE`)** | ✅ **yes — for ~2 seconds** |
+   | **Power button** | ✅ yes |
+
+   The operator woke it with QAM, summoned the keyboard, typed the password with
+   the trackpads and reached the desktop. **So the device is recoverable by its
+   own controls and §5.24's unanswerable-screen scenario does not occur with the
+   `above_lock` fix in place.** An earlier note in this file called it a release
+   blocker; that was written before it was isolated and was wrong.
+
+   ⚠️ **Two corrections to how this was diagnosed, both worth keeping.** First,
+   "the backlight is on at 33% so this is not DPMS" was **unsound** — the
+   backlight sysfs value does not track DPMS state, and `dpmsStatus` was 0
+   throughout. Second, the tempting correlation (*"black happens when the OSK is
+   mapped at lock time"*) was **a coincidence of two runs**; DPMS state was the
+   variable nobody recorded on the first one. Two plausible stories, both wrong,
+   both killed by changing one variable deliberately.
+
+   **Why QAM and nothing else is the interesting part:** QAM is the only button
+   bound to *spawn a process* (`omarchy-menu toggle`), so it plausibly wakes the
+   display through the shell reacting rather than through the input path at all.
+   That fits the trackpad failing — **the mapper grabs the pad, so its raw events
+   may never reach the compositor's idle notifier.** Unverified mechanism; it is
+   the first thing to check when fixing the three items below.
+
+### 5.24a 🆕 Operator requirements from seeing the lock in use (2026-08-11)
+
+Three changes, all requested after watching it work. None needs the Deck to
+develop; all need it to confirm.
+
+| # | Requirement | Note |
+|---|---|---|
+| 1 | **Only the power button should wake the panel** — QAM should not | Deliberately narrowing the wake surface. ⚠️ Verify the mechanism above first: if QAM wakes it via `omarchy-menu` rather than via input, "stop QAM waking it" is a different change than it sounds |
+| 2 | **Display-on time should be ~20 s, not ~2 s** | 2 s is not enough to aim a trackpad at a password field. This is the lock screen's own idle timeout, distinct from the 150 s screensaver and the 86400 s lock in `shell.json` |
+| 3 | **The OSK should auto-hide after unlock** | It currently persists into the desktop session. Ours is summon-only (§5.27), so nothing dismisses it on unlock today |
 2. 🔴 **There is no `unlock` IPC.** `qs ipc show` gives the `lock` target exactly
    `lock`, `isLocked`, `status`, `preview`, `hidePreview`. Nothing releases a
    lock but the password. Combined with #3, a keyboard-less Deck that locks with
