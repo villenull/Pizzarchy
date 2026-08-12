@@ -544,6 +544,15 @@ class OnScreenKeyboard:
         # The last renderer-owned request a press made ("emoji" | "move"), for
         # a renderer to pick up and clear. "" once handled.
         self.request = ""
+        # Which pads currently have a thumb on them, for §9g's per-pad badge
+        # gating. ⚠️ THE OVERLAY CANNOT COMPUTE THIS ITSELF: pad contact is an
+        # evdev fact derived from "the last sample was exactly 0,0" (measured
+        # on hardware 2026-08-12), and the layer-shell renderer is a separate
+        # process that never sees the device. It arrives over the wire; see
+        # format_state_line. Defaults to nothing touched, which is the frame
+        # where every badge is visible -- a badge wrongly shown is cosmetic, a
+        # badge wrongly hidden lies about what the controls do.
+        self.touched = {"left": False, "right": False}
 
     @property
     def layer(self) -> Layer:
@@ -855,15 +864,38 @@ STATE_FIELDS = 7  # without the optional trailing caps flag
 
 
 def parse_state_line(line: str) -> dict | None:
-    """`state <layer> <shift> <lx> <ly> <rx> <ry> [caps]` -> a dict, or None."""
+    """`state <layer> <shift> <lx> <ly> <rx> <ry> [caps] [ltouch rtouch]`.
+
+    Returns a dict, or None for anything it cannot make sense of.
+
+    ⚠️ GROWN TWICE, BOTH TIMES BACKWARD-COMPATIBLY, AND THAT IS DELIBERATE.
+    The layer-shell keyboard is a SEPARATE PROCESS (T8 step 7: a GTK crash
+    must not take the only input path on the device down with it), so this
+    line is the entire contract between the mapper and what a user sees.
+    An older mapper talking to a newer overlay, or the reverse, happens
+    every time one is deployed without the other -- `stage-input-mapper`
+    installs both, but a hand-run debug build routinely mixes them.
+
+    Fields 8 (caps) and 9-10 (pad touch) are therefore OPTIONAL, and their
+    absence means the safe default: no caps, nothing touched. "Nothing
+    touched" is the safe default because it is §9f's all-badges-visible
+    frame -- a badge shown when it should be hidden is cosmetic; a badge
+    hidden when the trigger really does something is a lie about the
+    controls.
+    """
     parts = line.split()
-    if len(parts) not in (STATE_FIELDS, STATE_FIELDS + 1) or parts[0] != "state":
+    if not parts or parts[0] != "state":
+        return None
+    if len(parts) not in (STATE_FIELDS, STATE_FIELDS + 1, STATE_FIELDS + 3):
         return None
     _, layer, shift, lx, ly, rx, ry = parts[:STATE_FIELDS]
     caps_field = parts[STATE_FIELDS] if len(parts) > STATE_FIELDS else "off"
+    touch_fields = parts[STATE_FIELDS + 1:STATE_FIELDS + 3] or ["up", "up"]
     if layer not in LAYERS or shift not in ("off", "once", "locked"):
         return None
     if caps_field not in ("on", "off"):
+        return None
+    if any(t not in ("down", "up") for t in touch_fields):
         return None
     try:
         values = [float(v) for v in (lx, ly, rx, ry)]
@@ -872,15 +904,28 @@ def parse_state_line(line: str) -> dict | None:
     if not all(0.0 <= v <= 1.0 for v in values):
         return None
     return {"layer": layer, "shift": shift, "caps": caps_field == "on",
-            "left": (values[0], values[1]), "right": (values[2], values[3])}
+            "left": (values[0], values[1]), "right": (values[2], values[3]),
+            "touched": {"left": touch_fields[0] == "down",
+                        "right": touch_fields[1] == "down"}}
 
 
-def format_state_line(keyboard: OnScreenKeyboard, cursors: Cursors) -> str:
-    """The mapper's side of the same protocol."""
+def format_state_line(keyboard: OnScreenKeyboard, cursors: Cursors,
+                     touched: dict | None = None) -> str:
+    """The mapper's side of the same protocol.
+
+    `touched` is `{"left": bool, "right": bool}` -- `Mapper.pad_touched()`
+    for each half. It drives §9g's per-pad badge gating, which the overlay
+    cannot compute for itself: pad contact is an evdev fact, and the overlay
+    never sees the device. Omitted means "nothing touched", i.e. every badge
+    visible.
+    """
     left, right = cursors.position("left"), cursors.position("right")
+    touched = touched or {}
+    lt = "down" if touched.get("left") else "up"
+    rt = "down" if touched.get("right") else "up"
     return (f"state {keyboard.layer_name} {keyboard.shift} "
             f"{left[0]:.4f} {left[1]:.4f} {right[0]:.4f} {right[1]:.4f} "
-            f"{'on' if keyboard.caps else 'off'}\n")
+            f"{'on' if keyboard.caps else 'off'} {lt} {rt}\n")
 
 
 def apply_state(keyboard: OnScreenKeyboard, cursors: Cursors,
@@ -888,5 +933,6 @@ def apply_state(keyboard: OnScreenKeyboard, cursors: Cursors,
     keyboard.layer_name = state["layer"]
     keyboard.shift = state["shift"]
     keyboard.caps = bool(state.get("caps", False))
+    keyboard.touched = dict(state.get("touched", {"left": False, "right": False}))
     for half in ("left", "right"):
         cursors.pos[half] = [state[half][0], state[half][1]]

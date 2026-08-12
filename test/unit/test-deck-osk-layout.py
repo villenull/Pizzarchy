@@ -1012,25 +1012,57 @@ kb = osk.OnScreenKeyboard()
 cur = osk.Cursors()
 cur.update(e.ABS_HAT0X, MIN)
 cur.update(e.ABS_HAT0Y, MAX)
-check("a formatted line carries caps as an eighth field",
+NOTOUCH = {"left": False, "right": False}
+check("a formatted line carries caps, then both pad-touch fields",
       osk.format_state_line(kb, cur),
-      "state letters off 0.0000 0.0000 0.5000 0.5000 off\n")
+      "state letters off 0.0000 0.0000 0.5000 0.5000 off up up\n")
 kb.caps = True
 kb.shift = "locked"
 check("...and reports both modifiers independently",
       osk.format_state_line(kb, cur),
-      "state letters locked 0.0000 0.0000 0.5000 0.5000 on\n")
+      "state letters locked 0.0000 0.0000 0.5000 0.5000 on up up\n")
+# §9g's gate is PER PAD, so the two fields must move independently -- one
+# field for "a pad is touched" would hide both triggers' badges at once,
+# which is exactly the behaviour the operator measured as wrong.
+check("each pad's touch state is carried separately",
+      osk.format_state_line(kb, cur, {"left": True, "right": False}),
+      "state letters locked 0.0000 0.0000 0.5000 0.5000 on down up\n")
+check("...and the other way round",
+      osk.format_state_line(kb, cur, {"left": False, "right": True}),
+      "state letters locked 0.0000 0.0000 0.5000 0.5000 on up down\n")
 
 parsed = osk.parse_state_line(
     "state letters once 0.1000 0.2000 0.3000 0.4000 on")
 check("a full line parses", parsed,
       {"layer": "letters", "shift": "once", "caps": True,
-       "left": (0.1, 0.2), "right": (0.3, 0.4)})
+       "left": (0.1, 0.2), "right": (0.3, 0.4), "touched": NOTOUCH})
 check("a SEVEN-field line still parses, with caps off -- an older writer has "
       "no caps state and that is exactly what it means",
       osk.parse_state_line("state letters once 0.1 0.2 0.3 0.4"),
       {"layer": "letters", "shift": "once", "caps": False,
-       "left": (0.1, 0.2), "right": (0.3, 0.4)})
+       "left": (0.1, 0.2), "right": (0.3, 0.4), "touched": NOTOUCH})
+# ⚠️ THE DEFAULT IS THE SAFE ONE, AND IT IS ASSERTED. An older mapper sends
+# no touch fields; "nothing touched" shows every badge. A badge wrongly
+# shown is cosmetic; a badge wrongly hidden lies about what the trigger does.
+check("a ten-field line carries the pad-touch state through",
+      osk.parse_state_line("state letters once 0.1 0.2 0.3 0.4 on down up"),
+      {"layer": "letters", "shift": "once", "caps": True,
+       "left": (0.1, 0.2), "right": (0.3, 0.4),
+       "touched": {"left": True, "right": False}})
+check("...and the right pad independently",
+      osk.parse_state_line("state letters once 0.1 0.2 0.3 0.4 off up down")["touched"],
+      {"left": False, "right": True})
+check("a bad touch field is rejected rather than guessed",
+      osk.parse_state_line("state letters off 0.1 0.2 0.3 0.4 off down maybe"), None)
+check("a NINE-field line (one touch field, not two) is rejected, not half-read",
+      osk.parse_state_line("state letters off 0.1 0.2 0.3 0.4 off down"), None)
+# The round trip is what actually ships: whatever format_state_line writes,
+# parse_state_line must read back identically. A mismatch here is a keyboard
+# whose badges disagree with the device, and no single-sided test sees it.
+rt = osk.parse_state_line(
+    osk.format_state_line(kb, cur, {"left": True, "right": True}).strip())
+check("format -> parse round-trips the touch state", rt["touched"],
+      {"left": True, "right": True})
 check("a bad caps field is rejected rather than guessed",
       osk.parse_state_line("state letters off 0.1 0.2 0.3 0.4 maybe"), None)
 check("a bad shift state is rejected",

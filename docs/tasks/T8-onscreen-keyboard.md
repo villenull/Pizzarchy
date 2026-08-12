@@ -524,7 +524,7 @@ Ours draws both faces permanently. Valve swaps them:
 | State | Number/punctuation/arrow keys | Letters |
 |---|---|---|
 | **Unshifted** | **dual legend** — shifted small ABOVE, base large below | lowercase |
-| **Shift active** | **ONLY the shifted face**, larger, centred (`~ ! @ #`, `{ } \|`, `▲ ▼`) | UPPERCASE |
+| **Shift active** | **ONLY the shifted face** (`~ ! @ #`, `{ } \|`, `▲ ▼`) — ⚠️ **NOT larger**: pixel-measured as the *same size* as the small dual-legend glyph, merely **re-centred** from sitting high in the key to the key's vertical middle (`docs/findings/T8-reference-metrics.md`) | UPPERCASE |
 | **Caps active** | **unchanged — dual legends stay** | UPPERCASE |
 
 ⚠️ **Caps ≠ Shift, and that is the subtle part.** Caps changes *letter case
@@ -540,8 +540,18 @@ Shift's arrow behaviour unreachable.
 - **The cursor is a WHITE (inverted) key face PLUS a small BLUE DOT** drawn at
   the thumb's precise position on that key. Two cursors, one per pad, both
   visible at once. Ours has no equivalent of the dot.
-- Action keys (`Tab`, `Caps`, `Shift`, `Backspace`, `Enter`, `Move`) are drawn
-  **black**; letter keys are dark grey.
+- Action keys (`Tab`, `Caps`, `Shift`, `Backspace`, `Enter`) are drawn
+  **black**; letter keys are dark grey. ⚠️ **This does NOT reduce to a clean
+  rule** — measured twice: `Space` and `Move` are grey like letters, while
+  `Paste` and the arrows are black. Treat the per-key classification as data,
+  not as a predicate.
+- 🔴 **Corners are SQUARE, not rounded** — measured at single-pixel resolution,
+  hard one-pixel transitions at every corner. §9g's prose said nothing; ours
+  draws visibly rounded keys.
+- 🆕 A **3px stripe** (`#79A0F7`) runs the full width **above** the keyboard.
+- **Exact palette, geometry and the quantified diff against ours are in
+  `docs/findings/T8-reference-metrics.md`** — including that our gap between
+  halves is **≈62px, about 10× the normal inter-key gap**.
 
 #### ✅ Badge gating — confirmed, symmetric, and per-pad
 
