@@ -97,6 +97,175 @@ nb=$(screens::nonblank_rows "$work/cp437.screen")
 pass "nonblank_rows counts the pure-CP437 row too (LC_ALL=C is the load-bearing half here, not -a alone)"
 
 # ===========================================================================
+# table_value -- the function that replaced THE bug this harness's first
+# real run actually found (docs/findings/T4-harness-first-run.md)
+# ===========================================================================
+#
+# The fixture is a byte-accurate reconstruction of the real captured summary
+# screen: CP437 0xB3 (box-drawing vertical) as the column separator, values
+# padded out to the column width. The bug being regression-tested is that a
+# character-class/`.` regex over these bytes matches NOTHING in a UTF-8
+# locale, so the old inline extraction silently produced "" and the pairing
+# check blamed the wizard for a disagreement that did not exist.
+{
+  printf ' \263 Field         \263 Value               \263\n'
+  printf ' \263 Username      \263 deck                \263\n'
+  printf ' \263 Password      \263 ****                \263\n'
+  printf ' \263 Full name     \263 [Skipped]           \263\n'
+  printf ' \263 Hostname      \263 omarchy             \263\n'
+  printf ' \263 Timezone      \263 America/Mexico_City \263\n'
+  printf ' \263 Keyboard      \263 uk                  \263\n'
+} >"$work/summary.cp437"
+
+got=$(screens::table_value "$work/summary.cp437" "Username")
+[[ $got == "deck" ]] || fail "table_value reads a CP437-separated table cell" "got '$got'"
+pass "table_value reads 'deck' out of a CP437 box-drawn table (the exact bug run 1 hit)"
+
+# Prove the OLD approach really does fail on this same fixture, so the
+# regression test is anchored to a demonstrated failure rather than to a
+# story about one. If a future grep/locale makes the old form work, this
+# assertion tells us the fixture stopped reproducing the bug.
+# (|| true: under `set -o pipefail` the leading grep finding nothing -- which
+# is the whole point of this fixture -- would otherwise abort the suite.)
+old=$(command grep -aoE 'Username *. *[a-zA-Z0-9_-]+' "$work/summary.cp437" 2>/dev/null |
+  command grep -aoE '[a-zA-Z0-9_-]+$' | tail -1 || true)
+[[ -z $old ]] || printf 'note - the pre-fix locale-dependent extraction no longer fails here (got %s); check LC_* in this environment\n' "$old"
+
+# A value containing '/' and one containing '[' ']' both survive: the parse
+# is byte-delimited, not a character class of "allowed" value characters,
+# which is what made the old regex fragile in the first place.
+got=$(screens::table_value "$work/summary.cp437" "Timezone")
+[[ $got == "America/Mexico_City" ]] || fail "table_value keeps '/' in a value" "got '$got'"
+got=$(screens::table_value "$work/summary.cp437" "Full name")
+[[ $got == "[Skipped]" ]] || fail "table_value keeps bracket characters in a value" "got '$got'"
+pass "table_value preserves '/' and '[]' in cell values (byte-delimited, not character-classed)"
+
+got=$(screens::table_value "$work/summary.cp437" "Nonexistent")
+[[ -z $got ]] || fail "table_value returns nothing for a label with no row" "got '$got'"
+pass "table_value returns empty (not a plausible wrong value) for a missing label"
+
+# ⚠️ The false-positive case, and the reason both separators are REQUIRED.
+# "Username" also appears in ordinary prose on the username PROMPT screen
+# ("Username> Alphanumeric without spaces (like dhh)"). If table_value
+# accepted a row without separators it would happily return
+# "> Alphanumeric without spaces (like dhh)" and the pairing check would
+# report a mismatch against a screen that is not a table at all.
+printf "Let's setup your user account...\nUsername> Alphanumeric without spaces (like dhh)\nenter submit\n" >"$work/prompt.notable"
+got=$(screens::table_value "$work/prompt.notable" "Username")
+[[ -z $got ]] || fail "table_value must not read prose as a table row" "got '$got'"
+pass "table_value refuses a prose line with no cell separators (no false positive)"
+
+# A truncated/half-repainted row -- opening separator but no closing one --
+# must yield nothing rather than a partial value that looks fine.
+printf ' \263 Username      \263 dec\n' >"$work/summary.truncated"
+got=$(screens::table_value "$work/summary.truncated" "Username")
+[[ -z $got ]] || fail "table_value must reject a cell with no closing separator" "got '$got'"
+pass "table_value rejects a truncated cell rather than returning a partial value"
+
+# ⚠️ Added after mutation testing: deleting the OPENING-separator
+# requirement survived the fixtures above, because the prose case is caught
+# by the CLOSING check instead. This is the shape that isolates it -- the
+# label appearing inside ANOTHER row's value cell, on a line that does have
+# a closing separator. Without the opening requirement this returns
+# "missing" for the label "Username", which is a confidently wrong answer.
+printf ' \263 Warning       \263 Username missing    \263\n' >"$work/summary.labelinvalue"
+got=$(screens::table_value "$work/summary.labelinvalue" "Username")
+[[ -z $got ]] || fail "table_value must not read a label occurring inside another row's VALUE" "got '$got'"
+pass "table_value ignores its label when it appears inside another row's value cell"
+
+# ⚠️ Also added after mutation testing: taking the FIRST match instead of
+# the last survived everything above. A scrolled console can show a stale
+# copy of the same table above the live one -- the bottom-most row is the
+# current screen, the one above it is history.
+{
+  printf ' \263 Username      \263 dec                 \263\n'
+  printf ' -- (screen scrolled; the table was redrawn below) --\n'
+  printf ' \263 Username      \263 deck                \263\n'
+} >"$work/summary.scrolled"
+got=$(screens::table_value "$work/summary.scrolled" "Username")
+[[ $got == "deck" ]] || fail "table_value must return the LAST (live) row, not a stale one above it" "got '$got'"
+pass "table_value returns the live bottom-most row, not a stale scrolled-off copy"
+
+# ...and the deliberate consequence of that rule: if the LIVE row's cell is
+# empty (still being drawn, or genuinely blank), the answer is empty. It
+# must NOT fall back to the stale value above, which would be a confident
+# lie exactly where the caller most needs a loud failure.
+{
+  printf ' \263 Username      \263 deck                \263\n'
+  printf ' -- (redrawn) --\n'
+  printf ' \263 Username      \263                     \263\n'
+} >"$work/summary.staleabove"
+got=$(screens::table_value "$work/summary.staleabove" "Username")
+[[ -z $got ]] || fail "table_value must not fall back to a stale value when the live cell is empty" "got '$got'"
+pass "table_value reports the live row's EMPTY cell rather than falling back to a stale value"
+
+# ===========================================================================
+# content_digest -- a screen identity immune to vertical shift and nothing else
+# ===========================================================================
+#
+# The measured case: upstream's first rejection of an empty username drops
+# its intro line and moves everything below up one row. The wizard did not
+# advance, but a raw byte hash called that "the block did not hold".
+printf "Let's setup your user account...\n\nUsername> Alphanumeric without spaces (like dhh)\n\nenter submit\n" >"$work/block.before"
+printf "\n\nUsername> Alphanumeric without spaces (like dhh)\n\nenter submit\n\n" >"$work/block.after"
+
+[[ $(sha256sum <"$work/block.before" | cut -d' ' -f1) != $(sha256sum <"$work/block.after" | cut -d' ' -f1) ]] ||
+  fail "the shift fixture must genuinely differ at the byte level, or it proves nothing"
+
+command grep -av -- "Let's setup your user account" "$work/block.before" >"$work/block.before.less-intro"
+[[ $(screens::content_digest "$work/block.before.less-intro") == "$(screens::content_digest "$work/block.after")" ]] ||
+  fail "content_digest must see a pure vertical shift plus the pinned intro-line loss as the same screen"
+pass "content_digest ignores a whole-screen vertical shift (the measured upstream repaint)"
+
+# ...and NOTHING else. One character different anywhere must still differ.
+printf "\n\nUsername> Alphanumeric without spaces (like dhX)\n\nenter submit\n\n" >"$work/block.tampered"
+[[ $(screens::content_digest "$work/block.after") != $(screens::content_digest "$work/block.tampered") ]] ||
+  fail "content_digest must still catch a single changed character -- otherwise the guard is worthless"
+pass "content_digest still catches a single changed character (the guard keeps its strength)"
+
+# ⚠️ Added after mutation testing: deleting the right-trim survived the
+# fixtures above (none of them had trailing padding). A real /dev/vcs1
+# capture is a space-padded fixed grid, so trailing whitespace is an
+# artefact of the grid, never content -- the same screen must digest
+# identically however much padding it carries.
+printf 'Username> deck\nenter submit\n' >"$work/pad.none"
+printf 'Username> deck                    \nenter submit          \n' >"$work/pad.trailing"
+[[ $(screens::content_digest "$work/pad.none") == "$(screens::content_digest "$work/pad.trailing")" ]] ||
+  fail "content_digest must ignore trailing grid padding"
+pass "content_digest ignores trailing grid padding (it is grid, not content)"
+
+# LEADING whitespace is the opposite: indentation is real screen content,
+# and a prompt that jumped 20 columns left is a changed screen.
+printf '                    Username> deck\nenter submit\n' >"$work/pad.leading"
+[[ $(screens::content_digest "$work/pad.none") != $(screens::content_digest "$work/pad.leading") ]] ||
+  fail "content_digest must NOT ignore leading indentation -- horizontal position is content"
+pass "content_digest treats leading indentation as content (a shifted prompt is a changed screen)"
+
+# A row appearing or disappearing must differ too: this is the half-broken
+# repaint the guard exists to catch.
+printf "\n\nUsername> Alphanumeric without spaces (like dhh)\n\n" >"$work/block.lostrow"
+[[ $(screens::content_digest "$work/block.after") != $(screens::content_digest "$work/block.lostrow") ]] ||
+  fail "content_digest must catch a lost row"
+pass "content_digest catches a row that vanished from the repaint"
+
+# The blank-screen trap, stated in the function's own docstring: two blank
+# captures DO share a digest, so a caller must assert content separately.
+# Prove the row-count prefix makes that visible rather than hidden.
+printf '\n\n\n' >"$work/block.blank"
+# ⚠️ Regression test for a latent bug this fixture exposed: nonblank_rows
+# used to print "0\n0" on a file with no matches (grep -c prints 0 AND exits
+# 1, so the `|| echo 0` fallback fired as well). A caller doing
+# `[[ $(screens::nonblank_rows f) -gt 0 ]]` got a bash error, not an answer.
+got=$(screens::nonblank_rows "$work/block.blank")
+[[ $got == "0" ]] || fail "nonblank_rows returns exactly '0' (one line) for a blank file" "got '$got'"
+[[ $(screens::nonblank_rows "$work/no-such-file-at-all") == "0" ]] ||
+  fail "nonblank_rows returns exactly '0' for a missing file"
+pass "nonblank_rows returns a single clean '0' for blank and missing files (not '0\\n0')"
+[[ $(screens::content_digest "$work/block.blank") == 0:* ]] ||
+  fail "content_digest must expose a blank screen as row count 0" "got '$(screens::content_digest "$work/block.blank")'"
+pass "content_digest exposes a blank screen as '0:...' so a vacuous block is visible"
+
+# ===========================================================================
 # guard 1 / A5: advance-and-vanish
 # ===========================================================================
 

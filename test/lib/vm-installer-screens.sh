@@ -100,9 +100,19 @@ screens::fold_at_width() {
 # "does the word X still appear" check can pass on a screen that is mostly
 # gone. Counting rows is the check that catches that; this function is the
 # row-counting primitive other checks build on.
+# ⚠️ The `|| echo 0` fallback used to sit on the END of the grep pipeline,
+# which was wrong in the one case it existed for: `grep -c` on a file with
+# ZERO matches prints "0" AND exits 1, so both halves fired and the function
+# returned the two-line string "0\n0". Any caller doing `[[ $(...) -gt 0 ]]`
+# got a bash syntax error instead of a clean "no content", and a caller
+# comparing to "0" got a mismatch. Found by the blank-screen unit test added
+# with content_digest. Capture first, then decide -- never let a fallback
+# append to output the command already produced.
 screens::nonblank_rows() {
-  local file=$1
-  LC_ALL=C command grep -ac '[^[:space:]]' "$file" 2>/dev/null || echo 0
+  local file=$1 n
+  n=$(LC_ALL=C command grep -ac '[^[:space:]]' "$file" 2>/dev/null) || n=0
+  [[ $n =~ ^[0-9]+$ ]] || n=0
+  printf '%s\n' "$n"
 }
 
 # screens::marker_present <file> <fixed-string>
@@ -112,6 +122,105 @@ screens::nonblank_rows() {
 screens::marker_present() {
   local file=$1 marker=$2
   LC_ALL=C command grep -qaF -- "$marker" "$file" 2>/dev/null
+}
+
+# screens::table_value <file> <label>
+# Reads one cell out of a box-drawn two-column table (upstream's summary
+# screen: "<sep> Username      <sep> deck                <sep>"). Prints the
+# LAST matching row's value, or nothing if the label has no such row.
+#
+# ⚠️ THIS FUNCTION EXISTS BECAUSE ITS INLINE PREDECESSOR WAS THE LIE.
+# vm-installer-screens-test.sh used to extract the username with a bare
+# `command grep -aoE 'Username *. *[a-zA-Z0-9_-]+'` -- no LC_ALL=C. That is
+# §6.4 lie #7 exactly, and it fired: the column separator on a real captured
+# summary screen is the single byte 0xB3 (CP437's box-drawing vertical), and
+# in the dev machine's en_US.UTF-8 locale 0xB3 is an invalid multibyte
+# sequence, so `.` never matched it and the whole extraction returned "".
+# The pairing check then compared "" against the artefact's "deck" and
+# reported the WIZARD as disagreeing with itself -- when the screen plainly
+# read "Username | deck" all along. Reproduced on two independent full VM
+# runs (2026-08-11, 2026-08-12), both 35/40, both bit-identical.
+# See docs/findings/T4-harness-first-run.md.
+#
+# So: LC_ALL=C throughout, and the parse is BYTE-based rather than
+# regex-over-characters. A high byte (\200-\377) is treated as the cell
+# separator and the value is the ASCII run between two of them. Both the
+# opening AND the closing separator are REQUIRED -- a row missing either is
+# not a complete cell (it was truncated, wrapped, or half-repainted) and
+# yields nothing rather than a plausible-looking partial value. That also
+# stops the label matching in ordinary prose ("Username> Alphanumeric
+# without spaces"), which has no separator and must never be mistaken for a
+# table row.
+screens::table_value() {
+  local file=$1 label=$2
+  LC_ALL=C command awk -v label="$label" '
+    index($0, label) == 0 { next }
+    {
+      rest = substr($0, index($0, label) + length(label))
+      # require the opening separator immediately after the label
+      if (match(rest, /^[[:space:]]*[\200-\377]+[[:space:]]*/) == 0) next
+      rest = substr(rest, RLENGTH + 1)
+      # require a closing separator: the cell must be whole
+      if (match(rest, /[\200-\377]/) == 0) next
+      rest = substr(rest, 1, RSTART - 1)
+      # No leading trim needed: the opening-separator match above is greedy
+      # over the spaces that follow the separator, so `rest` already starts
+      # at the first content byte. (A leading `sub` here WAS dead code --
+      # deleting it survived mutation testing, which is how it was found.)
+      sub(/[[:space:]]+$/, "", rest)
+      # NOTE: no apostrophes anywhere in this awk program -- it is a
+      # single-quoted shell string, and one apostrophe in a comment silently
+      # ends the quote and mangles the whole parse. (Cost one debugging
+      # cycle; the symptom was table_value returning nothing at all.)
+      #
+      # LAST matching row wins, EVEN IF ITS CELL IS EMPTY. A "last
+      # non-empty" rule looks safer and is worse: on a scrolled console a
+      # stale copy of the same table can sit above the live one, and
+      # preferring the last non-empty value would return the STALE cell
+      # whenever the live row is blank or still being drawn. Reporting the
+      # live empty cell makes the check of the caller fail loudly instead.
+      last = rest
+    }
+    END { if (last != "") print last }
+  ' "$file" 2>/dev/null
+}
+
+# screens::content_digest <file>
+# A screen IDENTITY that is immune to a whole-screen VERTICAL SHIFT and to
+# nothing else: the ordered sequence of non-blank rows, right-trimmed,
+# prefixed with how many there are. Prints "<rows>:<sha256>".
+#
+# ⚠️ Why this is not just sha256 of the capture. Guard 4's blocking test
+# compared raw captures byte-for-byte and failed on a real, correct block:
+# MEASURED on two runs, upstream's first rejection of an empty username
+# repaints the prompt block one row HIGHER, dropping its own "Let's setup
+# your user account..." intro line. Nothing else changes and the wizard does
+# not advance -- the block held perfectly -- but every byte below the logo
+# moved, so a raw hash said the screen "changed".
+#
+# The row count is part of the printed identity on purpose: it keeps the
+# string human-readable in a failure message, and a screen that blanked
+# shows up as "0:..." instead of hiding inside an opaque hash. Callers must
+# STILL assert the row count is non-zero separately -- two blank screens
+# have the same digest, and "the block held" must never be satisfiable by
+# "both captures are empty" (§6.4 lie #3's shape, applied to this guard).
+#
+# Rows are right-trimmed (so trailing grid padding is not identity) but NOT
+# left-trimmed: indentation is real screen content and a prompt that jumped
+# 30 columns left must not hash the same.
+#
+# LC_ALL=C on the sed is DEFENSE IN DEPTH, honestly labelled: unlike
+# nonblank_rows (where it is load-bearing and proven, see the file header),
+# it was NOT reproduced as mattering here -- the C and UTF-8 digests of four
+# real CP437 captures from the 2026-08-12 run were byte-identical. It is
+# kept for the same reason marker_present keeps it: grep/sed locale handling
+# is a moving target and this costs nothing. No unit test claims otherwise.
+screens::content_digest() {
+  local file=$1 rows digest
+  rows=$(screens::nonblank_rows "$file")
+  digest=$(LC_ALL=C command sed -e 's/[[:space:]]*$//' -e '/^$/d' "$file" 2>/dev/null |
+    command sha256sum | command cut -d' ' -f1)
+  printf '%s:%s\n' "$rows" "$digest"
 }
 
 # --- A5 / guard 1: advance-and-vanish ------------------------------------

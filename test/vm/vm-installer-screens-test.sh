@@ -552,19 +552,68 @@ assert "kb-list->username advance-and-vanish" \
   "Username>" "Select keyboard layout"
 
 log "--- guard 4 (a guard nobody has seen fail): the blocking negative test -"
-# Byte-for-byte identity of the FOLDED capture across three empty-submit
-# attempts -- stronger than "still shows Username>", which a half-broken
-# repaint could also satisfy.
-base_sum=$(sha256sum "$(extract 03-username-empty)" | cut -d' ' -f1)
-sum2=$(sha256sum "$(extract 04-username-empty-2)" | cut -d' ' -f1)
+# ⚠️ MEASURED 2026-08-11 AND RE-MEASURED 2026-08-12, bit-identical both
+# times (docs/findings/T4-harness-first-run.md): upstream's FIRST rejection
+# of an empty username does not leave the screen untouched. It repaints the
+# prompt block one row higher and drops its own intro line
+# ("Let's setup your user account..."). The wizard does NOT advance -- the
+# block holds -- but a raw byte hash of the capture, which is what this
+# suite originally used, called that a broken block. That was a wrong
+# EXPECTATION in this harness, not a defect in the wizard.
+#
+# The fix keeps the guard's strength rather than relaxing it to "Username>
+# is still there" (which the file header rightly calls too weak). Both
+# claims below are pinned exactly:
+#
+#   attempt 1 -- the ONLY difference from the pre-submit screen is the loss
+#     of that one intro line. Proven by removing exactly that line from the
+#     BEFORE capture and requiring the content identities to match. Any
+#     other character moving anywhere still fails.
+#   attempts 2 and 3 -- full byte-for-byte identity of the raw capture,
+#     unchanged and unweakened, against attempt 1's settled screen.
+#
+# If upstream ever stops dropping the intro line, attempt 1 fails loudly and
+# this comment is the thing to re-measure. It is a pin, not a tolerance.
+USERNAME_INTRO="Let's setup your user account"
+
+# Guard against the vacuous shape: an identity comparison over two BLANK
+# screens would "hold" while proving nothing (§6.4 lie #3 applied to guard
+# 4). Every capture in this comparison must have real content first.
+for cap in 03-username-empty 04-username-empty-2 05-username-empty-3 06-username-empty-4; do
+  rows=$(screens::nonblank_rows "$(extract "$cap")")
+  assert "blocking-test capture $cap is not a blank screen (rows=$rows)" \
+    test "$rows" -gt 0
+done
+
+# attempt 1: the pinned, one-line delta
+before_capture=$(extract 03-username-empty)
+before_less_intro="$WORK/x.03-username-empty.less-intro"
+LC_ALL=C command grep -av -- "$USERNAME_INTRO" "$before_capture" >"$before_less_intro"
+assert "the intro line was actually present to begin with (else the pin below proves nothing)" \
+  screens::marker_present "$before_capture" "$USERNAME_INTRO"
+assert "empty-username attempt 1: screen did not advance; ONLY the intro line changed" \
+  screens::assert_blocking_held \
+    "$(screens::content_digest "$before_less_intro")" \
+    "$(screens::content_digest "$(extract 04-username-empty-2)")"
+
+# attempts 2 and 3: full raw byte identity against the settled screen
+settled_sum=$(sha256sum "$(extract 04-username-empty-2)" | cut -d' ' -f1)
 sum3=$(sha256sum "$(extract 05-username-empty-3)" | cut -d' ' -f1)
 sum4=$(sha256sum "$(extract 06-username-empty-4)" | cut -d' ' -f1)
-assert "empty-username attempt 1 changed NOTHING (screen still blocks)" \
-  screens::assert_blocking_held "$base_sum" "$sum2"
-assert "empty-username attempt 2 changed NOTHING" \
-  screens::assert_blocking_held "$base_sum" "$sum3"
+assert "empty-username attempt 2 changed NOTHING (byte-for-byte)" \
+  screens::assert_blocking_held "$settled_sum" "$sum3"
 assert "empty-username attempt 3 changed NOTHING -- the block genuinely holds" \
-  screens::assert_blocking_held "$base_sum" "$sum4"
+  screens::assert_blocking_held "$settled_sum" "$sum4"
+
+# and the guard's actual PURPOSE, asserted directly rather than inferred
+# from identity alone: after three empty submits the wizard is still on the
+# username prompt and the next screen has not appeared.
+for cap in 04-username-empty-2 05-username-empty-3 06-username-empty-4; do
+  assert "after empty submit ($cap) the username prompt is still the live screen" \
+    screens::marker_present "$(extract "$cap")" "Username>"
+  refute "after empty submit ($cap) the wizard did NOT reach the password step" \
+    screens::marker_present "$(extract "$cap")" "Password>"
+done
 
 log "--- guard 2 (silent input path): live echo, character by character ---"
 for pair in "07-username-d:d" "08-username-de:de" "09-username-dec:dec" "10-username-deck:deck"; do
@@ -611,8 +660,25 @@ assert "timezone accepted -> SUMMARY screen (S5-equivalent)" \
   "Keyboard" "America/Merida"
 
 log "--- A2/A3: the summary screen shown vs. the artefact written (S5's own warning) ---"
-summary_username=$(command grep -aoE 'Username *. *[a-zA-Z0-9_-]+' "$(extract 25-summary)" 2>/dev/null | command grep -aoE '[a-zA-Z0-9_-]+$' | tail -1)
+# ⚠️ This line used to be an inline, LOCALE-DEPENDENT grep, and it was the
+# only piece of checking logic in this file that never went through the
+# unit-tested library. It returned "" on a screen that plainly read
+# "Username | deck", because the column separator is the raw byte 0xB3 and
+# `.` does not match it in a UTF-8 locale (§6.4 lie #7). The pairing check
+# below then blamed the WIZARD. Two full runs, 35/40 both times. The lesson
+# is structural, not textual: checking logic lives in the library where it
+# is unit- and mutation-tested. See docs/findings/T4-harness-first-run.md.
+summary_username=$(screens::table_value "$(extract 25-summary)" "Username")
 screens::check "summary table shows the typed username" "$summary_username" "deck"
+
+# The same table, read the same way, for the other rows the artefact also
+# carries -- so the S5 pairing check below is not a single-field spot check.
+summary_hostname=$(screens::table_value "$(extract 25-summary)" "Hostname")
+summary_timezone=$(screens::table_value "$(extract 25-summary)" "Timezone")
+summary_keyboard=$(screens::table_value "$(extract 25-summary)" "Keyboard")
+screens::check "summary table shows the hostname" "$summary_hostname" "omarchy"
+screens::check "summary table shows the timezone" "$summary_timezone" "America/Mexico_City"
+screens::check "summary table shows the keyboard layout" "$summary_keyboard" "uk"
 
 assert "summary confirmed -> disk picker" \
   screens::advance_and_vanish "$(extract 25-summary)" "$(extract 26-disk-picker)" \
@@ -648,6 +714,13 @@ if [[ -n $cfg_b64 && -n $creds_b64 ]]; then
     assert "username: SUMMARY SCREEN and ARTEFACT agree" \
       screens::assert_pair "username" "$summary_username" "$written_username"
     screens::check "artefact username is 'deck'" "$written_username" "deck"
+    # S5's warning applies to every row of that table, not just the one.
+    assert "hostname: SUMMARY SCREEN and ARTEFACT agree" \
+      screens::assert_pair "hostname" "$summary_hostname" "$(jq -r '.hostname' "$cfg_json")"
+    assert "timezone: SUMMARY SCREEN and ARTEFACT agree" \
+      screens::assert_pair "timezone" "$summary_timezone" "$(jq -r '.timezone' "$cfg_json")"
+    assert "keyboard: SUMMARY SCREEN and ARTEFACT agree" \
+      screens::assert_pair "keyboard" "$summary_keyboard" "$(jq -r '.locale_config.kb_layout' "$cfg_json")"
     screens::check "artefact hostname is 'omarchy' (skipped, upstream default)" "$(jq -r '.hostname' "$cfg_json")" "omarchy"
     screens::check "artefact timezone is the geo-guessed default" "$(jq -r '.timezone' "$cfg_json")" "America/Mexico_City"
     screens::check "artefact keyboard layout is 'uk' (the down-arrow selection)" "$(jq -r '.locale_config.kb_layout' "$cfg_json")" "uk"
