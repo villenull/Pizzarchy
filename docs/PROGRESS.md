@@ -2693,57 +2693,60 @@ ways: injecting a bad dispatch into `src/deck-session.sh`, injecting a bare
 ⚠️ It asserts which *shape* is written down; that the Lua shape works is T10's
 measurement, not the suite's — nothing here talks to a live compositor.
 
-### 5.30c 🟡 PARTLY EXPLAINED 2026-08-12 — the OSK opts out of input; the desktop half is NOT explained
+### 5.30c ✅ SOLVED 2026-08-12 — the touch transform, confirmed by A/B on hardware
 
-⚠️ **This section claimed "SOLVED — the touchscreen was UNROTATED" for one
-commit. That claim was WRONG and is retracted.** The operator corrected it
-immediately: *"touch was working exactly the way i described even before you
-applied the transform. so not sure the transform did anything."* I changed a
-setting, observed the desired behaviour, and wrote down a causal claim **without
-ever taking a before/after measurement**. That is the same error this project
-keeps recording in others' work.
+⚠️ **This section flip-flopped twice before landing here. The record of that is
+kept deliberately, because the mistakes are more instructive than the answer.**
 
-#### ✅ What IS established (measured, and it is the actionable half)
+**The cause:** `input:touchdevice:transform` was `0` while the display runs
+`transform = 3`. Touches arrived the whole time and landed ~90° from the finger.
 
-**Our OSK is input-transparent ON PURPOSE.** `src/deck_osk_wayland.py:402` sets
-`surface.set_input_region(cairo.Region())` — an **empty** region — alongside
-`KeyboardMode.NONE`. Touch, and pointer, are deliberately not delivered to it.
-That is what stops the overlay stealing focus or swallowing clicks from the app
-beneath (T8 step 7's safety argument). **Nothing is broken; we told the
-compositor to send it nothing.**
+**The fix, and it is one line:**
 
-➡️ Supporting touch is therefore a **scoped change, not a bug fix**: give the
-surface a real input region and handle touch-down → key press. Valve's keyboard
-accepts touch, so it is on the path to §9g parity. ⚠️ It trades away the "can
-never swallow a click" property — re-read T8 step 7 first.
+```bash
+hyprctl eval 'hl.config{ input = { touchdevice = { transform = 3 } } }'
+```
 
-Also measured, and independent of any of the above:
+🔴 **`hyprctl keyword` CANNOT set this** — it answers *"keyword can't work with
+non-legacy parsers. Use eval."* The working form is a **nested Lua table**, not
+the colon-path string every Hyprland doc uses. Third §5.30b-class trap today.
 
-- The kernel node produces touch data: `cat /dev/input/event9` → **24,648 bytes
-  in six seconds**.
-- Hyprland has the panel bound (`Touch Device …: fts3528:00-2808:1015`) and
-  `input:touchdevice:enabled` is `true`.
-- `input:touchdevice:transform` reads `0` while the output runs `transform=3`.
-  **Whether that matters is UNKNOWN** — `0` may well mean "inherit the output's
-  transform" rather than "rotate by zero", which would explain why setting it to
-  `3` changed nothing observable. Nobody has tested that.
+#### How it was actually established, after two wrong turns
 
-#### 🔴 What is NOT explained — the original observation
+| | |
+|---|---|
+| **Claim 1** | "Solved — the touchscreen was unrotated." Set the transform, saw touch work, wrote it down. **No before/after measurement.** |
+| **Retraction** | The operator said touch behaved the same *before* the change. Claim withdrawn — correctly, since it had never been measured. |
+| **Over-correction** | The retraction went too far: it recorded the cause as *unexplained* and blamed a probable Steam confound. |
+| **Claim 2, measured** | After a reboot cleared the runtime setting, touch broke again. At `transform = 0` the operator reported *"things are moving but nothing is behaving quite right"* — taps landing in the **wrong place**, the signature of a transform mismatch. Set `3`: *"touch is working correctly now."* **One variable, two readings, reported by a human looking at the panel.** |
 
-2026-08-11, during T10, taps did nothing **anywhere** on the desktop. 2026-08-12,
-after a reboot and with Steam stopped, desktop touch worked normally. ⚠️ **The
-confound is Steam:** the first observation was taken while Steam was resident and
-holding the controller, the second was not. A resident Steam taking or breaking
-touch would be consistent with R-41 (*"a resident Steam is actively HARMFUL, not
-neutral"*), but **that is a hypothesis, not a measurement.**
+⚠️ **Two of my own instruments failed during this, and both looked like data:**
 
-**To settle it, one cheap Deck test:** tap the desktop with Steam stopped
-(expect: works), start Steam resident, tap again (does it stop?), stop Steam,
-tap again. Three readings, no config changes. Until someone runs it, do not
-record a cause.
+1. I captured `/dev/input/event9`, the node the touchscreen used *that morning*.
+   **Node numbers move across boots** — it was `event14` last night and `event14`
+   again now. I read an unrelated device and got "0 bytes".
+2. The replacement capture ran `cat` **without `sudo`** against a `root:input`
+   node. Permission denied → 0 bytes, silently, and it read as "no events".
 
-**Do not persist any touch transform** — operator decision 2026-08-12, on the
-grounds that it demonstrably changed nothing.
+Both readings said "the kernel is emitting nothing", which was false both times.
+**The operator's eyes were the only reliable oracle in the whole exchange.**
+
+#### ⚠️ Not persisted, and that is now a defect to fix
+
+The setting is **runtime-only and dies on every Hyprland restart**. `T5-fork-plan.md`
+§5.2 already owes a bake-in row for it — and note this makes a **FIFTH** rotation
+value across five mechanisms that do not follow from one another (§5.11 records
+four). *(An earlier operator decision said not to persist it, on the then-correct
+grounds that it demonstrably changed nothing. That basis is gone.)*
+
+#### Separately: our OSK is input-transparent ON PURPOSE
+
+`src/deck_osk_wayland.py` sets `surface.set_input_region(cairo.Region())` — an
+**empty** region — plus `KeyboardMode.NONE`, so it receives no touch and no
+pointer. That is what stops the overlay stealing focus or swallowing clicks
+(T8 step 7). Supporting touch on the keyboard is a **scoped change** — give the
+surface a real input region and handle touch-down — that trades away the "can
+never swallow a click" property. Still operator-gated.
 
 ### 5.30d 🔵 (was 5.30c's placeholder)
 
