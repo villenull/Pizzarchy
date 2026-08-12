@@ -3,82 +3,110 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
-> ## Where things stand (updated 2026-08-11, session 21)
+> ## Where things stand (updated 2026-08-12, session 21)
 >
-> *(Sessions 19, 20 and 21 all ran the same calendar day. The date is shared;
-> the session numbers are not. The older blocks are kept below and are still
-> broadly true — where they disagree with this one, this one wins.)*
+> *(Sessions 19–21 ran across two calendar days. Older blocks are kept below and
+> are still broadly true — where they disagree with this one, this one wins.)*
 >
-> ### ✅ THE RELEASE BLOCKER IS CLOSED — verified on a cold boot, 2026-08-11
+> ### ✅ THE RELEASE BLOCKER IS CLOSED, AND SO IS ONE PHASE-2 EXIT CRITERION
 >
-> **§5.28 is done.** The mapper's children were born blind on a fresh boot (no
-> keyboard, no launcher, no menu, on a device with no physical keyboard). The
-> fix resolves the session environment at run time instead of inheriting it,
-> polling on the main loop's clock. **Verified the only way it could be:** the
-> operator powered the Deck off, booted it, and pressed the three buttons
-> before touching anything. All three worked, and the journal caught the race
-> happening and being closed:
+> **§5.28 is done** — verified on a cold boot, twice, by pressing the buttons
+> before touching anything. The journal shows the race happen at 18.157 s and
+> the resolver close it at 19.159 s, one service start, nothing restarted by
+> hand. **The Gaming→Desktop switch path passes too**; it had never been tested.
 >
-> ```
-> [18.157] the session environment is not ready yet (missing WAYLAND_DISPLAY,
->          HYPRLAND_INSTANCE_SIGNATURE) ... which is what this polls for
-> [19.159] session environment resolved
-> ```
+> **Exit criterion 2 (hardware parity on OLED) is CLOSED.** Batch 1 was 7/7;
+> batch 2 (P2.3) was measured on hardware with the operator present — fan
+> control proven (commanded 2500 → **2568 RPM**), TDP proven (15 W → **10 W** →
+> 15 W), charge limit proven (0 → **80** → 0), every value restored to its
+> recorded baseline. `docs/findings/hardware-parity.md`.
 >
-> **The Gaming→Desktop switch path passes too** — it had never been tested.
+> ### 🎹 The on-screen keyboard was rebuilt against MEASURED pixels
 >
-> ### 🔴 READ THIS BEFORE ANYTHING ELSE: the first fix shipped a working-but-wrong keyboard
+> The operator's standard was *"identical"*, and ours was a **different
+> keyboard** — 10 number keys vs 13, no `Tab`/`Caps`/arrows/`Paste`/`Move`, a
+> visible gap between halves, shifted glyphs in the corner rather than stacked.
+> Six `grim` captures of Valve's own keyboard (idle, Shift, Caps, each pad
+> touched) became **`docs/findings/T8-reference-metrics.md`** — hex palette,
+> row heights, key spans, badge diameters — and §9g/§9f of
+> `docs/tasks/T8-onscreen-keyboard.md`.
 >
-> §5.30a. The parser handled `'...'` and `"..."`; **a real session emits six
-> values as `$'...'` and none in either form.** `GDK_BACKEND=$'wayland,x11,*'`
-> reached GTK verbatim, and the layer-shell keyboard fell back to an **ordinary
-> window** — it appeared, full-screen instead of anchored, and **would not have
-> drawn above `ext-session-lock`**, silently undoing the §5.24 lock fix that had
-> been verified in pixels.
+> Now, **all confirmed on the panel**: one continuous grid, **key widths within
+> 1.5 px of the reference on all 63 keys**, square corners, white-face-plus-blue-dot
+> cursors, per-pad badge gating, `X`→Backspace, `L3`→Caps, hold-to-Shift, pad-click
+> commit, and **touch input**.
 >
-> ⚠️ **The keyboard worked. Every check passed. The operator noticed it was the
-> size of the screen.** That was the entire detection. Fixed, redeployed, and
-> re-confirmed on the panel. **The commit that introduced it had flagged the
-> exact gap and shipped anyway** — treat "covered only by synthetic input" as a
-> defect report, not a caveat.
+> 🔴 **Two bugs hid under one symptom.** "Keys don't type what they should" was
+> *both* the session's `latam` keymap **and** `press_at` resolving in the
+> addressing metric while the renderer drew in the proportional one — **287 of
+> 1010 sampled positions committed a different key than the one drawn white.**
+> Fixing either alone would have left the other.
 >
-> ### ✅ T10 WAS RUN — rows 1–3, 6, 8 pass; the decision is YOURS and is not made
+> ### 🔬 SEVEN measurement tools lied today. Read this before trusting a check.
 >
-> `docs/findings/T10-steam-extest-results.md`. **Steam's own keyboard does drive
-> our Wayland desktop through extest** — trackpad-typed letters landed in a
-> Wayland-native client's *file*, not just on its screen. Three corrections to
-> T10's own procedure are in that file; **each alone would have produced a wrong
-> answer**, starting with "deploy both extest builds, not just i686 — nine
-> 64-bit `steamwebhelper` processes reject it".
+> `docs/PROGRESS.md` §5.30c tabulates the class. **The passing state was
+> indistinguishable from the not-having-run state** in every case:
 >
-> Row 4 (touch) fails for reasons unrelated to Steam. **Row 7 (the lock) was
-> skipped**; its prediction is *inferred*. Unchanged either way: **our OSK stays
-> the installer's and the lock's keyboard**, because Steam's is XWayland and
-> cannot render above `ext-session-lock`. The OSK touch/restyle plan stays on
-> hold until the operator decides.
+> - `hyprctl eval 'return X'` prints `ok` and exits **0** for names that never
+>   existed — and it was **documented as a verification procedure**
+> - A `grep` citing a path that does not exist: exit **2** reads exactly like
+>   "no match". The conclusion survived re-checking; the evidence never existed
+> - The P2.9 runbook's pre-flight gate printed "all suites green" **regardless**
+> - `test-iso-build.sh`'s `configerrors` check was empty *precisely when* the
+>   file had been discarded
+> - `vm-kernel-idempotency-test.sh`'s entire verdict was vacuous — two empty
+>   snapshots diff clean
+> - The `[V]` harness blamed upstream's wizard for a disagreement **its own
+>   CP437-in-UTF-8 grep had manufactured** (35/40 → **57/57**, no upstream defect)
+> - 🔴 **`vm-gamepad-spike-test.sh`'s in-guest probe has been a bash syntax error
+>   since the day it was committed.** `bash -n` cannot see inside a quoted
+>   heredoc. **The suite has never been runnable; the T2 result it is cited for
+>   came from a version never committed.**
 >
-> ### 🔴 Two NEW open issues, both found by looking rather than checking (§5.30)
+> ➡️ **The generalisation, now recorded: a check that proves something is ABSENT
+> must also prove it was LOOKING.** New scanners carry positive *and* negative
+> controls.
 >
-> - **`hyprctl dispatch`'s old string syntax is a Lua SYNTAX ERROR on Hyprland
->   0.56.2** — a parse error, not a no-match, and **silent when stderr is
->   discarded**. Audit `docs/RECOVERY.md` and `src/deck-session.sh`. Working
->   form and the full API listing are in the T10 findings.
-> - **The touchscreen does nothing anywhere on the desktop.** Kernel exposes it,
->   Hyprland has it bound, nothing responds. Never tested before. The approved
->   touch/restyle plan assumes touch works.
+> ### 🟢 T5 IS UNBLOCKED — parity proven, and T5b/T5c landed
 >
-> ### Where the ISO work stands — parity is NOT proven, and T5c is blocked
+> `docs/findings/T5a-parity.md`: the fork's build **was** producing a broken
+> ISO — a runtime 50 commits past the pin, missing `omarchy-setup-system`, dying
+> at **phase 5 of 14**. T5b's `--local-source` fixed it; the pinned build carries
+> `4.0.0.r1617.g6d7826d-1`, **exactly the reference's**. Parity re-measured under
+> §7's four tests: **all pass**, every difference temporal. Of 1180 same-version
+> packages, **1177 are byte-identical** — the 3 exceptions are our own builds.
 >
-> `iso/bin/build` ran to completion for the first time ever (the submodule had
-> never been checked out). **The pipeline reproduces the reference almost
-> exactly** — the entire ISO path diff is *one* timestamped filename. **But the
-> artifact bundles a runtime 50 commits past `iso/RUNTIME`** that ships
-> `omarchy-apply-system` and **no `omarchy-setup-system`** — the exact binary
-> the installer shells out to. That ISO dies at phase 5 of 14, after
-> partitioning and ~1200 packages. Verdict and evidence:
-> `docs/findings/T5a-parity.md`. **T5c stays blocked; T5b is the fix**, is
-> committed in a worktree, and needs one operator decision (an `iso/PKGS` pin —
-> a third input nobody had counted).
+> ⚠️ **T5b sat unmerged for hours** while work was built on a stale `bin/build`.
+> Merged now (282 → **731 lines**). **Check `git log` before assuming a slice
+> landed.**
+>
+> **T5c landed**: Valve's repos, the Deck's packages, and an NVIDIA guard with a
+> negative control. It found §3.8 wrong three ways — `lib32-vulkan-radeon` alone
+> does **not** drop NVIDIA to zero, and `linux-firmware-nvidia` ships in every
+> install, so "zero NVIDIA" was never literally achievable.
+>
+> ### The next actions
+>
+> 1. 🔴 **T5d** — the Wi-Fi phase exists; its four additive files and patch
+>    promotion do not. ⚠️ **The staged patch breaks every install without them**
+>    (`src/iso-patches/README.md`).
+> 2. **T5e/T5f/T5g** — bake-ins (now **four** rotations, not three), then CI.
+> 3. **T4** — `--osk-start-shown` and the mapper's "bound" line still do not
+>    exist, so S1's Wi-Fi passphrase prompt degrades on a real ISO.
+> 4. **Deck-only:** P2.4's menu row, P2.1's Gaming-Mode button mapping,
+>    §5.24a #1 and #3.
+>
+> ⚠️ **Two things have never actually run:** a real build with T5c's overlay
+> (its patches apply and its guard fired against live repos, but the container
+> run is inferred), and `vm-gamepad-spike-test.sh`.
+>
+> **Phase 2 has the parts and lacks the assembly.** Criteria 1, 3 and 4 all
+> converge on one thing: build our ISO, boot it, install with a controller.
+> That has still never happened.
+>
+> **Git: 56 commits on 2026-08-12, all pushed. 24 suites.** Verify with
+> `git rev-list --left-right --count origin/main...main`, never by trusting this
+> line. Deck snapshots to **#13** (`pre-OSK-parity`).
 >
 > ### ✅ The P2.9 Deck session is COMPLETE — all seven sections
 >
