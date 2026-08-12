@@ -1,0 +1,3 @@
+[submodule "iso/upstream"]
+	path = iso/upstream
+	url = https://github.com/omacom-io/omarchy-iso.git
