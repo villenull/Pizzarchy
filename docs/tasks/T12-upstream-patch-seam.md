@@ -215,7 +215,7 @@ assertion pass because the check never ran.
 ### Verification status against §2
 
 - **[B]** guard 6.6 — **not done**, belongs to T5b (see 4 above).
-- **[B]** the five applier unit tests — **done**, and superset: 36 assertions,
+- **[B]** the five applier unit tests — **done**, and superset: 38 assertions,
   every negative asserting exit code, diagnosis *and* that the target file is
   byte-identical afterwards. Mutation-tested: 34 mutations, **0 survivors**.
 - **[V]** QEMU install — **not done** (T5c/T5d blocked). The equivalent was
