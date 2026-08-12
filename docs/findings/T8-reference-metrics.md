@@ -1,5 +1,38 @@
 # T8 — reference metrics: Valve's keyboard vs ours, in numbers
 
+> ## 🔴 TWO CORRECTIONS, 2026-08-12 — read before using §2's ratios
+>
+> Found by the layout agent re-deriving from the pixels instead of trusting the
+> table below. Both are now encoded in `src/deck_osk_layout.py` and asserted in
+> `test/unit/test-deck-osk-layout.py`.
+>
+> **1. §2's "× unit" column is fill ÷ fill — it drops the inter-key gap.**
+> Laying a row out with `1.75 / 1.40 / 2.09 / 8.53` **overshoots every wide key
+> by 2–4px**. The correct *pitch* ratios, re-derived by rescanning each row for
+> runs of non-gap `#23262E` and reading fill starts/ends directly, are:
+>
+> ```
+> 0.52  1.03  1.71  1.36  1.69  2.01  1.20  8.08
+> ```
+>
+> Rebuilding the reference from these reproduces every fill width in §2's
+> **pixel** table to within **1.32px at 1280** (worst case the 725px space bar,
+> 0.18%). ➡️ **Use `Key.units`, which carries the corrected values. Do not
+> re-derive from the ratio column.** §2's *pixel* table remains correct and is
+> what the tests assert against.
+>
+> **2. Each row is normalised to the full width on its own.** §2 scanned only
+> row 1. All five rows span exactly `x=5..1273`, but a unit key is **85px in
+> row 1 and 86–87px in rows 2–4** — the fixed keys are fixed and the unit keys
+> absorb the remainder. So `row_units` is **row-specific** (14.02–14.23) where
+> `width` is not. ➡️ **A renderer must scale PER ROW**, or it reintroduces a
+> ragged right edge.
+>
+> ⚠️ Neither correction weakens the document — the palette, the pixel tables and
+> the geometry are sound. What was wrong was a *derived* column, and it was
+> wrong in the direction that looks plausible.
+
+
 **Session 2026-08-12.** §9g of `docs/tasks/T8-onscreen-keyboard.md` describes
 Valve's keyboard in prose. This document replaces the prose with pixel
 measurements, so a renderer agent has hex values and geometry instead of
