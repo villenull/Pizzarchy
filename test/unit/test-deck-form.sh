@@ -387,6 +387,58 @@ out=$(omarchy_prompt_hostname)
 [[ $out == steamdeck ]] || fail "omarchy_prompt_hostname must output the constant hostname" "got: $out"
 pass "omarchy_prompt_hostname outputs 'steamdeck' and prompts for nothing (no read, no blocking)"
 
+echo "--- the OVERRIDE-NAME contract, checked against upstream's own source ---"
+
+# 🔴 THE MOST IMPORTANT ASSERTION IN THIS FILE. The wrap decision (§1) works by
+# defining a function with the SAME NAME as an upstream one, after configurator
+# has sourced setup-form.sh. A name upstream never calls is therefore not a
+# broken screen -- it is NO screen, silently, while every unit test on that
+# screen's pure helpers stays green.
+#
+# This file shipped that defect FOUR times before this check existed:
+#   _identity, _hostname   -> really omarchy_prompt_identity / _hostname
+#   _username, _password   -> really omarchy_prompt_username / _password
+# all four from reading §1.1's `omarchy_prompt_keyboard, _username, _password,
+# _identity, ...` as four names rather than one name and three elisions. And:
+#   failure_menu           -> lives in omarchy-install-dashboard, a SEPARATE
+#                             PROCESS; renaming cannot fix it (see T4a)
+#
+# So every function this file defines that is NOT prefixed `deck_form_` is
+# claimed to be an upstream override, and must appear in configurator. The
+# allowlist below is for names that arrive through OUR OWN patch instead.
+CONFIGURATOR="$REPO_ROOT/iso/upstream/configs/airootfs/root/configurator"
+DASHBOARD="$REPO_ROOT/iso/upstream/configs/airootfs/usr/local/bin/omarchy-install-dashboard"
+# Never a silent skip -- this assertion is the only thing standing between an
+# elided name and a screen that never appears.
+[[ -r $CONFIGURATOR ]] ||
+  fail "iso/upstream is not checked out, so the override-name contract was NOT verified. Run: git submodule update --init iso/upstream"
+# deck_final_summary is called by T4's patch P1 hunk 2, not by stock upstream.
+OVERRIDE_ALLOWLIST=" deck_final_summary "
+
+overrides=$(grep -oE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' "$REPO_ROOT/src/deck-form.sh" |
+              tr -d '()' | grep -v '^deck_form_' | sort -u)
+[[ -n $overrides ]] ||
+  fail "found NO override functions in deck-form.sh -- this scanner is broken, not the file"
+
+while read -r fn; do
+  [[ -z $fn ]] && continue
+  case $OVERRIDE_ALLOWLIST in *" $fn "*) continue ;; esac
+  if LC_ALL=C grep -qE "(^|[^a-zA-Z0-9_])${fn}([^a-zA-Z0-9_]|\$)" "$CONFIGURATOR"; then
+    continue
+  fi
+  if [[ -r $DASHBOARD ]] &&
+     LC_ALL=C grep -qE "(^|[^a-zA-Z0-9_])${fn}([^a-zA-Z0-9_]|\$)" "$DASHBOARD"; then
+    fail "deck-form.sh defines '${fn}', which lives in omarchy-install-dashboard -- a SEPARATE PROCESS this file is never sourced into. It would never run. See docs/tasks/T4a-dashboard-screens.md"
+  fi
+  fail "deck-form.sh defines '${fn}', a name upstream's configurator never calls. That is not a broken screen, it is NO screen, and it fails SILENTLY"
+done <<<"$overrides"
+pass "every override deck-form.sh defines is a name upstream actually calls"
+
+# Negative control: a scanner that stopped matching would report a clean tree.
+LC_ALL=C grep -qE '(^|[^a-zA-Z0-9_])omarchy_prompt_username([^a-zA-Z0-9_]|$)' "$CONFIGURATOR" ||
+  fail "the override scanner cannot see a name that is definitely there -- it is broken"
+pass "override scanner positive control: it really does find a known-live name"
+
 echo "--- the variable-name contract, checked against UPSTREAM'S OWN SOURCE ---"
 
 # 🔴 WHY THIS SECTION EXISTS. An override's return value is not its output --

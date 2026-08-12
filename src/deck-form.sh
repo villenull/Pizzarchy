@@ -85,7 +85,11 @@
 #      and NetworkManager credential hand-off (U1) are NOT built.
 #   5. S8 Failure -- the menu contents and the cancel-fallback decision
 #      layer (the one the spec's own §4 S8 flags as needing mutation
-#      testing), plus a real failure_menu loop and log pager wired to them.
+#      testing), plus the menu loop and log pager. ⚠️ NOT WIRED UP: upstream's
+#      `failure_menu` lives in `omarchy-install-dashboard`, a separate process
+#      this file is never sourced into, so the loop is named
+#      `deck_form_failure_menu` and waits on T4a's patch seam. S8 does not
+#      appear on a real ISO today.
 #
 # ⚠️ CORRECTION found THIS session, by actually reading the real
 # `iso/upstream/configs/airootfs/root/configurator` (not available to the
@@ -483,7 +487,7 @@ deck_form_username_body() { gum input --placeholder "Username" --prompt "Usernam
 deck_form_password_body() { gum input --password --placeholder "Password" --prompt "Password> "; }
 deck_form_confirm_body()  { gum input --password --placeholder "Confirm" --prompt "Confirm> "; }
 
-_username() {
+omarchy_prompt_username() {
   local candidate
   while true; do
     candidate=$(deck_form_text_prompt deck_form_username_body) || return 1
@@ -504,7 +508,7 @@ _username() {
   done
 }
 
-_password() {
+omarchy_prompt_password() {
   local pw confirm
   while true; do
     pw=$(deck_form_text_prompt deck_form_password_body) || return 1
@@ -770,11 +774,21 @@ deck_form_show_log() {
   IFS= read -r _ <"$tty" 2>/dev/null || true
 }
 
-# failure_menu -- overrides upstream's own S8 screen.
-# Thin on purpose: every decision lives in deck_form_failure_action_for
-# above, which is what the unit suite actually exercises. This loop is the
-# real side-effecting shell around it and is proven at [V], not [U].
-failure_menu() {
+# 🔴 NOT `failure_menu`, AND IT CANNOT BE. Upstream's `failure_menu` is
+# defined at `omarchy-install-dashboard:609` and called at `:735` -- a
+# SEPARATE PROCESS that never sources this file (`configurator` contains no
+# mention of the name at all; both files were grepped, not assumed). A
+# function named `failure_menu` here would be loaded into the wrong process
+# and never run: S8 would silently never appear, while every unit test on the
+# pure helpers below stayed green. That is §6.4's own failure mode, and this
+# file had already shipped it twice.
+#
+# The loop is kept because it is correct and because `docs/tasks/
+# T4a-dashboard-screens.md` specifies the seam that will call it -- a one-hunk
+# patch sourcing a dashboard overlay. It is named `deck_form_*` like every
+# other helper here so that nothing can mistake it for a live override.
+# ⚠️ Until T4a lands, S8 is NOT wired up on a real ISO. Do not claim it is.
+deck_form_failure_menu() {
   local choice action
   while true; do
     choice=$(deck_form_failure_menu_items | gum choose --header "Installation failed") || choice=""
