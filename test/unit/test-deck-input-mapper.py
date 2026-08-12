@@ -898,16 +898,6 @@ check("y-then-x order: still touched on one zero", mm.pad_touched("left"), True)
 mm.translate(e.EV_ABS, e.ABS_HAT0Y, 0, 0.0)
 check("y-then-x order: lifted on the second", mm.pad_touched("left"), False)
 
-# Off by one unit is a touch. This is the whole difference between "exactly 0"
-# and "near centre", and a near-centre threshold would swallow it.
-mm = osk_mapper()
-mm.translate(e.EV_ABS, e.ABS_HAT0X, 1, 0.0)
-check("a thumb ONE unit off centre is touched, not lifted",
-      mm.pad_touched("left"), True)
-mm = osk_mapper()
-mm.translate(e.EV_ABS, e.ABS_HAT0Y, -1, 0.0)
-check("...on either axis and either sign", mm.pad_touched("left"), True)
-
 # ⚠️ THE ACCEPTED FAILURE MODE, pinned so nobody "fixes" it by accident: a thumb
 # resting at exact dead centre is byte-for-byte a lift, and reads as released.
 # Documented at PAD_TOUCH_AXES; do not add a heuristic without asking.
@@ -916,6 +906,155 @@ mm.translate(e.EV_ABS, e.ABS_HAT0X, 0, 0.0)
 mm.translate(e.EV_ABS, e.ABS_HAT0Y, 0, 0.0)
 check("a thumb at EXACT dead centre reads as lifted (known, accepted)",
       mm.pad_touched("left"), False)
+
+# --- 🔴 4% OF LIFTS DO NOT LAND ON (0, 0) -- 23 CAPTURED LIFTS, 2026-08-12 ---
+#
+# The operator: *"sometimes, when i release my fingers the aiming circle still
+# appears (happens one out of every 7 times maybe)"*. Measured by capturing 23
+# consecutive real lifts over 45s: 22 ended {x: 0, y: 0}, and ONE ended
+# {y: 0, x: -121} -- one axis zeroed, the other stopped 121 counts short. The
+# old rule wanted BOTH on zero, so it never saw that release and the cursor and
+# badges froze until the next touch.
+#
+# 🔴 EVERY FIXTURE BELOW IS TRANSCRIBED FROM THAT CAPTURE, tail and all. The
+# point of using the real tails rather than invented sequences is that an
+# invented one would only ever contain the shapes whoever invented it thought
+# of, and the shape that broke this is one nobody thought of.
+
+PAD_AXIS_BY_NAME = {
+    "L.x": e.ABS_HAT0X, "L.y": e.ABS_HAT0Y,
+    "R.x": e.ABS_HAT1X, "R.y": e.ABS_HAT1Y,
+}
+HALF_BY_LETTER = {"L": "left", "R": "right"}
+
+# The last six samples of each of the 23 bursts, verbatim.
+CAPTURED_LIFT_TAILS = [
+    ("#1",  [("L.y", 3338), ("L.x", 4782), ("L.y", 3370), ("L.x", 4651), ("L.x", 0), ("L.y", 0)]),
+    ("#2",  [("R.y", -14856), ("R.x", -8610), ("R.x", -8435), ("R.x", -8192), ("R.x", 0), ("R.y", 0)]),
+    ("#3",  [("L.x", 8973), ("L.x", 8746), ("L.x", 8208), ("L.x", 8070), ("L.x", 0), ("L.y", 0)]),
+    ("#4",  [("L.x", 11646), ("L.y", -1358), ("L.x", 11500), ("L.y", -1198), ("L.x", 0), ("L.y", 0)]),
+    ("#5",  [("L.x", 2799), ("L.y", 6849), ("L.x", 2612), ("L.y", 6980), ("L.x", 0), ("L.y", 0)]),
+    ("#6",  [("L.y", 10920), ("L.x", -997), ("L.x", -1147), ("L.y", 10881), ("L.x", 0), ("L.y", 0)]),
+    ("#7",  [("L.x", 16846), ("L.y", -860), ("L.x", 16624), ("L.y", -904), ("L.x", 0), ("L.y", 0)]),
+    # 🔴 THE FAILURE. Note the x column: 270, 96, -121 -- and never 0.
+    ("#8",  [("L.x", 270), ("L.y", 17200), ("L.x", 96), ("L.y", 17234), ("L.x", -121), ("L.y", 0)]),
+    ("#9",  [("L.x", 7803), ("L.y", -3163), ("L.x", 7614), ("L.y", -2972), ("L.x", 0), ("L.y", 0)]),
+    ("#10", [("L.x", 14951), ("L.x", 14216), ("L.x", 14057), ("L.x", 13897), ("L.x", 0), ("L.y", 0)]),
+    ("#11", [("L.x", 21238), ("L.y", -4032), ("L.x", 21379), ("L.y", -4093), ("L.x", 0), ("L.y", 0)]),
+    ("#12", [("L.x", 19461), ("L.y", -6206), ("L.x", 19516), ("L.y", -6354), ("L.x", 0), ("L.y", 0)]),
+    ("#13", [("L.x", 15803), ("L.y", 4620), ("L.x", 14922), ("L.y", 4587), ("L.x", 0), ("L.y", 0)]),
+    ("#14", [("L.y", -4215), ("L.y", -4349), ("L.y", -4485), ("L.y", -4626), ("L.x", 0), ("L.y", 0)]),
+    ("#15", [("L.x", 6808), ("L.y", 4190), ("L.x", 6853), ("L.y", 4156), ("L.x", 0), ("L.y", 0)]),
+    ("#16", [("R.y", 14871), ("R.y", 14832), ("R.y", 14800), ("R.y", 13996), ("R.x", 0), ("R.y", 0)]),
+    # Both pads in one tail -- the only burst in the capture that lifts two.
+    ("#17", [("L.y", -10616), ("L.y", -10581), ("L.x", 0), ("L.y", 0), ("R.x", 0), ("R.y", 0)]),
+    ("#18", [("L.x", 20373), ("L.y", -18616), ("L.x", 20529), ("L.y", -18671), ("L.x", 0), ("L.y", 0)]),
+    ("#19", [("L.x", 6356), ("L.y", 4565), ("L.x", 6131), ("L.y", 4724), ("L.x", 0), ("L.y", 0)]),
+    ("#20", [("L.x", -6725), ("L.x", -6853), ("L.x", -6900), ("L.x", -6936), ("L.x", 0), ("L.y", 0)]),
+    ("#21", [("L.x", 24931), ("L.y", -14478), ("L.y", -14424), ("L.y", -14379), ("L.x", 0), ("L.y", 0)]),
+    ("#22", [("L.x", 16309), ("L.y", -12116), ("L.x", 16439), ("L.y", -12255), ("L.x", 0), ("L.y", 0)]),
+    ("#23", [("L.x", -8998), ("L.y", 9646), ("L.x", -9163), ("L.y", 9812), ("L.x", 0), ("L.y", 0)]),
+]
+
+
+def replay_tail(mm, tail, now=0.0):
+    """Feed one captured tail through `translate`, as the device sent it."""
+    for name, value in tail:
+        mm.translate(e.EV_ABS, PAD_AXIS_BY_NAME[name], value, now)
+
+
+check("all 23 captured lifts are here, the failing one included",
+      len(CAPTURED_LIFT_TAILS), 23)
+
+stuck = []
+for label, tail in CAPTURED_LIFT_TAILS:
+    mm = osk_mapper()
+    replay_tail(mm, tail)
+    halves = sorted({HALF_BY_LETTER[name[0]] for name, _ in tail})
+    if any(mm.pad_touched(half) for half in halves):
+        stuck.append(label)
+check("EVERY captured lift reads as released -- the operator's stuck cursor",
+      stuck, [])
+
+# ⚠️ Pinned separately so the suite cannot go green by #8 quietly becoming a
+# clean (0, 0) fixture. If this stops being the awkward shape, the test above
+# stops testing anything.
+mm = osk_mapper()
+replay_tail(mm, dict(CAPTURED_LIFT_TAILS)["#8"])
+check("lift #8's final sample really is the one that used to stick",
+      mm.pad_last["left"], [-121, 0])
+check("...and the OLD rule -- exactly 0 on BOTH -- called that a TOUCH",
+      any(mm.pad_last["left"]), True)
+check("...while the rule now in force releases it", mm.pad_touched("left"), False)
+
+# --- and the other half of the fix: a thumb still on the pad stays touched ---
+#
+# 🔴 EITHER ASSERTION ALONE IS NOT THE FIX. "Every lift releases" is satisfied
+# by `return False`; "a resting thumb is touched" is satisfied by the rule that
+# was just replaced. Only both together say the boundary moved to the right
+# place.
+RESTING_SAMPLES = [
+    # The two captured rests, replayed verbatim.
+    ((-26331, 6687), "the first captured rest"),
+    ((-25598, 966), "the second captured rest"),
+    # The same thumb after a 1.29s quiet gap in the same capture -- still down.
+    ((-26265, 6815), "a rest that has not moved for over a second"),
+    # ⚠️ ON a centre line, which is the shape the exact-zero half of the rule
+    # has to survive: one axis really is 0 and the thumb really is down.
+    ((0, 966), "a thumb resting on the vertical centre line"),
+    ((966, 0), "...and on the horizontal one"),
+    # One count outside the residual, on both sides and both axes.
+    ((0, m.PAD_RELEASE_RESIDUAL + 1), "one count outside the residual, +y"),
+    ((0, -(m.PAD_RELEASE_RESIDUAL + 1)), "one count outside the residual, -y"),
+    ((m.PAD_RELEASE_RESIDUAL + 1, 0), "one count outside the residual, +x"),
+    ((-(m.PAD_RELEASE_RESIDUAL + 1), 0), "one count outside the residual, -x"),
+    # 🔴 THE CASE A PLAIN DEADBAND WOULD LOSE. A thumb aiming at the middle of
+    # the keyboard half sits near dead centre with NEITHER axis on zero; at
+    # +/-512 this reads as lifted and its click dies silently.
+    ((300, -400), "a thumb aiming at the middle key, neither axis on zero"),
+    ((-121, 300), "the failing lift's residual with a real y beside it"),
+    ((1, 1), "one count out on BOTH axes"),
+]
+released_by_mistake = []
+for (x, y), what in RESTING_SAMPLES:
+    mm = osk_mapper()
+    mm.translate(e.EV_ABS, e.ABS_HAT0X, x, 0.0)
+    mm.translate(e.EV_ABS, e.ABS_HAT0Y, y, 0.0)
+    if not mm.pad_touched("left"):
+        released_by_mistake.append(what)
+check("no plausible resting position reads as a lift", released_by_mistake, [])
+
+# The boundary itself, from both sides. This is the whole difference between
+# "exactly 0" and "near centre", and it sits at PAD_RELEASE_RESIDUAL exactly.
+mm = osk_mapper()
+mm.translate(e.EV_ABS, e.ABS_HAT0X, m.PAD_RELEASE_RESIDUAL, 0.0)
+check("the residual's own value, with the other axis on 0, is a LIFT",
+      mm.pad_touched("left"), False)
+mm = osk_mapper()
+mm.translate(e.EV_ABS, e.ABS_HAT0X, m.PAD_RELEASE_RESIDUAL + 1, 0.0)
+check("...and one count further out is a touch", mm.pad_touched("left"), True)
+mm = osk_mapper()
+mm.translate(e.EV_ABS, e.ABS_HAT0X, m.PAD_RELEASE_RESIDUAL, 0.0)
+mm.translate(e.EV_ABS, e.ABS_HAT0Y, m.PAD_RELEASE_RESIDUAL, 0.0)
+check("BOTH axes inside the residual and NEITHER on zero is still a touch -- "
+      "this is a residual, not a deadband", mm.pad_touched("left"), True)
+
+# The value itself, bounded by what was measured rather than by what looks safe.
+check("the residual clears the one measured 121-count shortfall",
+      m.PAD_RELEASE_RESIDUAL > 121, True)
+check("...and stays under 512, where the blind spot would be 1.6% of the axis",
+      m.PAD_RELEASE_RESIDUAL < 512, True)
+
+# ⚠️ THE WIDENED BLIND SPOT, pinned honestly rather than left to be discovered:
+# a thumb resting exactly ON a centre line and within the residual of centre
+# reads as lifted. That is the price of the fix and it is documented at
+# PAD_TOUCH_AXES; it is a plus-sign of 1025 sample positions, where a plain
+# +/-256 deadband would have blinded 263169.
+mm = osk_mapper()
+mm.translate(e.EV_ABS, e.ABS_HAT0X, 0, 0.0)
+mm.translate(e.EV_ABS, e.ABS_HAT0Y, 200, 0.0)
+check("a thumb ON the centre line within the residual reads as lifted "
+      "(known, accepted, the price of the fix)", mm.pad_touched("left"), False)
 
 # Per-pad, never shared: §9e's rule is that each trigger's badge is gated on its
 # OWN side's pad, and the operator confirmed that on hardware.
@@ -1277,6 +1416,278 @@ check("with the OSK down the left pad click emits nothing",
       mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.0), [])
 check("...and neither does the right",
       mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.0), [])
+
+# --- 🆕 AND THE CLICK BUZZES (operator, 2026-08-12) -------------------------
+#
+# *"on the steam deck when i pad click it gives me some haptic feedback to feel
+# like i pressed the trackpad"*. The trackpads have no key travel, so on a
+# keyboard reached only by pointing the buzz IS the press confirmation.
+#
+# The interface, established by inspecting the machine rather than recalled:
+# there is no haptic sysfs node and no LED-class node; what exists is EV_FF on
+# the SAME evdev node this process already reads, advertising FF_RUMBLE with 16
+# effect slots, and hid-steam's `steam_play_effect` forwards the two rumble
+# magnitudes to ID_TRIGGER_RUMBLE_CMD. See `PAD_HAPTIC_MAGNITUDES`.
+#
+# 🔴 EVERY TEST HERE IS ALSO A FAIL-SOFT TEST. With lizard_mode=N this process
+# is the only input path on the device, so a haptics fault must cost the buzz
+# and nothing else -- never the commit, never the pointer, never the process.
+
+import evdev.ff as real_ff        # noqa: E402 -- the real structs, not a stub
+
+
+class FakeFFDevice:
+    """An evdev node that records what was uploaded and played.
+
+    Real `evdev.ff` structs go in, so a wrong field name or a swapped argument
+    fails here rather than on hardware.
+    """
+
+    def __init__(self, caps=(e.FF_RUMBLE,), upload_error=None, write_error=None):
+        self.path = "/dev/input/fake"
+        self.caps = list(caps)
+        self.upload_error = upload_error
+        self.write_error = write_error
+        self.uploaded: list = []      # the ff.Effect objects, in order
+        self.by_id: dict = {}         # effect id -> the effect uploaded under it
+        self.played: list = []        # (code, value) written as EV_FF
+        self.erased: list = []
+        self.next_id = 40
+
+    def capabilities(self):
+        return {e.EV_ABS: [], e.EV_FF: self.caps}
+
+    def upload_effect(self, effect):
+        if self.upload_error is not None and len(self.uploaded) >= self.upload_error:
+            raise OSError(22, "Invalid argument")
+        self.uploaded.append(effect)
+        self.next_id += 1
+        self.by_id[self.next_id] = effect
+        return self.next_id
+
+    def write(self, etype, code, value):
+        if self.write_error:
+            raise OSError(19, "No such device")
+        if etype != e.EV_FF:
+            raise AssertionError(f"haptics wrote EV type {etype}, not EV_FF")
+        self.played.append((code, value))
+
+    def erase_effect(self, effect_id):
+        self.erased.append(effect_id)
+
+
+def rumble_of(dev, effect_id):
+    """(strong, weak) as they were actually uploaded under that effect id."""
+    rumble = dev.by_id[effect_id].u.ff_rumble_effect
+    return (rumble.strong_magnitude, rumble.weak_magnitude)
+
+
+class Recorder:
+    """A `Haptics` stand-in for the wiring tests: records halves, never buzzes."""
+
+    def __init__(self):
+        self.buzzed: list[str] = []
+
+    def buzz(self, half):
+        self.buzzed.append(half)
+        return True
+
+
+def said(log):
+    return " ".join(log)
+
+
+check("the magnitudes are per pad, one actuator each, strong then weak",
+      m.PAD_HAPTIC_MAGNITUDES,
+      {"left": (m.PAD_HAPTIC_MAGNITUDE, 0), "right": (0, m.PAD_HAPTIC_MAGNITUDE)})
+check("...and the two halves do not both drive the same actuator",
+      m.PAD_HAPTIC_MAGNITUDES["left"] != m.PAD_HAPTIC_MAGNITUDES["right"], True)
+check("the pulse is a click, not a rumble: well under a tenth of a second",
+      0 < m.PAD_HAPTIC_MS <= 100, True)
+check("...and long enough to survive CONFIG_HZ=300's 3.3ms jiffy",
+      m.PAD_HAPTIC_MS >= 10, True)
+
+# --- start(): two effects, uploaded once, with the measured magnitudes -------
+dev, log = FakeFFDevice(), []
+h = m.Haptics(dev, ff_module=real_ff, log=log.append)
+check("start() arms", (h.start(), h.enabled), (True, True))
+check("...uploading exactly one effect per pad, and no more",
+      len(dev.uploaded), 2)
+check("...as FF_RUMBLE effects of the documented length",
+      sorted({(f.type, f.ff_replay.length) for f in dev.uploaded}),
+      [(e.FF_RUMBLE, m.PAD_HAPTIC_MS)])
+# 🔴 BY EFFECT ID, not by upload order. This is what makes the buzz tests below
+# mean something: the slot `buzz("left")` plays is the slot the LEFT pad's
+# magnitudes went into, so a swap anywhere between the constant and the ioctl
+# lands here.
+check("...carrying each pad's own magnitudes, under that pad's own slot",
+      {half: rumble_of(dev, effect_id) for half, effect_id in h.effects.items()},
+      dict(m.PAD_HAPTIC_MAGNITUDES))
+check("...and saying nothing, because nothing went wrong", log, [])
+
+# --- buzz(): the right slot, on the right side ------------------------------
+check("buzzing the left pad plays the LEFT effect",
+      (h.buzz("left"), dev.played), (True, [(h.effects["left"], 1)]))
+dev.played.clear()
+check("buzzing the right pad plays the RIGHT one -- the sides are not swapped",
+      (h.buzz("right"), dev.played), (True, [(h.effects["right"], 1)]))
+check("the two slots really are different", h.effects["left"] != h.effects["right"], True)
+check("an unknown half buzzes nothing rather than raising", h.buzz("middle"), False)
+armed_slots = sorted(h.effects.values())
+h.close()
+check("close() hands both slots back, and disarms",
+      (sorted(dev.erased), h.enabled), (armed_slots, False))
+check("...and a closed Haptics buzzes nothing", h.buzz("left"), False)
+h.close()
+check("...and closing twice erases nothing a second time -- it is idempotent",
+      sorted(dev.erased), armed_slots)
+
+# --- fail-soft, every way it can fail ---------------------------------------
+dev, log = FakeFFDevice(caps=()), []
+h = m.Haptics(dev, ff_module=real_ff, log=log.append)
+check("a node with no FF_RUMBLE does not arm", (h.start(), h.enabled), (False, False))
+check("...and SAYS so, naming what is lost and what is not",
+      ("FF_RUMBLE" in said(log) and "SILENTLY" in said(log)
+       and "unaffected" in said(log)), True)
+check("...and uploads nothing to it", dev.uploaded, [])
+check("...and buzzing it is a quiet False, not an exception", h.buzz("left"), False)
+
+dev, log = FakeFFDevice(), []
+h = m.Haptics(dev, ff_module=None, log=log.append)
+check("no evdev.ff at all does not arm, and says why",
+      (h.start(), "evdev.ff" in said(log)), (False, True))
+
+# 🔴 A HALF-ARMED HAPTICS IS WORSE THAN NONE: one pad buzzing and the other not
+# reads as "the right pad's click is broken".
+dev, log = FakeFFDevice(upload_error=1), []
+h = m.Haptics(dev, ff_module=real_ff, log=log.append)
+check("an upload that fails half way does not arm", (h.start(), h.enabled), (False, False))
+check("...and gives back the slot that DID upload", len(dev.erased), 1)
+check("...and says which pad failed and that the rest still works",
+      ("SILENTLY" in said(log) and "unaffected" in said(log)), True)
+check("...and buzzes nothing afterwards", h.buzz("left"), False)
+
+dev, log = FakeFFDevice(), []
+h = m.Haptics(dev, ff_module=real_ff, log=log.append)
+h.start()
+dev.write_error = True
+check("a write that fails is a False, never an exception", h.buzz("left"), False)
+check("...said ONCE -- a line per click at 250Hz would bury the journal",
+      len(log), 1)
+check("...and it disables itself rather than repeating",
+      (h.buzz("left"), h.buzz("right"), len(log)), (False, False, 1))
+
+# --- the wiring: which press buzzes, and which does not ---------------------
+check("a Mapper with no haptics at all is the default",
+      m.Mapper().haptics, None)
+mm = osk_mapper()
+touch(mm, "left", MINV, MAXV)
+check("...and a pad click still commits without one",
+      bool(mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.1)), True)
+
+mm, rec = osk_mapper(), Recorder()
+mm.haptics = rec
+touch(mm, "left", MINV, MAXV)
+touch(mm, "right", MAXV, MAXV)
+check("clicking the LEFT pad buzzes the LEFT pad, and commits",
+      (bool(mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.1)), rec.buzzed), (True, ["left"]))
+check("clicking the RIGHT pad buzzes the RIGHT one -- not swapped, not both",
+      (bool(mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.2)), rec.buzzed),
+      (True, ["left", "right"]))
+check("a click RELEASE buzzes nothing -- one buzz per press",
+      (mm.translate(e.EV_KEY, e.BTN_THUMB, 0, 0.3), rec.buzzed),
+      ([], ["left", "right"]))
+check("...and neither does the pad's autorepeat",
+      (mm.translate(e.EV_KEY, e.BTN_THUMB, 2, 0.4), rec.buzzed),
+      ([], ["left", "right"]))
+
+# ⚠️ A click over a LIFTED pad commits nothing, so it must not buzz either: a
+# buzz there announces a keypress that never happened.
+mm, rec = osk_mapper(), Recorder()
+mm.haptics = rec
+check("clicking a LIFTED pad neither commits nor buzzes",
+      (mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.0), rec.buzzed), ([], []))
+
+# 🔴 THE TRIGGERS DO NOT BUZZ, DELIBERATELY. L2/R2 are switches with real
+# travel; the finger already knows. The pad has none, which is the operator's
+# own reason for asking.
+mm, rec = osk_mapper(), Recorder()
+mm.haptics = rec
+touch(mm, "left", MINV, MAXV)
+check("committing with the TRIGGER does not buzz",
+      (bool(mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1)), rec.buzzed), (True, []))
+check("...and neither does commit_at on its own -- the buzz is a separate call",
+      (bool(mm.commit_at("left")), rec.buzzed), (True, []))
+
+# A commit that types nothing is still a commit. Shift and Caps have no other
+# feedback at all, so gating the buzz on emissions would go quiet on exactly
+# the two keys that need it most.
+mm, rec = osk_mapper(), Recorder()
+mm.haptics = rec
+touch(mm, "left", MINV, MAXV)
+mm.cursors.pos["left"] = [0.05, 0.75]              # the left Shift key
+check("clicking a key that TYPES NOTHING still buzzes",
+      (mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.1), mm.osk.shift, rec.buzzed),
+      ([], "once", ["left"]))
+
+# --- 🔴 A BUZZ THAT THROWS MUST NOT TAKE THE INPUT PATH DOWN ----------------
+#
+# End to end through the real class, with the device failing underneath it: the
+# click still types, because with lizard_mode=N there is nothing else to type
+# with.
+dev, log = FakeFFDevice(), []
+mm = osk_mapper()
+mm.haptics = m.Haptics(dev, ff_module=real_ff, log=log.append)
+mm.haptics.start()
+dev.write_error = True
+touch(mm, "left", MINV, MAXV)
+expected = key_under(mm, "left")
+check("a dead actuator costs the buzz and NOT the keystroke",
+      mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.1), [(expected, 1), (expected, 0)])
+check("...having said so, once", len(log), 1)
+
+# --- main() wires it up, and re-wires it when the pad re-enumerates ---------
+#
+# ⚠️ The effect ids belong to the node they were uploaded to. §5.9's ENODEV
+# path swaps that node out; a Haptics carried across it writes to a dead slot
+# and the keyboard is silent for the rest of the session.
+import ast as _ast  # noqa: E402 -- local to this block, like the imports above
+
+main_def = next(
+    node for node in _ast.walk(
+        _ast.parse((REPO_ROOT / "src" / "deck-input-mapper.py").read_text()))
+    if isinstance(node, _ast.FunctionDef) and node.name == "main")
+arm_calls = [node for node in _ast.walk(main_def)
+             if isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name)
+             and node.func.id == "arm_haptics"]
+check("main() arms haptics at startup AND again after a re-enumeration",
+      len(arm_calls), 2)
+# ⚠️ `mapper.haptics.close()` SPECIFICALLY, and counted. `close` alone matches
+# the uinput device and the overlay's stream, so a bare name check here passed
+# with both of these deleted -- it was a mutation survivor before it was this.
+# Two: once before rebinding to a replacement node, once on the way out.
+closes = [node for node in _ast.walk(main_def)
+          if isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute)
+          and node.func.attr == "close"
+          and isinstance(node.func.value, _ast.Attribute)
+          and node.func.value.attr == "haptics"]
+check("...closing the dead node's effects before rebinding, AND on the way out",
+      len(closes), 2)
+# ⚠️ And guarded on there BEING haptics. `if False:` in front of either one
+# leaves the call in the tree and survived the count above -- so the guard is
+# checked too, and checked for mentioning `haptics` rather than for existing.
+guarded = [node for node in _ast.walk(main_def)
+           if isinstance(node, _ast.If)
+           and any(sub in closes for sub in _ast.walk(node))
+           and any(isinstance(sub, _ast.Attribute) and sub.attr == "haptics"
+                   for sub in _ast.walk(node.test))]
+check("...each behind a real `mapper.haptics is not None`, not a constant",
+      len(guarded), 2)
+arm_def = next(node for node in _ast.walk(main_def)
+               if isinstance(node, _ast.FunctionDef) and node.name == "arm_haptics")
+check("--dry-run arms no haptics: a buzz is an emission a user would FEEL",
+      any(isinstance(node, _ast.Attribute) and node.attr == "dry_run"
+          for node in _ast.walk(arm_def)), True)
 
 # --- 🔴 A COMMIT HIT-TESTS IN THE METRIC THE RENDERER DREW IN ---------------
 #

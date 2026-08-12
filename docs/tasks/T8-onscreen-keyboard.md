@@ -756,3 +756,155 @@ pads emit a separate touch bit (`BTN_TOOL_FINGER`, `BTN_TOUCH`, or similar) on
 this hardware. **If they do not, the rule cannot be reproduced faithfully.**
 
 ➡️ **The layout work in §9d is NOT blocked by this** and can proceed alone.
+
+---
+
+## 9h. The release rule, corrected — and haptics on the pad click (2026-08-12, session 22)
+
+Two items, both from the operator testing the OSK on hardware. The first is a
+defect in code shipped that afternoon; the second is an addition to this spec.
+
+### 1. 🔴 The aiming cursor stuck on ~4% of lifts
+
+> *"sometimes, when i release my fingers the aiming circle still appears
+> (happens one out of every 7 times maybe)"*
+
+**§9g's rule was "the last sample on that pad was exactly `0` on BOTH axes".**
+A 45-second capture of **23 real lifts** on the Deck says that is not what the
+hardware does:
+
+```
+lifts captured: 23
+clean 0,0:      22
+FAILED:          1  (4%)
+
+#8  169 samples  FINAL {'L.y': 0, 'L.x': -121}   *** NOT ZERO ***
+      tail: L.x=270  L.y=17200  L.x=96  L.y=17234  L.x=-121  L.y=0
+```
+
+**On a failing lift the driver emits `L.y=0` but leaves `L.x` at `-121`.** One
+axis lands exactly on zero, the other stops just short. A rule demanding both
+never saw the release, `pad_touched` stayed `True`, and the cursor and badges
+froze until the next touch. Largest residual observed: **121 counts out of
+±32767 — 0.37% of the axis.**
+
+#### The rule now in force
+
+```
+released  <=>  at least one axis is EXACTLY 0
+               and neither axis is further from centre than 256 counts
+```
+
+`src/deck-input-mapper.py`: `PAD_RELEASE_RESIDUAL = 256`, consumed by
+`Mapper.pad_touched`.
+
+#### Why that shape, and not a deadband
+
+Three shapes were on the table. The residual matters far less than the shape,
+because the shape decides *what a resting thumb has to do to be mistaken for a
+lift*.
+
+| Shape | Catches #8? | Blind spot | |
+|---|---|---|---|
+| plain deadband, `\|x\| <= D and \|y\| <= D` | yes, and any unseen both-axes residual | a **disc**: 263 169 sample positions at D=256, 1 050 625 at D=512 | ❌ |
+| an exact `0` on *either* axis, unbounded | yes | **both whole centre lines** — a thumb resting anywhere on either one | ❌ |
+| an exact `0` on either axis **and** the other within D | yes | a **plus-sign**: 1025 sample positions | ✅ |
+
+Dead centre is a legitimate place to aim — it is the middle of the keyboard
+half — so a deadband trades a rare stuck cursor for a *reachable* click that
+dies silently, which is §9a's "worse than silence" arriving through the commit.
+
+⚠️ **The exact-zero requirement is what keeps a resting thumb touched, not `D`.**
+`D` only has to cover how far short of centre the un-zeroed axis stops, which is
+why 256 (2.1× the one measured 121) is enough and why raising it "to be safe"
+buys nothing and lengthens the blind plus-sign directly.
+
+**In user units:** a pad's full range maps onto **one half** of the keyboard,
+whose widest row is 14 keys — so a half-row is 7 keys across 65535 counts and
+one key is **~9362 counts** wide. 256 counts is **2.7% of a key**, far inside
+the nearest hit-test boundary.
+
+⛔ **NO TIMEOUT, and this is now measured rather than argued.** A capture of a
+*resting* thumb contains quiet gaps of 0.46 s, 1.10 s, 1.29 s and 1.70 s with the
+finger never leaving the pad. Silence is not a lift on this hardware at any
+threshold a human would pick.
+
+#### The accepted failure mode, now slightly wider
+
+A thumb resting at exact dead centre still reads as released — and so does one
+resting exactly **on** a centre line within 256 counts of centre. That is the
+price of the fix, it is 1025 sample positions rather than 1, and it is pinned by
+a test so nobody "fixes" it by accident.
+
+### 2. 🆕 Haptic feedback on the pad click
+
+> *"on the steam deck when i pad click it gives me some haptic feedback to feel
+> like i pressed the trackpad"*
+
+**New behaviour, not a bug — nothing in T8 claimed it.** It matters because the
+trackpads have no key travel: on a keyboard reached only by pointing, the buzz
+*is* the press confirmation, and the alternative is watching the screen for a
+character to appear.
+
+#### ✅ The interface, established by inspecting the machine
+
+| Looked for | Found |
+|---|---|
+| a `hid-steam` haptic sysfs node | **none.** The hid device dir exposes only `country`, `modalias`, `report_descriptor`, `uevent`, `power` |
+| an LED-class node | **none relevant.** `/sys/class/leds` has the keyboard LEDs, `mmc0`, `status:white` |
+| anything named `*haptic*` under `/sys` | **nothing** |
+| force feedback | ✅ **`EV_FF` on the node we already read** |
+
+**`/dev/input/event7` ("Steam Deck") advertises `FF_RUMBLE`, `FF_PERIODIC`,
+`FF_SQUARE`/`TRIANGLE`/`SINE` and `FF_GAIN`, with 16 simultaneous effect slots
+(`EVIOCGEFFECTS`).** The shipped module was disassembled to confirm what
+`FF_RUMBLE` actually reaches: `hid-steam` calls `input_ff_create_memless`, and
+`steam_play_effect` copies `ff_effect.u.rumble.strong_magnitude` and
+`.weak_magnitude` into a report that `steam_haptic_rumble_cb` sends as
+`ID_TRIGGER_RUMBLE_CMD` (`0xEB`). **The Deck's "rumble" hardware *is* its two
+trackpad actuators.**
+
+The node is `root:input 0660` and the session user is in group `input`, so
+python-evdev's `InputDevice` already opens it `O_RDWR`. **No new privilege, no
+second file descriptor, no extra device.**
+
+#### What was built
+
+`Haptics` in `src/deck-input-mapper.py`: two `FF_RUMBLE` effects uploaded once
+at start (one per pad), played with a single `write(EV_FF, id, 1)` on the click.
+**30 ms at half scale** (`PAD_HAPTIC_MS`, `PAD_HAPTIC_MAGNITUDE`).
+
+🔴 **The buzz is on the pad click and NOT in `commit_at`.** `commit_at` is shared
+with the trigger, and L2/R2 are switches with real travel — the finger already
+knows. It is also **inside** the touched branch: a click over a lifted pad
+commits nothing, and buzzing there would announce a keypress that never
+happened.
+
+🔴 **Fail-soft, because with `lizard_mode=N` this process is the only input path
+on the device** (`docs/PROGRESS.md` §5.9). Every failure — no `evdev.ff`, no
+`FF_RUMBLE`, a failed upload, a dead write — costs the buzz and says so **once**,
+and the click still types. A half-armed `Haptics` gives its slots back rather
+than buzzing one pad and not the other.
+
+#### ⚠️ Unverified, and it needs one press to settle
+
+**Which actuator is physically which.** The report carries two independent
+magnitudes and `hid-steam` names them left and right; proving which pad each one
+shakes needs an effect actually played on hardware, which could not be done
+without buzzing the operator's device mid-session. The mapping lives in one
+dict (`PAD_HAPTIC_MAGNITUDES`) so flipping it is a one-line change.
+
+**And the feel is untuned.** 30 ms at half scale is a starting point, chosen to
+be short enough to read as a click rather than a rumble and strong enough to be
+felt through a thumb already pressing the pad. `POINTER_DIVISOR`'s history is the
+precedent: only the operator saying *stronger* / *shorter* can set it.
+
+### Testing
+
+`test/unit/test-deck-input-mapper.py` carries **all 23 captured lift tails
+verbatim**, the failing one included, plus the captured rests. Both directions
+are asserted, and **either alone is not the fix**: "every lift releases" is
+satisfied by `return False`, and "a resting thumb is touched" is satisfied by the
+rule that was just replaced.
+
+**38 mutations, 0 survivors.**

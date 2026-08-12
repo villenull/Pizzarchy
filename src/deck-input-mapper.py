@@ -89,6 +89,15 @@ from dataclasses import dataclass, field
 
 from evdev import InputDevice, UInput, ecodes as e, list_devices
 
+# The force-feedback structs the pad click's haptic is built from (`Haptics`).
+# ⚠️ Guarded, and the guard is not decoration: this is the one import here that
+# a python-evdev old enough to still satisfy every other import could lack, and
+# with lizard_mode=N an ImportError at module load costs the whole input path.
+try:
+    from evdev import ff as evdev_ff
+except ImportError:                      # pragma: no cover -- see Haptics.start
+    evdev_ff = None
+
 # --- the on-screen keyboard's layout core (T8) -------------------------------
 #
 # Imported rather than copied. OSK_KEYCODES decides which keycodes this
@@ -224,23 +233,58 @@ DECK_TRIGGERS = (e.ABS_HAT2X, e.ABS_HAT2Y)  # X is R2, Y is L2; both 0..32767
 # question "is a finger on this pad" cannot be asked directly, and T8 §9e warned
 # that without an answer Valve's badge gating could not be reproduced at all.
 #
-# ✅ WHAT DOES WORK, AND IT IS A STATE RATHER THAN A TIMEOUT: a lift reports
-# EXACTLY 0 on BOTH axes, while a resting thumb keeps emitting jittery samples
-# at its real off-centre position. Two captured lifts both terminated at
-# {x: 0, y: 0}; two captured rests sat at {-26331, 6687} and {-25598, 966}.
+# ✅ WHAT DOES WORK, AND IT IS A STATE RATHER THAN A TIMEOUT: a lift ZEROES the
+# pad, while a resting thumb keeps emitting jittery samples at its real
+# off-centre position. Captured rests sat at {-26331, 6687} and {-25598, 966};
+# every captured lift put at least one axis on exactly 0.
 #
-#     released  <=>  the last sample on that pad was exactly 0 on BOTH axes
+#     released  <=>  at least one axis is EXACTLY 0, and neither axis is
+#                    further from centre than PAD_RELEASE_RESIDUAL
 #
 # A timeout would get the motionless case exactly wrong -- a thumb held still
 # off-centre is still touching, and would have "timed out" into released. This
-# rule keeps it touched.
+# rule keeps it touched. ⛔ AND DO NOT ADD ONE AS A BACKSTOP: a capture of a
+# RESTING thumb (2026-08-12) contains quiet gaps of 0.46s, 1.10s, 1.29s and
+# 1.70s with the finger never leaving the pad. Silence is not a lift on this
+# hardware, at any threshold a human would pick.
 #
-# ⚠️ KNOWN AND ACCEPTED FAILURE MODE: a thumb resting at exact dead centre
-# reads as released, because that is byte-for-byte what a lift looks like. It
-# costs one position out of 2^32, half a key away from any hit-test boundary,
-# and `Cursors.update` already makes the same trade for the same reason. Do NOT
-# paper over it with a heuristic (a "recently moved" timer, a jitter detector)
-# without asking -- every such heuristic reintroduces the timeout failure above.
+# 🔴 THE RULE USED TO BE "EXACTLY 0 ON BOTH AXES", AND THAT STUCK THE AIMING
+# CURSOR ON 4% OF LIFTS. Reported by the operator as "one out of every 7 times
+# maybe"; measured 2026-08-12 by capturing 23 consecutive real lifts over 45s:
+#
+#     22 of 23 ended {x: 0, y: 0}
+#      1 of 23 ended {y: 0, x: -121}   <-- one axis zeroed, the other did not
+#
+#     tail of the failure:  x=270  y=17200  x=96  y=17234  x=-121  y=0
+#
+# So the driver can zero ONE axis and leave the other just short of centre. A
+# rule demanding both never saw that release, `pad_touched` stayed True
+# forever, and the cursor and badges froze until the next touch.
+#
+# WHY A RESIDUAL AND NOT A PLAIN DEADBAND. Three shapes were considered:
+#
+#   a plain deadband (|x| <= D and |y| <= D)
+#       catches this and any hypothetical both-axes-short residual, but its
+#       blind spot is a DISC: every thumb resting within D of dead centre reads
+#       as lifted. Dead centre is a legitimate place to aim -- it is the middle
+#       of the keyboard half -- so this trades a rare stuck cursor for a
+#       reachable dead-and-silent click. Rejected.
+#   an exact 0 on EITHER axis, with no bound on the other
+#       catches this, but blinds the whole of both centre LINES: a thumb
+#       resting anywhere on a centreline reads as lifted. Rejected.
+#   an exact 0 on either axis AND the other within D   <-- chosen
+#       the exact zero is what keeps a resting thumb touched; D only has to
+#       cover how far short of centre the un-zeroed axis stops.
+#
+# ⚠️ KNOWN AND ACCEPTED FAILURE MODE, now slightly wider than it was: a thumb
+# resting at exact dead centre reads as released, because that is byte-for-byte
+# what a lift looks like -- and so does a thumb resting exactly ON a centreline
+# within PAD_RELEASE_RESIDUAL of centre. That is a plus-sign of 1025 sample
+# positions rather than the single point it used to be; a plain +/-256 deadband
+# would have been 263169, and +/-512 would have been 1050625. `Cursors.update`
+# already makes the same trade for the same reason. Do NOT paper over it with a
+# heuristic (a "recently moved" timer, a jitter detector) without asking --
+# every such heuristic reintroduces the timeout failure above.
 #
 # ⚠️ BTN_THUMB IS THE LEFT TRACKPAD'S CLICK, not a touch flag and not the left
 # stick. Measured in the same capture (press 14.079s, release 14.551s). The left
@@ -252,6 +296,24 @@ PAD_TOUCH_AXES: dict[int, tuple[str, str]] = {
     DECK_RIGHT_TRACKPAD[0]: ("right", "x"),
     DECK_RIGHT_TRACKPAD[1]: ("right", "y"),
 }
+
+# How far short of centre the un-zeroed axis may stop and still be a lift.
+#
+# ⚠️ DERIVED FROM THE MEASUREMENT, NOT PICKED FOR ROUNDNESS. The one failing
+# lift in 23 stopped 121 counts out -- 0.37% of the axis's +/-32767 half-range.
+# 256 is 2.1x that: enough headroom for a residual larger than the single one
+# we have seen, and small enough that the blind plus-sign above stays tiny.
+#
+# In the units that matter to a user: a pad's full range maps onto ONE HALF of
+# the keyboard, whose widest row is 14 keys, so a half-row is 7 keys across
+# 65535 counts and one key is ~9362 counts wide. 256 counts is 2.7% of a key.
+# The old accepted blind spot was 0% of a key and one sample wide; this is
+# still far inside the nearest hit-test boundary.
+#
+# ⛔ DO NOT RAISE THIS "to be safe". It is not what stops a resting thumb being
+# read as lifted -- the exact-zero requirement in `pad_touched` is -- so every
+# count added here buys nothing and lengthens the blind plus-sign directly.
+PAD_RELEASE_RESIDUAL = 256
 
 # The pointer comes from the RIGHT trackpad, matching where a thumb rests and
 # what lizard mode does when it is enabled.
@@ -448,6 +510,58 @@ PAD_CLICK_HALF: dict[int, str] = {
     e.BTN_THUMB2: "right",
 }
 
+# --- 🆕 AND IT BUZZES (operator, 2026-08-12) ---------------------------------
+#
+# Operator, on hardware: *"on the steam deck when i pad click it gives me some
+# haptic feedback to feel like i pressed the trackpad"*. Ours committed
+# silently. This is an ADDITION to T8's spec, not a bug fix, and it matters
+# because the trackpads have no key travel: on a keyboard reached only by
+# pointing, the buzz IS the press confirmation, and without it the only
+# confirmation is watching the screen for a character to appear.
+#
+# ✅ THE INTERFACE, ESTABLISHED BY INSPECTING THE MACHINE (2026-08-12), not by
+# recalling how Deck haptics usually work:
+#
+#   * NO haptic sysfs node and NO LED-class node. /sys/class/leds carries only
+#     the keyboard LEDs, mmc0 and status:white; nothing under /sys named
+#     *haptic* exists; the hid device directory
+#     (/sys/bus/hid/devices/0003:28DE:1205.0003) exposes only country,
+#     modalias, report_descriptor, uevent and power.
+#   * WHAT DOES EXIST is force feedback on the SAME evdev node this process
+#     already reads -- "Steam Deck", /dev/input/event7 -- advertising
+#     FF_RUMBLE, FF_PERIODIC, FF_SQUARE/TRIANGLE/SINE and FF_GAIN, with 16
+#     simultaneous effect slots (EVIOCGEFFECTS).
+#   * The shipped module was disassembled to confirm what FF_RUMBLE reaches:
+#     hid-steam calls input_ff_create_memless, and `steam_play_effect` copies
+#     ff_effect.u.rumble.strong_magnitude and .weak_magnitude into a report
+#     that `steam_haptic_rumble_cb` sends as ID_TRIGGER_RUMBLE_CMD (0xEB).
+#     The Deck's "rumble" hardware IS its two trackpad actuators.
+#   * The node is root:input 0660 and the session user is in group `input`,
+#     so python-evdev's InputDevice already opens it O_RDWR. No new privilege,
+#     no second file descriptor, no extra device.
+#
+# ⚠️ WHICH ACTUATOR IS PHYSICALLY WHICH IS NOT PROVEN. The report carries two
+# independent magnitudes and hid-steam names them left and right; confirming
+# which pad each one shakes needs an effect actually played on hardware, which
+# this could not do without buzzing the operator's device mid-session. The
+# mapping therefore lives in ONE dict, so flipping it is a one-line change if
+# the operator reports a click on one pad buzzing the other.
+PAD_HAPTIC_MAGNITUDE = 0x8000   # half of the 0..0xFFFF the FF API takes
+
+# ⚠️ FEEL IS UNTUNED, and this is the honest state of it: 30 ms at half scale
+# is a starting point chosen to be short enough to read as a click rather than
+# a rumble (the kernel is CONFIG_HZ=300, so 30 ms is 9 jiffies -- comfortably
+# above the timer granularity ff-memless schedules on) and strong enough to be
+# felt through a thumb already pressing the pad. POINTER_DIVISOR's history is
+# the precedent: only the operator saying "stronger"/"shorter" can set it.
+PAD_HAPTIC_MS = 30
+
+# strong first, weak second -- the order `steam_play_effect` reads them in.
+PAD_HAPTIC_MAGNITUDES: dict[str, tuple[int, int]] = {
+    "left": (PAD_HAPTIC_MAGNITUDE, 0),
+    "right": (0, PAD_HAPTIC_MAGNITUDE),
+}
+
 # ⚠️ The uinput device declares exactly this set, and emits NOTHING else -- the
 # kernel drops an undeclared code without an error. Every character key the OSK
 # can type therefore has to be in here before a renderer ever draws it, which is
@@ -589,6 +703,12 @@ class Mapper:
         default_factory=lambda: {"left": [0, 0], "right": [0, 0]}
     )
 
+    # The `Haptics` above, or None. None in --dry-run, in every unit test that
+    # does not ask for one, and whenever `Haptics.start()` said why it could
+    # not arm -- which is exactly the set of cases where a pad click must still
+    # commit, just without the buzz.
+    haptics: "object | None" = None
+
     # What `shift` was before L2 was pulled, or None while L2 is not holding it.
     # This is the ONE piece of shift state this object owns, and it is not a
     # mirror: it is what a MOMENTARY modifier has to remember in order to put
@@ -620,16 +740,25 @@ class Mapper:
     def pad_touched(self, half: str) -> bool:
         """Is a finger on that pad right now?
 
-        ⚠️ `released` <=> the last sample was exactly 0 on BOTH axes. A single
-        axis crossing 0 mid-stroke is still a touch, which is why both are
-        required; and a motionless off-centre thumb stays touched forever, which
-        is what no timeout could do. The dead-centre blind spot is documented
-        and accepted at PAD_TOUCH_AXES.
+        ⚠️ `released` <=> AT LEAST ONE axis is exactly 0 and NEITHER is further
+        from centre than PAD_RELEASE_RESIDUAL. The exact zero is the whole
+        guard: a resting thumb reports two jittering off-centre values and can
+        never satisfy it, so a motionless thumb stays touched forever, which is
+        what no timeout could do. The residual exists only because 1 lift in 23
+        zeroes one axis and stops 121 counts short on the other -- see
+        PAD_TOUCH_AXES for the capture and for why a plain deadband was
+        rejected. The blind plus-sign around dead centre is documented and
+        accepted there too.
         """
         sample = self.pad_last.get(half)
         if sample is None:
             raise ValueError(f"half must be 'left' or 'right', got {half!r}")
-        return any(sample)
+        x, y = sample
+        if x != 0 and y != 0:
+            # No lift this hardware has produced looks like this. A touch --
+            # including a stroke passing near, but not through, the centre.
+            return True
+        return max(abs(x), abs(y)) > PAD_RELEASE_RESIDUAL
 
     def pad_touch_state(self) -> dict[str, bool]:
         """Both pads at once, in the shape the wire protocol wants.
@@ -971,6 +1100,18 @@ class Mapper:
             # nothing, so inventing an idle meaning here would be a behaviour
             # the keyboard never advertises. §9a: worse than silence.
             if self.pad_touched(half):
+                # 🔴 THE BUZZ LIVES HERE AND NOT IN `commit_at`, DELIBERATELY.
+                # `commit_at` is shared with the TRIGGER, and L2/R2 are real
+                # switches with real travel -- the finger already knows they
+                # went down. The pad has no travel at all, which is the
+                # operator's own reason for asking (PAD_HAPTIC_MAGNITUDES), so
+                # the pad click is the press that needs confirming.
+                #
+                # ⚠️ INSIDE the touched branch. A click over a LIFTED pad
+                # commits nothing (see above), and a buzz there would announce
+                # a keypress that never happened -- §9a's confidently-wrong
+                # failure, delivered through the thumb instead of the screen.
+                self.buzz(half)
                 return self.commit_at(half)
             return []
         if code == OSK_CAPS_BUTTON:
@@ -981,6 +1122,18 @@ class Mapper:
         if key is not None:
             return [(key, 1), (key, 0)]
         return []
+
+    def buzz(self, half: str) -> bool:
+        """Confirm a pad click through that pad's actuator. False if silent.
+
+        ⚠️ A SEPARATE CALL FROM THE COMMIT, not a return value folded into it.
+        A commit that types nothing is still a commit -- Shift and Caps are real
+        keys -- so the buzz cannot be conditioned on emissions without going
+        quiet on exactly the two keys whose only feedback is the buzz.
+        """
+        if self.haptics is None:
+            return False
+        return bool(self.haptics.buzz(half))
 
     def commit_at(self, half: str) -> list[tuple[int, int]]:
         """Press the key under that side's cursor. THE one commit path.
@@ -1831,6 +1984,111 @@ class AutoShow:
             proc.kill()
 
 
+class Haptics:
+    """One short buzz on the pad that was clicked. See PAD_HAPTIC_MAGNITUDES.
+
+    🔴 FAIL-SOFT IS THE WHOLE DESIGN, AND IT IS NOT THE USUAL EXCUSE FOR
+    SWALLOWING. With lizard_mode=N this process is the ONLY input path on the
+    device (docs/PROGRESS.md §5.9), so an exception escaping a buzz would take
+    the pointer and every key down with it. A haptics failure must cost the
+    buzz and nothing else.
+
+    ⚠️ IT IS STILL LOUD. CLAUDE.md forbids failing silently, so every reason
+    this ends up disabled is printed -- ONCE. Once, because the alternative is
+    a line per pad click at 250Hz, which is how a journal becomes unreadable
+    and a real message becomes invisible.
+
+    Both effects are uploaded ONCE at start. Uploading per press would put an
+    ioctl and a kernel allocation on the commit path, and the device only has
+    16 slots to leak into.
+    """
+
+    def __init__(self, device, ff_module=None, log=say):
+        self.device = device
+        self.ff = ff_module
+        self.log = log
+        self.enabled = False
+        # half -> effect id handed back by EVIOCSFF.
+        self.effects: dict[str, int] = {}
+
+    def start(self) -> bool:
+        """Upload one effect per pad. False (and a reason) if haptics are off.
+
+        ⚠️ THE CAPABILITY IS CHECKED, not assumed. `--device` accepts any node,
+        Steam's virtual pad is a real thing this mapper has latched onto before
+        (see `is_steam_virtual_pad`), and a node without FF_RUMBLE would fail
+        the upload with a bare errno and no hint of why.
+        """
+        if self.ff is None:
+            self.log("no evdev.ff in this python-evdev; the pad click commits "
+                     "SILENTLY (no haptic), everything else is unaffected")
+            return False
+        try:
+            rumbles = self.device.capabilities().get(e.EV_FF, [])
+        except OSError as exc:
+            self.log(f"could not read {getattr(self.device, 'path', '?')}'s "
+                     f"capabilities ({exc}); the pad click commits SILENTLY")
+            return False
+        if e.FF_RUMBLE not in rumbles:
+            self.log(f"{getattr(self.device, 'path', '?')} advertises no "
+                     "FF_RUMBLE; the pad click commits SILENTLY (no haptic), "
+                     "everything else is unaffected")
+            return False
+        for half, (strong, weak) in PAD_HAPTIC_MAGNITUDES.items():
+            effect = self.ff.Effect(
+                e.FF_RUMBLE, -1, 0,
+                self.ff.Trigger(0, 0),
+                self.ff.Replay(PAD_HAPTIC_MS, 0),
+                self.ff.EffectType(
+                    ff_rumble_effect=self.ff.Rumble(strong_magnitude=strong,
+                                                   weak_magnitude=weak)),
+            )
+            try:
+                self.effects[half] = self.device.upload_effect(effect)
+            except (OSError, ValueError) as exc:
+                # ⚠️ Give back whatever went up before the failure. A half-armed
+                # Haptics that buzzed one pad and not the other would read as
+                # "the right pad's click is broken", which is a worse lie than
+                # no haptics at all.
+                self.log(f"uploading the {half} pad's haptic failed ({exc}); "
+                         "the pad click commits SILENTLY, everything else is "
+                         "unaffected")
+                self.close()
+                return False
+        self.enabled = True
+        return True
+
+    def buzz(self, half: str) -> bool:
+        """Play that pad's effect. Never raises; False means nothing buzzed."""
+        if not self.enabled:
+            return False
+        effect_id = self.effects.get(half)
+        if effect_id is None:
+            return False
+        try:
+            self.device.write(e.EV_FF, effect_id, 1)
+        except (OSError, ValueError) as exc:
+            # Said once, then disabled. A pad whose node has gone (ENODEV on
+            # re-enumeration) would otherwise print on every click forever.
+            self.enabled = False
+            self.log(f"the haptic write failed ({exc}); pad clicks now commit "
+                     "SILENTLY, everything else is unaffected")
+            return False
+        return True
+
+    def close(self) -> None:
+        """Hand the effect slots back. Idempotent; called on every exit path
+        and before re-binding to a replacement pad."""
+        self.enabled = False
+        for effect_id in self.effects.values():
+            try:
+                self.device.erase_effect(effect_id)
+            except (OSError, ValueError):
+                # The node going away IS the usual reason to be here.
+                pass
+        self.effects = {}
+
+
 def read_lizard_mode(path: str = LIZARD_MODE_PATH) -> str | None:
     """`Y`, `N`, or None when the knob cannot be read (no hid_steam, not a Deck)."""
     try:
@@ -2184,6 +2442,21 @@ def main() -> None:
         for code, ai in dict(pad.capabilities().get(e.EV_ABS, [])).items()
         if code in STICK_AXES
     })
+
+    # --- the pad click's haptic confirmation (PAD_HAPTIC_MAGNITUDES) --------
+    #
+    # ⚠️ NOT UNDER --dry-run. That flag's promise is that nothing leaves this
+    # process, and a buzz is the one emission a user would feel rather than
+    # read. `mapper.haptics` staying None is exactly the silent-commit path,
+    # which is what --dry-run should behave like.
+    def arm_haptics(device) -> "Haptics | None":
+        """A started `Haptics`, or None -- having said which, and why."""
+        if args.dry_run:
+            return None
+        haptics = Haptics(device, ff_module=evdev_ff)
+        return haptics if haptics.start() else None
+
+    mapper.haptics = arm_haptics(pad)
 
     ui = None
     if not args.dry_run:
@@ -2823,9 +3096,18 @@ def main() -> None:
                         sel.unregister(pad.fd)
                     except (KeyError, ValueError, OSError):
                         pass
+                    # ⚠️ The effect ids belonged to the node that just vanished.
+                    # Dropped and re-uploaded against the replacement, or every
+                    # pad click from here on writes to a dead slot -- which
+                    # `Haptics.buzz` would survive, and would then leave the
+                    # keyboard permanently silent after one re-enumeration.
+                    if mapper.haptics is not None:
+                        mapper.haptics.close()
+                        mapper.haptics = None
                     pad = pick_device(args.device)
                     if args.grab:
                         pad.grab()
+                    mapper.haptics = arm_haptics(pad)
                     sel.register(pad.fd, selectors.EVENT_READ)
                     print(f"deck-input-mapper: re-bound to {pad.path} ({pad.name})",
                           file=sys.stderr, flush=True)
@@ -2886,6 +3168,11 @@ def main() -> None:
         pass
     finally:
         lock_watcher.stop()
+        if mapper.haptics is not None:
+            # Hand the 16 effect slots back. Not strictly required -- closing
+            # the fd does it -- but this process is restarted by systemd and a
+            # leak here would be invisible until the 9th restart.
+            mapper.haptics.close()
         if auto is not None:
             auto.stop()
         if args.grab:
