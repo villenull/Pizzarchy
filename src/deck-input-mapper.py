@@ -549,6 +549,25 @@ class Mapper:
     osk: "object | None" = None       # deck_osk_layout.OnScreenKeyboard
     cursors: "object | None" = None   # deck_osk_layout.Cursors
 
+    # 🔴 WHICH METRIC A COMMIT HIT-TESTS IN, AND IT IS NOT COSMETIC.
+    #
+    # A key carries two widths (`deck_osk_layout`'s header): `cells` is the
+    # integer addressing grid the TTY renderer draws, `units` is the MEASURED
+    # VISUAL width the layer-shell renderer draws. They reach the same keys per
+    # row and disagree about where the boundaries fall INSIDE a half -- by up to
+    # half a key.
+    #
+    # ⚠️ So the metric has to follow the RENDERER THAT IS ON SCREEN. Committing
+    # in `cells` under the layer overlay types a key up to half a key away from
+    # the white one the user is looking at: sampled across the letters layer,
+    # 287 of 1010 cursor positions disagree. That is §9a's confidently-wrong
+    # failure, arriving through the commit rather than through a badge.
+    #
+    # Defaults to `cells`, which is the TTY renderer's metric and the layout
+    # core's own default -- so a backend that forgets to say gets the behaviour
+    # it had, and only the layer backend has to opt in (main() does).
+    osk_metric: str = "cells"
+
     # --- state the RENDERERS read (T8 §9g) -----------------------------------
     #
     # The keyboard's look is downstream of all three of these, so they live here
@@ -930,12 +949,12 @@ class Mapper:
         half = TRIGGER_HALF.get(code)
         if half is not None:
             if self.pad_touched(half):
-                return self.osk.press_at(half, *self.cursors.position(half))
+                return self.commit_at(half)
             return self._osk_idle_trigger(code)
         half = PAD_CLICK_HALF.get(code)
         if half is not None:
             # 🔴 THE SAME EMISSION PATH AS THE TRIGGER, on purpose: one call,
-            # `press_at` on that side's cursor. A click and a pull commit
+            # `commit_at` on that side's cursor. A click and a pull commit
             # identically or they will drift on shift, caps and the one-shot.
             #
             # ⚠️ GATED ON TOUCH, exactly as the trigger is, and for the same
@@ -952,7 +971,7 @@ class Mapper:
             # nothing, so inventing an idle meaning here would be a behaviour
             # the keyboard never advertises. §9a: worse than silence.
             if self.pad_touched(half):
-                return self.osk.press_at(half, *self.cursors.position(half))
+                return self.commit_at(half)
             return []
         if code == OSK_CAPS_BUTTON:
             # Caps is a state, never a keycode: see OSK_CAPS_BUTTON.
@@ -963,17 +982,30 @@ class Mapper:
             return [(key, 1), (key, 0)]
         return []
 
+    def commit_at(self, half: str) -> list[tuple[int, int]]:
+        """Press the key under that side's cursor. THE one commit path.
+
+        Both things that commit -- the trigger over a touched pad and that pad's
+        CLICK -- come through here, so they cannot drift apart, and both
+        hit-test in `osk_metric`, so what is typed is what is drawn. This is
+        `OnScreenKeyboard.press_at` with the metric filled in; `press_at` itself
+        hard-codes the layout core's default, which is right for the TTY and
+        wrong under the overlay.
+        """
+        return self.osk.press(
+            self.osk.key_at(half, *self.cursors.position(half), self.osk_metric))
+
     def press_key_index(self, row: int, key_index: int) -> "list[tuple[int, int]] | None":
         """Commit the key at (row, key_index) -- what a TOUCH on the overlay asks for.
 
         🔴 AN INDEX, NOT A COORDINATE, AND THAT IS THE WHOLE DESIGN OF THE TOUCH
-        PATH. `press_at` hit-tests in the layout core's default `CELLS` metric;
-        the overlay DRAWS in `UNITS` and hit-tests its own painted rectangles in
-        the metric it drew them in (`deck_osk_wayland.key_at_pixel`). The two
-        disagree by up to half a key inside a half, so a touch that sent
-        coordinates home would be re-resolved here in the OTHER metric and would
-        sometimes type the neighbour of the key under the finger. The overlay
-        resolves the key it drew; this presses it, and no metric is involved.
+        PATH. `commit_at` has to be told which metric the renderer on screen
+        drew in (`osk_metric`); the overlay already knows, because it hit-tests
+        its own painted rectangles (`deck_osk_wayland.key_at_pixel`). A touch
+        that sent COORDINATES home would have to be re-resolved here against a
+        metric this end merely believes, and the two metrics differ by up to
+        half a key. The overlay resolves the key it drew; this presses it, and
+        no metric is involved at all.
 
         🔴 AND IT IS THE SAME EMISSION PATH. Both routes end in
         `OnScreenKeyboard.press`, so shift, caps, the one-shot being spent, the
@@ -2242,6 +2274,12 @@ def main() -> None:
                 code: (ai.min, ai.max) for code, ai in pad_abs.items()
                 if code in osk_layout.PAD_AXES
             })
+            # 🔴 THIS RENDERER DRAWS IN `units`, SO COMMITS MUST HIT-TEST IN
+            # `units`. Without this line a trigger or a pad click types a key up
+            # to half a key away from the white one under the cursor -- 287 of
+            # 1010 sampled positions disagree. See `Mapper.osk_metric`. The tty
+            # backend below deliberately does NOT set it: it draws `cells`.
+            mapper.osk_metric = osk_layout.UNITS
             # ⚠️ IMPORTED FOR ITS PROTOCOL, NOT RUN. The overlay is a separate
             # process (see `osk_layer_start`); this is the same trick `AutoShow`
             # uses with `deck_osk_focus` -- the module that WRITES a line is the

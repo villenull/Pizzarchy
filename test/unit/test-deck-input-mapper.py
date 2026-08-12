@@ -1278,6 +1278,44 @@ check("with the OSK down the left pad click emits nothing",
 check("...and neither does the right",
       mm.translate(e.EV_KEY, e.BTN_THUMB2, 1, 0.0), [])
 
+# --- 🔴 A COMMIT HIT-TESTS IN THE METRIC THE RENDERER DREW IN ---------------
+#
+# A key carries two widths and they are not redundant: `cells` is the integer
+# addressing grid `deck_osk_tty` draws, `units` is the measured visual width
+# `deck_osk_wayland` draws. They differ by up to half a key INSIDE a half, so a
+# commit resolved in the wrong one types a key the user is not pointing at while
+# the correct key is drawn white -- §9a's confidently wrong, arriving through
+# the commit instead of through a badge. `press_at` hard-codes the layout core's
+# default, which is why `Mapper.commit_at` exists at all.
+
+check("the default metric is the layout core's own -- the tty renderer's",
+      m.Mapper().osk_metric, osk_mod.CELLS)
+
+# The two metrics must actually disagree somewhere, or nothing below is a test.
+DISAGREE = [(half, x, y)
+            for half in ("left", "right")
+            for x in (i / 100 for i in range(101))
+            for y in (0.1, 0.3, 0.5, 0.7, 0.9)
+            if osk_mod.key_at(osk_mod.LETTERS, half, x, y, osk_mod.UNITS)
+            is not osk_mod.key_at(osk_mod.LETTERS, half, x, y, osk_mod.CELLS)]
+check("the two metrics really do disagree, on hundreds of cursor positions",
+      len(DISAGREE) > 100, True)
+
+for button, half in ((e.BTN_TL2, "left"), (e.BTN_THUMB, "left"),
+                     (e.BTN_TR2, "right"), (e.BTN_THUMB2, "right")):
+    where = next(s for s in DISAGREE if s[0] == half)
+    wrong = []
+    for metric in (osk_mod.CELLS, osk_mod.UNITS):
+        mm = osk_mapper()
+        mm.osk_metric = metric
+        touch(mm, half, MINV, -1)
+        mm.cursors.pos[half] = [where[1], where[2]]
+        want = mm.osk.key_at(half, *mm.cursors.position(half), metric).code
+        got = mm.translate(e.EV_KEY, button, 1, 0.1)
+        if got != [(want, 1), (want, 0)]:
+            wrong.append((metric, got, want))
+    check(f"a commit on {half} follows osk_metric, in BOTH metrics", wrong, [])
+
 # --- 🔴 TOUCH: the overlay reports a KEY INDEX and this presses it -----------
 #
 # Operator, on hardware, 2026-08-12: *"touch on the keyboard still does not work
@@ -2274,6 +2312,17 @@ mapper_calls = [node for node in ast.walk(main_def)
                 and node.func.value.id == "mapper"]
 check("main() resets the OSK's state on BOTH show paths (tty and layer)",
       sum(node.func.attr == "reset_osk_state" for node in mapper_calls), 2)
+
+# Same shape again: `osk_metric` defaults to the tty renderer's metric, so the
+# LAYER backend has to say so, and if it stops saying so every commit quietly
+# lands up to half a key from the key drawn under the cursor. Nothing else in
+# this suite can see that line, because setting it is main()'s job.
+metric_sets = [node for node in ast.walk(main_def) if isinstance(node, ast.Assign)
+               and any(isinstance(t, ast.Attribute) and t.attr == "osk_metric"
+                       and isinstance(t.value, ast.Name) and t.value.id == "mapper"
+                       for t in node.targets)]
+check("main() tells the mapper which metric the LAYER renderer draws in",
+      [ast.unparse(node.value) for node in metric_sets], ["osk_layout.UNITS"])
 
 # 🔴 THE DEFECT ITSELF, AND THE ONLY PLACE IT CAN BE SEEN. `format_state_line`
 # takes `touched` as an OPTIONAL third argument, because an older mapper must
