@@ -166,9 +166,12 @@ try:
     move(e.ABS_HAT1Y, 32000)
     time.sleep(0.4)
     corners = screen(drain())
-    check("the left cursor reached its half's top-left key", "[  1  ]" in corners, True)
+    # Digits carry their shifted symbol beside them now (T8 §9), in every
+    # state including highlighted -- see deck_osk_tty.display_label's own
+    # docstring for why that has to be true in BOTH states, not just at rest.
+    check("the left cursor reached its half's top-left key", "[ 1 ! ]" in corners, True)
     check("the right cursor reached its OWN half's top-right key",
-          "[  0  ]" in corners, True)
+          "[ 0 ) ]" in corners, True)
     check("still exactly two highlights", corners.count("["), 2)
 
     # Both axes moving together on both pads -- the failure mode that shipped
@@ -196,7 +199,9 @@ try:
     time.sleep(0.3)
     shifted = screen(drain())
     check("pressing shift redraws the letters capitalised", "  Q  " in shifted, True)
-    check("and the digits as their shifted faces", "  !  " in shifted, True)
+    # The composite always leads with the CURRENTLY ACTIVE face -- "! 1", not
+    # "1 !" -- once shift makes "!" the face `kb.face()` reports.
+    check("and the digits as their shifted faces", "! 1" in shifted, True)
     check("and the shift key reports its own state", "Shift" in shifted, True)
 
     move(e.ABS_HAT1X, -20000)

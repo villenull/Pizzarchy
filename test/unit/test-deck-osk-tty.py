@@ -128,6 +128,95 @@ for layer in osk.LAYERS.values():
                             truncated.append((layer.name, label, key.span, hot, drawn))
 check("no key label is ever truncated, at any span or shift state", truncated, [])
 
+# --- T8 §9: shifted-symbol legends and controller-glyph hints, degraded ------
+#
+# ⚠️ SAME INVARIANT AS ABOVE, EXTENDED TO THE COMPOSITE TEXT AND TO BOTH
+# WIDTHS A KEY IS EVER DRAWN AT. `display_label` is what `render()` actually
+# feeds to `cell_text()` now, and it is the one that could overflow --
+# `kb.face(key)` alone cannot, by the invariant just checked above, but
+# pasting a hint or a second legend onto it can. `display_label` returns ONE
+# string regardless of highlight state (see its own docstring for why), so
+# this checks that string against BOTH budgets it will ever be centred into.
+truncated_composite = []
+for layer in osk.LAYERS.values():
+    for half in ("left", "right"):
+        for row in layer.half(half):
+            for key in row:
+                for state in ("off", "once", "locked"):
+                    probe = osk.OnScreenKeyboard(layer.name)
+                    probe.shift = state
+                    text = tty.display_label(probe, key)
+                    width = key.span * tty.KEY_CELL
+                    for hot, available in ((False, width), (True, width - 2)):
+                        if len(text) > available:
+                            truncated_composite.append(
+                                (layer.name, key.label, state, hot, text, available))
+check("the composite display text never exceeds its cell, at any span, "
+      "shift state, or highlight state", truncated_composite, [])
+
+# No key may carry both a shifted-symbol legend and a controller hint -- the
+# format only has room for one, and `display_label` prefers the legend, which
+# would silently swallow a hint on a key that happened to have both.
+both = [key.label for layer in osk.LAYERS.values()
+        for half in ("left", "right") for row in layer.half(half) for key in row
+        if key.shift_label and not key.is_letter and key.hint]
+check("no key has both a shift_label and a hint", both, [])
+
+# Hints must name the trigger that ACTUALLY fires the key -- the half it is
+# drawn in, in every layer it appears in. A hint naming the wrong trigger
+# would be confidently wrong, which T8 §9's request singles out as worse than
+# no hint at all.
+HINT_TO_HALF = {osk.HINT_LEFT: "left", osk.HINT_RIGHT: "right"}
+mislabelled_hints = []
+for layer in osk.LAYERS.values():
+    for half in ("left", "right"):
+        for row in layer.half(half):
+            for key in row:
+                if key.hint and HINT_TO_HALF.get(key.hint) != half:
+                    mislabelled_hints.append((layer.name, half, key.label, key.hint))
+check("every hint names the trigger for the half it is actually drawn in",
+      mislabelled_hints, [])
+check("shift is hinted for the LEFT trigger", osk.SHIFT_KEY.hint, osk.HINT_LEFT)
+check("backspace is hinted for the RIGHT trigger", osk.BACKSPACE_KEY.hint, osk.HINT_RIGHT)
+check("enter is hinted for the RIGHT trigger", osk.ENTER_KEY.hint, osk.HINT_RIGHT)
+
+# --- display_label: exact composition ------------------------------------
+
+kb2, cur2 = fresh()
+digit_1 = osk.key_at(osk.LETTERS, "left", 0.1, 0.1)   # "1"
+check("a digit shows its shifted symbol beside it",
+      tty.display_label(kb2, digit_1), "1 !")
+
+check("shift shows its trigger hint -- it fits (span 2, plenty of room)",
+      tty.display_label(kb2, osk.SHIFT_KEY), "Lshift")
+check("backspace shows its trigger hint -- it fits EXACTLY (4 + 1 = 5)",
+      tty.display_label(kb2, osk.BACKSPACE_KEY), "Rback")
+check("enter shows NO hint -- 'Renter' is 6 characters and the highlighted "
+      "budget is 5; 'enter' alone already fills it",
+      tty.display_label(kb2, osk.ENTER_KEY), "enter")
+
+kb2.press_at("left", 0.1, 0.9)   # shift -> once
+check("the hint survives a shift-state change -- it names a button, not a face",
+      tty.display_label(kb2, osk.SHIFT_KEY), "LShift")
+
+# A key with neither a shift_label nor a hint (e.g. tab) is unaffected --
+# display_label must not invent decoration for a plain key.
+check("a plain key with no legend and no hint is unaffected",
+      tty.display_label(kb2, osk.TAB_KEY), "tab")
+
+# ⚠️ THE PROPERTY THIS WHOLE REDESIGN EXISTS FOR: cell_text()'s FACE (brackets
+# stripped) must be identical whether or not a key happens to be highlighted,
+# or `rows_on_screen` cannot tell a moved highlight from a damaged row -- see
+# "the highlight having moved does not lose a row" below, and
+# `display_label`'s own docstring for the defect this reproduces directly.
+for probed in (digit_1, osk.SHIFT_KEY, osk.BACKSPACE_KEY, osk.ENTER_KEY, osk.TAB_KEY):
+    text = tty.display_label(kb2, probed)
+    width = probed.span * tty.KEY_CELL
+    cold_face = tty.face_of(tty.cell_text(text, width, False))
+    hot_face = tty.face_of(tty.cell_text(text, width, True))
+    check(f"{probed.label}'s face is byte-identical whether or not it is "
+          "highlighted", cold_face, hot_face)
+
 # --- the rendered grid --------------------------------------------------------
 
 kb, cur = fresh()
@@ -153,12 +242,17 @@ def labels(line: str) -> list[str]:
 
 check("the top row carries both halves' digits, gutter between",
       labels(plain.split("\n")[0]),
-      ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"])
-check("the home row reads asdfg / hjkl + backspace",
+      # Cold, so each digit carries its shifted symbol beside it (T8 §9) --
+      # `labels()` splits on the internal space, so each digit is its own
+      # token followed by its symbol's.
+      ["1", "!", "2", "@", "3", "#", "4", "$", "5", "%",
+       "6", "^", "7", "&", "8", "*", "9", "(", "0", ")"])
+check("the home row reads asdfg / hjkl + backspace, hinted",
       labels(plain.split("\n")[2]),
-      ["a", "s", "d", "f", "g", "h", "j", "k", "l", "back"])
-check("the function row carries shift, the layer key, tab, space and close",
-      labels(plain.split("\n")[4]), ["shift", "?#=", "tab", "space", "close"])
+      ["a", "s", "d", "f", "g", "h", "j", "k", "l", "Rback"])
+check("the function row carries shift (hinted), the layer key, tab, "
+      "space and close",
+      labels(plain.split("\n")[4]), ["Lshift", "?#=", "tab", "space", "close"])
 
 # Both halves must be present on every line, or one thumb has nothing to drive.
 check("every rendered line spans both halves",
@@ -173,10 +267,16 @@ cur.update(e.ABS_HAT1X, MAX)   # right pad: top-right -> "0"
 cur.update(e.ABS_HAT1Y, MAX)
 rows = tty.render(kb, cur)
 plain = tty.to_plain(rows)
+# Digits carry their shifted symbol beside them now (T8 §9), in every state --
+# see display_label's docstring -- so the drawn cell is "1 !"/"0 )", not a
+# bare digit; `key_at` is the independent source for what that composite is.
+key_1 = osk.key_at(osk.LETTERS, "left", 0.0, 0.0)
+key_0 = osk.key_at(osk.LETTERS, "right", 1.0, 0.0)
+key_5 = osk.key_at(osk.LETTERS, "left", 1.0, 0.0)
 check("the left cursor brackets the key it is over",
-      tty.cell_text("1", tty.KEY_CELL, True) in plain, True)
+      tty.cell_text(tty.display_label(kb, key_1), tty.KEY_CELL, True) in plain, True)
 check("the right cursor brackets its own key",
-      tty.cell_text("0", tty.KEY_CELL, True) in plain, True)
+      tty.cell_text(tty.display_label(kb, key_0), tty.KEY_CELL, True) in plain, True)
 check("exactly two keys are highlighted -- one per half",
       sum(1 for row in rows for _, hot in row if hot), 2)
 
@@ -187,9 +287,9 @@ cur.update(e.ABS_HAT0X, MAX)   # left cursor moves to the right edge of ITS half
 cur.update(e.ABS_HAT0Y, MAX)
 plain = tty.to_plain(tty.render(kb, cur))
 check("moving the left cursor moved its highlight",
-      tty.cell_text("5", tty.KEY_CELL, True) in plain, True)
+      tty.cell_text(tty.display_label(kb, key_5), tty.KEY_CELL, True) in plain, True)
 check("and left the right cursor's highlight alone",
-      tty.cell_text("0", tty.KEY_CELL, True) in plain, True)
+      tty.cell_text(tty.display_label(kb, key_0), tty.KEY_CELL, True) in plain, True)
 check("still exactly two highlights",
       sum(1 for row in tty.render(kb, cur) for _, hot in row if hot), 2)
 

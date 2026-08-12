@@ -301,6 +301,77 @@ for state in ("off", "once", "locked"):
                         face_mismatches.append((layer.name, half, state, shown, typed))
 check("every printable key types exactly the face it shows", face_mismatches, [])
 
+# --- secondary_face(): the dual-legend a renderer with room can show ----------
+#
+# T8 §9: "shifted symbols shown above the digit on the same key". `face()`
+# reports whichever face is CURRENTLY active; `secondary_face()` reports the
+# other one, so a renderer can show both without waiting for a shift press.
+
+kb = osk.OnScreenKeyboard()
+check("unshifted: secondary face of 1 is its shifted symbol",
+      kb.secondary_face(one), "!")
+check("unshifted: secondary face of q (a letter) is empty -- excluded on purpose",
+      kb.secondary_face(q), "")
+check("a key with no shift_label has no secondary face either",
+      kb.secondary_face(tab), "")
+kb.press_at(*SHIFT)
+check("one-shot: secondary face of 1 flips to its UNSHIFTED face",
+      kb.secondary_face(one), "1")
+check("...it is always the face NOT currently shown, never a fixed one",
+      kb.face(one) != kb.secondary_face(one), True)
+kb.press_at(*SHIFT)
+check("caps lock does not affect digits -- secondary face of 1 is still 1's pair",
+      {kb.face(one), kb.secondary_face(one)}, {"1", "!"})
+
+# Punctuation, not just digits -- the spec's table only names the digit row,
+# but the mechanism is general and every sym() key qualifies.
+slash = osk.key_at(osk.SYMBOLS, "left", 0.1, 0.6)
+kb_sym = osk.OnScreenKeyboard("symbols")
+check("a punctuation key also carries a secondary face",
+      {kb_sym.face(slash), kb_sym.secondary_face(slash)}, {"/", "?"})
+
+# Every sym() key in every layer has a secondary face; every letter and every
+# action key does not. Checked exhaustively, not sampled -- the same
+# discipline as the face() invariant just above.
+secondary_wrong = []
+for layer in osk.LAYERS.values():
+    for half in ("left", "right"):
+        for row in layer.half(half):
+            for key in row:
+                probe = osk.OnScreenKeyboard(layer.name)
+                has_secondary = bool(probe.secondary_face(key))
+                should_have = bool(key.shift_label) and not key.is_letter
+                if has_secondary != should_have:
+                    secondary_wrong.append((layer.name, half, key.label,
+                                            has_secondary, should_have))
+check("secondary_face is present iff the key is a non-letter with a shift_label",
+      secondary_wrong, [])
+
+# --- hint: which controller trigger fires this key --------------------------
+
+check("a key with no hint reports the empty string", q.hint, "")
+check("shift's hint names the LEFT trigger", osk.SHIFT_KEY.hint, osk.HINT_LEFT)
+check("backspace's hint names the RIGHT trigger", osk.BACKSPACE_KEY.hint, osk.HINT_RIGHT)
+check("enter's hint names the RIGHT trigger", osk.ENTER_KEY.hint, osk.HINT_RIGHT)
+
+# The hint must agree with reality: a trigger only ever fires keys on its OWN
+# half (TRIGGER_HALF), so a hint naming the other one would be confidently
+# wrong -- worse than carrying no hint at all.
+HINT_TRIGGER_HALF = {code: half for code, half in osk.TRIGGER_HALF.items()}
+HALF_BY_HINT = {osk.HINT_LEFT: "left", osk.HINT_RIGHT: "right"}
+check("every hint constant maps to a real trigger's half",
+      set(HALF_BY_HINT.values()) <= set(HINT_TRIGGER_HALF.values()), True)
+
+hint_mismatches = []
+for layer in osk.LAYERS.values():
+    for half in ("left", "right"):
+        for row in layer.half(half):
+            for key in row:
+                if key.hint and HALF_BY_HINT.get(key.hint) != half:
+                    hint_mismatches.append((layer.name, half, key.label, key.hint))
+check("every hinted key's glyph names the trigger for the half it is drawn in",
+      hint_mismatches, [])
+
 # --- layers -------------------------------------------------------------------
 
 kb = osk.OnScreenKeyboard()

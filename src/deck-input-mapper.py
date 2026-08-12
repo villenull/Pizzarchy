@@ -36,6 +36,14 @@ DESKTOP MODE ADDS TWO BUTTONS (docs/PROGRESS.md §5.23)
                       fcitx5 its Wayland-native clients (R-51). The chord works
                       with or without it, and outlives it if it fails.
 
+    The `layer` backend also auto-HIDES itself once the session it was shown
+    across UNLOCKS (docs/PROGRESS.md §5.24a request 3). This is always on for
+    that backend, no flag: unlike auto-show it costs nobody's Wayland seat, it
+    only ever hides a keyboard the user already asked for, and getting it
+    wrong in the direction of "stays up a little longer" is the ONLY safe
+    direction -- STEAM+X still dismisses it by hand either way. See
+    `LockWatcher` for the mechanism and why it cannot fire on LOCK.
+
     Text entry is DELIBERATELY absent: free text comes from an on-screen
     keyboard (squeekboard) under a compositor, or from a TUI-native picker --
     that fork is exactly what FINDING-T2-gamepad-spike.md decides. A nav-only
@@ -59,6 +67,7 @@ from __future__ import annotations
 import argparse
 import errno
 import importlib.util
+import json
 import os
 import pathlib
 import selectors
@@ -627,6 +636,179 @@ class Mapper:
         return min(deadlines) if deadlines else None
 
 
+# --- auto-hide on UNLOCK, layer backend only (docs/PROGRESS.md §5.24a #3) ----
+#
+# Request 1, 2026-08-11: "the OSK must auto-hide after unlock". Today it does
+# not -- `layer_rule({match={namespace="deck-osk"}, above_lock=2})` (§5.24)
+# means our overlay draws ABOVE `ext-session-lock` on purpose, so the keyboard
+# a user summoned to type their password keeps drawing straight through the
+# unlock and into the desktop session behind it.
+#
+# ⚠️ THE DESIGN QUESTION, ANSWERED: HOW DOES THIS PROCESS LEARN "UNLOCKED"?
+#
+#   ext-session-lock itself   Binding it as a THIRD PARTY does not work: the
+#                             protocol is for IMPLEMENTING a locker (one
+#                             object per compositor, whoever gets there
+#                             first), not for observing one that already
+#                             exists. `deck_osk_focus.py` hand-rolls
+#                             zwp_input_method_v2 the same way, and that
+#                             protocol at least has an observer role; this one
+#                             does not.
+#   a Hyprland IPC event      Traced (docs/findings/T9-lock-service-mitigation
+#                             .md §1.3, from Hyprland's OWN source): the only
+#                             producer of session-lock state is
+#                             `g_pSessionLockManager->isSessionLocked()`,
+#                             read by `getSolitaryBlockedReason()` and
+#                             surfaced in `hyprctl -j monitors` as
+#                             `solitaryBlockedBy`. There is no lock/unlock
+#                             line on the event socket (`socket2`) -- nothing
+#                             else in Hyprland's IPC touches that bit.
+#   something the mapper can already see   No: this process reads a gamepad
+#                             node and writes to uinput. It has never had any
+#                             visibility into compositor or session state.
+#
+# So the answer is the same ground truth upstream's OWN sensor reads --
+# `bin/omarchy-hyprland-session-locked` is exactly this query, one exec of
+# `hyprctl -j monitors` -- polled from here rather than subscribed to,
+# because there is nothing to subscribe to.
+#
+# ⚠️ WHY POLLING IS THE SAFER CHOICE HERE, NOT JUST THE AVAILABLE ONE.
+# CLAUDE.md's operator instructions were explicit: prefer a mechanism that
+# CANNOT leave the keyboard stuck up if the signal is missed. An event-based
+# design has a failure mode polling does not -- a dropped or unsubscribed
+# event is gone forever, so a keyboard waiting on "the one event that tells
+# me to hide" can wait forever. A poll that misses one cycle asks again on
+# the next one: the worst case is late, never wrong and never permanent, and
+# `hyprctl` succeeding or not is dead simple to reason about next to a
+# hand-rolled protocol client staying in sync with a compositor's socket.
+#
+# ⚠️ read_lock_state() BLOCKS THE INPUT LOOP, up to LOCK_STATE_TIMEOUT --
+# `spawn_detached()` elsewhere in this file is built specifically to NEVER do
+# that. The difference is scope: that helper fires on every STEAM/QAM press,
+# so a stall there is felt as lag on every press. This runs at most once
+# every LOCK_POLL_INTERVAL seconds, and only while the layer-shell keyboard
+# is actually on screen -- a local AF_UNIX round trip to a compositor that
+# is, by construction, still painting frames (it is drawing the lock screen
+# or the desktop this keyboard sits above) is not the risk spawning an
+# unbounded helper process is. An async spawn-and-poll design was considered
+# and rejected: it earns a THIRD fd in the main selector (after the pad and
+# the focus watcher) to avoid a bound that is already small.
+LOCK_STATE_ARGV: tuple[str, ...] = ("hyprctl", "-j", "monitors")
+LOCK_POLL_INTERVAL = 0.75   # seconds between checks while the layer OSK is up
+LOCK_STATE_TIMEOUT = 0.3    # bounded: a hung hyprctl costs at most this, rarely
+
+
+def lock_state_from_monitors(monitors_json: str) -> bool | None:
+    """True if any monitor's `solitaryBlockedBy` names LOCK; False if the
+    JSON parses and none does; None if it cannot be read this way at all.
+
+    Mirrors upstream's own sensor, `bin/omarchy-hyprland-session-locked`
+    (docs/findings/T9-lock-service-mitigation.md §1.3): `solitaryBlockedBy`
+    contains "LOCK" iff Hyprland's session-lock manager is ACTUALLY holding
+    an `ext_session_lock_v1` at the moment `hyprctl` was asked -- a direct
+    read of ground truth, not a heuristic like the DPMS/backlight confusion
+    §5.24 already recorded one of. So False is exactly as trustworthy as
+    True; only a malformed or unexpected answer (this is not Hyprland,
+    `hyprctl` failed, the JSON shape changed) returns None, and a caller
+    seeing None must change nothing -- see `LockWatcher`.
+    """
+    try:
+        monitors = json.loads(monitors_json)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(monitors, list):
+        return None
+    for monitor in monitors:
+        if not isinstance(monitor, dict):
+            continue
+        blocked = monitor.get("solitaryBlockedBy")
+        if isinstance(blocked, list) and "LOCK" in blocked:
+            return True
+    return False
+
+
+def read_lock_state(argv: tuple[str, ...] = LOCK_STATE_ARGV,
+                    timeout: float = LOCK_STATE_TIMEOUT) -> bool | None:
+    """One bounded, synchronous read of Hyprland's own lock state. See the
+    module-level note above this section for why blocking here is a
+    deliberate, scoped exception to `spawn_detached`'s "never block" rule."""
+    try:
+        result = subprocess.run(
+            list(argv), capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return lock_state_from_monitors(result.stdout)
+
+
+@dataclass
+class LockWatcher:
+    """Detects a LOCKED -> UNLOCKED edge, throttled and self-correcting.
+
+    `tick()` is meant to be called on every pass through the main loop while
+    the layer-shell keyboard is on screen; it polls at most once per
+    `interval` seconds and reports True exactly once, on the transition.
+
+    ⚠️ EDGE-TRIGGERED, IN ONE DIRECTION ONLY -- THIS IS WHAT KEEPS IT FROM
+    EVER FIRING ON LOCK. `saw_lock` starts False every time `start()` is
+    called (i.e. every time the keyboard is shown) and only ever latches
+    True on an OBSERVED True reading. `tick()` reports "hide it" only on a
+    False reading that follows a True one in THIS showing. A keyboard
+    summoned in an already-unlocked desktop therefore never dismisses
+    itself -- there is nothing it could have unlocked FROM -- and nothing
+    here can report "hide" while `solitaryBlockedBy` still contains LOCK,
+    however many times it is asked. Getting this backwards would hide the
+    only keyboard a user has to answer a lock prompt, which is precisely
+    the defect `above_lock=2` (§5.24) exists to prevent -- read
+    `docs/tasks/T8-onscreen-keyboard.md` request 1 before touching this.
+
+    ⚠️ FAILS TOWARD DOING NOTHING. `read_lock_state()` returning None --
+    `hyprctl` missing, this is not actually Hyprland, a timeout -- leaves
+    `saw_lock` exactly where it was: the keyboard just keeps behaving as it
+    does today, staying up until STEAM+X. The only failure mode this adds is
+    "does not auto-hide"; it cannot add "cannot be hidden at all", because
+    the chord never goes through this class.
+    """
+
+    interval: float = LOCK_POLL_INTERVAL
+    saw_lock: bool = False
+    next_check: float = field(default=float("inf"))
+
+    def start(self, now: float) -> None:
+        """Arm for a fresh showing. Call every time the keyboard is shown."""
+        self.saw_lock = False
+        self.next_check = now  # check right away -- summoned-while-locked is the common case
+
+    def stop(self) -> None:
+        """Disarm. Call every time the keyboard is hidden, for any reason."""
+        self.saw_lock = False
+        self.next_check = float("inf")
+
+    @property
+    def armed(self) -> bool:
+        return self.next_check != float("inf")
+
+    def tick(self, now: float, reader=read_lock_state) -> bool:
+        """Poll if due. Returns True exactly on a LOCKED -> UNLOCKED edge."""
+        if not self.armed or now < self.next_check:
+            return False
+        self.next_check = now + self.interval
+        state = reader()
+        if state is None:
+            return False
+        if state:
+            self.saw_lock = True
+            return False
+        was_locked = self.saw_lock
+        self.saw_lock = False
+        return was_locked
+
+    def next_deadline(self) -> float | None:
+        """For the caller's select() timeout. None when not armed."""
+        return self.next_check if self.armed else None
+
+
 # --- spawning helpers, and what the menu buttons will actually do ------------
 
 
@@ -1138,6 +1320,12 @@ def main() -> None:
 
     osk_visible = False
 
+    # Auto-hide on unlock (docs/PROGRESS.md §5.24a #3). Only the `layer`
+    # backend can be shown ABOVE a lock (`above_lock=2`, §5.24) and so is the
+    # only one that needs this; harmless to construct unconditionally, since
+    # it is only ever start()ed/tick()ed under that backend below.
+    lock_watcher = LockWatcher()
+
     # --- the tty backend: the keyboard we draw ourselves (T8) ----------------
     #
     # Only set up when asked for. The default stays `dbus` so the installed
@@ -1367,6 +1555,16 @@ def main() -> None:
             # rather than leaving the user with nothing until the next press.
             if osk_backend == "dbus" and visible:
                 osk_dbus_toggle(True)
+            # Arm the unlock watcher for exactly the span this showing covers
+            # -- fresh on every show, so a keyboard summoned in an already
+            # unlocked desktop has no LOCK reading to ever transition away
+            # from. Only while STILL "layer": the fallback just above may
+            # have changed it, and dbus/squeekboard's own visibility is not
+            # this mechanism's business.
+            if osk_backend == "layer" and visible:
+                lock_watcher.start(time.monotonic())
+            else:
+                lock_watcher.stop()
             return
         if osk_backend == "dbus":
             osk_dbus_toggle(visible)
@@ -1425,6 +1623,16 @@ def main() -> None:
     try:
         while True:
             deadline = mapper.next_deadline()
+            # ⚠️ The lock watcher's own deadline must also bound the wait, or
+            # select() blocks indefinitely whenever nothing else is pending --
+            # exactly the state a user leaves the pad in right after typing
+            # their password and letting go. Without this the unlock could
+            # sit undetected until the NEXT pad event gave the loop a reason
+            # to wake up, which might be much later than the user expects
+            # "auto-hide" to mean.
+            lock_deadline = lock_watcher.next_deadline()
+            if lock_deadline is not None:
+                deadline = lock_deadline if deadline is None else min(deadline, lock_deadline)
             timeout = max(0.0, deadline - time.monotonic()) if deadline is not None else None
             ready = sel.select(timeout)
             now = time.monotonic()
@@ -1532,9 +1740,19 @@ def main() -> None:
                         osk_layer_send()
             for key, value in mapper.due_repeats(now):
                 emit(key, value)
+            # ⚠️ OUTSIDE the `pad.fd in ready_fds` branch, like due_repeats
+            # above -- this must run on every pass, including the ones woken
+            # by nothing but the timeout this class asked for, or an unlock
+            # with no pad activity after it goes undetected until the pad
+            # moves again.
+            if osk_backend == "layer" and osk_visible and lock_watcher.tick(now):
+                say("the session unlocked; hiding the keyboard it was shown "
+                    "across (docs/PROGRESS.md §5.24a #3)")
+                set_osk_visible(False)
     except KeyboardInterrupt:
         pass
     finally:
+        lock_watcher.stop()
         if auto is not None:
             auto.stop()
         if args.grab:

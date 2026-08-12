@@ -116,6 +116,58 @@ def cell_text(label: str, width: int, highlighted: bool) -> str:
     return label.center(width)[:width]
 
 
+# --- visual parity with SteamOS's keyboard (T8 §9, degraded honestly) --------
+#
+# ⛔ Not Valve's artwork -- one letter, ours, spelling out which of OUR OWN
+# "L2"/"R2" strings (`deck_osk_layout.HINT_LEFT/HINT_RIGHT`) a hinted key
+# carries. `docs/findings/P16-redistribution-and-trademark.md`.
+HINT_GLYPH: dict[str, str] = {osk.HINT_LEFT: "L", osk.HINT_RIGHT: "R"}
+
+
+def display_label(kb: osk.OnScreenKeyboard, key: osk.Key) -> str:
+    """The text `cell_text` draws for one key: `face()`, plus -- when there is
+    room -- the shifted-symbol legend or the controller-button hint this key
+    carries. Never both: no key in the layout has both a `shift_label` and a
+    `hint` (asserted in `test-deck-osk-layout.py`).
+
+    ⚠️ THE SAME TEXT WHETHER THE KEY IS HIGHLIGHTED OR NOT, DELIBERATELY --
+    THIS IS NOT AN OVERSIGHT, IT IS THE ONE THING THIS FUNCTION MUST NEVER DO.
+    `rows_on_screen` (docs on `face_of`) assumes a key's drawn TEXT is
+    invariant to the cursor's position: only the brackets and reverse video
+    may differ, because that machinery compares a REFERENCE render against a
+    console captured after the cursor had time to move -- "the cursors move
+    between a render and a console read", in `write_at`'s own words. A hint
+    that appeared cold and vanished hot would make that comparison a race,
+    and a first version of this function did exactly that: it passed the
+    unit suite that exercises `display_label` directly and then failed
+    `test-deck-osk-tty.py`'s "the highlight having moved does not lose a
+    row" two hundred lines later, for a reason that took a while to see.
+    Fixed by deciding ONCE, against the TIGHTER of the two budgets a key will
+    ever be drawn at (`key.span * KEY_CELL - 2`, the highlighted one -- brackets
+    always cost exactly 2 columns), and applying that decision unconditionally.
+
+    ⚠️ THE CONSEQUENCE: `enter` never gets a hint, in EITHER state. `enter` is
+    a single-span key whose face already fills the highlighted budget (5
+    characters, no spare) -- the one label KEY_CELL=7 was sized around in the
+    first place. `shift` (span 2) and `back` (4 characters, exactly 1 spare)
+    both fit; `enter` genuinely does not, and showing the hint only when cold
+    would be the same race this paragraph exists to rule out. Wayland has
+    pixels to spare and draws every hint regardless (`deck_osk_wayland.draw`);
+    the TTY renderer degrading enter's hint away rather than lying about it
+    sometimes IS the honest degrade this module's header asks for.
+    """
+    face = kb.face(key)
+    secondary = kb.secondary_face(key)
+    if secondary:
+        extra = f"{face} {secondary}"
+    elif key.hint:
+        extra = f"{HINT_GLYPH.get(key.hint, '')}{face}"
+    else:
+        return face
+    highlighted_budget = key.span * KEY_CELL - 2
+    return extra if len(extra) <= highlighted_budget else face
+
+
 def render(kb: osk.OnScreenKeyboard, cursors: osk.Cursors) -> list[list[Segment]]:
     """The keyboard as rows of (text, highlighted) segments.
 
@@ -145,10 +197,10 @@ def render(kb: osk.OnScreenKeyboard, cursors: osk.Cursors) -> list[list[Segment]
             if half == "right":
                 segments.append((" " * GUTTER, False))
             for key_index, key in enumerate(rows[row_index]):
+                hot = highlights[half] == (row_index, key_index)
                 segments.append((
-                    cell_text(kb.face(key), key.span * KEY_CELL,
-                              highlights[half] == (row_index, key_index)),
-                    highlights[half] == (row_index, key_index),
+                    cell_text(display_label(kb, key), key.span * KEY_CELL, hot),
+                    hot,
                 ))
         out.append(segments)
     return out
