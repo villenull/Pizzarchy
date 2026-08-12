@@ -391,8 +391,13 @@ else
   build_log "⚠️  pin it by creating iso/PKGS with: omacom-io/omarchy-pkgs@$pkgs_head"
 fi
 
-[[ -d "$PKGS_SRC/pkgbuilds/$RUNTIME_PACKAGE" ]] ||
-  build_fail "pkgs source $PKGS_SRC has no pkgbuilds/$RUNTIME_PACKAGE. build-omarchy-packages.sh would fail inside the container after the whole image had been provisioned; refusing here instead."
+# All three, because build-omarchy-packages.sh builds all three and stops on
+# the first one it cannot find -- an hour into a container that has already
+# provisioned an entire Arch image.
+for pkg_name in "$RUNTIME_PACKAGE" "$SETTINGS_PACKAGE" "$NVIM_PACKAGE"; do
+  [[ -d "$PKGS_SRC/pkgbuilds/$pkg_name" ]] ||
+    build_fail "pkgs source $PKGS_SRC has no pkgbuilds/$pkg_name. build-omarchy-packages.sh would fail inside the container after the whole image had been provisioned; refusing here instead."
+done
 
 # ---------------------------------------------------------------------------
 # 3. Fresh scratch clone of the pinned submodule.

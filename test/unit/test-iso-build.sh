@@ -174,9 +174,11 @@ make_fixture() {
   # build-omarchy-packages.sh insists on.
   local pk="$root/pkgs-src"
   git_init "$pk"
-  mkdir -p "$pk/pkgbuilds/omarchy-dev" "$pk/pkgbuilds/omarchy-settings-dev"
-  printf 'pkgname=omarchy-dev\n' >"$pk/pkgbuilds/omarchy-dev/PKGBUILD"
-  printf 'pkgname=omarchy-settings-dev\n' >"$pk/pkgbuilds/omarchy-settings-dev/PKGBUILD"
+  local recipe
+  for recipe in omarchy-dev omarchy-settings-dev omarchy-nvim; do
+    mkdir -p "$pk/pkgbuilds/$recipe"
+    printf 'pkgname=%s\n' "$recipe" >"$pk/pkgbuilds/$recipe/PKGBUILD"
+  done
   git_commit_all "$pk" 'fixture pkgs commit'
   FIXTURE_PKGS_SHA=$(git -C "$pk" rev-parse HEAD)
 }
@@ -607,7 +609,17 @@ run_build "$f23"
 [[ $BUILD_STATUS -eq 1 ]] || fail "a pkgs checkout with no omarchy-dev PKGBUILD must be refused" "status=$BUILD_STATUS $BUILD_OUT"
 [[ $BUILD_OUT == *"pkgbuilds/omarchy-dev"* ]] || fail "the refusal names the missing recipe" "$BUILD_OUT"
 [[ $BUILD_OUT != *"docker is required"* ]] || fail "it must stop the build" "$BUILD_OUT"
-pass "a pkgs checkout missing pkgbuilds/omarchy-dev is refused here, not inside the container an hour later"
+# build-omarchy-packages.sh builds three recipes and stops on the first it
+# cannot find, so checking only the runtime's would move the failure into the
+# container rather than prevent it.
+f23b="$work/f23b"
+make_fixture "$f23b"
+rm -rf "$f23b/pkgs-src/pkgbuilds/omarchy-nvim"
+git_commit_all "$f23b/pkgs-src" 'drop the nvim pkgbuild'
+run_build "$f23b"
+[[ $BUILD_STATUS -eq 1 ]] || fail "a pkgs checkout missing any of the three recipes must be refused" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"pkgbuilds/omarchy-nvim"* ]] || fail "the refusal names the recipe that is actually missing" "$BUILD_OUT"
+pass "a pkgs checkout missing any of the three PKGBUILDs is refused here, not inside the container an hour later"
 
 # An unpinned pkgs checkout is used, but never quietly: the run prints the sha
 # and the exact line that would pin it.
