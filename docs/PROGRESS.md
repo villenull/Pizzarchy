@@ -2693,7 +2693,46 @@ ways: injecting a bad dispatch into `src/deck-session.sh`, injecting a bare
 ⚠️ It asserts which *shape* is written down; that the Lua shape works is T10's
 measurement, not the suite's — nothing here talks to a live compositor.
 
-### 5.30c 🔴 OPEN, NEW — the touchscreen does nothing on the desktop, at all
+### 5.30c ✅ SOLVED 2026-08-12 — the touchscreen was UNROTATED, and our OSK opts out of input
+
+**Two separate causes, both measured, neither one "broken hardware".**
+
+**1. The desktop: `input:touchdevice:transform` was `0` while the display runs
+`transform = 3`.** Touches were arriving the whole time — `cat /dev/input/event9`
+produced **24,648 bytes in six seconds** — they just landed ~90° from where the
+finger was. Setting the transform to match made touch work immediately
+(operator confirmed: window controls, the Wi-Fi button, links).
+
+⚠️ **Applied at RUNTIME only; it reverts on the next Hyprland restart.** The
+persistent fix belongs with the other rotation surfaces — §5.11 already records
+**four** rotation values across four mechanisms that do not follow from one
+another, and this is a **fifth**. T5's bake-in list (`T5-fork-plan.md` §5.2)
+owes it a row.
+
+🔴 **And the syntax to set it is a §5.30b trap:** `hyprctl keyword` answers
+*"keyword can't work with non-legacy parsers. Use eval."* The working form is a
+**nested table**, not the colon-path string every Hyprland doc uses:
+
+```bash
+hyprctl eval 'hl.config{ input = { touchdevice = { transform = 3 } } }'
+```
+
+**2. Our OSK: it is input-transparent ON PURPOSE.** Touch works on the desktop
+but not on our keyboard, because `src/deck_osk_wayland.py:402` sets
+`surface.set_input_region(cairo.Region())` — an **empty** region — alongside
+`KeyboardMode.NONE`. That is what stops the overlay stealing focus or swallowing
+clicks from the app beneath it (T8 step 7's whole safety argument). Nothing is
+broken; we told the compositor to send it nothing.
+
+➡️ **Supporting touch is therefore a scoped change, not a bug fix:** give the
+surface a real input region and handle touch-down → key press. Valve's keyboard
+accepts touch, so this is on the path to §9g parity. ⚠️ It trades away the
+"can never swallow a click" property — re-read T8 step 7 before doing it.
+
+*(Superseded: this section previously read "the touchscreen does nothing on the
+desktop, at all" and listed it as an unexplained open issue.)*
+
+### 5.30d 🔵 (was 5.30c's placeholder)
 
 Discovered as T10 row 4 and then isolated: taps do nothing on Valve's keyboard
 **and nothing anywhere else on the desktop**. Not a Steam problem. The kernel
