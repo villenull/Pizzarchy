@@ -92,168 +92,345 @@ def _ensure_layer_shell_preloaded() -> None:
 # screen. `test-deck-osk-wayland.py` asserts the round trip -- every drawn key
 # rectangle must hit-test back to the key it was drawn for.
 
-# Blank pixels between the halves. Wide on purpose: it is the only thing
-# telling a user which cursor belongs to which thumb.
-DEFAULT_GUTTER = 48
+# 🔴 THERE IS NO GUTTER, AND THERE MUST NEVER BE ONE AGAIN.
+#
+#     This file used to split the surface into two half-grids with 48 blank
+#     pixels between them. The operator saw it beside the real thing -- "i
+#     still see a gap between the left half and the right half" -- and the
+#     reference was then measured: `docs/findings/T8-reference-metrics.md` §6
+#     puts ours at ~62px of dead space where Valve's has the ordinary ~4.5px
+#     inter-key gap. Ten times too wide; a whole key of nothing.
+#
+#     `Layer.split` is a CURSOR-ADDRESSING boundary, not a visual one. Keys are
+#     placed from `Layer.cell_bounds()` across the FULL width, and the split
+#     only tells `cursor_pixel` which cell range a given thumb ranges over. The
+#     space bar straddles it deliberately, which a drawn gap could not even
+#     represent.
+
+HALVES = ("left", "right")
+
+# `docs/findings/T8-reference-metrics.md` §1: a 3px bar in `#79A0F7` spans the
+# full width directly above the keyboard whenever it is being driven, and is
+# absent at idle. In the reference it sits just OUTSIDE the panel (the panel
+# starts at y=430; the bar is y=427..429), so the band is reserved at the top
+# of our own surface -- ALWAYS reserved, painted only when in use. Reserving it
+# unconditionally is the whole point: a band that appeared and disappeared
+# would shift every key by 3px the instant a modifier was pressed.
+STRIPE_HEIGHT_RATIO = 3.0 / 358.0
 
 
-def half_bounds(width: float, gutter: float) -> dict[str, tuple[float, float]]:
-    """(x origin, width) for each half."""
-    half = (width - gutter) / 2.0
-    return {"left": (0.0, half), "right": (half + gutter, half)}
+def stripe_height(height: float) -> float:
+    """Pixels reserved at the top of the surface for the in-use stripe."""
+    return min(max(1.0, height * STRIPE_HEIGHT_RATIO), height)
 
 
-def key_rects(layer: osk.Layer, width: float, height: float,
-              gutter: float = DEFAULT_GUTTER) -> list[tuple]:
-    """Every key's pixel rectangle: (half, row, col, x, y, w, h)."""
-    bounds = half_bounds(width, gutter)
+def grid_origin(height: float) -> tuple[float, float]:
+    """(top y, height) of the key grid itself, below the reserved stripe."""
+    top = stripe_height(height)
+    return (top, height - top)
+
+
+def key_rects(layer: osk.Layer, width: float, height: float) -> list[tuple]:
+    """Every key's pixel rectangle: (row, col, x, y, w, h).
+
+    ONE CONTINUOUS GRID (T8 §9g). `Layer.cell_bounds` gives each key its
+    [start, end) cells in a row that is `Layer.width` cells wide on EVERY row,
+    so columns line up all the way down and a ragged row cannot be drawn.
+    There is no `half` in the answer any more: a key belongs to the grid, and
+    whether a given thumb can REACH it is a separate question that
+    `half_pixel_range` answers.
+    """
+    top, grid_h = grid_origin(height)
+    row_h = grid_h / len(layer.rows)
+    cell_w = width / layer.width
     out = []
-    for half in ("left", "right"):
-        x0, half_w = bounds[half]
-        rows = layer.half(half)
-        row_h = height / len(rows)
-        for row_index, row in enumerate(rows):
-            cells = sum(key.span for key in row)
-            cell_w = half_w / cells
-            seen = 0
-            for key_index, key in enumerate(row):
-                out.append((half, row_index, key_index,
-                            x0 + seen * cell_w, row_index * row_h,
-                            key.span * cell_w, row_h))
-                seen += key.span
+    for row_index in range(len(layer.rows)):
+        for key_index, (start, end) in enumerate(layer.cell_bounds(row_index)):
+            out.append((row_index, key_index,
+                        start * cell_w, top + row_index * row_h,
+                        (end - start) * cell_w, row_h))
     return out
 
 
-def cursor_pixel(half: str, position: tuple[float, float], width: float,
-                 height: float, gutter: float = DEFAULT_GUTTER) -> tuple[float, float]:
-    """A cursor's 0..1 position within its half, in pixels."""
-    x0, half_w = half_bounds(width, gutter)[half]
-    return (x0 + position[0] * half_w, position[1] * height)
+def half_pixel_range(layer: osk.Layer, half: str, width: float) -> tuple[float, float]:
+    """(x start, x end) of the cell range this pad's cursor addresses.
+
+    ⚠️ NOT a drawn boundary -- nothing paints it, and nothing may. It exists
+    because a cursor reports 0..1 WITHIN its half and has to be placed on a
+    full-width grid.
+    """
+    start, end = layer.half_cells(half)  # raises on an unknown half
+    cell_w = width / layer.width
+    return (start * cell_w, end * cell_w)
+
+
+def cursor_pixel(layer: osk.Layer, half: str, position: tuple[float, float],
+                 width: float, height: float) -> tuple[float, float]:
+    """A cursor's 0..1 position within its half, in surface pixels."""
+    x0, x1 = half_pixel_range(layer, half, width)
+    top, grid_h = grid_origin(height)
+    return (x0 + position[0] * (x1 - x0), top + position[1] * grid_h)
 
 
 # --- appearance ---------------------------------------------------------------
 #
-# Deliberately not themed. This has to be legible over an unknown wallpaper on
-# a handheld held at arm's length, and a theme that follows the desktop can
-# make it invisible. Drawn with Cairo's own font API rather than Pango: one
-# fewer dependency, and no fontconfig behaviour to differ between the ISO and
-# an installed system.
-BACKDROP = (0.07, 0.07, 0.09, 0.94)
-KEY_FACE = (0.17, 0.17, 0.21, 1.0)
-# T8 §9f: "modifier and action keys are visibly DARKER than letter keys -- a
-# black key face against the letters' dark grey." `deck_osk_layout.is_action_key`
-# is the shared, tested classification; this is just the second colour it
-# selects between. Close to BACKDROP but not equal to it, so an action key
-# still reads as a KEY and not as a hole in the keyboard.
-KEY_FACE_DARK = (0.03, 0.03, 0.04, 1.0)
-KEY_EDGE = (0.30, 0.30, 0.36, 1.0)
-KEY_TEXT = (0.92, 0.92, 0.95, 1.0)
-HOT_TEXT = (0.05, 0.05, 0.07, 1.0)
-# One accent per half, so which cursor is which is answerable at a glance.
-ACCENT = {"left": (0.38, 0.78, 0.92, 1.0), "right": (0.98, 0.72, 0.30, 1.0)}
-KEY_PAD = 3.0
-CORNER = 6.0
-
-# --- visual parity with SteamOS's keyboard (T8 §9, operator request) --------
+# ⛔ NOT VALVE'S ARTWORK. Every value below is a NUMBER READ OFF A SCREENSHOT
+# and every mark is drawn from primitives this file already has -- rectangles,
+# circles and Cairo's own font API. Placement and metrics transcribed from
+# measurement are fine; assets are not
+# (`docs/findings/P16-redistribution-and-trademark.md`).
 #
-# ⛔ Not Valve's artwork. Every mark below is drawn with primitives this file
-# already has -- a rounded rect and Cairo's own font API -- naming OUR OWN
-# "L2"/"R2" strings, the same ones the TTY renderer abbreviates to a single
-# letter for lack of room. `docs/findings/P16-redistribution-and-trademark.md`.
-# A wayland surface has pixels the TTY does not, so unlike the console
-# renderer this one shows both dual-legend faces AND every hint regardless of
-# highlight -- there is no width budget forcing a choice here.
-SECONDARY_TEXT = (0.62, 0.62, 0.68, 1.0)   # dimmer than KEY_TEXT: a hint, not the answer
-HINT_BADGE_FILL = (0.30, 0.30, 0.36, 1.0)  # same tone as KEY_EDGE -- part of the key, not a flag
-HINT_BADGE_TEXT = (0.92, 0.92, 0.95, 1.0)
-# GUTTER_LINE removed 2026-08-11 with the divider it coloured. Kept out
-# rather than left unused: an orphan colour constant invites someone to
-# find a use for it, which here means drawing the line back.
+# 📐 EVERY colour and ratio here comes from `docs/findings/T8-reference-metrics.md`,
+# measured 2026-08-12 from `grim` captures of the reference keyboard on this
+# exact panel. Nothing is inlined at a call site: retuning the look means
+# editing this block and nothing else. Where the metrics doc says ESTIMATED,
+# the constant says so too.
+#
+# Deliberately not themed, and that predates the parity work: this has to be
+# legible over an unknown wallpaper on a handheld held at arm's length, and a
+# theme that follows the desktop can make it invisible. Cairo's toy font API
+# rather than Pango -- one fewer dependency.
+
+
+def _rgba(hex_colour: str, alpha: float = 1.0) -> tuple[float, float, float, float]:
+    """`"#0E141B"` -> Cairo's 0..1 floats. The metrics doc speaks in hex; so
+    does this file, so a value can be diffed against the doc by eye."""
+    h = hex_colour.lstrip("#")
+    return (int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0,
+            int(h[4:6], 16) / 255.0, alpha)
+
+
+# metrics §1. ⚠️ FULLY OPAQUE, measured: the gap colour is bit-for-bit
+# identical over a purple browser dropdown and over saturated game art, which
+# an alpha-blended panel could not be. Ours used to be 0.94 alpha.
+PANEL_FILL = _rgba("#23262E")
+KEY_FACE = _rgba("#0E141B")          # letters, digits, punctuation
+KEY_FACE_ACTION = _rgba("#000000")   # metrics §2's black keys -- see is_action
+MODIFIER_ACTIVE = _rgba("#1A9FFF")   # §9g's blue: shift held, caps latched
+CURSOR_FACE = _rgba("#FFFFFF")       # the cursor INVERTS the key face
+CURSOR_DOT_FILL = _rgba("#8CCFFF")   # a lighter blue than MODIFIER_ACTIVE
+CURSOR_DOT_RING = _rgba("#7F7F7F")   # measured, and NOT antialiasing (§1)
+KEY_TEXT = _rgba("#FFFFFF")
+KEY_TEXT_INVERTED = _rgba("#000000")  # on a cursor's white face
+# metrics §1 calls this one "a rough read, not a clean flat sample" -- the
+# glyph is a few pixels thick and mixes with antialiasing everywhere. Near
+# white, slightly down.
+SECONDARY_TEXT = _rgba("#EBEBF3")
+# On a cursor's white face the near-white secondary legend would vanish, so it
+# inverts with everything else -- grey rather than black, so it still reads as
+# the smaller, quieter of the two faces.
+CURSOR_TEXT_SECONDARY = _rgba("#3A3A42")
+BADGE_FILL = _rgba("#FFFFFF")
+BADGE_TEXT = _rgba("#000000")        # ESTIMATED in metrics §1, not isolated
+# metrics §1: a solid 3px bar above the keyboard in every "in use" frame and
+# absent at idle. ⚠️ The gating condition is OBSERVED, not proven -- 4/4
+# non-idle frames, but not every combination was tested.
+STRIPE_FILL = _rgba("#79A0F7")
+
+# 🔴 SQUARE CORNERS, measured (metrics §0.1). Key corners in the reference step
+# from border colour to fill in ONE pixel, in x and y independently, with no
+# diagonal blend -- at the key level and at the panel's own outer corner. Ours
+# had a 6px radius and a visible 2-3px antialiased gradient, so matching means
+# REMOVING rounding, not adding it. §9d's "dark rounded keys" was wrong.
+# Badges keep their shapes; only key faces are square.
+KEY_CORNER = 0.0
+
+# metrics §2: rows are 66px tall and inter-key/inter-row gaps are a flat 4-5px
+# at 1280x800, i.e. one gap of ~4.5px. Expressed against ROW HEIGHT so the
+# whole keyboard scales with the panel instead of pinning to one resolution.
+# The gap between two keys is twice this, because each key insets its own face.
+KEY_GAP_RATIO = 4.5 / 66.0
+
+# metrics §3. The base glyph is ~17px of cap height in a 66px row; a sans-serif
+# cap height is ~0.72 of its point size, so ~0.36 of the row.
+FACE_SIZE_RATIO = 0.36
+# 🔴 metrics §0.2 CORRECTS §9g: the shift-active face is NOT larger than the
+# small dual-legend glyph -- same size, RE-CENTRED from high in the key to the
+# key's vertical middle. Measured on `!`, `@` and `&`: bboxes match within
+# antialiasing noise, only the y-centre moves (~32% -> ~53% down).
+SECONDARY_SIZE_RATIO = 0.85
+# Where each legend's optical centre sits, as a fraction down the row.
+SECONDARY_CENTRE_Y = 0.32   # the small shifted face, high in the key
+FACE_CENTRE_Y_DUAL = 0.69   # the large base face, low in the key
+FACE_CENTRE_Y_SOLO = 0.50   # one legend only: the key's own middle
+# Fraction of a key's inner width a label may occupy before `_fit` shrinks it.
+LABEL_WIDTH_BUDGET = 0.86
+
+# metrics §4: the dot is ~24-25px across with a ~3px #7F7F7F ring, ~29-31px
+# outer, in a 66px row.
+CURSOR_DOT_RATIO = 24.5 / 66.0   # diameter, against row height
+CURSOR_RING_RATIO = 3.0 / 66.0   # ring thickness, against row height
+
+# metrics §5: face-button badges are 26x26px circles, trigger/stick badges
+# ~30x26px rounded rects, and BOTH sit ~23.5px from their key's left edge and
+# ~61-67% down the 66px row -- lower half, not dead centre.
+BADGE_SIZE_RATIO = 26.0 / 66.0
+BADGE_CENTRE_X_RATIO = 23.5 / 66.0
+BADGE_CENTRE_Y_RATIO = 0.64
+BADGE_MIN_WIDTH_RATIO = 30.0 / 26.0   # of the badge's own height, for "L2"
+BADGE_TEXT_RATIO = 0.62               # glyph size within the badge
+BADGE_CORNER_RATIO = 0.30             # ESTIMATED: metrics §5 did not trace it
+
+# The reference's legends are a proportional sans, not a monospace. Named
+# rather than inlined so a machine missing it has one line to change.
+FONT_FAMILY = "sans-serif"
+
+# metrics §2: the reference panel is y=430..788 on an 800px-tall screen. Ours
+# was 0.42, which measured ~14% short on every row.
+HEIGHT_FRACTION = 358.0 / 800.0
+
+
+TAU = 6.283185307179586
+
+
+def touched_halves(keyboard: osk.OnScreenKeyboard) -> frozenset:
+    """Which pads have a finger on them, as `hint_visible` wants it.
+
+    `OnScreenKeyboard.touched` is a `{"left": bool, "right": bool}` dict fed
+    over the wire by `parse_state_line`/`apply_state`; an old writer that omits
+    the fields means NOTHING touched, which is T8 §9f's every-badge-visible
+    frame. `getattr` because this renderer must keep running against a core
+    that predates the field rather than crash the only keyboard on the device.
+    """
+    state = getattr(keyboard, "touched", None) or {}
+    return frozenset(half for half in HALVES if state.get(half))
+
+
+def in_use(keyboard: osk.OnScreenKeyboard, touched) -> bool:
+    """Is the keyboard being DRIVEN right now? -- the stripe's gate.
+
+    ⚠️ OBSERVED, NOT PROVEN (`docs/findings/T8-reference-metrics.md` §1). The
+    stripe is present in all four non-idle captures -- shift held, caps
+    latched, either pad touched -- and absent in both idle ones. That is the
+    best-fitting rule from the evidence and not a measured law; it is one
+    predicate, here, if a later capture disagrees.
+    """
+    return bool(keyboard.shift_active or keyboard.caps or touched)
 
 
 def draw(cr, keyboard: osk.OnScreenKeyboard, cursors: osk.Cursors,
-         width: float, height: float, gutter: float = DEFAULT_GUTTER) -> None:
+         width: float, height: float) -> None:
     """Paint the keyboard. `cr` is a Cairo context; nothing else is needed."""
-    cr.set_source_rgba(*BACKDROP)
+    layer = keyboard.layer
+    touched = touched_halves(keyboard)
+
+    cr.set_source_rgba(*PANEL_FILL)
     cr.rectangle(0, 0, width, height)
     cr.fill()
 
-    # ⚠️ NO VISIBLE DIVIDER between the halves. T8 §9 originally asked for the
-    # split to be "visible, not just logical", and one was drawn here -- then
-    # the operator looked at it on the panel next to the reference keyboard and
-    # rejected it: the reference has no division, and neither should this
-    # (2026-08-11).
-    #
-    # The GUTTER ITSELF STAYS. It is not decoration: `half_bounds` uses it for
-    # hit-testing, so the two trackpad cursors know which half they are in.
-    # Removing the gap would move every key and break that mapping. What went
-    # away is one drawn line, which is all that was ever visual.
-
-    highlights = {
-        half: keyboard.locate(half, *cursors.position(half))
-        for half in ("left", "right")
-    }
-    rows_by_half = {half: keyboard.layer.half(half) for half in ("left", "right")}
-
-    cr.select_font_face("monospace")
-    for half, row_index, key_index, x, y, w, h in key_rects(
-            keyboard.layer, width, height, gutter):
-        key = rows_by_half[half][row_index][key_index]
-        hot = highlights[half] == (row_index, key_index)
-        _rounded(cr, x + KEY_PAD, y + KEY_PAD, w - 2 * KEY_PAD, h - 2 * KEY_PAD, CORNER)
-        if hot:
-            face_colour = ACCENT[half]
-        elif osk.is_action_key(key):
-            face_colour = KEY_FACE_DARK
-        else:
-            face_colour = KEY_FACE
-        cr.set_source_rgba(*face_colour)
-        cr.fill_preserve()
-        cr.set_source_rgba(*KEY_EDGE)
-        cr.set_line_width(1.0)
-        cr.stroke()
-
-        # Shifted-symbol legend (T8 §9): the face a digit/punctuation key is
-        # NOT currently showing, drawn small in the top-right corner -- the
-        # way a real keycap prints both faces at once rather than waiting for
-        # a shift press to reveal the second one exists. Letters are excluded
-        # by `secondary_face` itself, so this line does nothing for them.
-        secondary = keyboard.secondary_face(key)
-        if secondary:
-            cr.set_font_size(max(8.0, h * 0.24))
-            sx = cr.text_extents(secondary)
-            cr.move_to(x + w - sx.width - sx.x_bearing - KEY_PAD - 3,
-                       y + KEY_PAD + 3 - sx.y_bearing)
-            cr.set_source_rgba(*SECONDARY_TEXT)
-            cr.show_text(secondary)
-
-        # Controller-glyph hint (T8 §9's highest-value item): which trigger
-        # fires this key, for the three keys a passphrase correction reaches
-        # for constantly -- shift, backspace, enter -- plus the one true
-        # face-button shortcut, Ⓨ on space (T8 §9f).
-        if key.hint:
-            _hint_badge(cr, key, x + KEY_PAD + 2, y + h - KEY_PAD - 2, h)
-
-        label = keyboard.face(key)
-        cr.set_font_size(_fit(cr, label, w - 2 * KEY_PAD, h - 2 * KEY_PAD))
-        extents = cr.text_extents(label)
-        cr.move_to(x + (w - extents.width) / 2 - extents.x_bearing,
-                   y + (h - extents.height) / 2 - extents.y_bearing)
-        cr.set_source_rgba(*(HOT_TEXT if hot else KEY_TEXT))
-        cr.show_text(label)
-
-    # The exact cursor point, on top of the snapped highlight. The highlight
-    # answers "which key"; the dot answers "where within it", which is what
-    # tells a user which way to move when they are between two keys.
-    for half in ("left", "right"):
-        cx, cy = cursor_pixel(half, cursors.position(half), width, height, gutter)
-        cr.set_source_rgba(*ACCENT[half])
-        cr.arc(cx, cy, 6.0, 0, 6.283185307179586)
+    top, grid_h = grid_origin(height)
+    if in_use(keyboard, touched):
+        cr.set_source_rgba(*STRIPE_FILL)
+        cr.rectangle(0, 0, width, top)
         cr.fill()
-        cr.set_source_rgba(0.05, 0.05, 0.07, 1.0)
-        cr.arc(cx, cy, 6.0, 0, 6.283185307179586)
-        cr.set_line_width(1.5)
-        cr.stroke()
+
+    row_h = grid_h / len(layer.rows)
+    pad = row_h * KEY_GAP_RATIO / 2.0
+
+    # 🔴 NOTHING IS DRAWN AT THE SPLIT. Both cursors are resolved against the
+    # same continuous grid, and a key either half can reach (the space bar
+    # straddles cell 8) simply lights for whichever thumb is on it.
+    hot = {found for found in
+           (keyboard.locate(half, *cursors.position(half)) for half in HALVES)
+           if found is not None}
+
+    cr.select_font_face(FONT_FAMILY)
+    for row_index, key_index, x, y, w, h in key_rects(layer, width, height):
+        key = layer.rows[row_index][key_index]
+        is_hot = (row_index, key_index) in hot
+        # T8 §9g's precedence, and it only ever bites on the shift/caps keys:
+        # the cursor's white face WINS over an active modifier's blue, because
+        # "where is my thumb" is the answer that changes every frame and the
+        # modifier is still legible from the other shift key.
+        if is_hot:
+            face_colour, ink = CURSOR_FACE, KEY_TEXT_INVERTED
+        elif keyboard.modifier_state(key):
+            face_colour, ink = MODIFIER_ACTIVE, KEY_TEXT
+        elif osk.is_action_key(key):
+            face_colour, ink = KEY_FACE_ACTION, KEY_TEXT
+        else:
+            face_colour, ink = KEY_FACE, KEY_TEXT
+
+        fx, fy = x + pad, y + pad
+        fw, fh = w - 2 * pad, h - 2 * pad
+        _key_face(cr, fx, fy, fw, fh)
+        cr.set_source_rgba(*face_colour)
+        cr.fill()
+        # ⚠️ No stroked edge. The reference has none: keys are solid rects on
+        # the panel's own paint and the "border" IS the gap (metrics §1).
+
+        # T8 §9g's legend rule, which ours got wrong on every screen before
+        # this. `secondary_face()` owns the state machine -- it returns "" the
+        # moment shift is active, which is what collapses a dual legend down to
+        # the single shifted face.
+        label = keyboard.face(key)
+        secondary = keyboard.secondary_face(key)
+        base_size = row_h * FACE_SIZE_RATIO
+        small_size = base_size * SECONDARY_SIZE_RATIO
+        # A badge is drawn INSIDE its key at the left, so the legend is centred
+        # in what is left rather than over the top of it -- which is what the
+        # reference does (its `Ⓧ Backspace` reads as two marks, not one on top
+        # of another) and what ours did NOT do: `R2` and `Enter` collided.
+        badged = osk.hint_visible(key, touched)
+        lx, lw = fx, fw
+        if badged:
+            edge = min(_badge_right_edge(cr, key, fx, row_h) + pad, fx + fw)
+            lx, lw = edge, max(fx + fw - edge, 1.0)
+        if secondary:
+            _text(cr, secondary, lx, lw, y + row_h * SECONDARY_CENTRE_Y,
+                  _fit(cr, secondary, lw, small_size),
+                  CURSOR_TEXT_SECONDARY if is_hot else SECONDARY_TEXT)
+            _text(cr, label, lx, lw, y + row_h * FACE_CENTRE_Y_DUAL,
+                  _fit(cr, label, lw, base_size), ink)
+        else:
+            # 🔴 metrics §0.2: under shift the lone shifted face is the SAME
+            # SIZE as the small legend it replaced, only re-centred. It is not
+            # enlarged, however much §9g's prose said "larger".
+            size = small_size if _shift_only_face(keyboard, key) else base_size
+            _text(cr, label, lx, lw, y + row_h * FACE_CENTRE_Y_SOLO,
+                  _fit(cr, label, lw, size), ink)
+
+        # Which controller button fires this key. §9g's gate is PER-PAD:
+        # touching a pad hides only its own trigger's badge, because while that
+        # pad is in use the trigger means "commit this cursor" rather than the
+        # idle meaning the badge advertises. Ⓧ/Ⓨ/L3 never gate. The whole rule
+        # lives in `hint_visible`, so both renderers ask one table.
+        if badged:
+            _hint_badge(cr, key, fx, y, row_h, inverted=is_hot)
+
+    # The exact cursor point, on top of the inverted key face. The white face
+    # answers "which key"; the dot answers "where within it", which is what
+    # tells a user which way to move when they are between two keys. Both
+    # cursors are drawn identically -- metrics §6: the reference has ONE cursor
+    # treatment, not a colour per thumb, and ours used to tint whole keys cyan
+    # and amber instead.
+    dot_r = row_h * CURSOR_DOT_RATIO / 2.0
+    ring = row_h * CURSOR_RING_RATIO
+    for half in HALVES:
+        cx, cy = cursor_pixel(layer, half, cursors.position(half), width, height)
+        cr.set_source_rgba(*CURSOR_DOT_RING)
+        cr.arc(cx, cy, dot_r + ring, 0, TAU)
+        cr.fill()
+        cr.set_source_rgba(*CURSOR_DOT_FILL)
+        cr.arc(cx, cy, dot_r, 0, TAU)
+        cr.fill()
+
+
+def _shift_only_face(keyboard: osk.OnScreenKeyboard, key: osk.Key) -> bool:
+    """Is this key showing its shifted face ALONE because shift is active?
+
+    Letters are excluded: their two faces are the same glyph in two cases, so
+    they never had a small legend to shrink back to.
+    """
+    return bool(keyboard.shift_active and key.shift_label and not key.is_letter)
+
+
+def _key_face(cr, x, y, w, h) -> None:
+    """The key's own shape. 🔴 SQUARE -- see KEY_CORNER."""
+    if KEY_CORNER <= 0:
+        cr.rectangle(x, y, w, h)
+        return
+    _rounded(cr, x, y, w, h, KEY_CORNER)
 
 
 def _rounded(cr, x, y, w, h, r) -> None:
@@ -267,63 +444,147 @@ def _rounded(cr, x, y, w, h, r) -> None:
     cr.close_path()
 
 
-def _hint_badge(cr, key: osk.Key, x: float, y: float, key_height: float) -> None:
-    """A small badge naming the button that fires this key, hanging from
-    `(x, y)` -- the key's bottom-left corner, inside its own padding, so the
-    badge is unmistakably PART of the key rather than a separate mark.
+# ⛔ WE DRAW THESE OURSELVES, and not only for the licence reason.
+#
+# DejaVu Sans -- what `sans-serif` resolves to on the Deck and in the ISO --
+# carries U+25B2/U+25BC (▲ ▼) but NOT U+25C0/U+25B6 (◀ ▶): the left and right
+# arrows came out as tofu boxes on the very first render. A missing glyph on
+# the installer's only keyboard is exactly the kind of defect this project
+# keeps finding on screens rather than in logs, and font coverage is not
+# something the ISO can promise. Four filled triangles from Cairo primitives
+# depend on no font at all, and they match each other in weight, which four
+# glyphs from two different Unicode blocks would not.
+#
+# (x, y) unit vectors: apex first, then the two base corners.
+ARROW_GLYPHS: dict[str, tuple[tuple[float, float], ...]] = {
+    "◀": ((-0.5, 0.0), (0.5, -0.5), (0.5, 0.5)),
+    "▶": ((0.5, 0.0), (-0.5, -0.5), (-0.5, 0.5)),
+    "▲": ((0.0, -0.5), (-0.5, 0.5), (0.5, 0.5)),
+    "▼": ((0.0, 0.5), (-0.5, -0.5), (0.5, -0.5)),
+}
+ARROW_SIZE_RATIO = 0.62   # of the font size it stands in for
 
-    T8 §9f: the SHAPE carries meaning in the reference and is reproduced here
-    with our own primitives, never Valve's artwork -- a rounded rectangle
-    (`_rounded`, already used for key faces) for triggers and stick-clicks,
-    a full circle for face-button shortcuts. `key.hint_shape` selects which;
-    anything unrecognised falls back to the rectangle, which is the shape
-    every hint drew before §9f added a second one.
-    """
-    hint = key.hint
-    size = max(9.0, key_height * 0.22)
+
+def _arrow(cr, glyph: str, cx: float, cy: float, size: float, colour) -> None:
+    """One of `ARROW_GLYPHS`, filled, centred on (cx, cy)."""
+    span = size * ARROW_SIZE_RATIO
+    points = ARROW_GLYPHS[glyph]
+    cr.new_sub_path()
+    cr.move_to(cx + points[0][0] * span, cy + points[0][1] * span)
+    for px, py in points[1:]:
+        cr.line_to(cx + px * span, cy + py * span)
+    cr.close_path()
+    cr.set_source_rgba(*colour)
+    cr.fill()
+
+
+def _text(cr, text: str, x: float, w: float, centre_y: float, size: float,
+          colour) -> None:
+    """`text` centred horizontally in [x, x+w] and vertically about `centre_y`."""
+    if not text:
+        return
+    if text in ARROW_GLYPHS:
+        _arrow(cr, text, x + w / 2.0, centre_y, size, colour)
+        return
     cr.set_font_size(size)
-    extents = cr.text_extents(hint)
-    pad_x, pad_y = 3.0, 2.0
+    extents = cr.text_extents(text)
+    cr.move_to(x + (w - extents.width) / 2 - extents.x_bearing,
+               centre_y - extents.height / 2 - extents.y_bearing)
+    cr.set_source_rgba(*colour)
+    cr.show_text(text)
+
+
+def _hint_badge(cr, key: osk.Key, key_x: float, row_y: float, row_h: float,
+                inverted: bool = False) -> None:
+    """The badge naming the button that fires this key.
+
+    Placed from measurement (`docs/findings/T8-reference-metrics.md` §5): the
+    centre sits ~23.5px from the key's left FILL edge and ~64% down a 66px row
+    -- the lower half, not dead centre -- and that same offset holds for a
+    149px Backspace and a 725px space bar alike, so it is an offset from the
+    left edge and not a fraction of the key.
+
+    ⛔ Our own primitives and our own strings, never Valve's artwork. The SHAPE
+    is semantic and measured: face buttons in a 26x26 circle, triggers and
+    stick clicks in a ~30x26 rounded rectangle. `key.hint_shape` selects;
+    anything unrecognised falls back to the rectangle.
+
+    `inverted` is for a key under a cursor, whose face is white -- a white
+    badge on a white key is an invisible badge.
+    """
+    cx, cy, badge_w, badge_h = _badge_box(cr, key, key_x, row_y, row_h)
+    fill = BADGE_TEXT if inverted else BADGE_FILL
+    ink = BADGE_FILL if inverted else BADGE_TEXT
 
     if key.hint_shape == osk.HINT_SHAPE_CIRCLE:
-        from math import pi
-        radius = max(extents.width, extents.height) / 2 + max(pad_x, pad_y)
-        cx, cy = x + radius, y - radius
         cr.new_sub_path()
-        cr.arc(cx, cy, radius, 0, 2 * pi)
-        cr.set_source_rgba(*HINT_BADGE_FILL)
-        cr.fill()
-        cr.set_source_rgba(*HINT_BADGE_TEXT)
-        cr.move_to(cx - extents.width / 2 - extents.x_bearing,
-                   cy - extents.height / 2 - extents.y_bearing)
-        cr.show_text(hint)
-        return
-
-    badge_w = extents.width + 2 * pad_x
-    badge_h = size + 2 * pad_y
-    badge_y = y - badge_h
-    _rounded(cr, x, badge_y, badge_w, badge_h, min(4.0, badge_h / 2))
-    cr.set_source_rgba(*HINT_BADGE_FILL)
+        cr.arc(cx, cy, badge_h / 2.0, 0, TAU)
+    else:
+        _rounded(cr, cx - badge_w / 2.0, cy - badge_h / 2.0, badge_w, badge_h,
+                 badge_h * BADGE_CORNER_RATIO)
+    cr.set_source_rgba(*fill)
     cr.fill()
-    cr.set_source_rgba(*HINT_BADGE_TEXT)
-    cr.move_to(x + pad_x - extents.x_bearing,
-               badge_y + (badge_h - extents.height) / 2 - extents.y_bearing)
-    cr.show_text(hint)
+
+    cr.set_font_size(badge_h * BADGE_TEXT_RATIO)
+    extents = cr.text_extents(key.hint)
+    cr.set_source_rgba(*ink)
+    cr.move_to(cx - extents.width / 2 - extents.x_bearing,
+               cy - extents.height / 2 - extents.y_bearing)
+    cr.show_text(key.hint)
 
 
-def _fit(cr, label: str, w: float, h: float) -> float:
-    """Largest font size at which `label` fits its key.
+def _badge_box(cr, key: osk.Key, key_x: float, row_y: float,
+               row_h: float) -> tuple[float, float, float, float]:
+    """(centre x, centre y, width, height) of this key's badge.
 
-    Word labels ("space", "enter") are much longer than "q", and a single size
-    either overflows them or wastes the letters. The TTY renderer hit the same
-    thing and answered it with a wider cell; here the size can just shrink.
+    Shared by the badge itself and by the legend, which is centred in what the
+    badge leaves rather than on top of it. ⚠️ Sets the Cairo font size as a
+    side effect, because a rounded rect's width depends on the string inside.
     """
-    size = h * 0.5
-    for _ in range(8):
+    badge_h = row_h * BADGE_SIZE_RATIO
+    cx = key_x + row_h * BADGE_CENTRE_X_RATIO
+    cy = row_y + row_h * BADGE_CENTRE_Y_RATIO
+    if key.hint_shape == osk.HINT_SHAPE_CIRCLE:
+        return (cx, cy, badge_h, badge_h)
+    cr.set_font_size(badge_h * BADGE_TEXT_RATIO)
+    width = max(badge_h * BADGE_MIN_WIDTH_RATIO,
+                cr.text_extents(key.hint).width + badge_h * 0.3)
+    return (cx, cy, width, badge_h)
+
+
+def _badge_right_edge(cr, key: osk.Key, key_x: float, row_h: float) -> float:
+    """Where a badge stops, so a legend can start after it."""
+    cx, _cy, width, _h = _badge_box(cr, key, key_x, 0.0, row_h)
+    return cx + width / 2.0
+
+
+def _fit(cr, label: str, w: float, size: float) -> float:
+    """`size`, shrunk until `label` fits inside `w`.
+
+    Word labels ("Backspace", "space") are much longer than "q", and a single
+    size either overflows them or wastes the letters. The TTY renderer hit the
+    same thing and answered it with a wider cell; here the size can just
+    shrink, which is what the reference does too -- its Backspace legend is
+    visibly smaller than its letters.
+    """
+    if not label or w <= 0 or label in ARROW_GLYPHS:
+        return size
+    budget = w * LABEL_WIDTH_BUDGET
+    cr.set_font_size(size)
+    measured = cr.text_extents(label).width
+    if measured <= budget:
+        return size
+    # One proportional step, because Cairo's advance widths scale linearly with
+    # the font size, and then a few small ones because HINTING does not: a
+    # fixed number of blind 0.88 steps used to give up quietly on a narrow key,
+    # which is the failure mode CLAUDE.md forbids.
+    if measured > 0:
+        size *= budget / measured
+    for _ in range(6):
         cr.set_font_size(size)
-        if cr.text_extents(label).width <= w * 0.82:
+        if cr.text_extents(label).width <= budget:
             break
-        size *= 0.85
+        size *= 0.94
     return size
 
 
@@ -337,7 +598,9 @@ def main() -> int:
     ap.add_argument("--demo", action="store_true",
                     help="draw a fixed pose and stay up, instead of reading stdin")
     ap.add_argument("--height", type=int, default=0, metavar="PX",
-                    help="overlay height in pixels (default: 42%% of the output)")
+                    help="overlay height in pixels "
+                         "(default: %.2f%%%% of the output, measured)"
+                         % (HEIGHT_FRACTION * 100))
     ap.add_argument("--no-exclusive", action="store_true",
                     help="do not reserve space; overlap the window underneath")
     args = ap.parse_args()
@@ -382,7 +645,7 @@ def main() -> int:
             display = window.get_display()
             monitors = display.get_monitors()
             geometry = monitors.get_item(0).get_geometry() if monitors.get_n_items() else None
-            height = int((geometry.height if geometry else 800) * 0.42)
+            height = int((geometry.height if geometry else 800) * HEIGHT_FRACTION)
         window.set_default_size(-1, height)
         if not args.no_exclusive:
             # Reserve the space, so the compositor moves the focused window up
