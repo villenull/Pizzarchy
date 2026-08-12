@@ -515,12 +515,37 @@ grep -qi 'refusing to silently lint with some other binary' <<<"$out" ||
 $out"
 pass "a named qmllint that cannot be run fails the run and is never silently swapped out"
 
-# And the resolver's own search list: the absolute Qt6 location must be in it,
-# because that is the only place a real Omarchy target has the binary.
-grep -q '/usr/lib/qt6/bin/qmllint' "$APPLIER" ||
-  fail "🔴 the resolver looks in qt6-declarative's actual install location" \
-    "qt6-declarative installs /usr/lib/qt6/bin/qmllint and puts nothing on PATH; a bare 'command -v qmllint' finds qt5's linter or nothing at all"
-pass "the qmllint resolver searches /usr/lib/qt6/bin, where qt6-declarative actually installs it"
+# The resolver must search qt6-declarative's install DIRECTORY, and that
+# directory must beat PATH. Proven functionally, not by grepping the source: a
+# grep cannot tell code that searches /usr/lib/qt6/bin from a comment that
+# mentions it, and the pre-correction bug was exactly a bare `command -v`.
+fakeqt="$work/fakeqt"
+mkdir -p "$fakeqt"
+cat >"$fakeqt/qmllint" <<FAKE
+#!/usr/bin/env bash
+printf 'used-the-directory-search\n' >>"$work/qmllint-marker"
+exit 0
+FAKE
+chmod +x "$fakeqt/qmllint"
+rm -f "$work/qmllint-marker"
+pd=$(new_patch_dir)
+rm -f "$pd"/0020-*
+root=$(new_root)
+rc=0
+out=$(env -u OMARCHY_DECK_QMLLINT OMARCHY_DECK_QMLLINT_DIRS="$fakeqt" \
+  "$APPLIER" --root "$root" --patch-dir "$pd" --state-file "$root.state.json" 2>&1) || rc=$?
+[[ $rc -eq 0 ]] || fail "the directory-searched qmllint was used" "rc=$rc
+$out"
+[[ -f $work/qmllint-marker ]] ||
+  fail "🔴 the resolver searches qt6-declarative's install DIRECTORY before PATH" \
+    "the linter in the searched directory never ran, so PATH won -- qt6-declarative installs /usr/lib/qt6/bin/qmllint and puts NOTHING on PATH, and a /usr/bin/qmllint (where one exists) is qt5-declarative's, a different parser for a different Qt"
+pass "the qmllint resolver searches its directory list first, and that beats PATH"
+
+# ...and the default of that list is the real Qt6 location.
+grep -qE '^readonly QMLLINT_DIRS=\$\{OMARCHY_DECK_QMLLINT_DIRS:-/usr/lib/qt6/bin\}$' "$APPLIER" ||
+  fail "the default search directory is qt6-declarative's" \
+    "the override exists for the test above; the DEFAULT is what ships to the Deck"
+pass "the default qmllint search directory is /usr/lib/qt6/bin"
 
 # The no-linter-anywhere case, exercised through the real resolver rather than
 # the override. Only meaningful on a machine with no absolute Qt6 candidate;
@@ -585,6 +610,25 @@ jq -e . "$state" >/dev/null ||
   fail "a multi-line git reject does not corrupt the state file" "$(cat "$state")"
 [[ $(jq -r '.overall' "$state") == failed ]] || fail "overall is failed when a row failed" "$(cat "$state")"
 pass "git's multi-line reject text is JSON-escaped into the state file intact"
+
+# Quotes and backslashes too, not just newlines. A detail string is built from
+# text the applier does not control (a .meta key, git's own output), and an
+# unescaped " turns patch-state.json into a file nothing downstream can read --
+# silently, because nothing downstream would be looking.
+pd=$(new_patch_dir)
+rm -f "$pd"/0020-*
+printf 'target: %s\nqm"lint\\back: %s\n' "$QML_REL" "$QML_REL" >"$pd/0010-lock-blank-timer-20s.meta"
+root=$(new_root)
+run_applier "$root" "$pd"
+[[ $rc -eq 3 ]] || fail "a .meta key containing a quote is rejected" "rc=$rc
+$out"
+jq -e . "$state" >/dev/null ||
+  fail "🔴 a quote or backslash in a detail string does not corrupt patch-state.json" \
+    "the state file is not valid JSON:
+$(cat "$state")"
+[[ $(jq -r '.patches[0].detail' "$state") == *'qm"lint\back'* ]] ||
+  fail "the offending key survives escaping intact" "$(jq -r '.patches[0].detail' "$state")"
+pass "quotes and backslashes in a detail string are escaped, and round-trip through jq"
 
 # --- 13. the applier must not touch the shell ------------------------------
 #
@@ -656,6 +700,19 @@ done
 for patch in "$PATCH_DIR"/*.patch; do
   [[ -f ${patch%.patch}.meta ]] || fail "$(basename -- "$patch") has a .meta sibling" "$patch"
 done
+# 0010 must assert both directions, and this is not decoration: `interval:`
+# occurs four times in Service.qml, so a patch that landed on the wrong Timer
+# would still put a `20000` in the file. Only "and the 5000 is gone" catches it.
+m10="$PATCH_DIR/0010-lock-blank-timer-20s.meta"
+grep -qF 'assert_count: shell/plugins/lock/Service.qml|^    interval: 20000$|1' "$m10" ||
+  fail "0010 asserts the NEW value appears exactly once" "$(cat "$m10")"
+grep -qF 'assert_count: shell/plugins/lock/Service.qml|^    interval: 5000$|0' "$m10" ||
+  fail "🔴 0010 asserts the OLD value is GONE" \
+    "without this a patch that applied to the wrong one of the four 'interval:' hunks would still pass"
+grep -qF 'qmllint: shell/plugins/lock/Service.qml' "$m10" ||
+  fail "0010 lints the QML it edits" "$(cat "$m10")"
+pass "0010 asserts both directions of the literal and lints the result"
+
 n_patches=$(find "$PATCH_DIR" -name '*.patch' | wc -l)
 [[ $n_patches -le 2 ]] ||
   fail "the runtime patch budget is 2 (T12 finding §3.5)" \

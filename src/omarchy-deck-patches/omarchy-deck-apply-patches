@@ -234,6 +234,12 @@ json_escape() {
 # just not on what you asked for" this project keeps getting bitten by.
 
 readonly QMLLINT_OVERRIDE=${OMARCHY_DECK_QMLLINT:-}
+# Colon-separated directories searched BEFORE PATH. The default is where
+# qt6-declarative actually installs the binary. Overridable only so the unit
+# suite can prove the directory search really happens and really wins over
+# PATH -- a static grep for this path could not tell the difference between
+# code that searches it and a comment that mentions it.
+readonly QMLLINT_DIRS=${OMARCHY_DECK_QMLLINT_DIRS:-/usr/lib/qt6/bin}
 qmllint_bin=""
 qmllint_why=""
 qmllint_resolved=0
@@ -255,11 +261,15 @@ resolve_qmllint() {
     return 1
   fi
 
-  for c in /usr/lib/qt6/bin/qmllint /usr/lib/qt6/bin/qmllint6; do
-    if [[ -x $c ]]; then
-      qmllint_bin=$c
-      return 0
-    fi
+  local d dirs
+  IFS=: read -r -a dirs <<<"$QMLLINT_DIRS"
+  for d in ${dirs[@]+"${dirs[@]}"}; do
+    for c in "$d/qmllint" "$d/qmllint6"; do
+      if [[ -x $c ]]; then
+        qmllint_bin=$c
+        return 0
+      fi
+    done
   done
   for c in qmllint-qt6 qmllint; do
     if qmllint_bin=$(command -v "$c" 2>/dev/null); then
@@ -267,7 +277,7 @@ resolve_qmllint() {
     fi
   done
   qmllint_bin=""
-  qmllint_why="qmllint is not installed: looked at /usr/lib/qt6/bin/qmllint (where qt6-declarative puts it) and on PATH. Install qt6-declarative"
+  qmllint_why="qmllint is not installed: looked in $QMLLINT_DIRS (where qt6-declarative puts it) and on PATH. Install qt6-declarative"
   return 1
 }
 
