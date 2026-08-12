@@ -487,6 +487,36 @@ a grep. It converts the §0 failure from "dies at phase 5 of an install" into
 
 ---
 
+## 6a. 🆕 The THIRD pin — `iso/PKGS`, decided 2026-08-12
+
+T5b wired `--local-source`, and doing so exposed an input this plan never
+counted: **`omacom-io/omarchy-pkgs`**, the PKGBUILD recipes that decide what
+actually lands in `/usr/bin`. §2 treats the build as two pinned inputs; it is
+**three**.
+
+That is not bookkeeping. `docs/findings/T5a-parity.md` failed on exactly this
+class of problem — an ISO whose runtime shipped `omarchy-apply-system` and no
+`omarchy-setup-system`, the binary its own installer shells out to, so it dies
+at phase 5 of 14 after partitioning and ~1200 packages.
+
+**Operator decision 2026-08-12: pin to `ae07234a016c`** (2026-08-10 14:42) —
+the last `omarchy-pkgs` commit before our known-good reference ISO was cut at
+15:24 the same day.
+
+⚠️ **This is dated proximity, not evidence.** Nothing inside the ISO records
+which `omarchy-pkgs` commit built it; the image carries the *runtime's* version
+string (`omarchy-dev-4.0.0.r1667.g4727bad`), not a recipe SHA. The pin is the
+best available inference and should be re-checked if a build behaves oddly.
+
+🔴 **A FOURTH input is still unpinned and cannot be pinned here.**
+`omarchy-nvim`'s PKGBUILD fetches `LazyVim/starter` from `heads/main.tar.gz`
+**at build time**. So even with all three pins in place, two builds a week apart
+can differ. Nobody had counted this either. It is upstream's PKGBUILD, so the
+options are to accept it, patch it in our overlay, or drop the package — a
+decision this plan does not yet make.
+
+---
+
 ## 7. Slices — what the next sessions actually do
 
 Each is independently landable and independently testable. Sizes are relative,
