@@ -102,6 +102,19 @@ the instance first:
 ssh steamdeck 'export HYPRLAND_INSTANCE_SIGNATURE=$(ls -t /run/user/1000/hypr/ | head -1); hyprctl eval "hl.clear_crashed_lockscreen()"'
 ```
 
+⚠️ **If it still says `HYPRLAND_INSTANCE_SIGNATURE not set!` *with* the export**,
+the directory was empty and the export quietly set an empty string. That means
+no Hyprland is running as uid 1000 — run `ls /run/user/*/hypr/` to find out
+which user, if any, has one. It does **not** mean the command is wrong.
+
+> 🔧 **Do not "simplify" this to `hyprctl dispatch` with a bareword argument.**
+> On Hyprland 0.56.2 — what the Deck runs — `dispatch` parses its argument as
+> **Lua**, so the old space-separated string form is a **parse error**, not an
+> unknown-command error. It fails with `')' expected near ...` on stderr and
+> otherwise looks like it did nothing. `eval` is the Lua entry point, and it is
+> the form measured to work here.
+> (`docs/PROGRESS.md` §5.30b, `docs/findings/T10-steam-extest-results.md` §3.)
+
 **2. Even then it REFUSES on a healthy lock**, with:
 
 > `hl.clear_crashed_lockscreen: session is locked with a client, refusing to unlock`

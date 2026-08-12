@@ -1,0 +1,653 @@
+#!/usr/bin/env bash
+# omarchy-deck-apply-patches -- re-apply the Omarchy Deck patch set to files
+# that UPSTREAM packages own.
+#
+# WHY THIS EXISTS
+#
+# `omarchy-dev` installs the whole Omarchy tree under /usr/share/omarchy and
+# declares no `backup=()` array. A hand-edit of a file in there is reverted by
+# the next upgrade SILENTLY: no .pacnew, no .pacsave, no warning, pacman exits
+# 0 (docs/findings/T12-upstream-patch-seam.md, measurement M2). That is exactly
+# the failure class CLAUDE.md forbids, so the seam is not "edit the file" --
+# it is "re-apply a patch after every transaction that could have reverted it,
+# and SHOUT when the patch no longer fits".
+#
+# THE ONE RULE THIS FILE EXISTS TO ENFORCE
+#
+# `git apply` with real context lines, never `sed`. Upstream retuned the very
+# literal patch 0010 targets three times in two months (30000 -> 3000 -> 5000,
+# commits 35a6940 and af82848). A `sed -i 's/interval: 5000/.../'` matches
+# nothing on the next retune, exits 0, and the fix is gone with no signal.
+# The patch's context lines turn that same event into a reject, which is the
+# whole product of this mechanism. The alarm is the feature; the patch is
+# incidental.
+#
+# IT MUST NOT RESTART THE SHELL
+#
+# The first-party plugin directory is not watched for live reload -- Quickshell's
+# PluginRegistry inotify watcher covers only ~/.config/omarchy/plugins -- so a
+# patched value takes effect at the next shell start, and that is fine.
+# Relaunching Quickshell from a pacman hook would re-run checkStrandedLock(),
+# the one code path docs/findings/T9-delta-classification.md classifies BREAKS
+# US, possibly while the device is locked. Nothing here starts, stops, restarts
+# or signals a shell, a compositor or a session. Keep it that way.
+#
+# CONTRACT (docs/findings/T12-upstream-patch-seam.md §3.3), per patch, in
+# filename order:
+#
+#   0. the .meta must exist, name a target, and carry at least one
+#      post-condition                                     -> bad_meta
+#   1. the target file must exist                          -> missing_target
+#   2. `git apply --reverse --check` succeeds  => already applied, ok
+#   3. `git apply --check` fails               => DRIFT, upstream moved
+#   4. apply it (--verify stops before this and reports `pending` instead)
+#   5. post-conditions from the .meta          -> postcondition_failed
+#   6. write patch-state.json; exit non-zero if any patch is not ok
+#
+# A failed patch NEVER stops the remaining patches from being attempted -- but
+# it is remembered, and the process exits non-zero. A failed patch also never
+# leaves the target file half-written: every decision is made by a --check
+# before anything is applied.
+#
+# Standalone by design. This file, the .hook, the .service and patches/ are the
+# payload of the `omarchy-deck` package (T5 seam S4); nothing here reaches into
+# the ISO build tree.
+
+set -euo pipefail
+
+readonly PROG=omarchy-deck-apply-patches
+
+# Exit codes are part of the contract: callers and tests must be able to tell
+# "the patches do not fit" from "this machine is not set up", without parsing
+# English.
+readonly EXIT_OK=0
+readonly EXIT_USAGE=2
+readonly EXIT_PATCH=3 # one or more patches are not ok
+readonly EXIT_ENV=4   # cannot even start: no patch dir, no root, no git
+
+readonly DEFAULT_ROOT=/usr/share/omarchy
+readonly DEFAULT_PATCH_DIR=/usr/share/omarchy-deck/patches
+readonly DEFAULT_STATE_FILE=/var/lib/omarchy-deck/patch-state.json
+
+root=$DEFAULT_ROOT
+patch_dir=$DEFAULT_PATCH_DIR
+state_file=$DEFAULT_STATE_FILE
+verify_only=0
+from_hook=0
+notify=0
+
+usage() {
+  cat <<USAGE
+Usage: $PROG [--verify] [--from-hook] [--notify]
+              [--root DIR] [--patch-dir DIR] [--state-file FILE]
+
+  --verify       report only; never modify a target file
+  --from-hook    called from the ALPM PostTransaction hook (affects wording
+                 and the recorded invocation, nothing else)
+  --notify       on failure, additionally try omarchy-notification-send
+  --root DIR     patch root (default: $DEFAULT_ROOT)
+  --patch-dir    directory of *.patch + *.meta (default: $DEFAULT_PATCH_DIR)
+  --state-file   where to write patch-state.json (default: $DEFAULT_STATE_FILE)
+
+Exit: 0 all patches ok - 2 usage - 3 a patch is not ok - 4 environment
+USAGE
+}
+
+log() { printf '%s: %s\n' "$PROG" "$*"; }
+warn() { printf '%s: WARNING: %s\n' "$PROG" "$*" >&2; }
+err() { printf '%s: ERROR: %s\n' "$PROG" "$*" >&2; }
+
+die_env() {
+  err "$1"
+  exit "$EXIT_ENV"
+}
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+  --verify) verify_only=1 ;;
+  --from-hook) from_hook=1 ;;
+  --notify) notify=1 ;;
+  --root)
+    [[ $# -ge 2 ]] || {
+      err "--root needs an argument"
+      exit "$EXIT_USAGE"
+    }
+    root=$2
+    shift
+    ;;
+  --patch-dir)
+    [[ $# -ge 2 ]] || {
+      err "--patch-dir needs an argument"
+      exit "$EXIT_USAGE"
+    }
+    patch_dir=$2
+    shift
+    ;;
+  --state-file)
+    [[ $# -ge 2 ]] || {
+      err "--state-file needs an argument"
+      exit "$EXIT_USAGE"
+    }
+    state_file=$2
+    shift
+    ;;
+  -h | --help)
+    usage
+    exit "$EXIT_OK"
+    ;;
+  *)
+    err "unknown argument: $1"
+    usage >&2
+    exit "$EXIT_USAGE"
+    ;;
+  esac
+  shift
+done
+
+# --- environment ------------------------------------------------------------
+#
+# Every one of these is fatal BEFORE any patch is looked at, and each has its
+# own message. "No patch directory" must never be reported as "the patch does
+# not apply" -- a wrong diagnosis on a device with no terminal costs a session.
+
+command -v git >/dev/null 2>&1 ||
+  die_env "git is not installed; the patch seam cannot work without 'git apply'"
+[[ -d $root ]] ||
+  die_env "patch root does not exist: $root (is omarchy installed?)"
+[[ -d $patch_dir ]] ||
+  die_env "patch directory does not exist: $patch_dir (is omarchy-deck installed?)"
+
+shopt -s nullglob
+patches=("$patch_dir"/*.patch)
+shopt -u nullglob
+# An empty patch set is not "success with nothing to do": this program is only
+# ever installed alongside its patches, so zero patches means the package is
+# broken or somebody emptied the directory. Saying "ok" here would be the
+# silent-success bug in miniature.
+[[ ${#patches[@]} -gt 0 ]] ||
+  die_env "no *.patch files in $patch_dir -- the omarchy-deck payload is incomplete"
+
+# --- small helpers ----------------------------------------------------------
+
+sha256_of() {
+  if [[ -f $1 ]]; then
+    sha256sum -- "$1" | cut -d' ' -f1
+  else
+    printf 'absent'
+  fi
+}
+
+# Occurrence count (not line count): two matches on one line count as two.
+#
+# Returns 1 when grep could not evaluate the expression at all. The obvious
+# `{ grep ... || true; } | wc -l` is wrong here and the bug is nasty: an
+# invalid ERE makes grep exit 2 with no output, `|| true` swallows it, the
+# count comes back 0, and a post-condition written as "this must NOT appear"
+# then passes *because the check never ran*. grep's exit 1 (no match) and exit
+# 2 (bad pattern / unreadable file) mean completely different things and must
+# not be collapsed.
+count_matches() {
+  local re=$1 file=$2 out rc=0
+  out=$(grep -oE -- "$re" "$file") || rc=$?
+  [[ $rc -le 1 ]] || return 1
+  if [[ -z $out ]]; then
+    printf '0'
+  else
+    wc -l <<<"$out" | tr -d ' '
+  fi
+}
+
+json_escape() {
+  local s=$1
+  s=$(printf '%s' "$s" | tr -d '\000-\010\013\014\016-\037')
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\n'/\\n}
+  printf '%s' "$s"
+}
+
+# --- finding qmllint --------------------------------------------------------
+#
+# 🔴 CORRECTION TO docs/findings/T12-upstream-patch-seam.md §7. That finding
+# says qmllint "is present on any Omarchy 4.0 target because quickshell depends
+# on qt6-declarative", and measured it by running `qmllint` on a dev machine.
+# Measured again 2026-08-12 in a clean archlinux container: qt6-declarative
+# installs it at **/usr/lib/qt6/bin/qmllint**, which is NOT on the default
+# PATH. The /usr/bin/qmllint that answered on the dev machine belongs to
+# **qt5-declarative** -- a different parser for a different Qt.
+#
+# So a bare `command -v qmllint` would have found nothing on a real target and
+# failed every single run: a permanent false alarm, which is as bad as a
+# permanent silence. Search absolute locations first, and prefer the Qt6 tool,
+# because Qt6 is the engine Quickshell actually loads the file with.
+#
+# Re-verified with the real Qt6 tool (6.11.1) on the pinned Service.qml:
+# exit 0 on the correctly patched file (only unresolved-import warnings) and
+# 255 on deliberately broken QML. The substance of the finding holds; only the
+# path did not.
+#
+# OMARCHY_DECK_QMLLINT overrides the search. If it is set and not executable
+# this is a HARD failure rather than a fallback -- silently linting with a
+# different binary than the operator named is exactly the kind of "it worked,
+# just not on what you asked for" this project keeps getting bitten by.
+
+readonly QMLLINT_OVERRIDE=${OMARCHY_DECK_QMLLINT:-}
+# Colon-separated directories searched BEFORE PATH. The default is where
+# qt6-declarative actually installs the binary. Overridable only so the unit
+# suite can prove the directory search really happens and really wins over
+# PATH -- a static grep for this path could not tell the difference between
+# code that searches it and a comment that mentions it.
+readonly QMLLINT_DIRS=${OMARCHY_DECK_QMLLINT_DIRS:-/usr/lib/qt6/bin}
+qmllint_bin=""
+qmllint_why=""
+qmllint_resolved=0
+
+resolve_qmllint() {
+  local c
+  if [[ $qmllint_resolved -ne 0 ]]; then
+    [[ -n $qmllint_bin ]]
+    return
+  fi
+  qmllint_resolved=1
+
+  if [[ -n $QMLLINT_OVERRIDE ]]; then
+    if [[ -x $QMLLINT_OVERRIDE ]]; then
+      qmllint_bin=$QMLLINT_OVERRIDE
+      return 0
+    fi
+    qmllint_why="OMARCHY_DECK_QMLLINT is set to '$QMLLINT_OVERRIDE', which is not executable; refusing to silently lint with some other binary instead"
+    return 1
+  fi
+
+  local d dirs
+  IFS=: read -r -a dirs <<<"$QMLLINT_DIRS"
+  for d in ${dirs[@]+"${dirs[@]}"}; do
+    for c in "$d/qmllint" "$d/qmllint6"; do
+      if [[ -x $c ]]; then
+        qmllint_bin=$c
+        return 0
+      fi
+    done
+  done
+  for c in qmllint-qt6 qmllint; do
+    if qmllint_bin=$(command -v "$c" 2>/dev/null); then
+      return 0
+    fi
+  done
+  qmllint_bin=""
+  qmllint_why="qmllint is not installed: looked in $QMLLINT_DIRS (where qt6-declarative puts it) and on PATH. Install qt6-declarative"
+  return 1
+}
+
+installed_version() {
+  local pkg
+  command -v pacman >/dev/null 2>&1 || {
+    printf 'unknown'
+    return 0
+  }
+  for pkg in omarchy-dev omarchy; do
+    if out=$(pacman -Q "$pkg" 2>/dev/null); then
+      printf '%s' "$out"
+      return 0
+    fi
+  done
+  printf 'not-installed'
+}
+
+# --- meta parsing -----------------------------------------------------------
+#
+# Format is deliberately dumb: `key: value`, one per line, `#` comments.
+# An UNKNOWN key is a hard error. A typo'd post-condition key that was merely
+# ignored would produce a patch that reports "ok" while asserting nothing --
+# a guard that silently does not run is worse than no guard, because it also
+# buys false confidence.
+
+meta_target=""
+meta_desc=""
+meta_requirement=""
+meta_asserts=()
+meta_qmllint=()
+meta_error=""
+
+parse_meta() {
+  local file=$1 line key value meta_name
+  meta_name=$(basename -- "$file")
+  meta_target=""
+  meta_desc=""
+  meta_requirement=""
+  meta_asserts=()
+  meta_qmllint=()
+  meta_error=""
+
+  if [[ ! -f $file ]]; then
+    meta_error="no .meta sibling: $file (every patch must declare its target and post-conditions)"
+    return 1
+  fi
+
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%$'\r'}
+    [[ -n ${line//[[:space:]]/} ]] || continue
+    [[ $line != \#* ]] || continue
+    if [[ $line != *:* ]]; then
+      meta_error="unparseable line in $meta_name: $line"
+      return 1
+    fi
+    key=${line%%:*}
+    value=${line#*:}
+    key=${key//[[:space:]]/}
+    value=${value#"${value%%[![:space:]]*}"}
+    case $key in
+    target)
+      if [[ -n $meta_target ]]; then
+        meta_error="more than one 'target:' in $meta_name -- one patch, one target file"
+        return 1
+      fi
+      meta_target=$value
+      ;;
+    description) meta_desc=$value ;;
+    requirement) meta_requirement=$value ;;
+    assert_count) meta_asserts+=("$value") ;;
+    qmllint) meta_qmllint+=("$value") ;;
+    *)
+      meta_error="unknown key '$key' in $meta_name -- known keys: target, description, requirement, assert_count, qmllint"
+      return 1
+      ;;
+    esac
+  done <"$file"
+
+  if [[ -z $meta_target ]]; then
+    meta_error="$meta_name declares no 'target:'"
+    return 1
+  fi
+  if [[ ${#meta_asserts[@]} -eq 0 && ${#meta_qmllint[@]} -eq 0 ]]; then
+    meta_error="$meta_name declares no post-conditions -- a patch that asserts nothing about its own result is a bug (T12 §3.3 step 4)"
+    return 1
+  fi
+  return 0
+}
+
+# --- post-conditions --------------------------------------------------------
+
+postcondition_failures=()
+
+run_postconditions() {
+  local spec file re want got rest
+  postcondition_failures=()
+
+  for spec in ${meta_asserts[@]+"${meta_asserts[@]}"}; do
+    # <file>|<ERE>|<expected occurrences>
+    #
+    # Split on the FIRST and the LAST `|`, not on every one: an ERE may
+    # legitimately contain alternation, and a separator that silently truncated
+    # `a|b` to `a` would quietly test a different assertion than the one
+    # written down.
+    file=${spec%%|*}
+    rest=${spec#*|}
+    want=${rest##*|}
+    re=${rest%|*}
+    if [[ $spec != *\|*\|* || -z ${file:-} || -z ${re:-} || -z ${want:-} ]]; then
+      postcondition_failures+=("malformed assert_count: '$spec' (want <file>|<regex>|<count>)")
+      continue
+    fi
+    if [[ ! $want =~ ^[0-9]+$ ]]; then
+      postcondition_failures+=("malformed assert_count: '$spec' -- the expected count '$want' is not a number")
+      continue
+    fi
+    if [[ ! -f $root/$file ]]; then
+      postcondition_failures+=("assert_count target missing: $root/$file")
+      continue
+    fi
+    if ! got=$(count_matches "$re" "$root/$file"); then
+      postcondition_failures+=("assert_count could not evaluate /$re/ against $file -- invalid expression or unreadable file (grep failed); the assertion did NOT run")
+      continue
+    fi
+    if [[ $got != "$want" ]]; then
+      postcondition_failures+=("assert_count $file /$re/ expected $want occurrence(s), found $got")
+    fi
+  done
+
+  for file in ${meta_qmllint[@]+"${meta_qmllint[@]}"}; do
+    if ! resolve_qmllint; then
+      # Not a skip. If the linter cannot be found or cannot be run, the
+      # post-condition DID NOT RUN, and a post-condition that did not run must
+      # never be counted as one that passed -- that is the silent-success bug
+      # this whole seam exists to avoid, wearing a lab coat.
+      postcondition_failures+=("the QML post-condition for $file could NOT be checked: $qmllint_why")
+      continue
+    fi
+    if [[ ! -f $root/$file ]]; then
+      postcondition_failures+=("qmllint target missing: $root/$file")
+      continue
+    fi
+    if ! qmllint_out=$("$qmllint_bin" "$root/$file" 2>&1); then
+      postcondition_failures+=("qmllint ($qmllint_bin) rejected $file after the patch applied: ${qmllint_out}")
+    fi
+  done
+
+  [[ ${#postcondition_failures[@]} -eq 0 ]]
+}
+
+# --- state entries ----------------------------------------------------------
+#
+# One place that knows the shape of a patch record. The requirement and
+# description come straight from the .meta so that whoever reads
+# patch-state.json on a stale Deck learns WHICH operator requirement is not in
+# effect, not merely that "0010" failed.
+
+state_entries=()
+
+add_state_entry() {
+  local name=$1 status=$2 action=$3 target=$4 sha=$5 detail=$6
+  state_entries+=("$(
+    printf '{"patch":"%s","status":"%s","action":"%s","target":"%s","sha256":"%s","requirement":"%s","description":"%s","detail":"%s"}' \
+      "$(json_escape "$name")" "$status" "$action" "$(json_escape "$target")" \
+      "$(json_escape "$sha")" "$(json_escape "$meta_requirement")" \
+      "$(json_escape "$meta_desc")" "$(json_escape "$detail")"
+  )")
+}
+
+# --- the loop ---------------------------------------------------------------
+
+mode=apply
+[[ $verify_only -eq 0 ]] || mode=verify
+invocation=cli
+[[ $from_hook -eq 0 ]] || invocation=hook
+
+log "$mode: ${#patches[@]} patch(es) from $patch_dir against $root"
+
+overall_ok=1
+
+for patch_path in "${patches[@]}"; do
+  name=$(basename -- "$patch_path")
+  meta_path=${patch_path%.patch}.meta
+  status=""
+  action=""
+  detail=""
+
+  if ! parse_meta "$meta_path"; then
+    status=bad_meta
+    action=none
+    detail=$meta_error
+    err "[$name] bad_meta: $detail"
+    overall_ok=0
+    add_state_entry "$name" "$status" "$action" "" "" "$detail"
+    continue
+  fi
+
+  target=$meta_target
+  target_abs=$root/$target
+
+  # The patch and its .meta must agree about which file is touched. They are
+  # two hand-written files; nothing else compares them, and a stale .meta would
+  # run its post-conditions against a file the patch never touched -- green,
+  # and meaningless.
+  if touched=$(git -C "$root" apply --numstat -p1 -- "$patch_path" 2>/dev/null); then
+    touched_files=$(awk '{print $3}' <<<"$touched" | sort -u)
+  else
+    touched_files=""
+  fi
+  if [[ -n $touched_files && $touched_files != "$target" ]]; then
+    status=bad_meta
+    action=none
+    detail="the .meta declares target '$target' but the patch touches: $(tr '\n' ' ' <<<"$touched_files")"
+    err "[$name] bad_meta: $detail"
+    overall_ok=0
+    add_state_entry "$name" "$status" "$action" "$target" "" "$detail"
+    continue
+  fi
+
+  # Distinguish "upstream renamed or deleted the file" from "upstream edited
+  # near our hunk". Both make `git apply --check` fail with the same shape of
+  # message, and they call for completely different repairs -- one is "rebase
+  # the patch", the other is "the file this patch is about is GONE". Reporting
+  # the first as the second has cost real time on this project before.
+  if [[ ! -f $target_abs ]]; then
+    status=missing_target
+    action=none
+    detail="the patch target does not exist: $target_abs -- upstream renamed or removed it, or omarchy is not installed at $root"
+    err "[$name] missing_target: $detail"
+    overall_ok=0
+    add_state_entry "$name" "$status" "$action" "$target" "absent" "$detail"
+    continue
+  fi
+
+  # Step 1: already applied? This is what makes re-runs idempotent, and it is
+  # the only thing that can tell "already done" from "drifted" -- a bare
+  # `git apply` cannot.
+  if git -C "$root" apply --reverse --check -p1 -- "$patch_path" >/dev/null 2>&1; then
+    if run_postconditions; then
+      status=ok
+      action=already-applied
+      detail="already applied; post-conditions hold"
+      log "[$name] ok: already applied ($target)"
+    else
+      status=postcondition_failed
+      action=already-applied
+      detail="the patch reads as applied to $target but its post-conditions do not hold: $(printf '%s; ' "${postcondition_failures[@]}")"
+      err "[$name] postcondition_failed: $detail"
+      overall_ok=0
+    fi
+    add_state_entry "$name" "$status" "$action" "$target" "$(sha256_of "$target_abs")" "$detail"
+    continue
+  fi
+
+  # Step 2: does it still fit? A reject here is the alarm this whole mechanism
+  # exists to raise. Do NOT try harder (no --3way, no fuzz, no sed fallback):
+  # the correct response is a human rebasing the patch against the new upstream.
+  if ! reject=$(git -C "$root" apply --check -p1 --verbose -- "$patch_path" 2>&1); then
+    status=drift
+    action=none
+    detail="upstream drifted under $target; the patch no longer applies and the machine keeps upstream's behaviour. git apply said: $reject"
+    err "[$name] drift: the patch no longer applies to $target"
+    err "[$name] drift: $reject"
+    err "[$name] drift: rebase this patch against the installed omarchy before trusting the Deck's behaviour"
+    overall_ok=0
+    add_state_entry "$name" "$status" "$action" "$target" "$(sha256_of "$target_abs")" "$detail"
+    continue
+  fi
+
+  # Step 3: --verify stops here. It reports, it never writes.
+  if [[ $verify_only -eq 1 ]]; then
+    status=pending
+    action=not-applied
+    detail="the patch is NOT applied to $target (it would apply cleanly); --verify does not modify anything"
+    err "[$name] pending: not applied to $target"
+    overall_ok=0
+    add_state_entry "$name" "$status" "$action" "$target" "$(sha256_of "$target_abs")" "$detail"
+    continue
+  fi
+
+  if ! apply_out=$(git -C "$root" apply -p1 --verbose -- "$patch_path" 2>&1); then
+    status=apply_failed
+    action=none
+    detail="git apply --check passed but the apply itself failed on $target: $apply_out"
+    err "[$name] apply_failed: $detail"
+    overall_ok=0
+    add_state_entry "$name" "$status" "$action" "$target" "$(sha256_of "$target_abs")" "$detail"
+    continue
+  fi
+
+  # Step 4: post-conditions. "It applied" is not "it did the right thing":
+  # a patch can land on the wrong one of several similar hunks, or produce a
+  # file the QML engine will refuse at runtime, hours later, on a device with
+  # no terminal.
+  if run_postconditions; then
+    status=ok
+    action=applied
+    detail="applied; post-conditions hold"
+    log "[$name] ok: applied to $target"
+  else
+    status=postcondition_failed
+    action=applied
+    detail="applied to $target but the post-conditions FAILED: $(printf '%s; ' "${postcondition_failures[@]}")"
+    err "[$name] postcondition_failed: $detail"
+    overall_ok=0
+  fi
+  add_state_entry "$name" "$status" "$action" "$target" "$(sha256_of "$target_abs")" "$detail"
+done
+
+# --- state file -------------------------------------------------------------
+
+overall=ok
+[[ $overall_ok -eq 1 ]] || overall=failed
+
+state_dir=$(dirname -- "$state_file")
+if ! mkdir -p -- "$state_dir" 2>/dev/null; then
+  die_env "cannot create the state directory $state_dir"
+fi
+
+tmp_state=$(mktemp -- "$state_file.XXXXXX") ||
+  die_env "cannot write the state file next to $state_file"
+
+{
+  printf '{\n'
+  printf '  "schema": 1,\n'
+  printf '  "generated": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '  "mode": "%s",\n' "$mode"
+  printf '  "invocation": "%s",\n' "$invocation"
+  printf '  "root": "%s",\n' "$(json_escape "$root")"
+  printf '  "patch_dir": "%s",\n' "$(json_escape "$patch_dir")"
+  printf '  "omarchy": "%s",\n' "$(json_escape "$(installed_version)")"
+  printf '  "overall": "%s",\n' "$overall"
+  printf '  "patches": [\n'
+  for i in "${!state_entries[@]}"; do
+    printf '    %s' "${state_entries[$i]}"
+    if [[ $i -lt $((${#state_entries[@]} - 1)) ]]; then printf ',\n'; else printf '\n'; fi
+  done
+  printf '  ]\n'
+  printf '}\n'
+} >"$tmp_state"
+
+mv -f -- "$tmp_state" "$state_file"
+chmod 0644 -- "$state_file"
+
+# --- verdict ----------------------------------------------------------------
+
+if [[ $overall == ok ]]; then
+  log "all ${#patches[@]} patch(es) ok; state: $state_file"
+  exit "$EXIT_OK"
+fi
+
+err "one or more patches are NOT ok. State: $state_file"
+if [[ $from_hook -eq 1 ]]; then
+  # A PostTransaction hook cannot abort the transaction (AbortOnFail is a
+  # PreTransaction property), so this message and the failed verify unit at
+  # next boot are the channels that remain. Say what it means, not just that
+  # something failed.
+  err "the Steam Deck customisations above are NOT in effect on this system;"
+  err "the upstream behaviour is what you will get until the patches are rebased."
+fi
+
+if [[ $notify -eq 1 ]]; then
+  if command -v omarchy-notification-send >/dev/null 2>&1; then
+    omarchy-notification-send "Omarchy Deck patches are stale" \
+      "A Deck customisation no longer applies to upstream. See $state_file." ||
+      warn "omarchy-notification-send failed; the failure above stands regardless"
+  else
+    warn "--notify was requested but omarchy-notification-send is not on PATH"
+  fi
+fi
+
+exit "$EXIT_PATCH"

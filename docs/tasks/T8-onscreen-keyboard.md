@@ -486,6 +486,175 @@ row 5   ☺        [Ⓨ] ————— space (wide) —————     ◀  �
 - Row 4's right `Shift` and row 5's `Paste`/`Move` are `[obscured]`. An earlier
   still showed all three, so they exist; their exact spans do not.
 
+### 9g. 🎯 THE DEFINITIVE REFERENCE — six states captured at native resolution
+
+**Captured 2026-08-12 on the Deck itself** with `grim`, driving Valve's own
+keyboard through the extest bridge: idle, Shift held, Caps latched, left pad
+touched, right pad touched, plus cursor states. Full-resolution and uncropped,
+so **every `[obscured]` item in §9d and every "unresolved" item in §9f is now
+settled**. This section supersedes both where they disagree.
+
+⚠️ **The images are NOT vendored into this repo** — `docs/findings/
+P16-redistribution-and-trademark.md`. Transcribed only, and we draw our own
+glyphs.
+
+#### The layout — ONE CONTINUOUS GRID, full width, no split
+
+```
+row 1  [~`] [!1] [@2] [#3] [$4] [%5] [^6] [&7] [*8] [(9] [)0] [_-] [+=]  (Ⓧ) Backspace
+row 2  [Tab]  q  w  e  r  t  y  u  i  o  p  [{[] [}]] [|\]
+row 3  [Caps + L3 icon]  a  s  d  f  g  h  j  k  l  [:;] ["']      [R2] Enter
+row 4  [Shift  L2]  z  x  c  v  b  n  m  [<,] [>.] [?/]           [L2  Shift]
+row 5  [☺]  (Ⓨ) ———— space, wide ————  [▲/◀] [▼/▶]  [Paste]  [Move + icon]
+```
+
+🔴 **There is NO GAP between a left and right half.** One continuous keyboard
+spanning the full width. Ours renders two half-grids with a gap — the operator
+called this out first, and it is the single most visible difference.
+
+**Resolved unknowns:** `` ~` `` exists · `Tab` exists · the `R2` key reads
+**`Enter`** · the arrow cluster is **two keys with dual legends**, not four
+keys · there **is** an `☺` emoji key at the far left of row 5 (ours has none) ·
+a **`Move`** key with a keyboard icon sits right of `Paste`.
+
+#### 🔴 The legend rule — ours is WRONG, and it is wrong on every screen
+
+Ours draws both faces permanently. Valve swaps them:
+
+| State | Number/punctuation/arrow keys | Letters |
+|---|---|---|
+| **Unshifted** | **dual legend** — shifted small ABOVE, base large below | lowercase |
+| **Shift active** | **ONLY the shifted face**, larger, centred (`~ ! @ #`, `{ } \|`, `▲ ▼`) | UPPERCASE |
+| **Caps active** | **unchanged — dual legends stay** | UPPERCASE |
+
+⚠️ **Caps ≠ Shift, and that is the subtle part.** Caps changes *letter case
+only*; Shift changes symbols, case **and the arrow keys**. Note the
+consequence: **`▲`/`▼` are the SHIFTED faces of `◀`/`▶`** — Shift is how a
+user reaches up/down. Any layout that gives the arrows their own keys makes
+Shift's arrow behaviour unreachable.
+
+#### Active-modifier styling, and the cursor
+
+- **An active modifier turns BLUE** — both `Shift` keys under Shift, the `Caps`
+  key when latched. Nothing else changes colour.
+- **The cursor is a WHITE (inverted) key face PLUS a small BLUE DOT** drawn at
+  the thumb's precise position on that key. Two cursors, one per pad, both
+  visible at once. Ours has no equivalent of the dot.
+- Action keys (`Tab`, `Caps`, `Shift`, `Backspace`, `Enter`, `Move`) are drawn
+  **black**; letter keys are dark grey.
+
+#### ✅ Badge gating — confirmed, symmetric, and per-pad
+
+| Pad touched | Hidden | Still shown |
+|---|---|---|
+| left | **both** `L2` badges (both Shift keys) | `R2`, `Ⓧ`, `Ⓨ`, `L3` |
+| right | the `R2` badge | `L2` ×2, `Ⓧ`, `Ⓨ`, `L3` |
+| neither | — | everything |
+
+**Only the trigger badges gate.** `Ⓧ`, `Ⓨ` and `L3` are always visible, which
+fits §9e's semantics exactly: face buttons and the stick click are unconditional
+shortcuts, triggers are contextual.
+
+✅ **And it is implementable** — see §9e: a lift reports exactly `0,0`,
+measured on hardware, so "untouched" is a real state and not a timeout.
+
+### 9f. 📸 REFERENCE SCREENSHOT, idle state — supersedes the video transcription
+
+**Operator-supplied 2026-08-12, captured with NO trackpad touched**, i.e. the
+state in which *every* badge is displayed. This is the frame §9d and §9e both
+lacked. **Transcribed, not copied** — §9's constraint stands, and the image is
+deliberately not vendored into this repo.
+
+```
+row 1   [!1] [@2] [#3] [$4] [%5] [^6] [&7] [*8] [(9] [)0] [_-] [+=]   (Ⓧ) Back…
+row 2    q  w  e  r  t  y  u  i  o  p   [{[]  [}]]
+row 3   [L3 + icon]  a  s  d  f  g  h  j  k  l  [:;]  ["']        [R2]
+row 4   [L2]  z  x  c  v  b  n  m  [<,] [>.] [?/]                 [L2]
+row 5   (Ⓨ) ————————— space (wide) —————————   [▲][▼]/[◀][▶]  [Paste]  [M…]
+```
+
+#### 🔴 Corrections to §9d, which was transcribed from two video frames
+
+| §9d claimed | The screenshot shows |
+|---|---|
+| *"`◀ ▶` only … no up/down arrows visible, where ours draws four"* | **All four arrows are present.** Ours was right and §9d was wrong — a webcam overlay had hidden them. **Do not "fix" our four arrows.** |
+| row 3 left is `Caps⇪` | the key carries an **`L3`** badge and an icon — Caps is bound to the **left stick click**, not a trigger |
+| row 4 right Shift `[obscured]` | it exists, and **both** Shift keys carry an **`L2`** badge |
+
+#### What the screenshot establishes, and it is a lot
+
+- ✅ **Space is ONE wide key with `Ⓨ` at its left edge.**
+  🔴 **But §9d's "clearest divergence" DOES NOT EXIST, and §9f repeated it
+  without checking the source.** `SPACE_KEY` in `deck_osk_layout.py` has been
+  `act("", "space", span=3, …)` — one wide key — since the layout core landed,
+  and **there is no `☺` key anywhere in this repo** (grepped). §9d described
+  our bottom row from memory and was wrong; I carried it forward as
+  "confirmed". The real gap was only the missing badge, now added.
+  **Check the code, not the note about the code.**
+- ✅ **Dual legends** — shifted face above, base below — on **numbers and
+  punctuation alike**, both always visible. We match this.
+### ✅ OPERATOR DECISION 2026-08-12 — MATCH VALVE EXACTLY, INCLUDING THE BINDINGS
+
+> *"i dont care about the x is supposed to be tab functionality. i want the
+> functionality of the buttons as they appear in the deck images to be matched
+> exactly with our OSK"* — and, on the look: *"its still way off the mark …
+> i still see a gap between the left half and the right half"*.
+
+**This settles the open question below and reverses it.** The target is not
+"our model, badged honestly" — it is **Valve's model, reproduced**. Concretely:
+
+| Button | Was | **Now must be** |
+|---|---|---|
+| `X` (`BTN_NORTH`) | `KEY_TAB` | **Backspace** |
+| `Y` (`BTN_WEST`) | `KEY_SPACE` | Space *(already correct)* |
+| `L2` | commit left cursor | commit left cursor **+ Shift while the left pad is untouched** |
+| `R2` | commit right cursor | commit right cursor **+ Enter while the right pad is untouched** |
+| `L3` (`BTN_THUMBL`) | unbound | **Caps** |
+
+⚠️ **Tab is deliberately given up.** §2.3 wanted it for archinstall's "next
+field"; the operator has weighed that and chosen parity. **Do not reintroduce
+it as a badge or a binding without asking.**
+
+🔴 **The visual gap between the halves must go.** Ours renders two half-grids
+with a gap; Valve's is one continuous keyboard. The two-cursor model does not
+require a visual split — each cursor addresses its own half of a *continuous*
+grid — so this is a rendering change, not an input-model change.
+
+✅ **And the badge gating is now implementable** — see §9e: a lift reports
+exactly `0,0`, measured on hardware 2026-08-12, so "untouched" is a real state
+rather than a timeout.
+
+- ⚠️ **`Ⓧ` on Backspace — was true for Valve and a lie for us; the decision
+  above makes it TRUE for us too, by changing the binding.**
+  Measured against our own mapper: `BTN_WEST` (Y) → `KEY_SPACE`, so the `Ⓨ`
+  badge on space is truthful; but `BTN_NORTH` (X) → **`KEY_TAB`**, not
+  Backspace (`deck-input-mapper.py:160-161`). Painting `Ⓧ` on our Backspace
+  would be *confidently wrong*, which §9a establishes is worse than absent, so
+  it is deliberately not drawn.
+  🔴 **Closing this divergence is an OPERATOR decision, not a code one:** it
+  means rebinding X from Tab to Backspace, and Tab is "next field", which
+  archinstall's forms need. Matching Valve's badge costs a real input
+  affordance. **Do not change it without asking.**
+- 🆕 **Two badge SHAPES, and the distinction is semantic:** face buttons are
+  drawn in a **white circle** (`Ⓧ`, `Ⓨ`); triggers and stick clicks are drawn
+  in a **white rounded rectangle** (`L2`, `R2`, `L3`). That is a convention we
+  can reproduce with our own glyphs without touching Valve's artwork.
+- 🆕 **Modifier and action keys are visibly DARKER than letter keys** — a
+  black key face against the letters' dark grey. Ours does not differentiate.
+- 🆕 **`Paste` is a real labelled key** on the bottom row, right of the arrows.
+
+#### ⚠️ Still unresolved — the capture is cropped, do not invent these
+
+- The **left edge is cut**: whether row 1 has a `` ~` `` key and whether row 2
+  opens with `Tab` cannot be read from this image.
+- The **right edge is cut**: the `R2` key's text (§9d read it as `Enter`) and
+  the key after `Paste` (§9d read `Move`, here only `M…` is visible).
+- The arrow cluster reads as either a **2×2 block of four keys** or **two keys
+  carrying dual legends** (`▲` over `◀`, `▼` over `▶`) in the same
+  shifted-above-base style as the number row. **The second reading fits this
+  keyboard's own convention and is therefore the likelier one — but it is a
+  reading, not a measurement.** One uncropped capture settles it.
+
 ### 9e. 🔬 The badges are CONTEXTUAL — evidence, and the rule is not yet known
 
 | Badge | Frame 1 (3:15) | Frame 2 (3:29) |
@@ -499,10 +668,47 @@ row 5   ☺        [Ⓨ] ————— space (wide) —————     ◀  �
 `Ⓧ`/`Ⓨ` are true face-button shortcuts, while `L2`/`R2` describe *the triggers*,
 whose relevance depends on state.
 
-**Suspect: cursor position.** The cursor is on `b` in frame 1 and on `Backspace`
-in frame 2. ⚠️ **Two frames cannot establish a rule** — this is a hypothesis, and
-this project has had two die today already. **Do not implement it as fact.**
-A third frame showing a transition, or the cursor parked on each half in turn,
-would settle it.
+~~**Suspect: cursor position.**~~ ⚠️ **WRONG, and the warning below is why it was
+hedged.** The cursor is on `b` in frame 1 and on `Backspace` in frame 2, which
+looked like a rule and was a coincidence of those two frames.
+
+### ✅ THE RULE, from the operator using the real keyboard (2026-08-11, session 21)
+
+> *"L2 for shift … comes on if no trackpad is touched. As soon as you touch it
+> it disappears and L2 is now serving the function of clicking letters selected
+> by the left trackpad."*
+
+**The trigger badges are gated on TRACKPAD TOUCH, not cursor position:**
+
+| State | What `L2` means | Badge |
+|---|---|---|
+| No trackpad being touched | **Shift** | `L2` Shift shown |
+| Left trackpad touched | **commit the letter under the left cursor** | Shift badge hidden |
+
+This explains both video frames without the cursor-position rule: on `b` the pad
+was in use, on `Backspace` it was not.
+
+🔴 **This DISSOLVES §9a's "badges cannot copy Valve's without copying Valve's
+input model".** §9a recorded `L2 = Shift` as flatly contradicting ours
+(*"L2 **selects** whatever the left cursor is on"*) — but that is Valve's
+touched-state meaning, i.e. **the same as ours**. It is not a different input
+model; it is our model plus a *second, idle-state* meaning we simply do not
+have. Re-read §9a before acting on it.
+
+⚠️ **UNKNOWN, and both matter before anyone implements this:**
+
+✅ **BOTH ANSWERED by the operator, 2026-08-12: the gate is PER-PAD.** The left
+trackpad hides the `L2` badge only; the right trackpad hides the `R2` badge
+only. So `R2` mirrors `L2` exactly, and each trigger's badge is gated on *its
+own side's* pad. The idle screenshot in §9f is the all-badges-visible state
+this predicts.
+
+⚠️ **AND ONE HARD IMPLEMENTATION CAVEAT.** Copying this needs a real
+*touch/no-touch* signal, and §7's measured fact is that **a lifted pad reports
+`0` (centre)** — which is indistinguishable from a thumb resting at the centre.
+So "is the pad being touched" is **not** derivable from the axis values we
+already read. Before designing anything on top of this rule, measure whether the
+pads emit a separate touch bit (`BTN_TOOL_FINGER`, `BTN_TOUCH`, or similar) on
+this hardware. **If they do not, the rule cannot be reproduced faithfully.**
 
 ➡️ **The layout work in §9d is NOT blocked by this** and can proceed alone.

@@ -140,6 +140,12 @@ def cursor_pixel(half: str, position: tuple[float, float], width: float,
 # an installed system.
 BACKDROP = (0.07, 0.07, 0.09, 0.94)
 KEY_FACE = (0.17, 0.17, 0.21, 1.0)
+# T8 §9f: "modifier and action keys are visibly DARKER than letter keys -- a
+# black key face against the letters' dark grey." `deck_osk_layout.is_action_key`
+# is the shared, tested classification; this is just the second colour it
+# selects between. Close to BACKDROP but not equal to it, so an action key
+# still reads as a KEY and not as a hole in the keyboard.
+KEY_FACE_DARK = (0.03, 0.03, 0.04, 1.0)
 KEY_EDGE = (0.30, 0.30, 0.36, 1.0)
 KEY_TEXT = (0.92, 0.92, 0.95, 1.0)
 HOT_TEXT = (0.05, 0.05, 0.07, 1.0)
@@ -195,7 +201,13 @@ def draw(cr, keyboard: osk.OnScreenKeyboard, cursors: osk.Cursors,
         key = rows_by_half[half][row_index][key_index]
         hot = highlights[half] == (row_index, key_index)
         _rounded(cr, x + KEY_PAD, y + KEY_PAD, w - 2 * KEY_PAD, h - 2 * KEY_PAD, CORNER)
-        cr.set_source_rgba(*(ACCENT[half] if hot else KEY_FACE))
+        if hot:
+            face_colour = ACCENT[half]
+        elif osk.is_action_key(key):
+            face_colour = KEY_FACE_DARK
+        else:
+            face_colour = KEY_FACE
+        cr.set_source_rgba(*face_colour)
         cr.fill_preserve()
         cr.set_source_rgba(*KEY_EDGE)
         cr.set_line_width(1.0)
@@ -217,9 +229,10 @@ def draw(cr, keyboard: osk.OnScreenKeyboard, cursors: osk.Cursors,
 
         # Controller-glyph hint (T8 §9's highest-value item): which trigger
         # fires this key, for the three keys a passphrase correction reaches
-        # for constantly -- shift, backspace, enter.
+        # for constantly -- shift, backspace, enter -- plus the one true
+        # face-button shortcut, Ⓨ on space (T8 §9f).
         if key.hint:
-            _hint_badge(cr, key.hint, x + KEY_PAD + 2, y + h - KEY_PAD - 2, h)
+            _hint_badge(cr, key, x + KEY_PAD + 2, y + h - KEY_PAD - 2, h)
 
         label = keyboard.face(key)
         cr.set_font_size(_fit(cr, label, w - 2 * KEY_PAD, h - 2 * KEY_PAD))
@@ -254,14 +267,38 @@ def _rounded(cr, x, y, w, h, r) -> None:
     cr.close_path()
 
 
-def _hint_badge(cr, hint: str, x: float, y: float, key_height: float) -> None:
-    """A small pill naming the trigger that fires this key, hanging from
+def _hint_badge(cr, key: osk.Key, x: float, y: float, key_height: float) -> None:
+    """A small badge naming the button that fires this key, hanging from
     `(x, y)` -- the key's bottom-left corner, inside its own padding, so the
-    badge is unmistakably PART of the key rather than a separate mark."""
+    badge is unmistakably PART of the key rather than a separate mark.
+
+    T8 §9f: the SHAPE carries meaning in the reference and is reproduced here
+    with our own primitives, never Valve's artwork -- a rounded rectangle
+    (`_rounded`, already used for key faces) for triggers and stick-clicks,
+    a full circle for face-button shortcuts. `key.hint_shape` selects which;
+    anything unrecognised falls back to the rectangle, which is the shape
+    every hint drew before §9f added a second one.
+    """
+    hint = key.hint
     size = max(9.0, key_height * 0.22)
     cr.set_font_size(size)
     extents = cr.text_extents(hint)
     pad_x, pad_y = 3.0, 2.0
+
+    if key.hint_shape == osk.HINT_SHAPE_CIRCLE:
+        from math import pi
+        radius = max(extents.width, extents.height) / 2 + max(pad_x, pad_y)
+        cx, cy = x + radius, y - radius
+        cr.new_sub_path()
+        cr.arc(cx, cy, radius, 0, 2 * pi)
+        cr.set_source_rgba(*HINT_BADGE_FILL)
+        cr.fill()
+        cr.set_source_rgba(*HINT_BADGE_TEXT)
+        cr.move_to(cx - extents.width / 2 - extents.x_bearing,
+                   cy - extents.height / 2 - extents.y_bearing)
+        cr.show_text(hint)
+        return
+
     badge_w = extents.width + 2 * pad_x
     badge_h = size + 2 * pad_y
     badge_y = y - badge_h

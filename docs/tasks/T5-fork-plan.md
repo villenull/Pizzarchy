@@ -487,6 +487,36 @@ a grep. It converts the §0 failure from "dies at phase 5 of an install" into
 
 ---
 
+## 6a. 🆕 The THIRD pin — `iso/PKGS`, decided 2026-08-12
+
+T5b wired `--local-source`, and doing so exposed an input this plan never
+counted: **`omacom-io/omarchy-pkgs`**, the PKGBUILD recipes that decide what
+actually lands in `/usr/bin`. §2 treats the build as two pinned inputs; it is
+**three**.
+
+That is not bookkeeping. `docs/findings/T5a-parity.md` failed on exactly this
+class of problem — an ISO whose runtime shipped `omarchy-apply-system` and no
+`omarchy-setup-system`, the binary its own installer shells out to, so it dies
+at phase 5 of 14 after partitioning and ~1200 packages.
+
+**Operator decision 2026-08-12: pin to `ae07234a016c`** (2026-08-10 14:42) —
+the last `omarchy-pkgs` commit before our known-good reference ISO was cut at
+15:24 the same day.
+
+⚠️ **This is dated proximity, not evidence.** Nothing inside the ISO records
+which `omarchy-pkgs` commit built it; the image carries the *runtime's* version
+string (`omarchy-dev-4.0.0.r1667.g4727bad`), not a recipe SHA. The pin is the
+best available inference and should be re-checked if a build behaves oddly.
+
+🔴 **A FOURTH input is still unpinned and cannot be pinned here.**
+`omarchy-nvim`'s PKGBUILD fetches `LazyVim/starter` from `heads/main.tar.gz`
+**at build time**. So even with all three pins in place, two builds a week apart
+can differ. Nobody had counted this either. It is upstream's PKGBUILD, so the
+options are to accept it, patch it in our overlay, or drop the package — a
+decision this plan does not yet make.
+
+---
+
 ## 7. Slices — what the next sessions actually do
 
 Each is independently landable and independently testable. Sizes are relative,
@@ -504,6 +534,38 @@ not hours.
 
 **Do not start T5c before T5a proves parity.** An overlay whose base build was
 never shown to reproduce the known-good ISO cannot attribute any later failure.
+
+### 🔴 Outcome, 2026-08-11 — T5a's first artifact: parity NOT proven. **Swap T5b and T5c.**
+
+`docs/findings/T5a-parity.md` measured the 2026-08-12 build against
+`~/ISOs/omarchy-2026.08.10-…iso`. Split verdict:
+
+- **Pipeline ✅ proven.** The ISO9660 layouts differ by exactly one filename —
+  the build-timestamp `.uuid`. Every `omarchy-iso@a12bfea`-sourced file is
+  byte-identical, including `root/configurator`. No orphan paths, no
+  `__pycache__` artefact, 56/56 offline-package changes are *upgrades* (so the
+  guard-6.3 persisted cache is not serving stale packages), and two runs five
+  hours apart are identical. **Driving `builder/build-iso.sh` instead of
+  `omarchy-iso-make` changed nothing in the artifact.**
+- **Product 🔴 broken.** `iso/RUNTIME` says `6d7826d`; the ISO bundles
+  `omarchy-dev-4.0.0.r1667.g4727bad` — 50 commits later, past the
+  `536fcd5c` rename. §0's **(INFERRED)** prediction is now **MEASURED**: the
+  shipped orchestrator calls `/usr/bin/omarchy-setup-system`, and that package
+  contains **zero** paths matching `setup-system` (no file, no symlink, no
+  `.INSTALL` shim). This ISO cannot finish an install.
+
+**So: T5b first, T5c after.** T5b needs only the pipeline, which is proven, and
+its whole content is the fix. T5c stays blocked because (a) `[V]`-tier
+verification is unreachable through a base that dies at phase 5, and (b) its
+"zero NVIDIA packages" assertion would be measured against a mirror whose
+composition drifts daily — the runtime's `omarchy-base.packages` gained
+`libvips` + `zbar` (and 4 resolved packages) inside this one comparison.
+
+Two notes for T5b: **guard 6.4 now has a real failing case** to test against
+(the check above, run by hand, fires on today's artifact); and `--local-source`
+*builds* the runtime rather than downloading it, so the re-parity check must
+compare the **version string and file list**, never the archive checksum.
+`docs/findings/T5a-parity.md` §7 states the exact re-measurement that closes T5a.
 
 ---
 

@@ -354,12 +354,14 @@ check("shift's hint names the LEFT trigger", osk.SHIFT_KEY.hint, osk.HINT_LEFT)
 check("backspace's hint names the RIGHT trigger", osk.BACKSPACE_KEY.hint, osk.HINT_RIGHT)
 check("enter's hint names the RIGHT trigger", osk.ENTER_KEY.hint, osk.HINT_RIGHT)
 
-# The hint must agree with reality: a trigger only ever fires keys on its OWN
-# half (TRIGGER_HALF), so a hint naming the other one would be confidently
-# wrong -- worse than carrying no hint at all.
+# The hint must agree with reality: a TRIGGER hint only ever fires keys on its
+# OWN half (TRIGGER_HALF), so a hint naming the other one would be confidently
+# wrong -- worse than carrying no hint at all. This check is scoped to
+# hint_shape == RECT on purpose: HINT_SPACE (below) is a face-button
+# shortcut, not a trigger, and TRIGGER_HALF has nothing to say about it.
 HINT_TRIGGER_HALF = {code: half for code, half in osk.TRIGGER_HALF.items()}
 HALF_BY_HINT = {osk.HINT_LEFT: "left", osk.HINT_RIGHT: "right"}
-check("every hint constant maps to a real trigger's half",
+check("every trigger hint constant maps to a real trigger's half",
       set(HALF_BY_HINT.values()) <= set(HINT_TRIGGER_HALF.values()), True)
 
 hint_mismatches = []
@@ -367,10 +369,85 @@ for layer in osk.LAYERS.values():
     for half in ("left", "right"):
         for row in layer.half(half):
             for key in row:
-                if key.hint and HALF_BY_HINT.get(key.hint) != half:
+                if (key.hint and key.hint_shape == osk.HINT_SHAPE_RECT
+                        and HALF_BY_HINT.get(key.hint) != half):
                     hint_mismatches.append((layer.name, half, key.label, key.hint))
-check("every hinted key's glyph names the trigger for the half it is drawn in",
-      hint_mismatches, [])
+check("every trigger-hinted key's glyph names the trigger for the half it is "
+      "drawn in", hint_mismatches, [])
+
+# --- hint_shape: T8 §9f's second badge shape ---------------------------------
+#
+# Face buttons (Y) draw as a circle; triggers/stick-clicks (L2/R2) draw as a
+# rounded rectangle. A key with no hint carries no shape either -- there is
+# nothing to draw, and a stray shape on an unhinted key is a latent bug a
+# renderer could act on by accident.
+check("a key with no hint has no hint_shape either", q.hint_shape, "")
+check("shift (a trigger hint) has the RECT shape",
+      osk.SHIFT_KEY.hint_shape, osk.HINT_SHAPE_RECT)
+check("backspace (a trigger hint) has the RECT shape",
+      osk.BACKSPACE_KEY.hint_shape, osk.HINT_SHAPE_RECT)
+check("space (a face-button hint) has the CIRCLE shape",
+      osk.SPACE_KEY.hint_shape, osk.HINT_SHAPE_CIRCLE)
+
+shape_mismatches = []
+for layer in osk.LAYERS.values():
+    for half in ("left", "right"):
+        for row in layer.half(half):
+            for key in row:
+                if bool(key.hint) != bool(key.hint_shape):
+                    shape_mismatches.append((layer.name, half, key.label,
+                                             key.hint, key.hint_shape))
+check("every key has a hint_shape iff it has a hint", shape_mismatches, [])
+
+# --- HINT_SPACE: the one Valve badge that IS true of our own mapper ---------
+#
+# T8 §9a checked all four of Valve's face-button badges against the real
+# mapper table and found exactly one honest: Y -> Space (BTN_WEST ->
+# KEY_SPACE, src/deck-input-mapper.py). X -> Backspace is NOT true here (X is
+# Tab and the STEAM+X chord key), so space is the only key that gets a
+# face-button badge; nothing else should.
+check("space carries the Y face-button hint", osk.SPACE_KEY.hint, osk.HINT_SPACE)
+face_badges = [(layer.name, half, key.label)
+               for layer in osk.LAYERS.values()
+               for half in ("left", "right")
+               for row in layer.half(half) for key in row
+               if key.hint_shape == osk.HINT_SHAPE_CIRCLE]
+check("space is the ONLY key carrying a face-button (circle) badge, in "
+      "every layer it appears in",
+      face_badges, [("letters", "right", "space"), ("symbols", "right", "space")])
+
+# --- is_action_key: T8 §9f's "darker than letter keys" classification --------
+
+check("a letter is never an action key", osk.is_action_key(q), False)
+check("a digit is not an action key -- it prints two faces like a letter does",
+      osk.is_action_key(one), False)
+check("shift IS an action key", osk.is_action_key(osk.SHIFT_KEY), True)
+check("space IS an action key", osk.is_action_key(osk.SPACE_KEY), True)
+check("tab IS an action key", osk.is_action_key(osk.TAB_KEY), True)
+check("backspace IS an action key", osk.is_action_key(osk.BACKSPACE_KEY), True)
+check("enter IS an action key", osk.is_action_key(osk.ENTER_KEY), True)
+check("close IS an action key", osk.is_action_key(osk.CLOSE_KEY), True)
+
+slash_key = osk.key_at(osk.SYMBOLS, "left", 0.1, 0.6)
+check("punctuation with a shift_label is not an action key either",
+      osk.is_action_key(slash_key), False)
+arrow_left = osk.key_at(osk.SYMBOLS, "left", 0.3, 0.6)
+check("an arrow key (no typing face at all) IS an action key",
+      osk.is_action_key(arrow_left), True)
+
+# Exhaustive, not sampled: every key in the layout is exactly one of "letter",
+# "printable with a shift_label", or "action" -- and is_action_key must agree
+# with which, everywhere, in both layers.
+action_mismatches = []
+for layer in osk.LAYERS.values():
+    for half in ("left", "right"):
+        for row in layer.half(half):
+            for key in row:
+                should_be_action = not key.is_letter and not key.shift_label
+                if osk.is_action_key(key) != should_be_action:
+                    action_mismatches.append((layer.name, half, key.label))
+check("is_action_key agrees with (not letter, not shift_label) everywhere",
+      action_mismatches, [])
 
 # --- layers -------------------------------------------------------------------
 

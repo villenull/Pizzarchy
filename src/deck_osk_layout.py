@@ -64,7 +64,11 @@ class Key:
     target: str = ""  # layer name, for action == "layer"
     span: int = 1
     is_letter: bool = False  # caps lock applies to these and nothing else
-    hint: str = ""  # "" -> no controller-glyph hint; else HINT_LEFT | HINT_RIGHT
+    hint: str = ""  # "" -> no controller-glyph hint; else HINT_LEFT | HINT_RIGHT | HINT_SPACE
+    # T8 §9f: the reference draws two badge SHAPES and the distinction is
+    # semantic, not decorative -- face buttons (Ⓧ/Ⓨ) in a circle, triggers and
+    # stick clicks (L2/R2/L3) in a rounded rectangle. "" whenever hint == "".
+    hint_shape: str = ""
 
     @property
     def types(self) -> bool:
@@ -105,10 +109,16 @@ def sym(code: int, base: str, shifted: str) -> Key:
 
 
 def act(action: str, label: str, span: int = 1, target: str = "", code: int = 0,
-        hint: str = "") -> Key:
+        hint: str = "", hint_shape: str = "") -> Key:
     """A key that changes state (shift/layer/close) or types a control key."""
+    # A hint with no explicit shape defaults to "rect": every hint that
+    # existed before T8 §9f was a trigger badge (L2/R2), so this keeps every
+    # existing call site below unchanged. Only the space key's new face-button
+    # badge (HINT_SPACE) passes hint_shape explicitly.
+    if hint and not hint_shape:
+        hint_shape = HINT_SHAPE_RECT
     return Key(code=code, label=label, action=action, target=target, span=span,
-               hint=hint)
+               hint=hint, hint_shape=hint_shape)
 
 
 # --- controller-glyph hints (T8 §9, operator request 2026-08-11) -------------
@@ -125,6 +135,46 @@ def act(action: str, label: str, span: int = 1, target: str = "", code: int = 0,
 # glyph agrees with the half it is actually drawn in, on every layer.
 HINT_LEFT = "L2"
 HINT_RIGHT = "R2"
+
+# T8 §9a/§9f: a THIRD hint, and it is not a trigger at all. §9a's collision
+# table checked every one of Valve's four face-button badges against the real
+# mapper table (src/deck-input-mapper.py) and found exactly one true: "Y =
+# Space" (BTN_WEST -> KEY_SPACE). "X = Backspace" is NOT true here -- X is Tab
+# and the STEAM+X chord key -- so unlike Y it gets no badge; adding one would
+# be confidently wrong, the exact failure mode HINT_LEFT/RIGHT's own warning
+# names. HINT_SPACE is a face-button shortcut, not a per-half trigger, so it
+# is deliberately absent from TRIGGER_HALF and from the half-agreement check
+# below -- see the "circle badges" section of `test-deck-osk-layout.py`.
+HINT_SPACE = "Y"
+
+# T8 §9f: the reference draws two badge SHAPES and the distinction is
+# semantic -- face buttons in a white CIRCLE, triggers/stick-clicks in a white
+# ROUNDED RECTANGLE. Reproduced with our own glyphs and our own shapes, never
+# Valve's artwork (docs/findings/P16-redistribution-and-trademark.md): the
+# renderer draws these primitives itself from `hint_shape`, nothing is copied.
+HINT_SHAPE_CIRCLE = "circle"  # face buttons -- currently just HINT_SPACE
+HINT_SHAPE_RECT = "rect"      # triggers and stick clicks -- HINT_LEFT/RIGHT
+
+
+def is_action_key(key: Key) -> bool:
+    """T8 §9f: "modifier and action keys are visibly DARKER than letter
+    keys -- a black key face against the letters' dark grey." This is the
+    classification a renderer with colour draws that distinction from.
+
+    A letter is never one. A digit or punctuation key (anything carrying a
+    `shift_label`) prints two characters on its face exactly the way a
+    letter prints one, so it reads as a typing key too and is excluded for
+    the same reason. Everything left -- shift, the layer switch, close,
+    space, tab, backspace, enter, and the symbols layer's editing/arrow
+    keys -- is a modifier or an action, never a character, and darkens.
+
+    Pure and renderer-agnostic on purpose: the Wayland renderer is the only
+    one that can currently PAINT the distinction (a bare console has no
+    colour), but the classification itself belongs in the shared core so
+    both renderers -- and their tests -- read it from one place rather than
+    each guessing which keys count.
+    """
+    return not key.is_letter and not key.shift_label
 
 
 # --- the layouts -------------------------------------------------------------
@@ -156,7 +206,13 @@ DIGITS_RIGHT = tuple(_D[c] for c in "67890")
 # against.
 SHIFT_KEY = act("shift", "shift", span=2, hint=HINT_LEFT)
 CLOSE_KEY = act("close", "close", span=2)
-SPACE_KEY = act("", "space", span=3, code=e.KEY_SPACE)
+# T8 §9f's clearest divergence: the reference draws space as ONE wide key
+# with the Ⓨ badge at its LEFT EDGE, not a separate Y key beside a plain
+# space. This key already IS one wide key (span=3) -- what was missing was
+# the badge, which is true to our own mapper (HINT_SPACE's own docs) rather
+# than copied from Valve's icon.
+SPACE_KEY = act("", "space", span=3, code=e.KEY_SPACE,
+                hint=HINT_SPACE, hint_shape=HINT_SHAPE_CIRCLE)
 TAB_KEY = act("", "tab", code=e.KEY_TAB)
 BACKSPACE_KEY = act("", "back", code=e.KEY_BACKSPACE, hint=HINT_RIGHT)
 ENTER_KEY = act("", "enter", code=e.KEY_ENTER, hint=HINT_RIGHT)

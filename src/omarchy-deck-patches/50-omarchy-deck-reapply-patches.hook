@@ -1,0 +1,45 @@
+##
+## ALPM PostTransaction hook -- re-apply the Omarchy Deck patch set after any
+## transaction that could have reverted it.
+##
+## Installed by the `omarchy-deck` package to /usr/share/libalpm/hooks/, NOT to
+## /etc/pacman.d/hooks/: that is where upstream Omarchy's own three hooks land
+## from a package, and it leaves /etc/pacman.d/hooks/ free as the operator's
+## override directory.
+##
+## THE THREE DECISIONS IN THIS FILE, EACH MEASURED
+##
+##  1. `Type = Package`, NEVER `Type = Path`. Measured (T12 finding §2, M3):
+##     when upstream RENAMES the patched file, a Path trigger silently stops
+##     firing and the machine quietly loses the fix forever. The Package
+##     trigger still fires, and the applier then fails loudly with
+##     `missing_target`. Silence versus noise -- that is the whole choice.
+##
+##  2. Both the `-dev` and the stable package names. Operator decision §5.25 #6
+##     is to move to 4.0 stable when it lands, and the stable package is
+##     `omarchy`. A trigger naming only `omarchy-dev` becomes a silent no-op at
+##     that rename: the same failure class as (1), arriving by a different door.
+##
+##  3. `50-`. Hooks run in filename order. Upstream ships 00- (the update
+##     guard), 10- (Hyprland reload pause) and 90- (reload resume), so 50-
+##     lands after the pause and before the resume.
+##
+## A PostTransaction hook CANNOT abort the transaction -- AbortOnFail is a
+## PreTransaction property -- so a non-zero exit here only colours the pacman
+## transcript. That is why omarchy-deck-patch-check.service exists as well.
+##
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = omarchy-dev
+Target = omarchy
+Target = omarchy-settings-dev
+Target = omarchy-settings
+
+[Action]
+Description = Re-applying Omarchy Deck patches to upstream files...
+When = PostTransaction
+Depends = omarchy-deck
+Exec = /usr/bin/omarchy-deck-apply-patches --from-hook

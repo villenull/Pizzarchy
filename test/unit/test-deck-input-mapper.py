@@ -1284,6 +1284,74 @@ env_text = "\n".join([
     "QUOTED='a value with spaces'",
     "EMPTY=",
 ])
+# 🔴 THE FORM THAT ACTUALLY OCCURS, and the one this suite originally missed.
+# These six lines are VERBATIM from the test Deck's own `systemctl --user
+# show-environment` on a real session (captured 2026-08-11). On that machine
+# SIX values are ANSI-C quoted and ZERO are plain-quoted -- so the `'...'`
+# fixtures below test a form systemd never emitted here, while the form it
+# always emits went unhandled.
+#
+# The cost was not theoretical: `$'wayland,x11,*'` reached GTK verbatim, GTK
+# reported `No such backend: $'wayland`, and the layer-shell keyboard fell
+# back to an ordinary window. It still appeared -- full-screen instead of
+# anchored -- and would NOT have rendered above `ext-session-lock`, silently
+# undoing the §5.24 lock fix that had been verified in pixels. **The keyboard
+# worked, and was wrong.** Caught only because a human looked at the panel
+# and said the keyboard was the size of the screen.
+DECK_REAL_ENV = "\n".join([
+    "DEBUGINFOD_URLS=$'https://debuginfod.archlinux.org '",
+    "EDITOR=$'omarchy-launch-editor --inline'",
+    "GDK_BACKEND=$'wayland,x11,*'",
+    "HYPRLAND_CMD=$'Hyprland --watchdog-fd 4'",
+    "QT_QPA_PLATFORM=$'wayland;xcb'",
+    "UWSM_FINALIZE_VARNAMES=$'HYPRLAND_INSTANCE_SIGNATURE HYPRLAND_CMD HYPRCURSOR_THEME'",
+    "WAYLAND_DISPLAY=wayland-1",
+])
+real = m.parse_show_environment(DECK_REAL_ENV)
+check("the ANSI-C form GTK choked on parses to a usable backend list",
+      real.get("GDK_BACKEND"), "wayland,x11,*")
+check("...and Qt's, which would have broken every Qt child the same way",
+      real.get("QT_QPA_PLATFORM"), "wayland;xcb")
+check("an ANSI-C value containing spaces survives whole",
+      real.get("HYPRLAND_CMD"), "Hyprland --watchdog-fd 4")
+check("a trailing space inside the quotes is not trimmed away",
+      real.get("DEBUGINFOD_URLS"), "https://debuginfod.archlinux.org ")
+check("bare values still parse alongside them",
+      real.get("WAYLAND_DISPLAY"), "wayland-1")
+check("all seven real lines parsed", len(real), 7)
+
+# The escapes systemd's own cescape_char can emit.
+check("\\n decodes", m.unescape_ansi_c(r"a\nb"), "a\nb")
+check("\\t decodes", m.unescape_ansi_c(r"a\tb"), "a\tb")
+check("an escaped quote decodes -- the reason the form exists at all",
+      m.unescape_ansi_c(r"it\'s"), "it's")
+check("a literal backslash decodes to one backslash",
+      m.unescape_ansi_c(r"a\\b"), "a\\b")
+check("\\xNN decodes", m.unescape_ansi_c(r"a\x41b"), "aAb")
+check("octal decodes", m.unescape_ansi_c(r"a\101b"), "aAb")
+# Bytes, not characters: a multi-byte UTF-8 character arrives as several \xNN
+# pairs and must reassemble, not become two replacement characters.
+check("two \\xNN halves of one UTF-8 character reassemble",
+      m.unescape_ansi_c(r"\xc3\xa9"), "é")
+# ⚠️ Unknown escapes are kept LITERALLY. Guessing corrupts a value silently;
+# leaving it visible does not.
+check("an unrecognised escape is kept whole, backslash included",
+      m.unescape_ansi_c(r"a\qb"), "a\\qb")
+check("a trailing backslash never raises", m.unescape_ansi_c("a\\"), "a\\")
+check("a truncated hex escape is kept literal, not half-decoded",
+      m.unescape_ansi_c(r"a\x4"), "a\\x4")
+check("an out-of-range octal escape stays literal rather than wrapping",
+      m.unescape_ansi_c(r"a\777b"), "a\\777b")
+check("an empty ANSI-C value is empty, not dropped",
+      m.parse_show_environment("FOO=$''").get("FOO"), "")
+# ⚠️ THROUGH THE PARSER, not the decoder directly. Every escape assertion
+# above calls unescape_ansi_c() itself, so all of them still pass if the
+# parser merely strips the `$'` and `'` and never decodes anything -- which
+# is a real mutation this suite let through until this line existed. The
+# whole point of the branch is that it DECODES, so that is what gets checked.
+check("the parser actually decodes, it does not just strip the wrapper",
+      m.parse_show_environment(r"FOO=$'a\tb\nc'").get("FOO"), "a\tb\nc")
+
 parsed = m.parse_show_environment(env_text)
 check("a plain assignment parses", parsed.get("WAYLAND_DISPLAY"), "wayland-1")
 # The DBus address contains '=' in its VALUE. Splitting on every '=' rather

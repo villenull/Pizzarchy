@@ -1,0 +1,51 @@
+# 0010-lock-blank-timer-20s -- metadata and post-conditions.
+#
+# Parsed by omarchy-deck-apply-patches. Format: `key: value`, one per line,
+# `#` comments, blank lines ignored. An UNKNOWN key is a hard error -- a
+# post-condition that was silently ignored because of a typo is worse than no
+# post-condition, because it also buys false confidence.
+#
+# WHY THIS PATCH EXISTS
+#
+# The lock screen blanks the panel ~5 s after locking, which on a handheld
+# reads as "it died". docs/PROGRESS.md §5.24 measured ~5-6 s;
+# docs/findings/T9-lock-wake-and-blank-timing.md §3 traced it to a hardcoded
+# QML Timer, NOT to Hyprland's DPMS timeout and NOT to any shell.json key --
+# there is no config knob for this value upstream. §5.2 of that finding is the
+# source of the one-line diff.
+#
+# WHY IT IS A PATCH AND NOT A `sed`
+#
+# Upstream retuned this exact literal three times in two months:
+#   35a6940 (2026-06-20) 30000 -> 3000   "Just 3 seconds of screen on after lock"
+#   af82848 (2026-07-04)  3000 -> 5000   "Give it a little more time"
+# A sed would match nothing on the next retune, exit 0, and lose the fix in
+# silence. The context lines below turn that same event into a reject, which is
+# the entire point of this mechanism.
+#
+# EXPECT TO REBASE THIS ROUGHLY MONTHLY. shell/plugins/lock/Service.qml is the
+# single BREAKS US row of docs/findings/T9-delta-classification.md and had 17
+# commits in three months. That is a known, accepted, and *loud* cost.
+#
+# NOT IN SCOPE: patching out recoverStrandedLock(), which lives in this same
+# file. Operator decision §5.25 #1 chose masking + above_lock instead. It is a
+# behavioural change to a security-relevant path and needs its own patch, its
+# own approval and its own hardware gate (T12 finding §6.3).
+
+requirement: docs/PROGRESS.md §5.24a row 2 -- the lock screen must keep the panel lit ~20 s, not ~2-5 s
+description: shell/plugins/lock/Service.qml idleBlankTimer.interval 5000 -> 20000
+target: shell/plugins/lock/Service.qml
+
+# The new value must be there exactly once...
+assert_count: shell/plugins/lock/Service.qml|^    interval: 20000$|1
+# ...and the old value must be gone. Both directions matter: a patch that
+# lands on the wrong one of several similar hunks would satisfy the first
+# assertion alone. `interval: 5000` occurs exactly once in the file at the
+# RUNTIME pin 6d7826d (verified), so 0 is the right expectation after the
+# patch.
+assert_count: shell/plugins/lock/Service.qml|^    interval: 5000$|0
+# The file is loaded by a QML engine minutes-to-hours later, on a device with
+# no terminal. qmllint exits 0 on the correctly patched file despite its
+# unresolvable qs.* imports, and 255 on broken QML (both verified, T12 finding
+# §7). It ships with qt6-declarative, which quickshell depends on.
+qmllint: shell/plugins/lock/Service.qml

@@ -9,42 +9,76 @@ work without waiting for further instruction.**
 > the session numbers are not. The older blocks are kept below and are still
 > broadly true — where they disagree with this one, this one wins.)*
 >
-> ### 🔴 READ THIS FIRST — the RELEASE BLOCKER now has a fix, and the fix is UNVERIFIED
+> ### ✅ THE RELEASE BLOCKER IS CLOSED — verified on a cold boot, 2026-08-11
 >
-> **§5.28: on a fresh boot to the desktop, the Deck has NO ON-SCREEN KEYBOARD,
-> no app launcher and no menu.** Measured on hardware by cold-booting and
-> pressing the buttons before touching anything. `systemctl --user restart
-> deck-input-mapper` fixes all three instantly.
+> **§5.28 is done.** The mapper's children were born blind on a fresh boot (no
+> keyboard, no launcher, no menu, on a device with no physical keyboard). The
+> fix resolves the session environment at run time instead of inheriting it,
+> polling on the main loop's clock. **Verified the only way it could be:** the
+> operator powered the Deck off, booted it, and pressed the three buttons
+> before touching anything. All three worked, and the journal caught the race
+> happening and being closed:
 >
-> The mapper starts before uwsm imports the session environment, so its whole
-> environment is `XDG_RUNTIME_DIR=/run/user/1000` — no `WAYLAND_DISPLAY`, no
-> `OMARCHY_PATH`. The mapper does not care; **its children do**, and both the
-> menus and the layer-shell OSK are children.
+> ```
+> [18.157] the session environment is not ready yet (missing WAYLAND_DISPLAY,
+>          HYPRLAND_INSTANCE_SIGNATURE) ... which is what this polls for
+> [19.159] session environment resolved
+> ```
 >
-> ⚠️ **The obvious fix is a trap.** `After=graphical-session.target` creates an
-> ordering cycle systemd resolves by **deleting the start job**, so the unit
-> silently never runs — already measured, already documented in the unit.
+> **The Gaming→Desktop switch path passes too** — it had never been tested.
 >
-> **🟡 Session 21 implemented the real fix and it is NOT VERIFIED.**
-> `src/deck-input-mapper.py` grew a `SessionEnv` resolver: it polls
-> `systemctl --user show-environment` **on the main loop's clock** (never on a
-> button press) until `WAYLAND_DISPLAY`, `HYPRLAND_INSTANCE_SIGNATURE` and
-> `OMARCHY_PATH` are all present, then caches; **every** child — menus,
-> layer-shell OSK, focus watcher, `hyprctl` — is now started with that
-> environment instead of inheriting. 302 assertions, **9/9 mutations caught**,
-> two of them structural because `main()` cannot be entered without a device.
-> Details and the honest limits: `docs/PROGRESS.md` §5.28 "The fix".
+> ### 🔴 READ THIS BEFORE ANYTHING ELSE: the first fix shipped a working-but-wrong keyboard
 >
-> 🔴 **The mapper has still never started on a cold-booted Deck with this code.**
-> **The test must boot the machine: a mapper restarted by hand always passes** —
-> that is exactly how the bug shipped. Next Deck session: cold boot, press STEAM
-> / QAM / STEAM+X **before touching anything**, then `journalctl --user -u
-> deck-input-mapper` for `session environment resolved`. Only then is §5.28
-> closed.
+> §5.30a. The parser handled `'...'` and `"..."`; **a real session emits six
+> values as `$'...'` and none in either form.** `GDK_BACKEND=$'wayland,x11,*'`
+> reached GTK verbatim, and the layer-shell keyboard fell back to an **ordinary
+> window** — it appeared, full-screen instead of anchored, and **would not have
+> drawn above `ext-session-lock`**, silently undoing the §5.24 lock fix that had
+> been verified in pixels.
 >
-> ⚠️ **The Gaming→Desktop switch path is a second, separate cold case** (§5.28's
-> own note): switch modes and press the same three buttons without restarting
-> anything.
+> ⚠️ **The keyboard worked. Every check passed. The operator noticed it was the
+> size of the screen.** That was the entire detection. Fixed, redeployed, and
+> re-confirmed on the panel. **The commit that introduced it had flagged the
+> exact gap and shipped anyway** — treat "covered only by synthetic input" as a
+> defect report, not a caveat.
+>
+> ### ✅ T10 WAS RUN — rows 1–3, 6, 8 pass; the decision is YOURS and is not made
+>
+> `docs/findings/T10-steam-extest-results.md`. **Steam's own keyboard does drive
+> our Wayland desktop through extest** — trackpad-typed letters landed in a
+> Wayland-native client's *file*, not just on its screen. Three corrections to
+> T10's own procedure are in that file; **each alone would have produced a wrong
+> answer**, starting with "deploy both extest builds, not just i686 — nine
+> 64-bit `steamwebhelper` processes reject it".
+>
+> Row 4 (touch) fails for reasons unrelated to Steam. **Row 7 (the lock) was
+> skipped**; its prediction is *inferred*. Unchanged either way: **our OSK stays
+> the installer's and the lock's keyboard**, because Steam's is XWayland and
+> cannot render above `ext-session-lock`. The OSK touch/restyle plan stays on
+> hold until the operator decides.
+>
+> ### 🔴 Two NEW open issues, both found by looking rather than checking (§5.30)
+>
+> - **`hyprctl dispatch`'s old string syntax is a Lua SYNTAX ERROR on Hyprland
+>   0.56.2** — a parse error, not a no-match, and **silent when stderr is
+>   discarded**. Audit `docs/RECOVERY.md` and `src/deck-session.sh`. Working
+>   form and the full API listing are in the T10 findings.
+> - **The touchscreen does nothing anywhere on the desktop.** Kernel exposes it,
+>   Hyprland has it bound, nothing responds. Never tested before. The approved
+>   touch/restyle plan assumes touch works.
+>
+> ### Where the ISO work stands — parity is NOT proven, and T5c is blocked
+>
+> `iso/bin/build` ran to completion for the first time ever (the submodule had
+> never been checked out). **The pipeline reproduces the reference almost
+> exactly** — the entire ISO path diff is *one* timestamped filename. **But the
+> artifact bundles a runtime 50 commits past `iso/RUNTIME`** that ships
+> `omarchy-apply-system` and **no `omarchy-setup-system`** — the exact binary
+> the installer shells out to. That ISO dies at phase 5 of 14, after
+> partitioning and ~1200 packages. Verdict and evidence:
+> `docs/findings/T5a-parity.md`. **T5c stays blocked; T5b is the fix**, is
+> committed in a worktree, and needs one operator decision (an `iso/PKGS` pin —
+> a third input nobody had counted).
 >
 > ### ✅ The P2.9 Deck session is COMPLETE — all seven sections
 >
