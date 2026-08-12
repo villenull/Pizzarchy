@@ -77,18 +77,42 @@ work without waiting for further instruction.**
 > its `src` argument, the QAM probe's `pads[-1]`, the snapshot number). **A
 > procedure nobody has run is a hypothesis.**
 >
-> ### Landed from four parallel agents, all merged, 16 suites green
+> ### Landed from THREE of five parallel agents; two did not finish
+>
+> *(An earlier version of this section said "four agents, all merged". Wrong —
+> corrected at close-out after checking the worktrees rather than memory.)*
+>
+> **Merged, 16 suites green:**
 >
 > - **T5a**: `iso/` skeleton — pins, submodule at `a12bfea`, `bin/build`, guards
->   6.1/6.3, `test-iso-build.sh`. ⚠️ **Parity build was still running at session
->   end — the claim is UNPROVEN.** Do not treat the skeleton as validated.
-> - **T4 harness** and the **lock-wake source trace**
+>   6.1/6.3, `test-iso-build.sh`. 🔴 **The parity build's outcome is UNKNOWN** —
+>   verified at close-out: no container, no ISO, no log survives. Treat parity as
+>   **not run**. `T5-fork-plan.md` §7: do not start T5c before parity is proven.
+> - The **lock-wake source trace**
 >   (`docs/findings/T9-lock-wake-and-blank-timing.md`) — the 5 s blank is a
->   **hardcoded `interval: 5000`** in Omarchy's `lock/Service.qml`, which matches
->   the hardware measurement exactly.
+>   **hardcoded `interval: 5000`** in Omarchy's `lock/Service.qml`, matching the
+>   hardware measurement exactly, from two independent directions.
 > - **OSK auto-hide + SteamOS visual parity** (T8 §9) — `LockWatcher`, glyph
->   hints, shifted legends. **Committed and merged, NOT deployed, never seen on
->   the panel.**
+>   hints, shifted legends, divider since removed on the operator's eyes.
+>   **Merged and deployed to the Deck; the restyle was seen on the panel.**
+>
+> **Not finished, work parked:**
+>
+> - **The T4 installer-screens harness**: its agent never committed. Three
+>   untracked files sit in `.claude/worktrees/agent-abe947f455288211c/` —
+>   `test/lib/vm-installer-screens.sh`, `test/unit/test-installer-harness-primitives.sh`,
+>   `test/vm/vm-installer-screens-test.sh`. **Inspect and salvage or re-run the
+>   task; do not assume they work** — nothing has ever executed them.
+> - **The T8 §9d layout-parity agent**: paused deliberately, plan-ready, zero
+>   commits (see the T10 section below for why). The operator's two decisions it
+>   was waiting on — **wire Y through then badge it; Caps/Shift option C** — are
+>   recorded in `~/.claude/plans/proud-finding-wreath.md` and in T8 §9. If T10
+>   says "our OSK", relaunch that work from those documents.
+>
+> **Git: everything through session 20 is on `main` and pushed.** Verify with
+> `git rev-list --left-right --count origin/main...main`, never by trusting this
+> line. Suites: **16** (run BOTH globs — `test/unit/test-*.sh` and `test-*.py`),
+> plus `test/osk-tty-e2e.py` and `test/xtest-*.py` by hand.
 >
 > ### The three operator requests still OPEN (§5.24a)
 >

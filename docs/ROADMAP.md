@@ -214,13 +214,22 @@ this procedure runs, not the first.
       with cause** — our image already carried identical inputs
 - [x] Substrate rebuilt on the shipped channel with the boot chain **asserted**;
       all 15 unit suites and **all four VM suites** green on it
-- [ ] ~~The Deck runs beta 2~~ — **it already does**, having been installed from
-      our ISO. Confirm with one `omarchy-version`: P2.9 runbook §8
-- [ ] The hands-on list signed off **on screen** — `docs/tasks/P2.9-deck-session-runbook.md`
+- [x] ~~The Deck runs beta 2~~ — **confirmed 2026-08-11**: `omarchy-version` =
+      `4.0.0.r1617.g6d7826d-1`, exactly the pin
+- [x] The hands-on list signed off **on screen** — **the runbook was executed IN
+      FULL, §1–§7, 2026-08-11 (session 20)**: lizard gate open, fallback proven,
+      QAM measured, the lock fix verified in pixels, both rotations upright,
+      Gaming Mode the default, 7/7 parity rows. ⚠️ One honest delta from P2.9f's
+      original wording: the **27 RE-VERIFY delta rows were not swept
+      individually** — the runbook's list was the executed scope. They gate
+      nothing until a move off the pin, which is P3.6's job |
 - [x] §7 re-checked: two facts corrected by measurement, thirteen added
 
-**Phase 2.9 is closed except for the two rows needing a human**, and both are
-folded into the P2.9 runbook rather than left dangling here.
+**Phase 2.9 is CLOSED, 2026-08-11 (session 20).** Both human rows were executed
+on hardware via the runbook; P2.9e's in-place update was **skipped with cause**
+(the Deck was measured already on the pin, so there was nothing to update — the
+stage re-runs, `dconf read -d`, lizard checks and both switch directions ran
+instead).
 
 ---
 
