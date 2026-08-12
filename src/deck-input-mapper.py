@@ -545,6 +545,12 @@ class Mapper:
         default_factory=lambda: {"left": [0, 0], "right": [0, 0]}
     )
 
+    # What `shift` was before L2 was pulled, or None while L2 is not holding it.
+    # This is the ONE piece of shift state this object owns, and it is not a
+    # mirror: it is what a MOMENTARY modifier has to remember in order to put
+    # back what it found. See `hold_osk_shift`.
+    osk_shift_prev: "str | None" = None
+
     # Whether the X we are holding emitted a real key-down. See translate():
     # without it, pressing X, then STEAM, then releasing X swallows the release
     # and leaves Backspace held down forever.
@@ -581,6 +587,20 @@ class Mapper:
             raise ValueError(f"half must be 'left' or 'right', got {half!r}")
         return any(sample)
 
+    def pad_touch_state(self) -> dict[str, bool]:
+        """Both pads at once, in the shape the wire protocol wants.
+
+        🔴 THIS IS THE THIRD ARGUMENT TO `format_state_line`, AND FOR ONE
+        RELEASE IT WAS NEVER PASSED. The protocol carried pad touch, the layout
+        core's `hint_visible()` consumed it, and the call site in `main()` still
+        used the two-argument form -- so the overlay was told every frame that
+        both pads were lifted. Badges never gated and both cursors stayed on
+        screen highlighting letters nobody was pointing at. Kept as a method
+        rather than a dict literal at the call site so the suite can assert the
+        call site passes THIS, and not a freshly-invented `{}`.
+        """
+        return {half: self.pad_touched(half) for half in self.pad_last}
+
     def reset_pad_touch(self) -> None:
         """Forget both pads. Called when the keyboard is shown, so a stale
         sample from the last showing cannot decide the first badge state."""
@@ -596,6 +616,11 @@ class Mapper:
         showing decides the first frame's badges.
         """
         self.reset_pad_touch()
+        # A keyboard dismissed with L2 physically down never sees that release
+        # (the chord is handled above the OSK branch, and a hidden keyboard
+        # routes the release to the navigation profile instead). Forgetting the
+        # saved value here is what stops the NEXT showing from restoring it.
+        self.osk_shift_prev = None
         if self.osk is not None:
             self.osk.shift = "off"
             self.osk.caps = False
@@ -616,6 +641,68 @@ class Mapper:
     def osk_caps(self) -> bool:
         """Is Caps latched? Drawn blue on the Caps key."""
         return self.osk is not None and bool(self.osk.caps)
+
+    # --- L2 is a MOMENTARY Shift (operator, 2026-08-12) ----------------------
+    #
+    # 🔴 THIS REVERSES A DELIBERATE DESIGN DECISION. L2 used to arm a ONE-SHOT
+    # shift, on the reasoning that "hold L2 while aiming" is a gesture this
+    # input model cannot offer -- the same trigger commits the instant a thumb
+    # lands on the left pad. The operator tested it and asked for hold-to-shift,
+    # "as on a pc". Their call wins; the interaction the old note worried about
+    # is real, so it is answered here rather than left to be rediscovered.
+    #
+    #   ⚠️ WHAT HAPPENS IF THE LEFT PAD IS TOUCHED WHILE L2 IS HELD: nothing at
+    #   all to the shift. It stays engaged until L2 physically comes up. A
+    #   modifier that evaporated because a thumb brushed a pad would type a
+    #   lowercase letter while the user was visibly holding shift, which §9a
+    #   calls the worst failure available -- confidently wrong. So touching the
+    #   left pad under a held L2 only AIMS (its cursor and highlight appear,
+    #   both L2 badges gate away). Committing from the left pad needs a fresh
+    #   L2 pull, which by definition means L2 came up first and shift went with
+    #   it. The reachable shifted-typing gestures are therefore:
+    #
+    #     two-handed -- hold L2, aim with the RIGHT pad, commit with R2. This is
+    #                   the PC gesture the operator asked for, and it repeats:
+    #                   the hold is a LOCK for its duration, so every key
+    #                   committed while L2 is down is shifted, not just the
+    #                   first.
+    #     one-handed -- the on-screen Shift key, untouched by any of this. It
+    #                   still cycles off -> once -> locked, so the one-shot the
+    #                   trigger used to offer is exactly where it always was.
+    #
+    # "locked" and not "once" is load-bearing: `OnScreenKeyboard.press()` spends
+    # a "once" on the first key it modifies, which would drop shift mid-hold
+    # after one character and make a held trigger behave like a tapped one.
+    # The old objection to a trigger reaching a shift LOCK was that a LATCHED
+    # lock is indistinguishable from Caps on screen; a lock that ends when the
+    # finger lifts cannot be latched, so that objection does not apply here.
+
+    def hold_osk_shift(self) -> None:
+        """Engage Shift for as long as L2 is down, remembering what it replaced.
+
+        Saving and restoring rather than forcing "off" on release: a lock the
+        user set from the on-screen Shift key must survive a trigger pull it
+        had nothing to do with. Re-entrant on purpose -- a second press with no
+        release in between (one lost while the keyboard was hidden) must not
+        overwrite the saved value with "locked".
+        """
+        if self.osk is None or self.osk_shift_prev is not None:
+            return
+        self.osk_shift_prev = self.osk.shift
+        self.osk.shift = "locked"
+
+    def release_osk_shift(self) -> None:
+        """L2 came up: put back whatever was there before it went down.
+
+        Runs whatever the left pad is doing now. The pad may well have been
+        touched since the press -- that is the interaction documented above --
+        and a shift left engaged after the trigger is up is the toggle the
+        operator asked us to remove.
+        """
+        if self.osk is None or self.osk_shift_prev is None:
+            return
+        self.osk.shift = self.osk_shift_prev
+        self.osk_shift_prev = None
 
     def pointer_delta(self, code: int, value: int, now: float) -> tuple[int, int]:
         """Right trackpad -> relative pointer motion. Returns (dx, dy).
@@ -729,25 +816,36 @@ class Mapper:
         """A trigger pulled while its own pad is UNTOUCHED -- Valve's second
         meaning for L2 and R2 (T8 §9g, and the operator's own words in §9e).
 
-        ⚠️ L2 is a ONE-SHOT Shift, not a held one, and it has to be: the same
-        physical trigger commits keys the instant a thumb lands on the left pad,
-        so "hold L2 while aiming" is a gesture this input model cannot offer.
-        Arming it and spending it on the next committed key is what the layout
-        core's `shift == "once"` already means, and what the on-screen Shift key
-        already does -- so both routes to Shift behave identically.
+        ⚠️ L2's Shift is MOMENTARY: engaged here, released in `_osk_release`.
+        The whole design, and the awkward case it has to answer, is written out
+        at `hold_osk_shift`. R2's Enter is unchanged -- a complete tap on the
+        press, nothing on the release, so it cannot stick down.
         """
         meaning = OSK_IDLE_TRIGGER.get(code)
         if meaning == "shift":
-            # Toggle, so a mis-pull is undone by a second pull. Deliberately
-            # NOT the Shift key's off -> once -> locked cycle: L3 owns Caps on
-            # this keyboard, and a trigger that could silently reach a shift
-            # LOCK would look identical to Caps and behave differently.
-            self.osk.shift = "off" if self.osk.shift != "off" else "once"
+            self.hold_osk_shift()
             return []
         key = OSK_IDLE_TRIGGER_KEYS.get(meaning)
         if key is None:
             return []
         return [(key, 1), (key, 0)]
+
+    def _osk_release(self, code: int) -> list[tuple[int, int]]:
+        """A button coming back UP while the keyboard is shown.
+
+        ⚠️ THE ONLY RELEASE THIS KEYBOARD ACTS ON, and it exists solely because
+        Shift is momentary. Everything else here emits a complete tap on the
+        press precisely so a keyboard dismissed mid-press cannot leave a key
+        held down, so their releases have nothing left to do.
+
+        Deliberately NOT gated on `pad_touched`: the press decided whether this
+        trigger was a Shift or a commit, and the pad state can have changed in
+        between. Gating the release the way the press is gated is the bug where
+        a thumb landing on the left pad during a hold strands Shift on for ever.
+        """
+        if OSK_IDLE_TRIGGER.get(code) == "shift":
+            self.release_osk_shift()
+        return []
 
     def _osk_event(self, etype: int, code: int, value: int) -> list[tuple[int, int]]:
         """Route one event to the on-screen keyboard. Returns keystrokes.
@@ -758,6 +856,14 @@ class Mapper:
         them. Everything else is deliberately swallowed: with the keyboard up, A
         must not also send Enter underneath, or every press does two things at
         once.
+
+        🔴 A TRIGGER OVER AN UNTOUCHED PAD NEVER COMMITS, and since the
+        operator's 2026-08-12 report that is also what the screen says: an
+        untouched pad draws no cursor dot and highlights no key, because there
+        is no thumb to point at one. The two halves of that rule have to agree
+        or the keyboard lies -- a visible highlight the trigger would not
+        commit is exactly §9a's confidently-wrong failure. The renderer's half
+        is `deck_osk_wayland.draw`, fed by `pad_touch_state()` over the wire.
 
         ⚠️ THE BUTTONS HERE ARE THE BADGES DRAWN ON THE KEYBOARD. Changing one
         without changing the other makes the keyboard lie about itself, which
@@ -771,9 +877,15 @@ class Mapper:
             self.note_pad_sample(code, value)
             self.cursors.update(code, value)
             return []
-        if etype != e.EV_KEY or value != 1:
-            # Releases and the pad's own autorepeat do nothing: every emission
-            # below is already a complete tap.
+        if etype != e.EV_KEY:
+            return []
+        if value == 0:
+            # ⚠️ Releases USED to be discarded here wholesale. L2's Shift is
+            # momentary now, so exactly one of them matters; see `_osk_release`.
+            return self._osk_release(code)
+        if value != 1:
+            # The pad's own autorepeat. Never a new press, and a repeat of L2
+            # must not be allowed to re-enter the hold and lose the saved state.
             return []
         half = TRIGGER_HALF.get(code)
         if half is not None:
@@ -2176,8 +2288,16 @@ def main() -> None:
             osk_dbus_toggle(True)
             return
         try:
+            # 🔴 THREE ARGUMENTS. The third is what tells the overlay which
+            # pads have a thumb on them -- the badge gate AND, since the
+            # operator's 2026-08-12 report, whether each cursor is drawn at
+            # all. The overlay cannot work it out: pad contact is an evdev
+            # fact (the last sample being exactly 0,0) and the overlay never
+            # sees the device. Dropping it back to two arguments compiles,
+            # runs, and silently reinstates both defects.
             osk_layer_proc.stdin.write(
-                osk_layout.format_state_line(mapper.osk, mapper.cursors))
+                osk_layout.format_state_line(mapper.osk, mapper.cursors,
+                                             mapper.pad_touch_state()))
             osk_layer_proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
             osk_layer_proc = None

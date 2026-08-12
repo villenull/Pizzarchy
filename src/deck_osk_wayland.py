@@ -401,9 +401,25 @@ def draw(cr, keyboard: osk.OnScreenKeyboard, cursors: osk.Cursors,
     # 🔴 `osk.UNITS`, BECAUSE THAT IS WHAT `key_rects` DRAWS. The default is
     # `CELLS` -- right for the TTY renderer and wrong here by up to half a key,
     # which would light a key the dot below is not sitting on.
+    #
+    # 🔴 AND ONLY THE TOUCHED HALVES. A cursor is where a THUMB is; a pad with
+    # no thumb on it has no cursor, so it lights nothing and draws no dot. The
+    # operator reported the old behaviour on hardware 2026-08-12: both dots
+    # stayed wherever they were last left, highlighting letters nobody was
+    # pointing at. It also made the keyboard lie -- the trigger over a lifted
+    # pad is Shift or Enter and would never have committed the key it was
+    # showing as selected (`deck-input-mapper.py::_osk_event`).
+    #
+    # ⚠️ The cost of the protocol's backward compatibility: a state line from a
+    # mapper too old to send the touch fields parses as NOTHING touched, and
+    # this draws no cursors at all. That is a hand-mixed debug build only --
+    # `stage-input-mapper` installs both halves together -- and it degrades to
+    # an aimless keyboard rather than a wrong one, because the mapper still
+    # commits from its OWN pad state. The badges stay visible in that frame for
+    # the same reason (§9f).
     hot = {found for found in
            (keyboard.locate(half, *cursors.position(half), osk.UNITS)
-            for half in HALVES)
+            for half in HALVES if half in touched)
            if found is not None}
 
     cr.select_font_face(FONT_FAMILY)
@@ -476,9 +492,15 @@ def draw(cr, keyboard: osk.OnScreenKeyboard, cursors: osk.Cursors,
     # cursors are drawn identically -- metrics §6: the reference has ONE cursor
     # treatment, not a colour per thumb, and ours used to tint whole keys cyan
     # and amber instead.
+    #
+    # 🔴 ONE DOT PER THUMB ON THE GLASS, and none for a pad nobody is touching
+    # -- the same gate as `hot` above, and it has to be the same gate or a dot
+    # floats over a key that is not highlighted. `touched` is iterated through
+    # HALVES rather than directly so the draw order is fixed rather than a
+    # set's.
     dot_r = row_h * CURSOR_DOT_RATIO / 2.0
     ring = row_h * CURSOR_RING_RATIO
-    for half in HALVES:
+    for half in (h for h in HALVES if h in touched):
         cx, cy = cursor_pixel(layer, half, cursors.position(half), width, height)
         cr.set_source_rgba(*CURSOR_DOT_RING)
         cr.arc(cx, cy, dot_r + ring, 0, TAU)

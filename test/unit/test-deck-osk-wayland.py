@@ -499,6 +499,20 @@ else:
                     break
         return found
 
+    def touching(*halves):
+        """A keyboard with a thumb on the named pads -- both, by default.
+
+        🔴 EVERY CURSOR ASSERTION BELOW NEEDS ONE. A cursor is only drawn for a
+        pad that is being TOUCHED (the operator's 2026-08-12 report: the dots
+        used to stay behind, highlighting letters nobody was pointing at), and
+        a fresh `OnScreenKeyboard` reports both pads lifted -- which is correct,
+        and is §9f's idle frame.
+        """
+        halves = halves or wl.HALVES
+        keyboard = osk.OnScreenKeyboard()
+        keyboard.touched = {half: half in halves for half in wl.HALVES}
+        return keyboard
+
     def face_box(row, col):
         """The key's own painted rectangle, inside the inter-key gap."""
         x, y, w, h = RECTS[(row, col)]
@@ -640,11 +654,16 @@ else:
 
     # Two poses, so no row is ever scanned with a cursor dot on it -- the dot
     # is the one thing drawn across the gaps, and it would bridge two runs.
+    #
+    # ⚠️ BOTH PADS MARKED TOUCHED, deliberately. Since the cursors gate on
+    # touch, a default keyboard draws no dots at all and this scan would have
+    # nothing to avoid -- the parking would still pass while testing less than
+    # it says. Touched keeps the dots real and the avoidance meaningful.
     def parked(y):
         c = osk.Cursors()
         c.pos["left"] = [0.5, y]
         c.pos["right"] = [0.5, y]
-        return render(cursors=c)
+        return render(touching(), cursors=c)
 
     parked_low, parked_high = parked(0.98), parked(0.02)
     for row_index in range(len(osk.LETTERS.rows)):
@@ -843,7 +862,7 @@ else:
     cursor_cur = osk.Cursors()
     cursor_cur.pos["left"] = [0.30, 0.55]
     cursor_cur.pos["right"] = [0.60, 0.28]
-    cursored = render(cursors=cursor_cur)
+    cursored = render(touching(), cursors=cursor_cur)
 
     # ⚠️ `osk.UNITS` -- the metric this renderer draws. With the default the
     # probes below would look for a white face on the key the CELL grid points
@@ -885,7 +904,7 @@ else:
     nudged = osk.Cursors()
     nudged.pos["left"] = [0.34, 0.55]
     nudged.pos["right"] = [0.60, 0.28]
-    nudged_surface = render(cursors=nudged)
+    nudged_surface = render(touching(), cursors=nudged)
     scan_y = int(wl.cursor_pixel(osk.LETTERS, "left", (0.30, 0.55), W, H)[1])
     check("the nudge stays on the same key, so only the dot can have moved",
           osk.locate(osk.LETTERS, "left", *nudged.position("left"), osk.UNITS),
@@ -894,6 +913,58 @@ else:
           "and not a decoration",
           dot_left_edge(nudged_surface, scan_y) > dot_left_edge(cursored, scan_y),
           True)
+
+    # --- 🔴 A LIFTED PAD HAS NO CURSOR AT ALL --------------------------------
+    #
+    # The operator's first reported defect, 2026-08-12: "the two circle
+    # indicators for the thumb trackpads should disappear if i don't have any
+    # fingers on the trackpad (they are currently still on the keyboard and
+    # highlighting letters)". BOTH halves of the cursor have to go -- the dot
+    # AND the white key face. Leaving the highlight behind would be the worse
+    # half of the two: it says a key is selected when the trigger over that
+    # lifted pad is Shift or Enter and would never commit it.
+    #
+    # The poses are the ones above, so the only difference between these
+    # surfaces and `cursored` is which pads are reported touched.
+
+    def dot_at(surf, half, cursors=cursor_cur):
+        cx, cy = wl.cursor_pixel(osk.LETTERS, half, cursors.position(half), W, H)
+        return region_has(surf, cx - 1, cy - 1, 3, 3, wl.CURSOR_DOT_FILL)
+
+    def face_lit(surf, hit):
+        hx, hy, hw, hh = face_box(*hit)
+        return region_has(surf, hx + 2, hy + 2, hw - 4, 4, wl.CURSOR_FACE)
+
+    lifted = render(osk.OnScreenKeyboard(), cursors=cursor_cur)
+    check("both pads lifted: neither dot is drawn",
+          (dot_at(lifted, "left"), dot_at(lifted, "right")), (False, False))
+    check("...and neither key is highlighted",
+          (face_lit(lifted, hits[0]), face_lit(lifted, hits[1])), (False, False))
+    # Not merely moved: nothing anywhere on the panel is cursor-coloured. A
+    # mutation that parked the dots off-key instead of skipping them would pass
+    # the two probes above and fail here.
+    check("...and no dot is drawn ANYWHERE, so they were skipped and not moved",
+          region_has(lifted, 0, 0, W, H, wl.CURSOR_DOT_FILL), False)
+
+    # Per pad, in both directions: one thumb down draws one cursor.
+    only_left = render(touching("left"), cursors=cursor_cur)
+    check("left pad alone draws the LEFT dot and highlight",
+          (dot_at(only_left, "left"), face_lit(only_left, hits[0])), (True, True))
+    check("...and neither the right dot nor the right highlight",
+          (dot_at(only_left, "right"), face_lit(only_left, hits[1])),
+          (False, False))
+    only_right = render(touching("right"), cursors=cursor_cur)
+    check("right pad alone draws the RIGHT dot and highlight",
+          (dot_at(only_right, "right"), face_lit(only_right, hits[1])),
+          (True, True))
+    check("...and neither the left dot nor the left highlight",
+          (dot_at(only_right, "left"), face_lit(only_right, hits[0])),
+          (False, False))
+    check("and with both down, both are drawn -- the gate is per pad, not a "
+          "switch that turns cursors off",
+          (dot_at(cursored, "left"), dot_at(cursored, "right"),
+           face_lit(cursored, hits[0]), face_lit(cursored, hits[1])),
+          (True, True, True, True))
 
     # --- 🔴 THE DRAWN RECT AND THE HIT-TESTED KEY AGREE, IN THE RASTER -------
     #
@@ -916,7 +987,7 @@ else:
         probe.pos[half] = [cx_n, cy_n]
         other = "right" if half == "left" else "left"
         probe.pos[other] = [0.99 if other == "right" else 0.01, 0.02]
-        surface = render(cursors=probe)
+        surface = render(touching(), cursors=probe)
         ux, uy, uw, uh = face_box(*want_units)
         check(f"{half} at ({cx_n}, {cy_n}): the WHITE face is on the key the "
               f"UNITS hit test names -- the one the renderer drew there",
@@ -1089,6 +1160,10 @@ else:
     for width, height in SIZES + ((320, 96), (2560, 716)):
         for layer_name in osk.LAYERS:
             keyboard = osk.OnScreenKeyboard(layer_name)
+            # Touched, so the cursor path is exercised at every size too -- with
+            # the pads lifted `cursor_pixel` is never called and a geometry
+            # crash there would go unseen at all but the Deck's own dimensions.
+            keyboard.touched = {"left": True, "right": True}
             cursors = osk.Cursors()
             cursors.update(e.ABS_HAT0X, MIN + 1)
             cursors.update(e.ABS_HAT0Y, MIN + 1)

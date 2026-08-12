@@ -930,6 +930,53 @@ check("and both can be touched at once",
 check("an unknown half is an error, not a quiet False",
       isinstance(raised(lambda: osk_mapper().pad_touched("middle")), ValueError), True)
 
+# --- 🔴 AND IT REACHES THE OVERLAY. This is the defect, not `pad_touched`. ---
+#
+# The wire protocol was extended to carry pad touch, the layout core's
+# `hint_visible()` was taught to consume it -- and the mapper went on calling
+# `format_state_line(osk, cursors)` with two arguments. Every frame told the
+# overlay both pads were lifted, so no badge ever gated and neither cursor ever
+# vanished, WHILE EVERY `pad_touched` TEST ABOVE STAYED GREEN. The state line
+# is the entire contract between the two processes; assert on the line.
+
+mm = osk_mapper()
+check("both pads lifted serialise as `up up`",
+      osk_mod.format_state_line(mm.osk, mm.cursors, mm.pad_touch_state())
+      .split()[-2:], ["up", "up"])
+touch(mm, "left")
+check("a thumb on the left pad reaches the wire as `down up`",
+      osk_mod.format_state_line(mm.osk, mm.cursors, mm.pad_touch_state())
+      .split()[-2:], ["down", "up"])
+touch(mm, "right")
+check("...and both as `down down`",
+      osk_mod.format_state_line(mm.osk, mm.cursors, mm.pad_touch_state())
+      .split()[-2:], ["down", "down"])
+check("the sides are not swapped -- right alone is `up down`",
+      osk_mod.format_state_line(osk_mapper().osk, osk_mapper().cursors,
+                                {"left": False, "right": True}).split()[-2:],
+      ["up", "down"])
+
+# End to end, through the parser the overlay actually uses, to the question the
+# renderer actually asks. A mapper that reports touch and a badge rule that
+# consumes it are worth nothing if the two do not meet.
+mm = osk_mapper()
+touch(mm, "left")
+parsed = osk_mod.parse_state_line(
+    osk_mod.format_state_line(mm.osk, mm.cursors, mm.pad_touch_state()))
+far_kb, far_cur = osk_mod.OnScreenKeyboard(), osk_mod.Cursors()
+osk_mod.apply_state(far_kb, far_cur, parsed)
+check("the overlay ends up believing exactly what the mapper measured",
+      far_kb.touched, {"left": True, "right": False})
+gates = {half: [osk_mod.hint_visible(key, frozenset(
+             h for h in ("left", "right") if far_kb.touched[h]))
+         for row in far_kb.layer.rows for key in row if key.hint == hint]
+         for half, hint in (("left", osk_mod.HINT_LEFT),
+                            ("right", osk_mod.HINT_RIGHT))}
+check("...so the L2 badges are hidden -- BOTH of them, on both Shift keys",
+      (len(gates["left"]), any(gates["left"])), (2, False))
+check("...and the R2 badge is not, because that pad is lifted",
+      all(gates["right"]) and len(gates["right"]) > 0, True)
+
 # A showing starts from a known state, or a sample left over from the last one
 # decides the first frame's badges.
 mm = osk_mapper()
@@ -954,18 +1001,141 @@ check("L2 with the left pad TOUCHED commits the left cursor's key",
 mm = osk_mapper()
 check("L2 with the left pad LIFTED emits no keycode",
       mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.0), [])
-check("...it arms Shift instead", (mm.osk_shift, mm.osk.shift), (True, "once"))
+check("...it engages Shift instead", mm.osk_shift, True)
 check("...and does NOT latch Caps -- Caps is L3's, and they are not the same",
       mm.osk_caps, False)
-check("a second pull disarms it, so a mis-pull is undoable",
-      (mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1), mm.osk_shift), ([], False))
-# ⚠️ It must never reach a shift LOCK. That state exists in the layout core and
-# looks identical to Caps on screen while behaving differently.
+
+# --- 🔴 SHIFT IS MOMENTARY, NOT A TOGGLE (operator, 2026-08-12) --------------
+#
+# "the shift L2 button works but as an on/off. shift should only be engaged
+# when i hold down l2 (as on a pc)". This REVERSES the one-shot decision that
+# shipped, whose reasoning is answered in full at `Mapper.hold_osk_shift` --
+# read that before simplifying any of this back.
+#
+# The release is the whole point, and it is the ONLY release the OSK path acts
+# on: everything else here emits a complete tap on the press so that a keyboard
+# dismissed mid-press cannot strand a key down.
+
 mm = osk_mapper()
-for i in range(6):
-    mm.translate(e.EV_KEY, e.BTN_TL2, 1, float(i))
-check("pulling L2 repeatedly never reaches a shift LOCK",
-      mm.osk.shift in ("off", "once"), True)
+mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.0)
+check("Shift is engaged while L2 is held", mm.osk_shift, True)
+check("...and RELEASING L2 lets it go, which is the entire complaint",
+      (mm.translate(e.EV_KEY, e.BTN_TL2, 0, 0.1), mm.osk_shift), ([], False))
+
+# The mutation this catches is the old code verbatim: a toggle reads the same
+# on one press and differs on the second.
+mm = osk_mapper()
+mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.0)
+mm.translate(e.EV_KEY, e.BTN_TL2, 0, 0.1)
+check("a SECOND press engages it again -- a toggle would have turned it off",
+      (mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.2), mm.osk_shift), ([], True))
+check("...and the second release lets go again",
+      (mm.translate(e.EV_KEY, e.BTN_TL2, 0, 0.3), mm.osk_shift), ([], False))
+
+# 🔴 NOT SPENT BY THE FIRST KEY. A one-shot dropped after one character, which
+# is exactly what "hold to shift" must not do: on a PC the hold shifts every
+# key struck during it. This is why the hold uses the layout core's "locked"
+# rather than its "once".
+mm = osk_mapper()
+mm.translate(e.EV_ABS, e.ABS_HAT1X, MINV, 0.0)
+mm.translate(e.EV_ABS, e.ABS_HAT1Y, -1, 0.0)      # a letter, right pad touched
+mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1)         # ...and L2 held for Shift
+first = mm.translate(e.EV_KEY, e.BTN_TR2, 1, 0.2)
+second = mm.translate(e.EV_KEY, e.BTN_TR2, 1, 0.3)
+check("a key committed during the hold carries the shift modifier",
+      first[0] if first else None, (osk_mod.SHIFT_CODE, 1))
+check("...and so does the NEXT one -- the hold is not spent by one key",
+      second[0] if second else None, (osk_mod.SHIFT_CODE, 1))
+check("...and Shift is still engaged after both", mm.osk_shift, True)
+check("...until L2 comes up",
+      (mm.translate(e.EV_KEY, e.BTN_TL2, 0, 0.4), mm.osk_shift), ([], False))
+
+# ⚠️ THE INTERACTION THE ONE-SHOT DESIGN WAS WORRIED ABOUT, pinned so it cannot
+# be "simplified" into either of its wrong answers. With L2 held for Shift the
+# user may still put a thumb on the LEFT pad -- the trigger that would commit
+# it is the one already down. Nothing about that touch may disturb Shift: a
+# modifier that evaporated when a thumb brushed a pad would type a lowercase
+# letter while the user was visibly holding shift.
+mm = osk_mapper()
+mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.0)         # held, left pad lifted
+touch(mm, "left", MINV, MAXV)                     # ...then a thumb lands on it
+check("a thumb landing on the left pad mid-hold leaves Shift engaged",
+      (mm.pad_touched("left"), mm.osk_shift), (True, True))
+check("...and the release still lets go, though the pad is now TOUCHED -- the "
+      "release is deliberately not gated the way the press is",
+      (mm.translate(e.EV_KEY, e.BTN_TL2, 0, 0.1), mm.osk_shift), ([], False))
+
+# The other order: a commit pull (pad touched) is not a Shift, and its release
+# must not clear a Shift somebody else set.
+mm = osk_mapper()
+mm.osk.shift = "locked"                            # e.g. the on-screen Shift key
+touch(mm, "left", MINV, MAXV)
+mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1)          # commits, does not hold Shift
+check("a commit pull leaves the shift state alone",
+      (mm.osk.shift, mm.osk_shift_prev), ("locked", None))
+check("...and its release does not clear a lock it never set",
+      (mm.translate(e.EV_KEY, e.BTN_TL2, 0, 0.2), mm.osk.shift), ([], "locked"))
+
+# 🔴 THE HOLD RESTORES WHAT IT FOUND. The on-screen Shift key still cycles
+# off -> once -> locked, and a trigger pull that silently cancelled a lock the
+# user set there would be a second, invisible way to lose it.
+for prior in ("off", "once", "locked"):
+    mm = osk_mapper()
+    mm.osk.shift = prior
+    mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.0)
+    check(f"L2 held over shift={prior!r} engages Shift", mm.osk_shift, True)
+    check(f"...and releasing it puts {prior!r} back",
+          (mm.translate(e.EV_KEY, e.BTN_TL2, 0, 0.1), mm.osk.shift), ([], prior))
+
+# The pad's own autorepeat is not a second press. Letting one through would
+# overwrite the saved state with the state the hold itself installed, and the
+# release would then "restore" Shift to on -- the toggle, back by accident.
+mm = osk_mapper()
+mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.0)
+mm.translate(e.EV_KEY, e.BTN_TL2, 2, 0.1)
+mm.translate(e.EV_KEY, e.BTN_TL2, 2, 0.2)
+check("an autorepeat during the hold does not corrupt what the release restores",
+      (mm.osk_shift_prev, mm.osk_shift), ("off", True))
+check("...so the release still lets go",
+      (mm.translate(e.EV_KEY, e.BTN_TL2, 0, 0.3), mm.osk_shift), ([], False))
+
+# ⚠️ Asked of the METHODS, because `_osk_event` filters the autorepeat above
+# before it can get this far -- so the event path alone cannot see whether the
+# hold is re-entrant, and a second press with no release in between (one lost
+# while the keyboard was hidden, an autorepeat let through by some later edit)
+# would save "locked" over the real state and "restore" Shift to ON. Belt and
+# braces, and the braces are only visible from here.
+mm = osk_mapper()
+mm.osk.shift = "once"
+mm.hold_osk_shift()
+mm.hold_osk_shift()
+check("a second hold does not overwrite what the first one saved",
+      mm.osk_shift_prev, "once")
+check("...so one release still puts the real state back",
+      (mm.release_osk_shift(), mm.osk.shift), (None, "once"))
+check("...and a second release is a no-op, not a second restore",
+      (mm.release_osk_shift(), mm.osk.shift, mm.osk_shift_prev),
+      (None, "once", None))
+
+# A keyboard dismissed with L2 physically down never sees that release: the
+# STEAM+X chord is handled ABOVE the OSK branch, and once hidden the release
+# goes to the navigation profile. The next showing must not restore anything.
+mm = osk_mapper()
+mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.0)
+mm.reset_osk_state()
+check("reset_osk_state forgets a hold that was interrupted by a dismissal",
+      (mm.osk_shift_prev, mm.osk.shift), (None, "off"))
+mm.translate(e.EV_KEY, e.BTN_TL2, 0, 0.1)
+check("...so the stray release that arrives afterwards changes nothing",
+      mm.osk.shift, "off")
+
+# R2 is unaffected by any of it: Enter is a complete tap on the press, and its
+# release stays silent (a held Enter would repeat into whatever has focus).
+mm = osk_mapper()
+mm.translate(e.EV_KEY, e.BTN_TR2, 1, 0.0)
+check("R2's release is still silent and still touches no modifier",
+      (mm.translate(e.EV_KEY, e.BTN_TR2, 0, 0.1), mm.osk_shift, mm.osk.caps),
+      ([], False, False))
 
 # LIFTED -> Enter, on the right. A full tap: nothing can stay held.
 mm = osk_mapper()
@@ -1046,10 +1216,10 @@ check("L3 again unlatches it",
 # The two are independent: latching one must not disturb the other.
 mm = osk_mapper()
 mm.translate(e.EV_KEY, e.BTN_THUMBL, 1, 0.0)       # Caps on
-mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1)          # Shift armed (pads lifted)
+mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1)          # Shift held (pads lifted)
 check("Caps and Shift can be on at once", (mm.osk_caps, mm.osk_shift), (True, True))
-mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.2)          # Shift disarmed
-check("disarming Shift leaves Caps latched", (mm.osk_caps, mm.osk_shift), (True, False))
+mm.translate(e.EV_KEY, e.BTN_TL2, 0, 0.2)          # Shift let go
+check("letting Shift go leaves Caps latched", (mm.osk_caps, mm.osk_shift), (True, False))
 
 # ⚠️ BTN_THUMBL IS THE LEFT STICK CLICK. BTN_THUMB, one letter shorter, is the
 # left TRACKPAD's click -- measured in the same capture (press 14.079s, release
@@ -1061,18 +1231,25 @@ check("the caps binding is the left STICK click, not the left PAD click",
 check("the left TRACKPAD click does nothing to Caps",
       (mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.0), mm.osk_caps), ([], False))
 
-# --- and Shift really does reach the emitted keystrokes ----------------------
+# --- the ON-SCREEN Shift key is untouched by any of that ---------------------
 #
-# The assertions above are about STATE. This one is about the wire: arm Shift
-# with a lifted L2, then commit a letter with the right pad, and the shift
-# modifier has to be in the emission or the whole binding is decorative.
+# ⚠️ THE ONE-SHOT DID NOT GO AWAY, IT MOVED BACK TO WHERE IT ALWAYS WAS. L2 is
+# now a hold, which is a two-handed gesture (hold L2, aim with the RIGHT pad,
+# commit with R2 -- see `Mapper.hold_osk_shift`). The one-handed route is the
+# Shift KEY on the keyboard, still cycling off -> once -> locked and still spent
+# by the key it modifies. Losing that quietly would leave a left-pad-only user
+# with no way to type a capital at all.
 mm = osk_mapper()
-touch(mm, "right", 0, 0)          # (a no-op: 0 is the lift)
-mm.translate(e.EV_ABS, e.ABS_HAT1X, MINV, 0.0)
-mm.translate(e.EV_ABS, e.ABS_HAT1Y, 0 - 1, 0.0)   # somewhere in the letter rows
-mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1)         # left pad lifted -> Shift
-strokes = mm.translate(e.EV_KEY, e.BTN_TR2, 1, 0.2)
-check("a committed key under Shift carries the shift modifier",
+touch(mm, "left", MINV, MAXV)
+mm.cursors.pos["left"] = [0.05, 0.75]              # the left Shift key
+check("the left cursor really is on a Shift key (or this proves nothing)",
+      mm.osk.key_at("left", *mm.cursors.position("left")).action, "shift")
+check("pressing it emits no keycode and arms a ONE-SHOT",
+      (mm.translate(e.EV_KEY, e.BTN_TL2, 1, 0.1), mm.osk.shift), ([], "once"))
+mm.translate(e.EV_ABS, e.ABS_HAT1X, MINV, 0.2)
+mm.translate(e.EV_ABS, e.ABS_HAT1Y, -1, 0.2)       # a letter, right pad touched
+strokes = mm.translate(e.EV_KEY, e.BTN_TR2, 1, 0.3)
+check("a committed key under it carries the shift modifier",
       strokes[0] if strokes else None, (osk_mod.SHIFT_CODE, 1))
 check("...and the one-shot is spent by the key it modified",
       mm.osk_shift, False)
@@ -1917,6 +2094,28 @@ mapper_calls = [node for node in ast.walk(main_def)
                 and node.func.value.id == "mapper"]
 check("main() resets the OSK's state on BOTH show paths (tty and layer)",
       sum(node.func.attr == "reset_osk_state" for node in mapper_calls), 2)
+
+# 🔴 THE DEFECT ITSELF, AND THE ONLY PLACE IT CAN BE SEEN. `format_state_line`
+# takes `touched` as an OPTIONAL third argument, because an older mapper must
+# still produce a line a newer overlay can parse -- so dropping it is not a
+# TypeError, it is a silent frame that says "nothing is being touched" for ever.
+# The call lives inside main(), around a live subprocess no unit test can enter,
+# so it is asserted structurally, exactly like the §5.28 environment rule above.
+state_lines = [node for node in ast.walk(tree)
+               if isinstance(node, ast.Call)
+               and isinstance(node.func, ast.Attribute)
+               and node.func.attr == "format_state_line"]
+check("the mapper writes exactly one state line, so there is one call to pin",
+      len(state_lines), 1)
+check("...and it passes THREE arguments -- the third is the pad touch state",
+      [len(node.args) for node in state_lines], [3])
+# ...from the mapper's own measurement, not a placeholder. `{}` and
+# `{"left": False, "right": False}` both type-check and both reinstate the bug.
+check("...taken from mapper.pad_touch_state(), not invented at the call site",
+      [node.args[2].func.attr for node in state_lines
+       if isinstance(node.args[2], ast.Call)
+       and isinstance(node.args[2].func, ast.Attribute)],
+      ["pad_touch_state"])
 
 # --- the console's WIDTH, read at runtime (T8 §9g) ---------------------------
 #
