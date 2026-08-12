@@ -51,6 +51,104 @@ trap 'rm -rf "$work"' EXIT
 source "$REPO_ROOT/src/deck-form.sh"
 
 # ===========================================================================
+# Stubs for upstream `configurator` helpers this file's screen OVERRIDES
+# call but does not itself define -- clear_logo/say/step/abort/
+# get_root_disk/get_disk_info are all real functions in the real
+# `configurator` (READ), not in deck-form.sh, so sourcing deck-form.sh
+# ALONE (this suite's whole point -- no VM, no real configurator) leaves
+# them undefined. Minimal stand-ins, not reimplementations of upstream's
+# real behaviour: just enough for the screen functions to run to completion
+# so THIS file's own logic (which is what this suite is actually proving)
+# can be exercised. `abort` is deliberately non-fatal here (`return 1`, not
+# upstream's real `exit 1`) so a path that reaches it fails an assertion
+# instead of killing the whole test process.
+#
+# ⚠️ MOVED TO THE TOP 2026-08-12, and the move is load-bearing: `greeter`
+# now runs S1 at the end of it (deck-form.sh's own "WHERE THIS SCREEN IS
+# CALLED FROM" comment), and S1 calls `step`/`say`. With the stubs defined
+# further down the file, the S0 test would have died on "step: command not
+# found" -- which under this suite's `set -e` is an abort, not a legible
+# failure.
+# ===========================================================================
+
+clear_logo() { :; }
+say() { printf '%s\n' "$*" >>"${DECK_TEST_SAY_LOG:-/dev/null}"; }
+step() { printf '%s\n' "$*" >>"${DECK_TEST_SAY_LOG:-/dev/null}"; }
+abort() { printf 'ABORT: %s\n' "$*" >&2; return 1; }
+get_root_disk() { printf '%s\n' "${DECK_TEST_ROOT_DISK:-}"; }
+get_disk_info() { printf '%s\n' "$1"; }
+
+# A dispatching fake `gum` -- confirm/choose/input/table, everything else
+# no-ops.
+#
+# ⚠️ THE QUEUE, AND WHY A HANG IS THE FAILURE MODE THIS GUARDS AGAINST.
+# S1's screen is a LOOP: a cancelled menu redraws (deliberately -- see
+# deck_form_net_choice_action's own comment on S8's Esc-drops-to-shell
+# bug), so a fake that returns the same answer forever spins forever, and
+# a spinning CI job reports nothing. FAKE_GUM_CHOOSE_QUEUE consumes one
+# scripted line per call; when it runs dry the fake answers with
+# FAKE_GUM_CHOOSE_EXHAUSTED (the tests set this to the Skip row, which
+# terminates the screen) and writes CHOOSE-QUEUE-EXHAUSTED to the log, so
+# a test that relied on the queue can assert it was never reached. That
+# turns "hangs until the watchdog kills the suite" into "answers wrong,
+# visibly" -- the same reasoning as the suite-level watchdog above.
+# `<CANCEL>` is the sentinel for gum exiting nonzero (B/Esc).
+#
+# With no queue set the old single-answer behaviour is unchanged, so every
+# pre-existing test in this file is untouched by the addition.
+mkdir -p "$work/bin-fakegum"
+cat >"$work/bin-fakegum/gum" <<'FAKEGUM'
+#!/usr/bin/env bash
+sub=${1:-}
+printf '%s\n' "$*" >>"${FAKE_GUM_LOG:-/dev/null}"
+
+pop_queue() {   # <queue-file> -> prints the popped line, status 1 if dry
+  local q=$1 line
+  line=$(head -1 "$q" 2>/dev/null)
+  [[ -z $line ]] && return 1
+  tail -n +2 "$q" >"$q.tmp" 2>/dev/null && mv "$q.tmp" "$q"
+  printf '%s\n' "$line"
+  return 0
+}
+
+case "$sub" in
+  confirm) exit "${FAKE_GUM_CONFIRM_RC:-0}" ;;
+  choose)
+    if [[ -n ${FAKE_GUM_CHOOSE_QUEUE:-} ]]; then
+      if line=$(pop_queue "$FAKE_GUM_CHOOSE_QUEUE"); then
+        [[ $line == '<CANCEL>' ]] && exit 1
+        printf '%s\n' "$line"
+        exit 0
+      fi
+      printf 'CHOOSE-QUEUE-EXHAUSTED\n' >>"${FAKE_GUM_LOG:-/dev/null}"
+      printf '%s\n' "${FAKE_GUM_CHOOSE_EXHAUSTED:-}"
+      exit 0
+    fi
+    [[ -n ${FAKE_GUM_CHOOSE_RC:-} && ${FAKE_GUM_CHOOSE_RC} != 0 ]] && exit "$FAKE_GUM_CHOOSE_RC"
+    printf '%s\n' "${FAKE_GUM_CHOOSE_OUTPUT:-}"
+    exit 0
+    ;;
+  input)
+    if [[ -n ${FAKE_GUM_INPUT_QUEUE:-} ]]; then
+      if line=$(pop_queue "$FAKE_GUM_INPUT_QUEUE"); then
+        [[ $line == '<CANCEL>' ]] && exit 1
+        [[ $line == '<EMPTY>' ]] && exit 0
+        printf '%s\n' "$line"
+        exit 0
+      fi
+      printf 'INPUT-QUEUE-EXHAUSTED\n' >>"${FAKE_GUM_LOG:-/dev/null}"
+      exit 0
+    fi
+    printf '%s\n' "${FAKE_GUM_INPUT_OUTPUT:-}"
+    exit 0
+    ;;
+  table) cat; exit 0 ;;
+  *) exit 0 ;;
+esac
+FAKEGUM
+chmod +x "$work/bin-fakegum/gum"
+
+# ===========================================================================
 # §2.3: the bounded text-entry mode
 # ===========================================================================
 
@@ -283,12 +381,38 @@ printf '\n' >"$work/fake-tty-input"   # one blank line, standing in for an Enter
 # environment, not this shell's unexported variables. Found by running this
 # exact test: the first draft put the assignments before `out=$(greeter)`
 # and the marker file was silently never created.
-out=$(STTY_MARKER="$work/stty.marker" PATH="$work/bin:$PATH" DECK_S0_TTY="$work/fake-tty-input" greeter)
+#
+# ⚠️ greeter now runs S1 at the end of it, so its collaborators must be
+# pointed at fixtures here or this test reaches the REAL /sys/class/net and
+# behaves differently on a laptop (which has a wireless interface) than in
+# CI (which may not) -- a test whose result depends on the machine it runs
+# on is not a test. An EMPTY sysfs root is the "no Wi-Fi hardware" branch,
+# which §5 requires to be non-blocking, so S0 still completes.
+mkdir -p "$work/net-empty" "$work/s0-state"
+out=$(STTY_MARKER="$work/stty.marker" PATH="$work/bin:$work/bin-fakegum:$PATH" \
+      DECK_S0_TTY="$work/fake-tty-input" \
+      DECK_NET_SYSFS="$work/net-empty" \
+      DECK_NET_STATE_DIR="$work/s0-state" \
+      DECK_TEST_SAY_LOG="$work/s0-say.log" \
+      greeter)
 [[ -f "$work/stty.marker" ]] ||
   fail "greeter must call 'stty sane' -- losing it silently kills every gum prompt after S0 (T4-screen-spec.md §4 S0)"
 LC_ALL=C grep -qF "proprietary firmware" <<<"$out" ||
   fail "greeter's own output must include the S0 text, not just stty side effects"
 pass "greeter calls 'stty sane' and prints the S0 disclosure text"
+
+# 🔴 THE WIRING ASSERTION. §3 promotes Wi-Fi to first and upstream has no
+# Wi-Fi screen to override, so S1's ONLY route onto a real ISO is the tail
+# of `greeter`. Without this, S1 could be perfectly built, perfectly unit
+# tested, and never appear -- the exact failure the override-name contract
+# below exists to prevent, in the one shape that contract cannot see
+# (deck_form_wifi_screen is `deck_form_`-prefixed, so the scanner skips it).
+[[ -f "$work/s0-state/$DECK_NET_OUTCOME_FILE" ]] ||
+  fail "greeter must run the S1 Wi-Fi screen -- no outcome file was written, so S1 never ran at all"
+LC_ALL=C grep -qF "status=no-hardware" "$work/s0-state/$DECK_NET_OUTCOME_FILE" ||
+  fail "S1, reached through greeter with an empty sysfs net root, must record the no-hardware outcome" \
+       "$(cat "$work/s0-state/$DECK_NET_OUTCOME_FILE")"
+pass "greeter actually runs S1 (the outcome artefact proves the screen ran, not just that it is defined)"
 
 # ===========================================================================
 # S3: Account
@@ -564,6 +688,32 @@ out=$(deck_form_parse_iwctl_networks "$work/iwctl.raw" 2>/dev/null | LC_ALL=C co
 [[ ${out:-0} -eq 0 ]] || fail "parse_iwctl_networks must strip ANSI colour codes from every field"
 pass "parse_iwctl_networks strips ANSI colour codes"
 
+# 🔴 A HOSTILE SSID CAN IMPERSONATE THE HEADER. The parser finds its column
+# boundaries by locating the line containing "Network name" -- and an
+# attacker may simply NAME THEIR NETWORK "Network name", putting that string
+# on a DATA row too. Anchoring on anything but the FIRST occurrence makes
+# the parser treat that data row as the header and silently drop every
+# network above it, which is a way to disappear the user's real network from
+# the list and leave only the attacker's. Found while mutation-testing: this
+# is the one input for which first-vs-last is not an equivalent change.
+cat >"$work/iwctl-impersonate.raw" <<EOF
+                                        Available networks
+-------------------------------------------------------------------------
+    Network name                    Security             Signal
+-------------------------------------------------------------------------
+    HomeNet                         psk                  ****
+    Network name                    open                 **
+    OtherNet                        psk                  *
+EOF
+deck_form_parse_iwctl_networks "$work/iwctl-impersonate.raw" >"$work/impersonate.tsv" ||
+  fail "the parser must survive an SSID that impersonates the header"
+[[ $(wc -l <"$work/impersonate.tsv") -eq 3 ]] ||
+  fail "an SSID named 'Network name' must not make the parser drop the networks above it" \
+       "$(cat "$work/impersonate.tsv")"
+LC_ALL=C grep -qF $'HomeNet\tpsk' "$work/impersonate.tsv" ||
+  fail "the real network listed above a header-impersonating SSID must still be present"
+pass "an SSID that impersonates the 'Network name' header cannot hide the networks above it"
+
 echo "--- S1 network row building -------------------------------------------"
 
 deck_form_build_network_rows "$work/parsed.tsv" >"$work/rows.txt"
@@ -600,6 +750,714 @@ open_row=$(LC_ALL=C command grep -F "OpenGuest" "$work/rows.txt")
 [[ $open_row != *$'\360\237\224\222'* ]] ||
   fail "an open network's row must NOT carry the lock glyph" "got: $open_row"
 pass "the lock glyph is present for secured networks and absent for open ones"
+
+echo "--- S1 row -> real network: the sanitisation round-trip trap -------------"
+
+# 🔴 The one that would have shipped a permanently-unjoinable network.
+# gum choose hands back the DISPLAYED row, which is the SANITISED SSID.
+# Recovering the SSID from that string would try to join "Evil?Bar", a
+# network that does not exist, forever. The mapping is positional, and
+# these two assertions are what prove it.
+idx=$(deck_form_row_index "$work/rows.txt" "$(LC_ALL=C command grep -F 'Evil?Bar' "$work/rows.txt")")
+[[ $idx -eq 4 ]] || fail "row_index must find the hostile row at its own position" "got: $idx"
+line=$(deck_form_network_at "$work/parsed.tsv" "$idx")
+[[ ${line%%$'\t'*} == 'Evil|Bar' ]] ||
+  fail "the chosen row must map back to the RAW SSID (with its '|'), not the sanitised display text" "got: $line"
+pass "a sanitised row maps back to the raw SSID -- 'Evil?Bar' on screen joins 'Evil|Bar' on the air"
+
+# The glyph must not shift the mapping either: the secured row at position
+# 1 carries a multi-byte lock glyph, and index arithmetic that counted
+# bytes rather than rows would land somewhere else.
+idx=$(deck_form_row_index "$work/rows.txt" "$(LC_ALL=C command grep -F 'My Home Network' "$work/rows.txt")")
+line=$(deck_form_network_at "$work/parsed.tsv" "$idx")
+[[ ${line%%$'\t'*} == 'My Home Network' ]] ||
+  fail "a lock-glyph row must still map back to its own network" "got: $line"
+pass "the lock glyph does not shift the row->network mapping"
+
+deck_form_row_index "$work/rows.txt" "A Network Nobody Drew" >/dev/null 2>&1 &&
+  fail "row_index must REFUSE a row that was never in the drawn list, not guess"
+pass "row_index refuses a row that is not in the list it was given (never guesses a network)"
+
+# 🔴 MUTATION-FOUND GAP, closed. The fixture above has no two rows that
+# render the same, so `head -1` and `tail -1` were indistinguishable -- the
+# documented "first match wins" rule was asserted by nothing. It matters:
+# two SSIDs that sanitise to the same display string are the collision an
+# attacker gets for free, and deck_form_build_network_rows keeps iwctl's
+# own signal ordering, so "first" means "the stronger signal".
+printf 'Real|Net\tpsk\t****\nReal?Net\tpsk\t*\n' >"$work/collide.tsv"
+deck_form_build_network_rows "$work/collide.tsv" >"$work/collide.rows"
+collided_row=$(head -1 "$work/collide.rows")
+collided=$(LC_ALL=C command grep -c -xF -- "$collided_row" "$work/collide.rows")
+[[ $collided -eq 2 ]] ||
+  fail "this fixture is supposed to produce two rows that render identically -- it does not, so the assertion below proves nothing" \
+       "$(cat "$work/collide.rows")"
+idx=$(deck_form_row_index "$work/collide.rows" "$collided_row")
+[[ $idx -eq 1 ]] ||
+  fail "when two rows render identically, the FIRST (strongest-signal) one must win, not the last" "got: $idx"
+pass "colliding sanitised rows resolve to the FIRST one, which is iwctl's strongest-signal network"
+
+deck_form_network_at "$work/parsed.tsv" 99 >/dev/null 2>&1 &&
+  fail "network_at must fail for an index past the end of the scan"
+deck_form_network_at "$work/parsed.tsv" 0 >/dev/null 2>&1 &&
+  fail "network_at must reject a zero index (rows are 1-based)"
+deck_form_network_at "$work/parsed.tsv" "; rm -rf /" >/dev/null 2>&1 &&
+  fail "network_at must reject a non-numeric index rather than interpolate it into sed"
+# 🔴 MUTATION-FOUND GAP, closed. The three cases above all survive WITHOUT
+# the numeric guard, because a broken `sed -n "<junk>p"` prints nothing and
+# the empty-line check catches it -- so they proved the wrong thing. `$` is
+# the input that separates them: it is not a positive integer, but
+# `sed -n "$p"` is VALID sed for "print the last line", so without the
+# guard this returns the last network in the scan for an index that means
+# nothing. Silently joining a different network than the one on the row the
+# user selected is precisely the class of bug this function exists to stop.
+deck_form_network_at "$work/parsed.tsv" '$' >/dev/null 2>&1 &&
+  fail "network_at must reject '\$' -- it is not an index, but sed reads it as 'the last line', so the guard is what stops a wrong network being joined"
+pass "network_at rejects out-of-range, zero, non-numeric and sed-metacharacter indices"
+
+echo "--- S1 the cancel-fallback and menu decisions (mutation targets) ---------"
+
+# S8's bug, pre-empted: upstream's failure menu made Esc SELECT "Drop to
+# shell" via `|| choice=...`. Here an empty choice must REDRAW.
+[[ $(deck_form_net_choice_action "") == redraw ]] ||
+  fail "an empty (cancelled) choice must REDRAW the network list, never act -- this is S8's Drop-to-shell bug in a new place"
+[[ $(deck_form_net_choice_action "$DECK_NET_SKIP_ROW") == skip ]] ||
+  fail "the Skip row must map to skip"
+[[ $(deck_form_net_choice_action "$DECK_NET_RESCAN_ROW") == rescan ]] ||
+  fail "the Rescan row must map to rescan"
+[[ $(deck_form_net_choice_action $'\360\237\224\222 My Home Network') == connect ]] ||
+  fail "an ordinary network row must map to connect"
+pass "network-list choice mapping: cancel redraws (never acts), Skip/Rescan/network map correctly"
+
+[[ $(deck_form_net_failure_action_for "") == redraw ]] ||
+  fail "a cancelled post-association failure menu must REDRAW, never act"
+[[ $(deck_form_net_failure_action_for "Try again") == retry ]] || fail "'Try again' must map to retry"
+[[ $(deck_form_net_failure_action_for "Pick another network") == another ]] || fail "'Pick another network' must map to another"
+[[ $(deck_form_net_failure_action_for "$DECK_NET_SKIP_ROW") == skip ]] || fail "the Skip row must map to skip in the failure menu too"
+[[ $(deck_form_net_failure_action_for "Drop to shell") == redraw ]] ||
+  fail "an unrecognised choice must redraw, never be guessed at"
+pass "post-association failure menu mapping: cancel and unrecognised both redraw; retry/another/skip map correctly"
+
+items=$(deck_form_net_failure_items)
+[[ $(LC_ALL=C command grep -c . <<<"$items") -eq 3 ]] ||
+  fail "the failure menu must offer exactly Retry / Pick another / Skip (§5's DHCP row)" "$items"
+LC_ALL=C command grep -qiF "shell" <<<"$items" &&
+  fail "the failure menu must never offer a shell -- there is no keyboard"
+pass "the failure menu offers exactly Retry / Pick another / Skip and never a shell"
+
+echo "--- S1 security classification -------------------------------------------"
+
+[[ $(deck_form_net_security_class open) == none ]] || fail "'open' must need no passphrase"
+[[ $(deck_form_net_security_class psk) == passphrase ]] || fail "'psk' must need a passphrase"
+[[ $(deck_form_net_security_class wep) == passphrase ]] || fail "'wep' must need a passphrase"
+[[ $(deck_form_net_security_class 8021x) == unsupported ]] ||
+  fail "'8021x' must be UNSUPPORTED -- a passphrase prompt for an enterprise network is three guaranteed failures and a user who thinks they mistyped"
+[[ $(deck_form_net_security_class "something-iwd-grows-later") == unsupported ]] ||
+  fail "an unknown security type must default to unsupported, not to 'try a passphrase'"
+pass "security classification: open/psk/wep/8021x, and an unknown type defaults to unsupported"
+
+echo "--- S1 DHCP detection: the link-local trap -------------------------------"
+
+deck_form_has_ipv4 "wlan0            UP             192.168.1.50/24" ||
+  fail "a routable address must count as DHCP success"
+# 🔴 169.254.0.0/16 is what you get when DHCP FAILED. Counting it would
+# make §5's "associated, no DHCP" row report success on the exact case it
+# was written to detect.
+deck_form_has_ipv4 "wlan0            UP             169.254.12.7/16" &&
+  fail "a 169.254 link-local address must NOT count as DHCP success -- it is the signature of DHCP failing"
+deck_form_has_ipv4 "lo               UNKNOWN        127.0.0.1/8" &&
+  fail "a loopback address must not count as a wireless link being configured"
+deck_form_has_ipv4 "wlan0            DOWN" &&
+  fail "an interface with no address at all must not count as configured"
+deck_form_has_ipv4 "" &&
+  fail "empty ip output must not count as configured"
+deck_form_has_ipv4 "wlan0  UP  169.254.12.7/16 10.0.0.9/24" ||
+  fail "a real address alongside a link-local one must still count"
+pass "DHCP detection accepts a routable v4 address and rejects link-local, loopback, and no address"
+
+echo "--- S1 connect verdict: belt AND braces ----------------------------------"
+
+[[ $(deck_form_connect_verdict 0 "") == ok ]] || fail "exit 0 with clean output must be ok"
+[[ $(deck_form_connect_verdict 1 "") == failed ]] || fail "a nonzero exit must be failed"
+# ⚠️ The reason the output is inspected at all: iwctl has been observed to
+# print a failure and still exit 0.
+[[ $(deck_form_connect_verdict 0 "Operation failed") == failed ]] ||
+  fail "a failure printed alongside exit 0 must still be failed -- otherwise a wrong passphrase reads as connected"
+[[ $(deck_form_connect_verdict 0 "Network not found") == failed ]] || fail "'Network not found' must be failed"
+[[ $(deck_form_connect_verdict 0 "Connected to MyNet") == ok ]] ||
+  fail "an ordinary success line must not be misread as a failure"
+pass "connect verdict combines the exit status AND the output, so an exit-0 failure is not reported as connected"
+
+echo "--- S1 captive-portal verdict --------------------------------------------"
+
+[[ $(deck_form_portal_verdict 0 "$DECK_NET_PORTAL_EXPECT") == online ]] ||
+  fail "the expected probe body must read as online"
+[[ $(deck_form_portal_verdict 0 "<html>Please sign in to HotelWiFi</html>") == portal ]] ||
+  fail "a body that is not the expected one must read as a captive portal"
+[[ $(deck_form_portal_verdict 0 "") == portal ]] ||
+  fail "an empty body with exit 0 (a bare redirect, curl without -L) must read as a captive portal"
+[[ $(deck_form_portal_verdict 7 "") == unreachable ]] ||
+  fail "a failed probe must read as unreachable, which is NOT the same sentence as a portal"
+pass "portal verdict distinguishes online / portal / unreachable (three outcomes, three different sentences)"
+
+echo "--- S1 offline consequence text (§5, stated on skip AND on S5) ----------"
+
+offline=$(deck_form_wifi_offline_text)
+LC_ALL=C grep -qF "audio DSP firmware and Steam are not downloaded" <<<"$offline" ||
+  fail "§5's consequence text must name what is not downloaded"
+LC_ALL=C grep -qF "Gaming Mode will have no Steam" <<<"$offline" ||
+  fail "§5's consequence text must name the Gaming Mode consequence"
+LC_ALL=C grep -qF "Desktop Mode afterwards" <<<"$offline" ||
+  fail "§5's consequence text must say Wi-Fi can be set up later"
+pass "the offline consequence text carries all three of §5's clauses"
+
+echo "--- S1 wireless-interface detection (sysfs, not a name pattern) ----------"
+
+mkdir -p "$work/net-a/eth0" "$work/net-a/wlan0/wireless" "$work/net-a/lo"
+[[ $(DECK_NET_SYSFS="$work/net-a" deck_form_wifi_iface) == wlan0 ]] ||
+  fail "wifi_iface must find the interface with a 'wireless' subdirectory"
+# The name is NOT the test: an interface called wlp2s0, or a renamed one,
+# must be found, and an interface called wlan0 with no wireless dir must
+# not be.
+mkdir -p "$work/net-b/wlan0" "$work/net-b/wlp2s0/wireless"
+[[ $(DECK_NET_SYSFS="$work/net-b" deck_form_wifi_iface) == wlp2s0 ]] ||
+  fail "wifi_iface must key off the sysfs 'wireless' directory, NOT off the interface name"
+mkdir -p "$work/net-none/eth0"
+DECK_NET_SYSFS="$work/net-none" deck_form_wifi_iface >/dev/null 2>&1 &&
+  fail "wifi_iface must report failure when no interface is wireless"
+mkdir -p "$work/net-truly-empty"
+DECK_NET_SYSFS="$work/net-truly-empty" deck_form_wifi_iface >/dev/null 2>&1 &&
+  fail "wifi_iface must report failure on an empty sysfs root (the unmatched-glob case)"
+pass "wireless detection is by sysfs 'wireless' dir, not by name, and reports absence rather than guessing"
+
+echo "--- U1: the NetworkManager keyfile ---------------------------------------"
+
+printf '11111111-2222-3333-4444-555555555555\n' >"$work/uuid"
+
+nm=$(deck_form_nmconnection "MyNet" "s3cret!" "11111111-2222-3333-4444-555555555555")
+LC_ALL=C grep -qxF 'ssid=MyNet' <<<"$nm" || fail "the keyfile must carry the SSID" "$nm"
+LC_ALL=C grep -qxF 'psk=s3cret!' <<<"$nm" || fail "the keyfile must carry the passphrase" "$nm"
+LC_ALL=C grep -qxF 'key-mgmt=wpa-psk' <<<"$nm" || fail "a secured network's keyfile must set key-mgmt" "$nm"
+LC_ALL=C grep -qxF 'type=wifi' <<<"$nm" || fail "the keyfile must declare type=wifi" "$nm"
+LC_ALL=C grep -qxF 'method=auto' <<<"$nm" || fail "the keyfile must ask for DHCP" "$nm"
+pass "the staged keyfile is a complete NetworkManager wifi profile with the PSK"
+
+# An open network must NOT get a [wifi-security] section: NetworkManager
+# reads the presence of that section as "this network is secured", so an
+# empty psk= makes an open network unjoinable.
+nm_open=$(deck_form_nmconnection "OpenGuest" "" "11111111-2222-3333-4444-555555555555")
+LC_ALL=C grep -qF 'wifi-security' <<<"$nm_open" &&
+  fail "an OPEN network's keyfile must have no [wifi-security] section at all"
+LC_ALL=C grep -qxF 'ssid=OpenGuest' <<<"$nm_open" || fail "the open-network keyfile must still carry the SSID"
+pass "an open network's keyfile omits [wifi-security] entirely"
+
+# 🔴 ini injection. A newline in an SSID would otherwise write a whole new
+# key -- or a whole new [section] -- into a root-owned credential file.
+deck_form_nmconnection $'Evil\nautoconnect=false' "pw" "11111111-2222-3333-4444-555555555555" >/dev/null 2>&1 &&
+  fail "an SSID containing a newline must be REFUSED, not written into the keyfile"
+deck_form_nmconnection $'Evil\n[connection]\nid=hijack' "pw" "11111111-2222-3333-4444-555555555555" >/dev/null 2>&1 &&
+  fail "an SSID that would inject a whole ini section must be refused"
+deck_form_nmconnection "MyNet" $'pw\npsk-flags=0' "11111111-2222-3333-4444-555555555555" >/dev/null 2>&1 &&
+  fail "a passphrase containing a newline must be refused"
+pass "the keyfile writer refuses newline injection in both the SSID and the passphrase"
+
+# GKeyFile strips surrounding whitespace on read, so a value written with
+# it would come back out DIFFERENT -- a silently wrong SSID, which is worse
+# than a refusal.
+deck_form_nmconnection " LeadingSpace" "pw" "11111111-2222-3333-4444-555555555555" >/dev/null 2>&1 &&
+  fail "an SSID with a leading space must be refused (GKeyFile would strip it and join the wrong network)"
+deck_form_nmconnection "TrailingSpace " "pw" "11111111-2222-3333-4444-555555555555" >/dev/null 2>&1 &&
+  fail "an SSID with a trailing space must be refused"
+deck_form_nmconnection "" "pw" "11111111-2222-3333-4444-555555555555" >/dev/null 2>&1 &&
+  fail "an empty SSID must be refused -- 'ssid=' is a profile for nothing"
+pass "the keyfile writer refuses values GKeyFile would silently alter (leading/trailing space, empty)"
+
+# An SSID with an interior space is a real, common shape and must WORK.
+nm_sp=$(deck_form_nmconnection "My Home Network" "pw" "11111111-2222-3333-4444-555555555555")
+LC_ALL=C grep -qxF 'ssid=My Home Network' <<<"$nm_sp" ||
+  fail "an ordinary space-containing SSID must be written, not refused" "$nm_sp"
+pass "an interior space in an SSID is written through unharmed"
+
+echo "--- U1: the staged file is 0600 BEFORE the secret is in it ---------------"
+
+DECK_UUID_SOURCE="$work/uuid" deck_form_stage_nmconnection "$work/staged.nmconnection" "MyNet" "s3cret!" ||
+  fail "staging a keyfile for a well-formed SSID must succeed"
+mode=$(stat -c '%a' "$work/staged.nmconnection")
+[[ $mode == 600 ]] ||
+  fail "the staged keyfile must be mode 0600 -- NetworkManager REFUSES a group/world-readable keyfile, and it holds a passphrase" "got: $mode"
+LC_ALL=C grep -qxF 'psk=s3cret!' "$work/staged.nmconnection" || fail "the staged keyfile must actually contain the PSK"
+LC_ALL=C grep -qxF 'uuid=11111111-2222-3333-4444-555555555555' "$work/staged.nmconnection" ||
+  fail "the staged keyfile must carry the uuid from the uuid source"
+pass "the staged keyfile is written 0600 and carries the PSK and a uuid"
+
+# A refused SSID must leave NO file behind -- a half-written credential
+# file that NetworkManager later half-reads is worse than none.
+DECK_UUID_SOURCE="$work/uuid" \
+  deck_form_stage_nmconnection "$work/staged-bad.nmconnection" $'Evil\nautoconnect=false' "pw" >/dev/null 2>&1 &&
+  fail "staging must fail for an unsafe SSID"
+[[ ! -e "$work/staged-bad.nmconnection" ]] ||
+  fail "a refused staging must leave no file behind" "$(cat "$work/staged-bad.nmconnection")"
+pass "a refused staging leaves no partial credential file on disk"
+
+echo "--- U1: the outcome record is parsed, never sourced ----------------------"
+
+mkdir -p "$work/state"
+deck_form_wifi_record_outcome "$work/state" connected $'Evil\nstatus=hijacked' ||
+  fail "recording an outcome must succeed"
+[[ $(LC_ALL=C command grep -c . "$work/state/$DECK_NET_OUTCOME_FILE") -eq 2 ]] ||
+  fail "a hostile SSID must not be able to add lines to the outcome record" \
+       "$(cat "$work/state/$DECK_NET_OUTCOME_FILE")"
+LC_ALL=C grep -qxF 'status=connected' "$work/state/$DECK_NET_OUTCOME_FILE" ||
+  fail "the outcome record must carry the status it was given, not the injected one"
+pass "the outcome record sanitises the SSID, so a hostile network name cannot forge a status line"
+
+echo "--- S1 the passphrase prompt: --password, and a sanitised prompt string --"
+
+# 🔴 MEASURED on the real wizard (T4 §4 S1's flow trace): passwords never
+# echo. The OSK is how the user types and the field shows dots.
+: >"$work/gum-pass.log"
+got=$(FAKE_GUM_LOG="$work/gum-pass.log" FAKE_GUM_INPUT_OUTPUT="hunter2" \
+      DECK_FORM_OSK_UP=1 PATH="$work/bin-fakegum:$PATH" \
+      deck_form_wifi_passphrase_body "MyNet" 2>/dev/null)
+[[ $got == hunter2 ]] || fail "the passphrase body must return what was typed" "got: $got"
+LC_ALL=C grep -qF -- "--password" "$work/gum-pass.log" ||
+  fail "the passphrase prompt MUST pass --password -- a Wi-Fi passphrase must never echo on a screen someone else can see" \
+       "$(cat "$work/gum-pass.log")"
+pass "the passphrase prompt uses gum input --password (never echoes) and returns what was typed"
+
+# The SSID reaches a --prompt string that is written straight to the
+# console. An ANSI escape there repaints the screen the user is typing a
+# password into.
+: >"$work/gum-hostile.log"
+FAKE_GUM_LOG="$work/gum-hostile.log" FAKE_GUM_INPUT_OUTPUT="x" \
+  DECK_FORM_OSK_UP=1 PATH="$work/bin-fakegum:$PATH" \
+  deck_form_wifi_passphrase_body $'Evil\x1b[2JNet' >/dev/null 2>&1
+LC_ALL=C command grep -q $'\x1b' "$work/gum-hostile.log" &&
+  fail "a hostile SSID must be sanitised BEFORE it reaches the gum --prompt string" \
+       "$(od -c "$work/gum-hostile.log" | head -5)"
+pass "the passphrase prompt sanitises the SSID before drawing it (the prompt is an ANSI sink too)"
+
+# §2.3: an OSK that did not come up is "a degradation the screen must
+# state, not swallow" -- and on THIS screen it means there is no way to
+# type at all, so it must also say what to do instead.
+warn=$(FAKE_GUM_INPUT_OUTPUT="x" DECK_FORM_OSK_UP=0 PATH="$work/bin-fakegum:$PATH" \
+       deck_form_wifi_passphrase_body "MyNet" 2>&1 >/dev/null)
+LC_ALL=C grep -qF "on-screen keyboard did not start" <<<"$warn" ||
+  fail "a missing OSK must be STATED on the passphrase screen, not swallowed" "$warn"
+LC_ALL=C grep -qF "$DECK_NET_SKIP_ROW" <<<"$warn" ||
+  fail "with no keyboard the screen must name the way out (the Skip row), or the user is stuck"
+pass "a missing OSK is stated loudly on the passphrase screen, together with the way out"
+
+echo "--- S1 end-to-end through deck_form_wifi_screen (§5's whole tree) --------"
+
+# A fake iwctl driven entirely by files, so every §5 branch is reachable
+# without a radio. It logs every invocation, so "did the passphrase reach
+# iwctl" is asserted on what the command RECEIVED, not on the screen --
+# T4-screen-spec.md §6.2's A4 primitive applied at the [U] tier.
+mkdir -p "$work/bin-net"
+cat >"$work/bin-net/iwctl" <<'IWCTL'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$IWCTL_LOG"
+case "$*" in
+  *get-networks*) cat "$IWCTL_NETWORKS" ; exit 0 ;;
+  *scan*)         exit "${IWCTL_SCAN_RC:-0}" ;;
+  *connect*)
+    printf '%s\n' "${IWCTL_CONNECT_OUTPUT:-}"
+    exit "${IWCTL_CONNECT_RC:-0}"
+    ;;
+esac
+exit 0
+IWCTL
+chmod +x "$work/bin-net/iwctl"
+
+cat >"$work/bin-net/ip" <<'IPBIN'
+#!/usr/bin/env bash
+cat "${IP_ADDR_OUTPUT:-/dev/null}"
+exit 0
+IPBIN
+chmod +x "$work/bin-net/ip"
+
+cat >"$work/bin-net/systemctl" <<'SYSTEMCTL'
+#!/usr/bin/env bash
+[[ -n ${SYSTEMCTL_FAIL:-} ]] && { printf 'Job for iwd.service failed.\n'; exit 1; }
+exit 0
+SYSTEMCTL
+chmod +x "$work/bin-net/systemctl"
+
+mkdir -p "$work/net-live/wlan0/wireless"
+cp "$work/iwctl.raw" "$work/networks.raw"
+
+# A no-op mapper stand-in that reports bound instantly, so the passphrase
+# path exercises deck_form_text_prompt for real rather than being stubbed
+# past it.
+cat >"$work/fake-mapper-fast" <<'EOF'
+#!/usr/bin/env bash
+echo "deck-input-mapper: bound"
+sleep 5
+EOF
+chmod +x "$work/fake-mapper-fast"
+
+# Every S1 run shares this environment; only the queues and the fake
+# command outcomes change per case.
+s1_env=(
+  DECK_NET_SYSFS="$work/net-live"
+  DECK_IWCTL_BIN="$work/bin-net/iwctl"
+  DECK_IP_BIN="$work/bin-net/ip"
+  DECK_SYSTEMCTL_BIN="$work/bin-net/systemctl"
+  DECK_CURL_BIN="$work/bin-net/curl-missing"
+  DECK_NET_SCAN_SETTLE_OVERRIDE=0
+  DECK_NET_DHCP_DEADLINE_OVERRIDE=0
+  DECK_NET_DHCP_POLL_OVERRIDE=0
+  DECK_TEXT_PROMPT_LIZARD_SYSFS="$work/s1-lizard"
+  DECK_TEXT_PROMPT_MAPPER_BIN="$work/fake-mapper-fast"
+  DECK_TEXT_PROMPT_DEADLINE=3
+  DECK_UUID_SOURCE="$work/uuid"
+  IWCTL_NETWORKS="$work/networks.raw"
+  FAKE_GUM_CHOOSE_EXHAUSTED="$DECK_NET_SKIP_ROW"
+  PATH="$work/bin-fakegum:$work/bin-net:$PATH"
+)
+
+# ⚠️ EACH S1 CASE RUNS IN A FRESH `bash`, NOT IN THIS SHELL. Three reasons,
+# all of them things that bit earlier drafts:
+#   - S1 loops. A case that misbehaves would spin THIS process, and the
+#     suite watchdog would kill everything with no per-case attribution;
+#     each case gets its own `timeout` instead.
+#   - S1 sets globals (DECK_WIFI_SSID) and `readonly` constants are already
+#     bound here, so re-sourcing in-process to reset state is impossible.
+#   - deck-form.sh must be provably runnable when sourced into a shell that
+#     is NOT this suite -- which is its actual deployment (upstream's
+#     `configurator`). A fresh bash with only the three upstream helpers
+#     defined is much closer to that than this suite's environment.
+# The wrapper carries the same minimal upstream stubs, and nothing else.
+cat >"$work/s1-boot.sh" <<'BOOT'
+clear_logo() { :; }
+say() { printf '%s\n' "$*" >>"${DECK_TEST_SAY_LOG:-/dev/null}"; }
+step() { printf '%s\n' "$*" >>"${DECK_TEST_SAY_LOG:-/dev/null}"; }
+source "$DECK_FORM_PATH"
+deck_form_wifi_screen
+rc=$?
+# DECK_WIFI_SSID is the ONLY thing S1 hands to S5 (deck_form_summary_rows
+# reads it directly), and it dies with this subshell -- so dump it, or the
+# one value that crosses the screen boundary is untested.
+printf '%s' "${DECK_WIFI_SSID:-}" >"${DECK_TEST_SSID_OUT:-/dev/null}"
+exit $rc
+BOOT
+
+s1_run() {
+  local name=$1; shift
+  rm -rf "$work/s1-$name"; mkdir -p "$work/s1-$name"
+  printf 'Y\n' >"$work/s1-lizard"
+  : >"$work/s1-$name/choose.q"
+  local l
+  for l in "$@"; do printf '%s\n' "$l" >>"$work/s1-$name/choose.q"; done
+  : >"$work/s1-$name/iwctl.log"
+  : >"$work/s1-$name/gum.log"
+  s1_rc=0
+  env "${s1_env[@]}" \
+      DECK_FORM_PATH="$REPO_ROOT/src/deck-form.sh" \
+      DECK_NET_STATE_DIR="$work/s1-$name" \
+      DECK_TEST_SAY_LOG="$work/s1-$name/say.log" \
+      DECK_TEST_SSID_OUT="$work/s1-$name/wifi-ssid" \
+      IWCTL_LOG="$work/s1-$name/iwctl.log" \
+      FAKE_GUM_LOG="$work/s1-$name/gum.log" \
+      FAKE_GUM_CHOOSE_QUEUE="$work/s1-$name/choose.q" \
+      FAKE_GUM_INPUT_QUEUE="${S1_INPUT_QUEUE:-}" \
+      IWCTL_CONNECT_RC="${S1_CONNECT_RC:-0}" \
+      IWCTL_CONNECT_OUTPUT="${S1_CONNECT_OUTPUT:-}" \
+      IP_ADDR_OUTPUT="${S1_IP_OUTPUT:-/dev/null}" \
+      SYSTEMCTL_FAIL="${S1_SYSTEMCTL_FAIL:-}" \
+      timeout 40 bash "$work/s1-boot.sh" \
+      >"$work/s1-$name/stdout" 2>"$work/s1-$name/stderr" || s1_rc=$?
+}
+
+s1_say()   { cat "$work/s1-$1/say.log"; }
+s1_out()   { cat "$work/s1-$1/${DECK_NET_OUTCOME_FILE}" 2>/dev/null; }
+
+# --- §5 row 1: no wlan0 -> skip S1 entirely, never block ---
+mkdir -p "$work/s1-nohw"
+env "${s1_env[@]}" DECK_NET_SYSFS="$work/net-none" \
+    DECK_FORM_PATH="$REPO_ROOT/src/deck-form.sh" \
+    DECK_NET_STATE_DIR="$work/s1-nohw" DECK_TEST_SAY_LOG="$work/s1-nohw/say2.log" \
+    IWCTL_LOG="$work/s1-nohw/iwctl.log" FAKE_GUM_LOG="$work/s1-nohw/gum.log" \
+    timeout 20 bash "$work/s1-boot.sh" >/dev/null 2>&1 || fail "S1 must return 0 with no Wi-Fi hardware -- it must never block the install (this is also every QEMU run)"
+LC_ALL=C grep -qF "No Wi-Fi hardware found" "$work/s1-nohw/say2.log" ||
+  fail "S1 must SAY that no Wi-Fi hardware was found" "$(cat "$work/s1-nohw/say2.log")"
+LC_ALL=C grep -qF "audio DSP firmware and Steam are not downloaded" "$work/s1-nohw/say2.log" ||
+  fail "the no-hardware path must state §5's offline consequence, not just skip silently"
+LC_ALL=C grep -qxF "status=no-hardware" "$work/s1-nohw/$DECK_NET_OUTCOME_FILE" ||
+  fail "the no-hardware path must record its outcome" "$(cat "$work/s1-nohw/$DECK_NET_OUTCOME_FILE")"
+pass "§5: no Wi-Fi hardware -> S1 returns 0, says so, states the consequence, records no-hardware"
+
+# --- §5 row 2: iwd will not start ---
+S1_SYSTEMCTL_FAIL=1 s1_run iwddead "$DECK_NET_SKIP_ROW"
+[[ $s1_rc -eq 0 ]] || fail "a dead iwd must not block the install" "rc=$s1_rc"
+LC_ALL=C grep -qF "would not start" "$(printf '%s' "$work/s1-iwddead/say.log")" ||
+  fail "S1 must say iwd would not start"
+LC_ALL=C grep -qF "Job for iwd.service failed" "$work/s1-iwddead/say.log" ||
+  fail "§5: the unit's own status line must be SHOWN, never swallowed" "$(s1_say iwddead)"
+LC_ALL=C grep -qxF "status=iwd-failed" "$work/s1-iwddead/$DECK_NET_OUTCOME_FILE" ||
+  fail "the dead-iwd path must record its outcome"
+unset S1_SYSTEMCTL_FAIL
+pass "§5: iwd will not start -> continues offline, SHOWS the unit's status line, records iwd-failed"
+
+# --- §5 row 7: the user picks Skip ---
+s1_run skip "$DECK_NET_SKIP_ROW"
+[[ $s1_rc -eq 0 ]] || fail "the Skip row must complete the screen" "rc=$s1_rc"
+LC_ALL=C grep -qxF "status=skipped" "$work/s1-skip/$DECK_NET_OUTCOME_FILE" ||
+  fail "Skip must record the skipped outcome" "$(s1_out skip)"
+LC_ALL=C grep -qF "audio DSP firmware and Steam are not downloaded" "$work/s1-skip/say.log" ||
+  fail "§5: the consequence must be stated on S1's skip"
+[[ ! -e "$work/s1-skip/$DECK_NET_STAGED_NMCONNECTION" ]] ||
+  fail "Skip must not stage a NetworkManager profile"
+pass "§5: Skip -> completes, states the consequence, records skipped, stages nothing"
+
+# --- the cancel fallback, driven for real: B on the list REDRAWS ---
+s1_run cancel "<CANCEL>" "<CANCEL>" "$DECK_NET_RESCAN_ROW" "$DECK_NET_SKIP_ROW"
+[[ $s1_rc -eq 0 ]] || fail "a cancelled list must redraw and the screen still complete" "rc=$s1_rc"
+LC_ALL=C grep -qF "CHOOSE-QUEUE-EXHAUSTED" "$work/s1-cancel/gum.log" &&
+  fail "the cancel/rescan case ran off the end of its scripted answers -- the loop is not doing what this test claims"
+[[ $(LC_ALL=C command grep -c '^choose' "$work/s1-cancel/gum.log") -eq 4 ]] ||
+  fail "two cancels and a rescan must each redraw the list (4 menus in total)" "$(cat "$work/s1-cancel/gum.log")"
+pass "B/Esc on the network list REDRAWS (never acts), and Rescan redraws too"
+
+# --- §5 row 4: wrong passphrase, bounded at 3 tries ---
+printf 'wrong1\nwrong2\nwrong3\nwrong4\n' >"$work/pass.q"
+S1_INPUT_QUEUE="$work/pass.q" S1_CONNECT_RC=1 \
+  s1_run wrongpw $'\360\237\224\222 My Home Network' "$DECK_NET_SKIP_ROW"
+[[ $s1_rc -eq 0 ]] || fail "three wrong passphrases must end back at the list, not stuck" "rc=$s1_rc"
+LC_ALL=C grep -qF "That didn't work -- check the password" "$work/s1-wrongpw/say.log" ||
+  fail "§5's exact retry sentence must be shown" "$(s1_say wrongpw)"
+tries=$(LC_ALL=C command grep -c 'connect' "$work/s1-wrongpw/iwctl.log")
+[[ $tries -eq 3 ]] ||
+  fail "§5: the passphrase loop must be BOUNDED AT 3 tries -- nobody stuck in a loop they cannot escape" "iwctl connect attempts: $tries"
+LC_ALL=C grep -qF "Back to the network list" "$work/s1-wrongpw/say.log" ||
+  fail "after the bound is reached the screen must say it is going back to the list"
+[[ $(LC_ALL=C command grep -c . "$work/pass.q") -eq 1 ]] ||
+  fail "exactly three passphrases must have been consumed (a 4th prompt means the bound leaked)" "$(cat "$work/pass.q")"
+unset S1_INPUT_QUEUE S1_CONNECT_RC
+pass "§5: a wrong passphrase re-prompts with the right sentence and is bounded at exactly 3 tries"
+
+# --- the happy path, and what iwctl RECEIVED ---
+printf 'C0rrect horse!\n' >"$work/pass-ok.q"
+printf 'wlan0 UP 192.168.1.50/24\n' >"$work/ip-ok"
+S1_INPUT_QUEUE="$work/pass-ok.q" S1_IP_OUTPUT="$work/ip-ok" \
+  s1_run happy $'\360\237\224\222 My Home Network'
+[[ $s1_rc -eq 0 ]] || fail "a successful join must return 0" "rc=$s1_rc; $(cat "$work/s1-happy/stderr")"
+# A4: assert on what the command RECEIVED, not on the screen.
+LC_ALL=C grep -qF -- "--passphrase C0rrect horse! station wlan0 connect My Home Network" "$work/s1-happy/iwctl.log" ||
+  fail "the typed passphrase and the RAW SSID must reach iwctl exactly" "$(cat "$work/s1-happy/iwctl.log")"
+LC_ALL=C grep -qxF "status=connected" "$work/s1-happy/$DECK_NET_OUTCOME_FILE" ||
+  fail "a successful join must record connected"
+[[ -f "$work/s1-happy/$DECK_NET_STAGED_NMCONNECTION" ]] ||
+  fail "🔴 U1: a successful join must STAGE a NetworkManager keyfile -- without it the Deck boots with no Wi-Fi and no way to type"
+LC_ALL=C grep -qxF 'psk=C0rrect horse!' "$work/s1-happy/$DECK_NET_STAGED_NMCONNECTION" ||
+  fail "the staged keyfile must carry the passphrase the user actually typed" "$(cat "$work/s1-happy/$DECK_NET_STAGED_NMCONNECTION")"
+[[ $(stat -c '%a' "$work/s1-happy/$DECK_NET_STAGED_NMCONNECTION") == 600 ]] ||
+  fail "the staged keyfile must be 0600 on the real path, not only in the unit test of the writer"
+unset S1_INPUT_QUEUE S1_IP_OUTPUT
+pass "the happy path joins, records connected, and stages a 0600 NetworkManager keyfile with the real PSK (U1)"
+
+# --- an OPEN network needs no passphrase prompt at all ---
+printf 'wlan0 UP 192.168.1.51/24\n' >"$work/ip-ok2"
+: >"$work/pass-none.q"
+S1_INPUT_QUEUE="$work/pass-none.q" S1_IP_OUTPUT="$work/ip-ok2" \
+  s1_run open "OpenGuest"
+[[ $s1_rc -eq 0 ]] || fail "joining an open network must succeed" "rc=$s1_rc"
+LC_ALL=C grep -qF -- "--passphrase" "$work/s1-open/iwctl.log" &&
+  fail "an OPEN network must be joined with no --passphrase at all"
+LC_ALL=C grep -qF "input" "$work/s1-open/gum.log" &&
+  fail "an OPEN network must never raise the passphrase prompt"
+LC_ALL=C grep -qF 'wifi-security' "$work/s1-open/$DECK_NET_STAGED_NMCONNECTION" &&
+  fail "an open network's staged keyfile must have no [wifi-security] section"
+unset S1_INPUT_QUEUE S1_IP_OUTPUT
+pass "an open network joins with no passphrase prompt and stages an unsecured keyfile"
+
+# --- §5 row 5: associated, no DHCP -- the case a naive check calls success ---
+printf 'C0rrect horse!\n' >"$work/pass-dhcp.q"
+printf 'wlan0 UP 169.254.9.9/16\n' >"$work/ip-linklocal"
+S1_INPUT_QUEUE="$work/pass-dhcp.q" S1_IP_OUTPUT="$work/ip-linklocal" \
+  s1_run nodhcp $'\360\237\224\222 My Home Network' "$DECK_NET_SKIP_ROW"
+[[ $s1_rc -eq 0 ]] || fail "a DHCP failure must be recoverable, not fatal" "rc=$s1_rc"
+LC_ALL=C grep -qF "never handed out an address" "$work/s1-nodhcp/say.log" ||
+  fail "§5: an association with no DHCP must be reported as a failure, not as success" "$(s1_say nodhcp)"
+LC_ALL=C grep -qxF "status=connected" "$work/s1-nodhcp/$DECK_NET_OUTCOME_FILE" &&
+  fail "🔴 a link-local address must NOT be recorded as connected -- that is the exact false success §5 row 5 exists to catch"
+[[ ! -e "$work/s1-nodhcp/$DECK_NET_STAGED_NMCONNECTION" ]] ||
+  fail "a network that never gave out an address must not be staged for the installed system"
+# 🔴 MUTATION-FOUND GAP, closed. Skip inside the DHCP menu must end the
+# WHOLE screen, not bounce back to the network list. Both spellings reach
+# "skipped" in the end (the list would be redrawn and Skip picked again),
+# so only the SHAPE of the run distinguishes them: exactly two menus (the
+# list, then the failure menu) and no fallback onto the fake's exhausted
+# answer. Without this the join function's 1-vs-2 status vocabulary was
+# untested.
+LC_ALL=C grep -qF "CHOOSE-QUEUE-EXHAUSTED" "$work/s1-nodhcp/gum.log" &&
+  fail "Skip inside the DHCP failure menu must END the screen -- this run fell through to an extra menu"
+[[ $(LC_ALL=C command grep -c '^choose' "$work/s1-nodhcp/gum.log") -eq 2 ]] ||
+  fail "the no-DHCP run must draw exactly two menus: the network list, then the failure menu" \
+       "$(cat "$work/s1-nodhcp/gum.log")"
+LC_ALL=C grep -qxF "status=skipped" "$work/s1-nodhcp/$DECK_NET_OUTCOME_FILE" ||
+  fail "Skip inside the DHCP menu must record the skipped outcome"
+unset S1_INPUT_QUEUE S1_IP_OUTPUT
+pass "§5: associated-but-no-DHCP is a failure with a recovery menu, never a recorded success"
+
+# --- the DHCP menu's own three answers, driven for real ---
+printf 'pw1\npw2\n' >"$work/pass-retry.q"
+S1_INPUT_QUEUE="$work/pass-retry.q" S1_IP_OUTPUT="$work/ip-linklocal" \
+  s1_run dhcpretry $'\360\237\224\222 My Home Network' "Try again" "Pick another network" "$DECK_NET_SKIP_ROW"
+[[ $s1_rc -eq 0 ]] || fail "the DHCP menu must always end somewhere reachable" "rc=$s1_rc"
+retries=$(LC_ALL=C command grep -c 'connect' "$work/s1-dhcpretry/iwctl.log")
+[[ $retries -eq 2 ]] ||
+  fail "'Try again' must re-run the join for the SAME network (2 connects), then 'Pick another' must go back to the list" "connects: $retries"
+unset S1_INPUT_QUEUE S1_IP_OUTPUT
+pass "the DHCP failure menu's Try again re-joins the same network, and Pick another returns to the list"
+
+# --- §5 row 6: captive portal ---
+mkdir -p "$work/bin-portal"
+cat >"$work/bin-portal/curl" <<'CURL'
+#!/usr/bin/env bash
+printf '%s' "${CURL_BODY:-}"
+exit "${CURL_RC:-0}"
+CURL
+chmod +x "$work/bin-portal/curl"
+printf 'C0rrect horse!\n' >"$work/pass-portal.q"
+printf 'wlan0 UP 10.0.0.9/24\n' >"$work/ip-portal"
+rm -rf "$work/s1-portal"; mkdir -p "$work/s1-portal"
+printf 'Y\n' >"$work/s1-lizard"
+printf '%s\n%s\n' $'\360\237\224\222 My Home Network' "$DECK_NET_SKIP_ROW" >"$work/s1-portal/choose.q"
+: >"$work/s1-portal/iwctl.log"; : >"$work/s1-portal/gum.log"
+env "${s1_env[@]}" \
+    DECK_CURL_BIN="$work/bin-portal/curl" \
+    DECK_FORM_PATH="$REPO_ROOT/src/deck-form.sh" \
+    DECK_NET_STATE_DIR="$work/s1-portal" \
+    DECK_TEST_SAY_LOG="$work/s1-portal/say.log" \
+    IWCTL_LOG="$work/s1-portal/iwctl.log" \
+    FAKE_GUM_LOG="$work/s1-portal/gum.log" \
+    FAKE_GUM_CHOOSE_QUEUE="$work/s1-portal/choose.q" \
+    FAKE_GUM_INPUT_QUEUE="$work/pass-portal.q" \
+    IP_ADDR_OUTPUT="$work/ip-portal" \
+    CURL_BODY='<html>Hotel sign-in</html>' \
+    PATH="$work/bin-portal:$work/bin-fakegum:$work/bin-net:$PATH" \
+    timeout 40 bash "$work/s1-boot.sh" >/dev/null 2>&1 ||
+  fail "a captive portal must be recoverable from the controller, not fatal"
+LC_ALL=C grep -qF "needs a web sign-in page" "$work/s1-portal/say.log" ||
+  fail "§5: a captive portal must be stated plainly" "$(cat "$work/s1-portal/say.log")"
+LC_ALL=C grep -qxF "status=connected" "$work/s1-portal/$DECK_NET_OUTCOME_FILE" &&
+  fail "a captive-portal network must NOT be recorded as usable"
+[[ ! -e "$work/s1-portal/$DECK_NET_STAGED_NMCONNECTION" ]] ||
+  fail "a captive-portal network must not be staged for the installed system"
+pass "§5: a captive portal is stated plainly, never rendered, never recorded as connected, and is recoverable"
+
+# --- §5 row 3: scan returns nothing ---
+: >"$work/networks-empty.raw"
+rm -rf "$work/s1-noscan"; mkdir -p "$work/s1-noscan"
+printf 'Y\n' >"$work/s1-lizard"
+printf '%s\n' "$DECK_NET_SKIP_ROW" >"$work/s1-noscan/choose.q"
+: >"$work/s1-noscan/iwctl.log"; : >"$work/s1-noscan/gum.log"
+env "${s1_env[@]}" \
+    IWCTL_NETWORKS="$work/networks-empty.raw" \
+    DECK_FORM_PATH="$REPO_ROOT/src/deck-form.sh" \
+    DECK_NET_STATE_DIR="$work/s1-noscan" \
+    DECK_TEST_SAY_LOG="$work/s1-noscan/say.log" \
+    IWCTL_LOG="$work/s1-noscan/iwctl.log" \
+    FAKE_GUM_LOG="$work/s1-noscan/gum.log" \
+    FAKE_GUM_CHOOSE_QUEUE="$work/s1-noscan/choose.q" \
+    timeout 40 bash "$work/s1-boot.sh" >/dev/null 2>&1 ||
+  fail "an empty scan must not block the screen"
+LC_ALL=C grep -qF "No networks found. Move closer, or skip." "$work/s1-noscan/say.log" ||
+  fail "§5's exact empty-scan sentence must be shown" "$(cat "$work/s1-noscan/say.log")"
+# 🔴 MUTATION-FOUND GAP, closed. This used to read `-eq $DECK_NET_SCAN_TRIES`
+# -- a tautology: mutating the constant to 1 moved the expectation with the
+# behaviour and the test stayed green. §5's number is TWO ("empty
+# get-networks after two tries"), so two is what is asserted, literally,
+# in both places.
+scans=$(LC_ALL=C command grep -c 'scan' "$work/s1-noscan/iwctl.log")
+[[ $scans -eq 2 ]] ||
+  fail "§5: an empty result must be retried exactly twice before giving up" "scans: $scans"
+[[ $DECK_NET_SCAN_TRIES -eq 2 ]] ||
+  fail "§5's scan-retry count is two" "DECK_NET_SCAN_TRIES=$DECK_NET_SCAN_TRIES"
+LC_ALL=C grep -qxF "status=skipped" "$work/s1-noscan/$DECK_NET_OUTCOME_FILE" ||
+  fail "the empty-scan screen must still reach Skip"
+pass "§5: an empty scan retries twice, says exactly what §5 asks, and still offers Skip"
+
+# --- an enterprise network must not open a passphrase prompt it cannot use ---
+cat >"$work/networks-8021x.raw" <<EOF
+                                        Available networks
+------------------------------------------------------------------------
+    Network name                    Security             Signal
+------------------------------------------------------------------------
+    CorpNet                         8021x                ****
+EOF
+rm -rf "$work/s1-corp"; mkdir -p "$work/s1-corp"
+printf 'Y\n' >"$work/s1-lizard"
+printf '%s\n%s\n' $'\360\237\224\222 CorpNet' "$DECK_NET_SKIP_ROW" >"$work/s1-corp/choose.q"
+: >"$work/s1-corp/iwctl.log"; : >"$work/s1-corp/gum.log"
+env "${s1_env[@]}" \
+    IWCTL_NETWORKS="$work/networks-8021x.raw" \
+    DECK_FORM_PATH="$REPO_ROOT/src/deck-form.sh" \
+    DECK_NET_STATE_DIR="$work/s1-corp" \
+    DECK_TEST_SAY_LOG="$work/s1-corp/say.log" \
+    IWCTL_LOG="$work/s1-corp/iwctl.log" \
+    FAKE_GUM_LOG="$work/s1-corp/gum.log" \
+    FAKE_GUM_CHOOSE_QUEUE="$work/s1-corp/choose.q" \
+    timeout 40 bash "$work/s1-boot.sh" >/dev/null 2>&1 ||
+  fail "an enterprise network must not break the screen"
+LC_ALL=C grep -qF "enterprise security" "$work/s1-corp/say.log" ||
+  fail "an 802.1x network must SAY why it cannot be joined here" "$(cat "$work/s1-corp/say.log")"
+LC_ALL=C grep -qF 'connect' "$work/s1-corp/iwctl.log" &&
+  fail "an 802.1x network must never be handed to iwctl connect with a passphrase"
+LC_ALL=C grep -qF "input" "$work/s1-corp/gum.log" &&
+  fail "an 802.1x network must never raise a passphrase prompt that cannot possibly work"
+pass "an enterprise (802.1x) network is explained and skipped, never given a doomed passphrase prompt"
+
+# --- the hostile SSID, end to end: what iwctl gets vs what the screen shows ---
+printf 'pw\n' >"$work/pass-hostile.q"
+printf 'wlan0 UP 10.0.0.5/24\n' >"$work/ip-hostile"
+S1_INPUT_QUEUE="$work/pass-hostile.q" S1_IP_OUTPUT="$work/ip-hostile" \
+  s1_run hostile "Evil?Bar"
+[[ $s1_rc -eq 0 ]] || fail "a hostile-named open network must still be joinable" "rc=$s1_rc"
+LC_ALL=C grep -qF 'connect Evil|Bar' "$work/s1-hostile/iwctl.log" ||
+  fail "🔴 the RAW SSID must reach iwctl -- joining the sanitised display text would fail forever with no clue why" \
+       "$(cat "$work/s1-hostile/iwctl.log")"
+LC_ALL=C grep -qF 'Evil|Bar' "$work/s1-hostile/say.log" &&
+  fail "the raw '|' must never reach the screen"
+LC_ALL=C grep -qxF "ssid=Evil?Bar" "$work/s1-hostile/$DECK_NET_OUTCOME_FILE" ||
+  fail "the outcome record must carry the sanitised SSID" "$(s1_out hostile)"
+# 🔴 MUTATION-FOUND GAP, closed. DECK_WIFI_SSID is the ONE value S1 hands
+# to S5, and deck_form_summary_rows prints it straight into a gum table --
+# so a raw SSID here is an ANSI-injection sink two screens later, on the
+# screen nobody would think to look at. Setting it to $ssid instead of
+# $safe_ssid survived every other assertion in this file.
+[[ $(cat "$work/s1-hostile/wifi-ssid") == 'Evil?Bar' ]] ||
+  fail "DECK_WIFI_SSID (the only value S1 hands to S5) must be the SANITISED SSID" \
+       "got: $(cat "$work/s1-hostile/wifi-ssid")"
+# ...and that value must survive into the summary table itself.
+DECK_WIFI_SSID=$(cat "$work/s1-hostile/wifi-ssid")
+username=deck; password=hunter22; hostname=steamdeck
+timezone=Europe/Copenhagen; disk=/dev/nvme0n1; encrypt_installation=false
+LC_ALL=C grep -qF "Wi-Fi,Evil?Bar" <<<"$(DECK_LSBLK_BIN=true deck_form_summary_rows)" ||
+  fail "the sanitised SSID must reach S5's summary row"
+unset DECK_WIFI_SSID
+unset S1_INPUT_QUEUE S1_IP_OUTPUT
+pass "a hostile SSID reaches iwctl raw, the screen sanitised, and S5 sanitised -- all three, in one run"
+
+# --- an empty passphrase must never be submitted as an open-network join ---
+# Without the empty check, gum returning nothing (the OSK closed with
+# nothing typed) falls through to `iwctl station … connect` with NO
+# --passphrase, i.e. a secured network joined as if it were open: a
+# guaranteed failure reported as "wrong password".
+printf '<EMPTY>\nC0rrect horse!\n' >"$work/pass-empty.q"
+printf 'wlan0 UP 10.0.0.7/24\n' >"$work/ip-empty"
+S1_INPUT_QUEUE="$work/pass-empty.q" S1_IP_OUTPUT="$work/ip-empty" \
+  s1_run emptypw $'\360\237\224\222 My Home Network'
+[[ $s1_rc -eq 0 ]] || fail "an empty passphrase must re-prompt, then succeed on the real one" "rc=$s1_rc"
+LC_ALL=C grep -qF "No password entered" "$work/s1-emptypw/say.log" ||
+  fail "an empty passphrase must be reported and re-prompted, not submitted" "$(s1_say emptypw)"
+connects=$(LC_ALL=C command grep -c 'connect' "$work/s1-emptypw/iwctl.log")
+[[ $connects -eq 1 ]] ||
+  fail "an empty passphrase must produce NO iwctl connect at all -- a secured network joined without --passphrase is a guaranteed failure blamed on the user" \
+       "$(cat "$work/s1-emptypw/iwctl.log")"
+unset S1_INPUT_QUEUE S1_IP_OUTPUT
+pass "an empty passphrase re-prompts instead of being submitted as an open-network join"
 # ===========================================================================
 # S8: Failure -- ITS ASSERTIONS WERE DELETED WITH THE CODE, ON PURPOSE
 # ===========================================================================
@@ -620,53 +1478,12 @@ pass "the lock glyph is present for secured networks and absent for open ones"
 # S8 now lives in `src/deck-dashboard.sh` and is proven by
 # `test/unit/test-deck-dashboard.sh`, against upstream's real menu.
 # ===========================================================================
-# Stubs for upstream `configurator` helpers this file's screen OVERRIDES
-# call but does not itself define -- clear_logo/say/step/abort/
-# get_root_disk/get_disk_info are all real functions in the real
-# `configurator` (READ this session), not in deck-form.sh, so sourcing
-# deck-form.sh ALONE (this suite's whole point -- no VM, no real
-# configurator) leaves them undefined. Minimal stand-ins, not
-# reimplementations of upstream's real behaviour: just enough for
-# confirm_disk_overwrite/disk_form/deck_final_summary to run to completion
-# so THIS file's own logic (which is what this suite is actually proving)
-# can be exercised. `abort` is deliberately non-fatal here (`return 1`, not
-# upstream's real `exit 1`) so a path that reaches it fails an assertion
-# instead of killing the whole test process.
+# The upstream-helper stubs and the fake `gum` USED to be defined here.
+# They moved to the top of this file (right after the `source`) on
+# 2026-08-12, because `greeter` now runs S1 and S1 calls `step`/`say`, so
+# the S0 test -- which is ABOVE this point -- needs them. Nothing else about
+# them changed; see their comment block up there.
 # ===========================================================================
-
-clear_logo() { :; }
-say() { printf '%s\n' "$*" >>"${DECK_TEST_SAY_LOG:-/dev/null}"; }
-step() { printf '%s\n' "$*" >>"${DECK_TEST_SAY_LOG:-/dev/null}"; }
-abort() { printf 'ABORT: %s\n' "$*" >&2; return 1; }
-get_root_disk() { printf '%s\n' "${DECK_TEST_ROOT_DISK:-}"; }
-get_disk_info() { printf '%s\n' "$1"; }
-
-# A dispatching fake `gum` -- confirm/choose/table only, everything else
-# no-ops. Every real gum-driving function this suite exercises below
-# (confirm_disk_overwrite, disk_form's picker branch, deck_final_summary's
-# affirmative path) calls gum EXACTLY ONCE per test, never in a loop this
-# fake could spin forever in -- the looping paths (deck_final_summary's
-# decline branch, omarchy_prompt_timezone's interactive area/city picker,
-# deck_form_disk_dead_end) are [V]-tier by this file's own design (same
-# precedent as S8's failure_menu, which this suite also does not drive
-# live) and are NOT exercised here.
-mkdir -p "$work/bin-fakegum"
-cat >"$work/bin-fakegum/gum" <<'FAKEGUM'
-#!/usr/bin/env bash
-sub=${1:-}
-printf '%s\n' "$*" >>"${FAKE_GUM_LOG:-/dev/null}"
-case "$sub" in
-  confirm) exit "${FAKE_GUM_CONFIRM_RC:-0}" ;;
-  choose)
-    [[ -n ${FAKE_GUM_CHOOSE_RC:-} && ${FAKE_GUM_CHOOSE_RC} != 0 ]] && exit "$FAKE_GUM_CHOOSE_RC"
-    printf '%s\n' "${FAKE_GUM_CHOOSE_OUTPUT:-}"
-    exit 0
-    ;;
-  table) cat; exit 0 ;;
-  *) exit 0 ;;
-esac
-FAKEGUM
-chmod +x "$work/bin-fakegum/gum"
 
 # ===========================================================================
 # S2: Region (timezone)
@@ -1153,6 +1970,28 @@ rc=$?
 LC_ALL=C grep -qF "table" "$work/gum.log" || fail "deck_final_summary must render the summary via gum table" "$(cat "$work/gum.log")"
 LC_ALL=C grep -qF "confirm" "$work/gum.log" || fail "deck_final_summary must ask for a final confirm"
 pass "deck_final_summary renders the table and returns 0 on an affirmative confirm"
+
+# §5: "the consequences, stated once, on S1's skip AND AGAIN ON S5." The
+# S1 half is asserted in the S1 block; this is the S5 half, and it must be
+# keyed on the same global the Wi-Fi row is built from, or the table and
+# the sentence can disagree.
+unset DECK_WIFI_SSID 2>/dev/null || true
+: >"$work/s5-say.log"
+FAKE_GUM_CONFIRM_RC=0 DECK_TEST_SAY_LOG="$work/s5-say.log" \
+DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" PATH="$work/bin-fakegum:$PATH" \
+  deck_final_summary >/dev/null
+LC_ALL=C grep -qF "audio DSP firmware and Steam are not downloaded" "$work/s5-say.log" ||
+  fail "§5: S5 must restate the offline consequence when no network was joined" "$(cat "$work/s5-say.log")"
+
+DECK_WIFI_SSID="MyHomeNetwork"
+: >"$work/s5-say2.log"
+FAKE_GUM_CONFIRM_RC=0 DECK_TEST_SAY_LOG="$work/s5-say2.log" \
+DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" PATH="$work/bin-fakegum:$PATH" \
+  deck_final_summary >/dev/null
+LC_ALL=C grep -qF "audio DSP firmware and Steam are not downloaded" "$work/s5-say2.log" &&
+  fail "S5 must NOT show the offline consequence when a network WAS joined -- a warning that always fires is noise, not information"
+unset DECK_WIFI_SSID
+pass "S5 restates §5's offline consequence exactly when no network was joined, and not otherwise"
 
 echo "========================================================================"
 echo "ALL deck-form.sh TESTS PASSED"

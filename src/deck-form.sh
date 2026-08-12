@@ -81,8 +81,7 @@
 #      real contents (not available in this repo -- see the load function).
 #   4. S1 Wi-Fi -- ONLY the pure, testable slice §4 S1 itself calls out for
 #      [U] coverage: the SSID list builder and its iwctl-output parser.
-#      The interactive gum flow, the DHCP/captive-portal failure tree (§5),
-#      and NetworkManager credential hand-off (U1) are NOT built.
+#      (COMPLETED 2026-08-12 -- see item 9 below.)
 #   5. S8 Failure -- the menu contents and the cancel-fallback decision
 #      layer (the one the spec's own §4 S8 flags as needing mutation
 #      testing), plus the menu loop and log pager. ⚠️ NOT WIRED UP: upstream's
@@ -120,6 +119,19 @@
 #      never a shell -- when none is), and `confirm_disk_overwrite` (our
 #      text, cursor defaults to "No", and `encrypt_installation` is an
 #      unconditional constant `false` -- no Ctrl+C toggle exists at all).
+#   9. S1 Wi-Fi, the rest of it (2026-08-12) -- the interactive scan/select
+#      flow, the passphrase prompt through §2.3's bounded text-entry mode,
+#      §5's whole failure tree (no hardware / iwd dead / no networks /
+#      wrong passphrase, bounded at 3 / no DHCP / captive portal / skip),
+#      and U1's NetworkManager credential hand-off. S1 is invoked from the
+#      END OF `greeter` -- upstream has no Wi-Fi screen to override, so
+#      there is no upstream name for it; see the S1 block's own "WHERE
+#      THIS SCREEN IS CALLED FROM" comment for why that is the seam and
+#      not a third patch hunk. U1's finding: upstream does NOTHING about
+#      carrying credentials across (measured against iso/upstream, not
+#      inferred), so this file stages a NetworkManager keyfile that T5's
+#      `configure_deck` phase must install -- contract in the U1 block.
+#
 #   8. S5 Summary -- `deck_final_summary`, the NEW function name patch P1
 #      hunk 2 calls directly (`docs/tasks/T4-screen-spec.md §1.2`), not an
 #      override of an existing upstream name. On "Go back" it re-runs
@@ -375,11 +387,23 @@ deck_form_s0_text() {
 #
 # DECK_S0_TTY is overridable so the unit suite never needs a real
 # controlling terminal.
+# ⚠️ THIS FUNCTION ALSO RUNS S1. See the S1 block's own "WHERE THIS SCREEN
+# IS CALLED FROM" comment for the full argument -- the short version is that
+# upstream has no Wi-Fi screen to override, §1.4's patch budget is already
+# spent, §3 promotes Wi-Fi to first, and `greeter` is the earliest point in
+# upstream's flow this file owns. It must stay BEFORE `keyboard_form`, which
+# runs `loadkeys`.
 greeter() {
   local tty=${DECK_S0_TTY:-/dev/tty}
   deck_form_s0_text
   deck_form_stty_sane "$tty"
   IFS= read -r _ <"$tty" 2>/dev/null
+  # Never gated on its status: S1 returns 0 on every path a user can reach
+  # (§5 -- "the install must still succeed"), so a nonzero here is this
+  # file's own plumbing failing, which is logged rather than swallowed and
+  # still does not stop the install.
+  deck_form_wifi_screen ||
+    deck_form_warn "the Wi-Fi screen returned $? -- continuing the install offline"
 }
 
 deck_form_stty_sane() {
@@ -571,12 +595,92 @@ deck_form_hostname_body() {
 omarchy_prompt_hostname() { deck_form_hostname_body; }
 
 # ===========================================================================
-# S1 -- Wi-Fi (PARTIAL: the pure SSID-list layer only -- see this file's own
-# header and this session's final report for what is NOT built here)
+# S1 -- Wi-Fi  🔴 "the hardest screen in the flow" (T4-screen-spec.md §4 S1)
 # ===========================================================================
+#
+# WHERE THIS SCREEN IS CALLED FROM, AND WHY IT IS NOT ITS OWN PATCH HUNK.
+# Upstream has NO Wi-Fi screen at all -- `build-iso.sh`'s own comment is
+# "The install is entirely offline and the live environment needs no Wi-Fi
+# driver" -- so there is no upstream function name to override, and the
+# override-name contract (test/unit/test-deck-form.sh) would correctly
+# reject a bare `deck_wifi_screen` as a name `configurator` never calls.
+#
+# §3's screen table says Wi-Fi is "KEPT and promoted to first". Upstream's
+# top-level flow is, verbatim (configurator lines ~985-1000):
+#
+#     wait_for_stable_terminal
+#     greeter                 <-- S0, ALREADY ours
+#     keyboard_form true
+#     ... user_step / disk_form / select_installation
+#
+# So the first point in that flow we already own is `greeter`, and S1 hangs
+# off the end of it. Three reasons that is the right seam and not a hack:
+#
+#  1. It costs ZERO extra patch hunks. §1.4's budget is two, both spent
+#     (the `source` line and `deck_final_summary || abort`). A third hunk
+#     to call S1 would be a spec change, and §1.4's own note prefers
+#     legible seams over clever ones -- but it prefers NO new seam most.
+#  2. S1 must run before S2, because S2's one-press timezone default comes
+#     from `tzupdate -p`, which needs the network (§3 deviation 3). Anything
+#     later than `greeter` and the geo-guess is dead.
+#  3. 🔴 It runs BEFORE `keyboard_form`, and that is load-bearing rather
+#     than incidental: `keyboard_form` ends by running `loadkeys` (READ,
+#     configurator line ~228). §2.2 item 4's hazard is that the OSK emits
+#     US keycodes while the console applies whatever keymap `loadkeys` last
+#     set -- so a passphrase typed AFTER `keyboard_form` under a non-US
+#     keymap would be silently mistyped, on the one screen where a single
+#     wrong character is indistinguishable from a wrong password. Running
+#     S1 before any `loadkeys` means the passphrase is always typed under
+#     the boot default, which is the layout the OSK actually draws.
+#
+# S1 NEVER BLOCKS AND NEVER FAILS THE INSTALL. Every branch below ends in
+# `return 0` from deck_form_wifi_screen: no hardware, iwd dead, no networks,
+# three wrong passphrases, no DHCP, a captive portal, or an explicit Skip
+# all continue the install offline with the consequence stated on screen
+# (§5: "The install must still succeed. What is banned is silence").
+# `greeter` therefore ignores its status -- but logs it, so a nonzero return
+# is visible rather than swallowed.
 
 readonly DECK_NET_SKIP_ROW="Skip -- set up Wi-Fi later"
 readonly DECK_NET_RESCAN_ROW="Rescan"
+
+# Where a wireless interface is DETECTED. §5's own detection column says
+# "`ip -br link` has no wireless device" -- ⚠️ that is not something
+# `ip -br link` can answer: it prints NAME/STATE/MAC/flags and says nothing
+# about whether a link is wireless (a Deck's `wlan0` and a USB `enp0s20u1`
+# are indistinguishable in that output, and the name `wlan0` is a udev
+# convention, not a guarantee). The kernel's own answer is the presence of
+# a `wireless` subdirectory under the interface in sysfs, which is exactly
+# what `iw`/`iwd` themselves key off. Detecting by NAME PATTERN would be
+# the same class of mistake §3 deviation 5 already caught for the microSD
+# ("by lsblk -dno RM, not by name").
+readonly DECK_NET_SYSFS_DEFAULT=/sys/class/net
+
+# §5: "Bounded at 3 tries, then back to the network list, so nobody is
+# stuck in a loop they cannot escape."
+readonly DECK_NET_MAX_PASSPHRASE_TRIES=3
+# §5: "empty get-networks after two tries".
+readonly DECK_NET_SCAN_TRIES=2
+readonly DECK_NET_SCAN_SETTLE=2        # seconds for the scan to populate
+# §5: "wlan0 has no address after 20 s".
+readonly DECK_NET_DHCP_DEADLINE=20
+readonly DECK_NET_DHCP_POLL=1
+
+# Captive-portal probe. NetworkManager's own connectivity endpoint and its
+# own expected body, chosen so the installed system and the installer agree
+# about what "online" means. ⚠️ (INFERRED, NOT MEASURED) that `curl` exists
+# in the live environment -- §2.4's table does not list it. A missing curl
+# is handled as "cannot check", stated on screen, never as "online".
+readonly DECK_NET_PORTAL_URL="http://ping.archlinux.org/nm-check.txt"
+readonly DECK_NET_PORTAL_EXPECT="NetworkManager is online"
+
+# The live-side artefact directory. /root is where upstream's own
+# `write_user_files` puts user_configuration.json / user_credentials.json,
+# so a consumer that already knows where to find those knows where to find
+# ours. Nothing here is written to the TARGET -- see the U1 block below.
+readonly DECK_NET_STATE_DIR_DEFAULT=/root
+readonly DECK_NET_STAGED_NMCONNECTION=deck-wifi.nmconnection
+readonly DECK_NET_OUTCOME_FILE=deck-wifi-outcome
 
 deck_form_strip_ansi() {
   # ESC [ ... <letter> -- the CSI form iwctl's own colouring uses.
@@ -696,6 +800,706 @@ deck_form_build_network_rows() {
   done <"$parsed"
   printf '%s\n' "$DECK_NET_SKIP_ROW"
   printf '%s\n' "$DECK_NET_RESCAN_ROW"
+}
+
+# --- S1: from a chosen ROW back to the real network -------------------------
+#
+# 🔴 THE SUBTLETY THAT MAKES THIS TWO FUNCTIONS INSTEAD OF A `sed`.
+# `gum choose` hands back the DISPLAYED row, and the displayed row is the
+# SANITISED SSID plus possibly a lock glyph. Recovering the SSID by string
+# surgery on that row would hand `iwctl connect` the sanitised text -- i.e.
+# for any SSID that actually needed sanitising, we would try to join a
+# network whose name does not exist, and the user would see "that didn't
+# work" forever with no clue why. So the row is mapped back by POSITION:
+# build_network_rows emits exactly one row per parsed line, in order, so
+# row N is parsed line N, and the RAW bytes come from the parsed file.
+#
+# ⚠️ Stated limitation, not a silent one: two networks whose sanitised
+# display collapses to the same string are indistinguishable in the list,
+# and the FIRST is chosen. iwctl orders get-networks by signal, so the
+# first is the stronger one -- an attacker who names their network to
+# collide with a real one must also out-signal it to be picked. There is no
+# fix that keeps the list honest (appending a disambiguator would let a
+# hostile SSID choose what the real network's row looks like).
+deck_form_row_index() {
+  local rows_file=$1 choice=$2 idx
+  idx=$(LC_ALL=C command grep -nxF -- "$choice" "$rows_file" 2>/dev/null | head -1 | cut -d: -f1)
+  if [[ -z $idx ]]; then
+    deck_form_warn "the chosen row is not in the list that was drawn -- refusing to guess which network was meant"
+    return 1
+  fi
+  printf '%s\n' "$idx"
+}
+
+# deck_form_network_at <parsed-file> <1-based-index>
+# The raw "ssid<TAB>security<TAB>signal" line, unsanitised, or a reported
+# failure. Never prints a partial line and never prints nothing on success.
+deck_form_network_at() {
+  local parsed=$1 idx=$2 line
+  if [[ ! $idx =~ ^[0-9]+$ ]] || [[ $idx -lt 1 ]]; then
+    deck_form_warn "network index '$idx' is not a positive integer"
+    return 1
+  fi
+  line=$(sed -n "${idx}p" "$parsed" 2>/dev/null)
+  if [[ -z $line ]]; then
+    deck_form_warn "no network at row $idx -- the list and the scan disagree, which means the scan changed under the menu"
+    return 1
+  fi
+  printf '%s\n' "$line"
+}
+
+# deck_form_net_choice_action <gum-choose-output-or-empty>
+#
+# S8's lesson applied before S1 can repeat it: upstream's failure menu made
+# Esc SELECT an action ("Drop to shell") via `|| choice=...`, so the one
+# gesture a controller-only user reaches for became the most destructive
+# one. Here an empty choice -- B/Esc, or gum exiting nonzero for any other
+# reason -- REDRAWS. It is deliberately NOT mapped to `skip`, even though
+# skip is harmless: "the cancel fallback maps to the menu, not to an
+# action" is the rule, and Skip is already a row the user can pick on
+# purpose. Mutation-test target (§6.5: single-string changes).
+deck_form_net_choice_action() {
+  local choice=$1
+  case $choice in
+    "")                        printf 'redraw\n' ;;
+    "$DECK_NET_SKIP_ROW")      printf 'skip\n' ;;
+    "$DECK_NET_RESCAN_ROW")    printf 'rescan\n' ;;
+    *)                         printf 'connect\n' ;;
+  esac
+}
+
+# deck_form_net_security_class <iwctl-security-field>
+#
+# open        -> none          join with no passphrase
+# psk / wep   -> passphrase    the S1 text-entry path
+# anything    -> unsupported   8021x (WPA-Enterprise) needs a certificate,
+#                              an identity and usually a CA bundle -- none
+#                              of which this screen can collect, and NONE
+#                              of which a passphrase prompt would obtain.
+#                              Offering the prompt anyway would produce
+#                              three guaranteed-failing tries and a user
+#                              who thinks they mistyped. Say so instead.
+# The default arm is `unsupported`, not `passphrase`, on purpose: a
+# security type iwd grows in a future release is something we have not
+# tested, and §CLAUDE.md's rule is not to claim support that was never
+# tested.
+deck_form_net_security_class() {
+  local security=$1
+  case $security in
+    open)     printf 'none\n' ;;
+    psk|wep)  printf 'passphrase\n' ;;
+    *)        printf 'unsupported\n' ;;
+  esac
+}
+
+# deck_form_wifi_iface [<sysfs-net-root>]
+# First interface with a `wireless` subdirectory. Glob order is bash's own
+# sort, so this is deterministic across runs rather than "whatever readdir
+# said". A machine with no wireless interface is a REPORTED condition
+# (return 1), which §5's first row turns into "No Wi-Fi hardware found --
+# continuing offline" -- and which is also every QEMU run, so it must not
+# block.
+deck_form_wifi_iface() {
+  local root=${1:-${DECK_NET_SYSFS:-$DECK_NET_SYSFS_DEFAULT}}
+  local dir
+  for dir in "$root"/*; do
+    [[ -d $dir/wireless ]] || continue
+    printf '%s\n' "${dir##*/}"
+    return 0
+  done
+  deck_form_warn "no wireless interface under $root (no directory has a 'wireless' subdirectory)"
+  return 1
+}
+
+# deck_form_has_ipv4 <ip--4--br-addr-output>
+#
+# §5: "Associated, no DHCP ... This is the case a naive 'did connect exit 0'
+# check calls success." 🔴 A link-local 169.254.0.0/16 address is what the
+# kernel/networkd hands out when DHCP FAILED, so counting it as an address
+# would reintroduce exactly the false success this row exists to catch --
+# the check would go green on the one outcome it was written to detect.
+# 127.0.0.0/8 is excluded for the same reason (a loopback address is never
+# evidence that a wireless link got configured).
+deck_form_has_ipv4() {
+  local text=$1 addr
+  while IFS= read -r addr; do
+    [[ -n $addr ]] || continue
+    [[ $addr == 169.254.* ]] && continue
+    [[ $addr == 127.* ]] && continue
+    return 0
+  done < <(LC_ALL=C printf '%s\n' "$text" |
+             LC_ALL=C command grep -oE '(^|[^0-9.])([0-9]{1,3}\.){3}[0-9]{1,3}' |
+             LC_ALL=C command grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
+  return 1
+}
+
+# deck_form_connect_verdict <iwctl-exit-status> <iwctl-output>
+#
+# ⚠️ Belt AND braces, deliberately. §5's detection column says "iwctl …
+# connect non-zero", and that is the primary signal -- but iwctl is an
+# interactive-first tool that has been observed to print a failure and
+# still exit 0 in non-interactive use, and this file cannot verify which
+# behaviour the pinned iwd has without a Deck. Trusting only the exit
+# status would turn a wrong passphrase into "connected", and then into a
+# DHCP timeout twenty seconds later with the wrong message on screen.
+# ⚠️ (INFERRED, NOT MEASURED): the exact strings below are iwctl's usual
+# error vocabulary, not a live capture. Confirm against a real Deck. Being
+# wrong here is SAFE IN ONE DIRECTION ONLY -- a missed string degrades to
+# the exit-status check plus the DHCP gate, while a false match would
+# report failure on a working join, so nothing generic ("error", "fail")
+# is matched.
+deck_form_connect_verdict() {
+  local status=$1 output=$2
+  if [[ $status != 0 ]]; then
+    printf 'failed\n'
+    return 0
+  fi
+  case $output in
+    *"Operation failed"*|*"Invalid arguments"*|*"Not connected"*|\
+    *"Network not found"*|*"Timed out"*|*"Invalid passphrase"*|*"Invalid format"*)
+      printf 'failed\n' ;;
+    *)
+      printf 'ok\n' ;;
+  esac
+}
+
+# deck_form_portal_verdict <probe-exit-status> <probe-body>
+#
+# §5: "Captive portal | HTTP probe returns a redirect | State plainly that
+# this network needs a browser and cannot be used during install ... Do not
+# attempt to render a portal."
+#
+# Three outcomes, not two. `unreachable` is separate from `portal` because
+# they need different sentences: a portal is a network the user could fix
+# by using a phone, while an unreachable probe on an associated link is
+# usually DNS or an upstream outage, and telling someone to open a browser
+# they do not need is worse than saying the check could not be made. An
+# unreachable probe is NOT treated as a hard failure -- the association and
+# the DHCP lease both succeeded, so the install proceeds and the fetch
+# either works or degrades where it happens.
+deck_form_portal_verdict() {
+  local status=$1 body=$2
+  if [[ $status != 0 ]]; then
+    printf 'unreachable\n'
+    return 0
+  fi
+  case $body in
+    *"$DECK_NET_PORTAL_EXPECT"*) printf 'online\n' ;;
+    *)                           printf 'portal\n' ;;
+  esac
+}
+
+# deck_form_net_failure_action_for <gum-choose-output-or-empty>
+# The post-association failure menu (§5's DHCP row: "offer Retry / Pick
+# another / Skip"). Same cancel discipline as
+# deck_form_net_choice_action: empty redraws, never acts.
+readonly -a DECK_NET_FAILURE_ITEMS=("Try again" "Pick another network")
+deck_form_net_failure_items() {
+  printf '%s\n' "${DECK_NET_FAILURE_ITEMS[@]}"
+  printf '%s\n' "$DECK_NET_SKIP_ROW"
+}
+deck_form_net_failure_action_for() {
+  local choice=$1
+  case $choice in
+    "")                       printf 'redraw\n' ;;
+    "Try again")              printf 'retry\n' ;;
+    "Pick another network")   printf 'another\n' ;;
+    "$DECK_NET_SKIP_ROW")     printf 'skip\n' ;;
+    *)                        printf 'redraw\n' ;;
+  esac
+}
+
+# --- §5's consequence text, stated on S1's skip and again on S5 -------------
+#
+# "That text is not decoration -- it is docs/tasks/T5-fork-plan.md §4.1's
+# requirement (i) rendered." Kept as one function with no side effects so
+# both call sites draw the SAME words and a [U] test can assert them
+# without a terminal (the deck_form_s0_text pattern).
+deck_form_wifi_offline_text() {
+  printf '%s\n' "Without a network the install still completes, but the audio DSP firmware and Steam are not downloaded."
+  printf '%s\n' "Speakers will sound thin and Gaming Mode will have no Steam until the Deck is connected."
+  printf '%s\n' "Wi-Fi can be set up from Desktop Mode afterwards."
+}
+
+deck_form_wifi_offline_notice() {
+  local line
+  while IFS= read -r line; do say "$line"; done < <(deck_form_wifi_offline_text)
+}
+
+# ===========================================================================
+# U1 -- the NetworkManager credential hand-off
+# ===========================================================================
+#
+# 🔴 WHAT UPSTREAM ACTUALLY DOES ABOUT THIS: NOTHING. Measured against the
+# pinned tree in iso/upstream (omacom-io/omarchy-iso@a12bfea7a86c), not
+# inferred from the spec's prose:
+#
+#   - `configurator` contains no `iwd`, `iwctl`, `nmcli`, `NetworkManager`
+#     or `wlan` at all. Its ONLY network statement is the literal
+#     `"network_config": { "type": "iso" }` it writes into
+#     user_configuration.json, at lines 770 and 1156.
+#   - The 14-phase orchestrator (orchestrator/*.py) contains no network
+#     code either -- the only matches for "network" in the whole package
+#     are `network-online.target` in an unrelated Tailscale unit.
+#   - The string `system-connections` and the string `nmconnection` appear
+#     ZERO times anywhere in iso/upstream.
+#
+# So the entire hand-off is delegated to archinstall's `type: iso` handler,
+# and that handler cannot produce a NetworkManager profile: it copies
+# /var/lib/iwd/*.psk and installs+enables **iwd** on the target, while
+# Omarchy's own package set installs and enables **NetworkManager**
+# (manifests/fresh-4.json: "is_enabled:NetworkManager" = enabled; the
+# manifest of a fresh install contains no iwd package at all). Two managers
+# claiming wlan0 is not a hand-off, it is a conflict -- and NetworkManager
+# does not read iwd's PSK store when running its default wpa_supplicant
+# backend.
+#
+# ⚠️ The archinstall half of that paragraph is (INFERRED): archinstall's
+# source is not vendored into this repo, so `copy_iso_network_config`'s
+# behaviour is recalled, not read. The REPO-GROUNDED half is enough on its
+# own to justify what follows -- nothing in upstream ever writes a
+# NetworkManager connection, so if we want one, we write it.
+#
+# WHAT THIS FILE CAN AND CANNOT DO. deck-form.sh runs in the live ISO
+# BEFORE the target disk is partitioned; there is no /mnt to write into
+# yet. So this file STAGES the connection profile in the live root and a
+# later, target-side step installs it. §5 names that step: "configure_deck
+# writes /etc/NetworkManager/system-connections/<ssid>.nmconnection (mode
+# 0600) itself" -- and `configure_deck` is T5's orchestrator phase (T5-fork
+# -plan.md §3 seam S3), a different component this file does not own.
+#
+# 🔴 THE CONTRACT, so the two halves cannot drift silently:
+#   /root/deck-wifi.nmconnection   a complete NetworkManager keyfile, mode
+#                                  0600, present ONLY if a network was
+#                                  actually joined. `configure_deck` copies
+#                                  it to
+#                                  /mnt/etc/NetworkManager/system-connections/
+#                                  preserving mode 0600 (NetworkManager
+#                                  REFUSES to load a group/world-readable
+#                                  keyfile, so a copy that widens the mode
+#                                  fails silently at first boot).
+#   /root/deck-wifi-outcome        `key=value` lines recording what S1 did.
+#                                  ⚠️ PARSE IT, NEVER `source` IT: the ssid
+#                                  value is attacker-controlled text.
+#
+# Until that phase exists, staging is still the right thing to do: the file
+# is inert, and the alternative (do nothing now, discover at T5 that S1
+# never captured the PSK) is the failure this comment exists to prevent.
+
+# deck_form_nmconnection_safe <text>
+# True when TEXT can be written into a NetworkManager keyfile as a plain
+# ini value without changing its own meaning. Rejects control bytes (a
+# newline would inject an ini line or a whole [section]) and leading or
+# trailing whitespace (GKeyFile strips it on read, so the value that comes
+# back out would not be the value that went in -- a silently WRONG SSID or
+# passphrase, which is worse than a refusal). An empty string is also not
+# safe: a keyfile with `ssid=` is a profile for nothing.
+#
+# ⚠️ Why not encode instead: NetworkManager's keyfile format does document
+# a byte-list form for `ssid` (`ssid=77;121;`), which would carry any bytes
+# at all. It is NOT used here because nothing in this project has ever
+# tested that NM accepts it, and a keyfile NM rejects is a Deck that boots
+# with no Wi-Fi and no visible reason -- exactly U1's own cost column. A
+# loud refusal, with the install still proceeding, is the honest trade.
+deck_form_nmconnection_safe() {
+  local text=$1
+  [[ -n $text ]] || return 1
+  [[ $text == *[$'\001'-$'\037']* ]] && return 1
+  [[ $text == *$'\177'* ]] && return 1
+  [[ $text == [[:space:]]* ]] && return 1
+  [[ $text == *[[:space:]] ]] && return 1
+  return 0
+}
+
+# deck_form_nmconnection <ssid> <psk> <uuid>
+# The keyfile itself. An empty PSK means an open network and emits NO
+# [wifi-security] section (NetworkManager treats the presence of that
+# section as "this network is secured", so an empty psk= would make an open
+# network unjoinable).
+deck_form_nmconnection() {
+  local ssid=$1 psk=$2 uuid=$3
+  if ! deck_form_nmconnection_safe "$ssid"; then
+    deck_form_warn "SSID cannot be written to a NetworkManager keyfile without changing its meaning (control bytes, or leading/trailing whitespace) -- NOT staging a profile for it"
+    return 1
+  fi
+  if ! deck_form_nmconnection_safe "$uuid"; then
+    deck_form_warn "refusing to write a keyfile with an unusable uuid"
+    return 1
+  fi
+  if [[ -n $psk ]] && ! deck_form_nmconnection_safe "$psk"; then
+    deck_form_warn "passphrase cannot be written to a NetworkManager keyfile without changing its meaning -- NOT staging a profile"
+    return 1
+  fi
+  printf '[connection]\n'
+  printf 'id=%s\n' "$ssid"
+  printf 'uuid=%s\n' "$uuid"
+  printf 'type=wifi\n'
+  printf 'autoconnect=true\n'
+  printf '\n[wifi]\n'
+  printf 'mode=infrastructure\n'
+  printf 'ssid=%s\n' "$ssid"
+  if [[ -n $psk ]]; then
+    printf '\n[wifi-security]\n'
+    printf 'key-mgmt=wpa-psk\n'
+    printf 'psk=%s\n' "$psk"
+  fi
+  printf '\n[ipv4]\n'
+  printf 'method=auto\n'
+  printf '\n[ipv6]\n'
+  printf 'addr-gen-mode=default\n'
+  printf 'method=auto\n'
+}
+
+# deck_form_stage_nmconnection <path> <ssid> <psk>
+#
+# 🔴 The file is created 0600 BEFORE any secret is written into it, not
+# chmod'd afterwards. `printf >file; chmod 600 file` leaves the passphrase
+# world-readable for the window between the two, and this runs on a live
+# ISO whose root filesystem other processes share.
+deck_form_stage_nmconnection() {
+  local path=$1 ssid=$2 psk=$3 uuid
+  uuid=$(deck_form_uuid) || return 1
+  rm -f "$path"
+  if ! (umask 077 && : >"$path"); then
+    deck_form_warn "could not create $path"
+    return 1
+  fi
+  if ! deck_form_nmconnection "$ssid" "$psk" "$uuid" >"$path"; then
+    rm -f "$path"
+    return 1
+  fi
+  return 0
+}
+
+# Overridable so the [U] suite gets a deterministic uuid.
+deck_form_uuid() {
+  local src=${DECK_UUID_SOURCE:-/proc/sys/kernel/random/uuid} uuid
+  uuid=$(cat "$src" 2>/dev/null)
+  if [[ -z $uuid ]]; then
+    deck_form_warn "could not read a uuid from $src"
+    return 1
+  fi
+  printf '%s\n' "$uuid"
+}
+
+# deck_form_wifi_record_outcome <state-dir> <status> <ssid>
+# Two lines, key=value, SSID sanitised. See the contract note above: this
+# file is parsed by its consumer, never sourced.
+deck_form_wifi_record_outcome() {
+  local dir=$1 status=$2 ssid=$3 path
+  path="$dir/$DECK_NET_OUTCOME_FILE"
+  if ! printf 'status=%s\nssid=%s\n' "$status" "$(deck_form_sanitize_ssid "$ssid")" >"$path"; then
+    deck_form_warn "could not record the Wi-Fi outcome to $path"
+    return 1
+  fi
+  return 0
+}
+
+# --- the interactive halves -------------------------------------------------
+#
+# Everything below drives gum / iwctl / ip / curl and is therefore [V]-tier
+# by T4-screen-spec.md §6.1's own split; every DECISION any of them makes
+# has been pulled out into a pure function above, which is where the [U]
+# assertions live. That is the same shape S2's omarchy_prompt_timezone and
+# S4's deck_form_disk_dead_end already use in this file.
+
+deck_form_wifi_passphrase_body() {
+  local ssid=$1 safe
+  # 🔴 SANITISE BEFORE DRAWING. The SSID goes into a gum --prompt string,
+  # which is written straight to the console: an SSID carrying an ANSI
+  # escape would repaint or scroll the screen the user is typing a password
+  # into. This is the same threat deck_form_sanitize_ssid exists for, and
+  # the prompt is a sink for it just as much as the menu is.
+  safe=$(deck_form_sanitize_ssid "$ssid")
+  if [[ ${DECK_FORM_OSK_UP:-0} != 1 ]]; then
+    # stderr, not stdout: this function's stdout IS the passphrase.
+    # §2.3: "a degradation the screen must state, not swallow."
+    deck_form_warn "the on-screen keyboard did not start -- there is no way to type here. Choose '$DECK_NET_SKIP_ROW' on the network list to continue without Wi-Fi."
+  fi
+  # 🔴 --password, and it is MEASURED, not stylistic: T4 §4 S1's flow trace
+  # records that the real wizard never echoes a password. The OSK is how
+  # the user types; the field shows dots.
+  gum input --password --placeholder "Wi-Fi password" --prompt "Password for ${safe}> "
+}
+
+# deck_form_wifi_scan <iface> <out-parsed-file>
+# §5: "empty get-networks after two tries". A failing `scan` is warned
+# about but not fatal -- iwd keeps a cache, and a scan that returns an
+# error while the cache is populated is still a usable list.
+deck_form_wifi_scan() {
+  local iface=$1 out=$2
+  local iwctl=${DECK_IWCTL_BIN:-iwctl}
+  local tries=${DECK_NET_SCAN_TRIES_OVERRIDE:-$DECK_NET_SCAN_TRIES}
+  local settle=${DECK_NET_SCAN_SETTLE_OVERRIDE:-$DECK_NET_SCAN_SETTLE}
+  local raw i
+  raw=$(mktemp) || { deck_form_die "mktemp failed"; return 1; }
+  : >"$out"
+  for ((i = 1; i <= tries; i++)); do
+    "$iwctl" station "$iface" scan >/dev/null 2>&1 ||
+      deck_form_warn "'iwctl station $iface scan' failed on attempt $i -- reading whatever iwd already has cached"
+    [[ $settle == 0 ]] || sleep "$settle"
+    if "$iwctl" station "$iface" get-networks >"$raw" 2>/dev/null &&
+       deck_form_parse_iwctl_networks "$raw" >"$out" 2>/dev/null &&
+       [[ -s $out ]]; then
+      rm -f "$raw"
+      return 0
+    fi
+  done
+  rm -f "$raw"
+  : >"$out"
+  deck_form_warn "no networks after $tries scan attempts on $iface"
+  return 1
+}
+
+deck_form_wifi_connect() {
+  local iface=$1 ssid=$2 psk=$3
+  local iwctl=${DECK_IWCTL_BIN:-iwctl}
+  local out status=0 verdict
+  # ⚠️ The passphrase is passed as an argv element, so it is briefly
+  # visible in /proc to anything that can read it. Accepted, and bounded:
+  # the live ISO is single-user root with no login prompt and no other
+  # accounts, and iwctl offers no stdin form for a non-interactive join.
+  # Recorded here rather than left for someone to rediscover.
+  if [[ -n $psk ]]; then
+    out=$("$iwctl" --passphrase "$psk" station "$iface" connect "$ssid" 2>&1) || status=$?
+  else
+    out=$("$iwctl" station "$iface" connect "$ssid" 2>&1) || status=$?
+  fi
+  verdict=$(deck_form_connect_verdict "$status" "$out")
+  if [[ $verdict != ok ]]; then
+    deck_form_warn "iwctl connect reported failure (status $status)"
+    return 1
+  fi
+  return 0
+}
+
+deck_form_wifi_wait_dhcp() {
+  local iface=$1
+  local ip_bin=${DECK_IP_BIN:-ip}
+  local deadline=${DECK_NET_DHCP_DEADLINE_OVERRIDE:-$DECK_NET_DHCP_DEADLINE}
+  local poll=${DECK_NET_DHCP_POLL_OVERRIDE:-$DECK_NET_DHCP_POLL}
+  local waited=0 out
+  while true; do
+    out=$("$ip_bin" -4 -br addr show dev "$iface" 2>/dev/null) || out=""
+    deck_form_has_ipv4 "$out" && return 0
+    if [[ $waited -ge $deadline ]]; then
+      deck_form_warn "$iface associated but has no routable IPv4 address after ${deadline}s -- DHCP did not complete"
+      return 1
+    fi
+    [[ $poll == 0 ]] || sleep "$poll"
+    waited=$((waited + poll))
+  done
+}
+
+deck_form_wifi_portal_check() {
+  local curl_bin=${DECK_CURL_BIN:-curl}
+  local url=${DECK_NET_PORTAL_URL_OVERRIDE:-$DECK_NET_PORTAL_URL}
+  local body status=0
+  if ! command -v "$curl_bin" >/dev/null 2>&1; then
+    deck_form_warn "no '$curl_bin' in the live environment -- the captive-portal check was NOT performed"
+    printf 'unreachable\n'
+    return 0
+  fi
+  body=$("$curl_bin" -fsS --max-time 5 -- "$url" 2>/dev/null) || status=$?
+  deck_form_portal_verdict "$status" "$body"
+}
+
+# deck_form_wifi_failure_menu <headline>
+# The shared "we associated but it did not work" menu (§5's DHCP and
+# captive-portal rows). Prints one of retry/another/skip on stdout; loops
+# on redraw so a cancelled prompt can never fall through to an action.
+deck_form_wifi_failure_menu() {
+  local headline=$1 choice action
+  while true; do
+    say --foreground 1 "$headline"
+    choice=$(deck_form_net_failure_items | gum choose --header "What next?") || choice=""
+    action=$(deck_form_net_failure_action_for "$choice")
+    [[ $action == redraw ]] && continue
+    printf '%s\n' "$action"
+    return 0
+  done
+}
+
+# deck_form_wifi_join <iface> <raw-ssid> <security-class>
+#
+# Status vocabulary, chosen to match upstream's own three-value convention
+# (§1.1 item 3) rather than inventing a fourth kind of return:
+#   0  connected      DECK_WIFI_SSID is set, the profile is staged
+#   1  back to list   this network did not work; the caller redraws
+#   2  skip the whole screen (the user asked for it inside a failure menu)
+deck_form_wifi_join() {
+  local iface=$1 ssid=$2 class=$3
+  local state_dir=${DECK_NET_STATE_DIR:-$DECK_NET_STATE_DIR_DEFAULT}
+  local tries=0 psk="" action portal
+  local max=${DECK_NET_MAX_PASSPHRASE_TRIES_OVERRIDE:-$DECK_NET_MAX_PASSPHRASE_TRIES}
+  local safe_ssid
+  safe_ssid=$(deck_form_sanitize_ssid "$ssid")
+
+  while true; do
+    if [[ $class == passphrase ]]; then
+      tries=$((tries + 1))
+      if [[ $tries -gt $max ]]; then
+        say "That password was rejected $max times. Back to the network list."
+        return 1
+      fi
+      # §2.3's bounded text-entry mode -- the ONLY place S1 types.
+      psk=$(deck_form_text_prompt deck_form_wifi_passphrase_body "$ssid") || return 1
+      if [[ -z $psk ]]; then
+        say "No password entered."
+        continue
+      fi
+    fi
+
+    if deck_form_wifi_connect "$iface" "$ssid" "$psk"; then
+      break
+    fi
+
+    if [[ $class == passphrase ]]; then
+      # §5, verbatim: "Back to the passphrase prompt with 'That didn't
+      # work -- check the password', passphrase cleared."
+      say --foreground 1 "That didn't work -- check the password."
+      psk=""
+      continue
+    fi
+    say --foreground 1 "Could not join $safe_ssid."
+    return 1
+  done
+
+  if ! deck_form_wifi_wait_dhcp "$iface"; then
+    action=$(deck_form_wifi_failure_menu "Joined $safe_ssid, but it never handed out an address.")
+    case $action in
+      # 3 == "run this same join again", handled by the caller's inner
+      # loop. It is a separate status from 1 (back to the list) because
+      # the two are genuinely different screens to return to, and folding
+      # them together would make "Try again" silently mean "pick another".
+      retry)   return 3 ;;
+      another) return 1 ;;
+      skip)    return 2 ;;
+    esac
+    return 1
+  fi
+
+  portal=$(deck_form_wifi_portal_check)
+  if [[ $portal == portal ]]; then
+    # §5: "State plainly that this network needs a browser and cannot be
+    # used during install ... Do not attempt to render a portal."
+    say --foreground 1 "$safe_ssid needs a web sign-in page, which this installer cannot show."
+    say "Use a different network, or skip Wi-Fi and set it up from Desktop Mode later."
+    action=$(deck_form_wifi_failure_menu "This network needs a browser sign-in.")
+    case $action in
+      retry|another) return 1 ;;
+      skip)          return 2 ;;
+    esac
+    return 1
+  fi
+  if [[ $portal == unreachable ]]; then
+    say "Connected to $safe_ssid, but the internet check did not answer. Continuing."
+  fi
+
+  DECK_WIFI_SSID=$safe_ssid
+  if ! deck_form_stage_nmconnection "$state_dir/$DECK_NET_STAGED_NMCONNECTION" "$ssid" "$psk"; then
+    # Loud, and NOT fatal: the install is on the network right now, so it
+    # will fetch what it needs. What is lost is the hand-off to the
+    # installed system, and the user is told so rather than finding out at
+    # first boot (U1's own cost column).
+    say --foreground 3 "Connected, but this network's name could not be saved for the installed system."
+    say "You will need to join Wi-Fi again after the first boot."
+  fi
+  deck_form_wifi_record_outcome "$state_dir" connected "$ssid" ||
+    deck_form_warn "the Wi-Fi outcome was not recorded"
+  say "Connected to $safe_ssid."
+  return 0
+}
+
+# deck_form_wifi_screen -- S1 itself. Always returns 0 on any path a user
+# can reach; a nonzero return means this function's OWN plumbing broke.
+deck_form_wifi_screen() {
+  local state_dir=${DECK_NET_STATE_DIR:-$DECK_NET_STATE_DIR_DEFAULT}
+  local systemctl_bin=${DECK_SYSTEMCTL_BIN:-systemctl}
+  local iface parsed rows choice action line ssid security class join_rc
+
+  DECK_WIFI_SSID=""
+
+  step "Wi-Fi"
+
+  if ! iface=$(deck_form_wifi_iface); then
+    say "No Wi-Fi hardware found -- continuing offline."
+    deck_form_wifi_offline_notice
+    deck_form_wifi_record_outcome "$state_dir" no-hardware ""
+    return 0
+  fi
+
+  local iwd_status
+  if ! iwd_status=$("$systemctl_bin" start iwd 2>&1); then
+    # §5: "Same, with the unit's status line shown. Never swallow."
+    say --foreground 1 "The Wi-Fi service (iwd) would not start -- continuing offline."
+    [[ -n $iwd_status ]] && say "$iwd_status"
+    deck_form_wifi_offline_notice
+    deck_form_wifi_record_outcome "$state_dir" iwd-failed ""
+    return 0
+  fi
+
+  parsed=$(mktemp) || { deck_form_die "mktemp failed"; return 1; }
+  rows=$(mktemp) || { deck_form_die "mktemp failed"; rm -f "$parsed"; return 1; }
+
+  while true; do
+    step "Wi-Fi"
+    if ! deck_form_wifi_scan "$iface" "$parsed"; then
+      # §5: "'Rescan' and 'Skip' only. Say 'No networks found. Move
+      # closer, or skip.'" -- which is what build_network_rows produces
+      # from an empty parse, since it always appends both rows.
+      say "No networks found. Move closer, or skip."
+    fi
+    deck_form_build_network_rows "$parsed" >"$rows"
+
+    choice=$(gum choose --header "Networks" <"$rows") || choice=""
+    action=$(deck_form_net_choice_action "$choice")
+    case $action in
+      redraw) continue ;;
+      rescan) continue ;;
+      skip)
+        say "Continuing without Wi-Fi."
+        deck_form_wifi_offline_notice
+        deck_form_wifi_record_outcome "$state_dir" skipped ""
+        rm -f "$parsed" "$rows"
+        return 0
+        ;;
+    esac
+
+    local idx
+    if ! idx=$(deck_form_row_index "$rows" "$choice"); then continue; fi
+    if ! line=$(deck_form_network_at "$parsed" "$idx"); then continue; fi
+    ssid=${line%%$'\t'*}
+    security=${line#*$'\t'}
+    security=${security%%$'\t'*}
+    class=$(deck_form_net_security_class "$security")
+
+    if [[ $class == unsupported ]]; then
+      say --foreground 1 "$(deck_form_sanitize_ssid "$ssid") uses enterprise security ($security), which needs a certificate this installer cannot collect."
+      say "Pick another network, or skip Wi-Fi."
+      continue
+    fi
+
+    while true; do
+      join_rc=0
+      deck_form_wifi_join "$iface" "$ssid" "$class" || join_rc=$?
+      [[ $join_rc -eq 3 ]] || break    # 3 == the DHCP menu's "Try again"
+    done
+    case $join_rc in
+      0)
+        rm -f "$parsed" "$rows"
+        return 0
+        ;;
+      2)
+        say "Continuing without Wi-Fi."
+        deck_form_wifi_offline_notice
+        deck_form_wifi_record_outcome "$state_dir" skipped ""
+        rm -f "$parsed" "$rows"
+        return 0
+        ;;
+      *) continue ;;
+    esac
+  done
 }
 
 # ===========================================================================
@@ -1187,6 +1991,13 @@ deck_final_summary() {
     echo
     deck_form_summary_rows | gum table -s ',' -p | sed "s/^/${PADDING_LEFT_SPACES:-}/"
     echo
+    # §5: the offline consequence is "stated once, on S1's skip and again
+    # on S5". This is the S5 half. Keyed on the same global the Wi-Fi row
+    # above is built from, so the sentence and the row can never disagree.
+    if [[ -z ${DECK_WIFI_SSID:-} ]]; then
+      deck_form_wifi_offline_notice
+      echo
+    fi
     if gum confirm --affirmative "Install" --negative "Go back" --default=true "Ready to install?"; then
       return 0
     fi
