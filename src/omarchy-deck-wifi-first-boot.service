@@ -1,0 +1,50 @@
+#
+# First-boot check that the installer's Wi-Fi actually reached the installed
+# system.
+#
+# SHIPPED AS: /usr/share/omarchy-iso/deck/omarchy-deck-wifi-first-boot.service
+# in the ISO; installed by `configure_deck` (src/deck_wifi.py) to
+# /etc/systemd/system/ on the target, with the multi-user.target.wants symlink
+# written in the same step.
+#
+# WHY A UNIT AND NOT A LOG LINE
+#
+# The install log scrolls past inside an installer nobody re-reads, and the
+# Deck has no terminal in normal use. docs/tasks/T5-fork-plan.md §4.1
+# requirement (iii) asks for a first-boot unit that retries and TELLS THE USER;
+# this is that unit. It runs after NetworkManager, waits for a connection, and
+# either stands down quietly or fails loudly.
+#
+# ⚠️ ExecStart has NO leading `-`, and RemainAfterExit is NOT set. A `-` would
+# tell systemd to ignore the non-zero exit and the unit would report `active`
+# on a Deck with no network -- which is the whole condition it exists to make
+# visible. `systemctl --failed` is the channel here (same reasoning as
+# src/omarchy-deck-patches/omarchy-deck-patch-check.service).
+#
+# ⚠️ It is NOT `ConditionFirstBoot`. That condition is only true while
+# /etc/machine-id is unset, and the installer writes one -- so the unit would
+# never run at all. The script disables itself instead, the first time the
+# machine has a network, which also means it keeps retrying across reboots
+# until it succeeds. That is the "retries" half of requirement (iii).
+#
+# ⚠️ `Wants=network.target` and `After=NetworkManager.service`, NOT
+# `network-online.target`. On a Deck with no network, waiting for
+# network-online.target would delay boot by its timeout on exactly the machines
+# this unit is for; the script does its own bounded wait instead.
+#
+
+[Unit]
+Description=Report whether the installer's Wi-Fi reached this system
+Documentation=file:///var/lib/omarchy-deck/wifi-status
+ConditionPathExists=/var/lib/omarchy-deck/wifi-carry
+After=NetworkManager.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/omarchy-deck-wifi-first-boot
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

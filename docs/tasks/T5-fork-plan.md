@@ -619,3 +619,76 @@ are specifications, not results.
 
 **Not done, per this task's constraints:** no ISO built, none downloaded, no
 Deck touched, no `ssh`. Nothing committed.
+
+---
+
+## 10. Implementation notes — what building the Wi-Fi carry-over found in §3/§4.1
+
+**Written 2026-08-12, after implementing `configure_deck`'s first step
+(`src/deck_configure.py`, `src/deck_wifi.py`, `src/deck-wifi-first-boot.sh`,
+`src/omarchy-deck-wifi-first-boot.service`, staged patch
+`src/iso-patches/configure-deck-phase.patch`, suite
+`test/unit/test-deck-configure-wifi.py`).** Everything here is a correction or
+an addition to this plan, not a restatement of it.
+
+**1. 🔴 §5's bake-in list has six items and none of them is the Wi-Fi
+credentials.** T4's U1 is the highest-cost open unknown in
+`docs/tasks/T4-screen-spec.md` §8, its mitigation is explicitly *"`configure_deck`
+writes the connection itself"*, and it appears nowhere in the table that decides
+what `configure_deck` does. It is now measured (U1's row, updated): upstream
+carries nothing across, and archinstall's `type: iso` handler enables **iwd** on
+a target where Omarchy enables **NetworkManager**. Treat §5 as five-and-a-half
+items, not six, until this one has a row with a [V] check of its own.
+
+**2. §4.1's requirements (ii) and (iii) are not properties of the
+`steamdeck-dsp` fetch.** They read as if they were — "`configure_deck`'s fetch
+step must…" — but they are the contract for *any* step that can come out
+degraded, and the Wi-Fi step needed them before the fetch step exists. Two
+consequences that had to be built rather than assumed:
+
+- (ii)'s `/var/log/omarchy-deck-install.json` has **several writers**. It is a
+  merge target keyed by step name (`deck_configure.record_result`), written
+  through a temp file and `os.replace`, with a pre-existing non-object moved to
+  `.corrupt` rather than destroyed. A step that opened it for writing would
+  erase whichever step ran before it.
+- (iii)'s first-boot unit is installed **unconditionally**, not only when the
+  step failed. §4.1 imagines the unit as the retry for a known failure; the case
+  it does not imagine is the one that matters most here — a keyfile copied
+  perfectly that NetworkManager then declines to load, which is invisible from
+  inside the installer. The unit disables itself the first time the machine has
+  a network, so unconditional does not mean permanent.
+
+**3. "Retries and tells the user" is under-specified for a step with nothing to
+retry.** When no credentials were captured there is nothing to re-attempt; the
+honest behaviour is to *say so*, on the installed system, and keep saying so
+until it stops being true. The unit therefore exits non-zero when the machine
+has no network (a FAILED unit is the channel that survives a reboot on a device
+with no terminal — the same reasoning
+`src/omarchy-deck-patches/omarchy-deck-patch-check.service` already carries) and
+exits 0 with a stand-down when there is no wireless hardware at all, so it does
+not become a permanently failed unit in every QEMU run and train people to
+ignore it.
+
+**4. §3's S3 is a phase, but §7 assumes it is a function.** Five separate slices
+(T5e's 5.1/5.5/5.6, T5f's 5.2, T12's applier, this one) all land inside the one
+`build_phases` entry, in different sessions. `configure_deck` is therefore a
+registry of `DeckStep(name, fn, critical)` — append a step, touch nothing that
+works. `critical` has **no default**: §4.1's "the offline install must still
+succeed" makes non-critical the common answer, which is exactly why it must be
+stated per step rather than inherited. **T12's `omarchy-deck-apply-patches` call
+is a step to register, not code to add to an existing one.**
+
+**5. The patch is not the whole change, and promoting it alone breaks every
+install.** `main.py`'s patched `build_phases` does
+`from .deck_configure import configure_deck`, which is evaluated *before* any
+phase runs — a loud, early failure, deliberately, but it means the additive
+overlay files must land in the same commit as the patch.
+`src/iso-patches/README.md` now carries that four-row list.
+
+**6. Where the phase sits, exactly.** Immediately after
+`("Configuring system", run_system_finalizer)` and therefore before
+`stage_provisioning_state` and `finalize_limine_boot`. §9 lists "that
+`configure_deck` placed between `run_system_finalizer` and
+`finalize_limine_boot` survives `install/post-install/pacman.sh`'s overwrite" as
+**(INFERRED)**, and it still is: the ordering is now asserted by a unit test
+that executes the patched `build_phases`, but nobody has run an install.

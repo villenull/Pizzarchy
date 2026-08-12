@@ -33,3 +33,25 @@ so retiring it deliberately is the point at which that reason expires.
 | Patch | Applies to | Owner |
 |---|---|---|
 | `omarchy-install-dashboard.patch` | `configs/airootfs/usr/local/bin/omarchy-install-dashboard` | T4a — sources `deck-dashboard.sh` so S6/S7/S8 exist at all |
+| `configure-deck-phase.patch` | `configs/airootfs/usr/share/omarchy-iso/orchestrator/main.py` | T5 seam S3 — inserts `("Configuring Steam Deck", configure_deck)` into `build_phases` |
+
+## 🔴 `configure-deck-phase.patch` does not stand alone
+
+The patch adds `from .deck_configure import configure_deck`, and an ImportError
+there aborts the install **before any phase runs** (`build_phases(ctx)` is
+evaluated as an argument to `run()`). That is the loud, early failure we want —
+but it means promoting this patch **without** the additive files below turns
+every install into an immediate traceback. Promote them in one commit:
+
+| Repo file | Lands in the overlay at | Then on the ISO at |
+|---|---|---|
+| `src/deck_configure.py` | `overlay/configs/airootfs/usr/share/omarchy-iso/orchestrator/deck_configure.py` | same |
+| `src/deck_wifi.py` | `…/orchestrator/deck_wifi.py` | same |
+| `src/deck-wifi-first-boot.sh` | `…/usr/share/omarchy-iso/deck/deck-wifi-first-boot.sh` | same |
+| `src/omarchy-deck-wifi-first-boot.service` | `…/usr/share/omarchy-iso/deck/omarchy-deck-wifi-first-boot.service` | same |
+
+The last two are *assets copied onto the target* by the phase, not files the
+live ISO runs; `deck_wifi.ASSET_DIR` is the one place that path is written
+down. A missing asset is reported into
+`/var/log/omarchy-deck-install.json` and does not stop the install —
+`test/unit/test-deck-configure-wifi.py` asserts both halves of that.
