@@ -499,10 +499,46 @@ row 5   ☺        [Ⓨ] ————— space (wide) —————     ◀  �
 `Ⓧ`/`Ⓨ` are true face-button shortcuts, while `L2`/`R2` describe *the triggers*,
 whose relevance depends on state.
 
-**Suspect: cursor position.** The cursor is on `b` in frame 1 and on `Backspace`
-in frame 2. ⚠️ **Two frames cannot establish a rule** — this is a hypothesis, and
-this project has had two die today already. **Do not implement it as fact.**
-A third frame showing a transition, or the cursor parked on each half in turn,
-would settle it.
+~~**Suspect: cursor position.**~~ ⚠️ **WRONG, and the warning below is why it was
+hedged.** The cursor is on `b` in frame 1 and on `Backspace` in frame 2, which
+looked like a rule and was a coincidence of those two frames.
+
+### ✅ THE RULE, from the operator using the real keyboard (2026-08-11, session 21)
+
+> *"L2 for shift … comes on if no trackpad is touched. As soon as you touch it
+> it disappears and L2 is now serving the function of clicking letters selected
+> by the left trackpad."*
+
+**The trigger badges are gated on TRACKPAD TOUCH, not cursor position:**
+
+| State | What `L2` means | Badge |
+|---|---|---|
+| No trackpad being touched | **Shift** | `L2` Shift shown |
+| Left trackpad touched | **commit the letter under the left cursor** | Shift badge hidden |
+
+This explains both video frames without the cursor-position rule: on `b` the pad
+was in use, on `Backspace` it was not.
+
+🔴 **This DISSOLVES §9a's "badges cannot copy Valve's without copying Valve's
+input model".** §9a recorded `L2 = Shift` as flatly contradicting ours
+(*"L2 **selects** whatever the left cursor is on"*) — but that is Valve's
+touched-state meaning, i.e. **the same as ours**. It is not a different input
+model; it is our model plus a *second, idle-state* meaning we simply do not
+have. Re-read §9a before acting on it.
+
+⚠️ **UNKNOWN, and both matter before anyone implements this:**
+
+1. **Does `R2` mirror it** — Enter while idle, commit-right-half while the right
+   pad is touched? Symmetry is likely and unmeasured.
+2. **Is the gate per-pad or any-pad?** Does touching the *right* pad change what
+   `L2` shows?
+
+⚠️ **AND ONE HARD IMPLEMENTATION CAVEAT.** Copying this needs a real
+*touch/no-touch* signal, and §7's measured fact is that **a lifted pad reports
+`0` (centre)** — which is indistinguishable from a thumb resting at the centre.
+So "is the pad being touched" is **not** derivable from the axis values we
+already read. Before designing anything on top of this rule, measure whether the
+pads emit a separate touch bit (`BTN_TOOL_FINGER`, `BTN_TOUCH`, or similar) on
+this hardware. **If they do not, the rule cannot be reproduced faithfully.**
 
 ➡️ **The layout work in §9d is NOT blocked by this** and can proceed alone.
