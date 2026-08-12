@@ -102,10 +102,34 @@ def _ensure_layer_shell_preloaded() -> None:
 #     inter-key gap. Ten times too wide; a whole key of nothing.
 #
 #     `Layer.split` is a CURSOR-ADDRESSING boundary, not a visual one. Keys are
-#     placed from `Layer.cell_bounds()` across the FULL width, and the split
-#     only tells `cursor_pixel` which cell range a given thumb ranges over. The
-#     space bar straddles it deliberately, which a drawn gap could not even
+#     placed from `Layer.unit_bounds()` across the FULL width, and the split
+#     only tells `cursor_pixel` which range of a row a given thumb ranges over.
+#     The space bar straddles it deliberately, which a drawn gap could not even
 #     represent.
+
+# 🔴 THIS RENDERER DRAWS IN `units`, NEVER IN `span`, AND IT HIT-TESTS IN THE
+#     SAME METRIC.
+#
+#     A key carries two widths and they are not redundant (`deck_osk_layout`'s
+#     header): `span` is INTEGER CELLS -- cursor addressing, and the only thing
+#     `deck_osk_tty.py` can draw with, because 16 cells x KEY_CELL=5 is the
+#     installed TTY's 80 columns exactly and a console cannot be proportional.
+#     `units` is the MEASURED VISUAL WIDTH. Drawing a uniform cell grid is what
+#     made ours put `Tab` and `Caps` at three times a letter where the reference
+#     draws them at 1.03 and 1.36 (`docs/findings/T8-reference-metrics.md` §2).
+#
+#     ⚠️ The two metrics reach the same keys per half and per row, and differ on
+#     where the boundaries fall INSIDE a half -- by up to half a key. So every
+#     hit test this file's geometry is compared against must pass `osk.UNITS`;
+#     drawing one metric and hit-testing the other puts the cursor's dot on a
+#     key it is not sitting on, and BOTH halves pass their own tests.
+#
+#     ⚠️ AND EVERY ROW IS SCALED ON ITS OWN, by `width / row_units(row)`. The
+#     rows really do differ (14.02..14.23 units): the reference fixes its
+#     special keys and lets the unit keys absorb the remainder, which is why a
+#     unit key is 85px in row 1 and 86-87px in rows 2-4 while every row still
+#     spans x=5..1273. Scaling the whole layer by one factor would leave a
+#     ragged right edge.
 
 HALVES = ("left", "right")
 
@@ -130,45 +154,88 @@ def grid_origin(height: float) -> tuple[float, float]:
     return (top, height - top)
 
 
+def row_scale(layer: osk.Layer, row_index: int, width: float) -> float:
+    """Pixels per unit for ONE row -- the row's own pitch.
+
+    Row-specific on purpose: see the header. `row_units` is validated positive
+    when the layer is built (`Layer.__post_init__` refuses `units <= 0`), so
+    this cannot divide by zero on any layer that exists.
+    """
+    return width / layer.row_units(row_index)
+
+
 def key_rects(layer: osk.Layer, width: float, height: float) -> list[tuple]:
     """Every key's pixel rectangle: (row, col, x, y, w, h).
 
-    ONE CONTINUOUS GRID (T8 §9g). `Layer.cell_bounds` gives each key its
-    [start, end) cells in a row that is `Layer.width` cells wide on EVERY row,
-    so columns line up all the way down and a ragged row cannot be drawn.
-    There is no `half` in the answer any more: a key belongs to the grid, and
-    whether a given thumb can REACH it is a separate question that
-    `half_pixel_range` answers.
+    ONE CONTINUOUS GRID (T8 §9g), in the VISUAL metric. `Layer.unit_bounds`
+    gives each key its [start, end) in letter-key units, and each row is scaled
+    by its OWN `width / row_units(row)` -- so every row still ends flush at the
+    right edge even though the rows differ in units, which is exactly what the
+    reference's pixels do.
+
+    ⚠️ Columns therefore DO NOT line up down the grid, and that is the
+    measurement rather than a regression: row 1's unit key is 85px and row 2's
+    is 86-87px in `01-idle.png`. What lines up is the right edge.
+
+    There is no `half` in the answer: a key belongs to the grid, and whether a
+    given thumb can REACH it is a separate question that `half_pixel_range`
+    answers.
+
+    The caller insets each rectangle by `KEY_GAP_RATIO`, which makes a key's
+    painted fill `units * pitch - gap` -- the same reconstruction
+    `test-deck-osk-layout.py` checks the `units` themselves against.
     """
     top, grid_h = grid_origin(height)
     row_h = grid_h / len(layer.rows)
-    cell_w = width / layer.width
     out = []
     for row_index in range(len(layer.rows)):
-        for key_index, (start, end) in enumerate(layer.cell_bounds(row_index)):
+        scale = row_scale(layer, row_index, width)
+        for key_index, (start, end) in enumerate(layer.unit_bounds(row_index)):
             out.append((row_index, key_index,
-                        start * cell_w, top + row_index * row_h,
-                        (end - start) * cell_w, row_h))
+                        start * scale, top + row_index * row_h,
+                        (end - start) * scale, row_h))
     return out
 
 
-def half_pixel_range(layer: osk.Layer, half: str, width: float) -> tuple[float, float]:
-    """(x start, x end) of the cell range this pad's cursor addresses.
+def half_pixel_range(layer: osk.Layer, half: str, width: float,
+                     row_index: int) -> tuple[float, float]:
+    """(x start, x end) of the range this pad's cursor addresses IN ONE ROW.
 
     ⚠️ NOT a drawn boundary -- nothing paints it, and nothing may. It exists
     because a cursor reports 0..1 WITHIN its half and has to be placed on a
     full-width grid.
+
+    ⚠️ PER ROW, and it has to be: `half_units` interpolates the cell split onto
+    the row's own key boundaries, so the boundary sits at a different pixel on
+    every row -- and on row 5 it lands INSIDE the space bar, which is how both
+    thumbs reach it. A single layer-wide boundary could not say that.
     """
-    start, end = layer.half_cells(half)  # raises on an unknown half
-    cell_w = width / layer.width
-    return (start * cell_w, end * cell_w)
+    start, end = layer.half_units(row_index, half)  # raises on an unknown half
+    scale = row_scale(layer, row_index, width)
+    return (start * scale, end * scale)
+
+
+def cursor_row(layer: osk.Layer, y: float) -> int:
+    """Which row a cursor's normalised `y` falls in.
+
+    ⚠️ Deliberately the same arithmetic as `osk.locate` -- `int()` then clamp,
+    so y == 1.0 lands on the bottom row rather than off the end. If this and
+    `locate` ever disagreed about the row, the dot and the white key face would
+    be in two different rows.
+    """
+    rows = len(layer.rows)
+    return min(int(min(max(y, 0.0), 1.0) * rows), rows - 1)
 
 
 def cursor_pixel(layer: osk.Layer, half: str, position: tuple[float, float],
                  width: float, height: float) -> tuple[float, float]:
-    """A cursor's 0..1 position within its half, in surface pixels."""
-    x0, x1 = half_pixel_range(layer, half, width)
+    """A cursor's 0..1 position within its half, in surface pixels.
+
+    🔴 THE ROW COMES FIRST. Each row has its own pitch and its own half
+    boundary, so x cannot be resolved until y has said which row it is in.
+    """
     top, grid_h = grid_origin(height)
+    x0, x1 = half_pixel_range(layer, half, width, cursor_row(layer, position[1]))
     return (x0 + position[0] * (x1 - x0), top + position[1] * grid_h)
 
 
@@ -330,8 +397,13 @@ def draw(cr, keyboard: osk.OnScreenKeyboard, cursors: osk.Cursors,
     # 🔴 NOTHING IS DRAWN AT THE SPLIT. Both cursors are resolved against the
     # same continuous grid, and a key either half can reach (the space bar
     # straddles cell 8) simply lights for whichever thumb is on it.
+    #
+    # 🔴 `osk.UNITS`, BECAUSE THAT IS WHAT `key_rects` DRAWS. The default is
+    # `CELLS` -- right for the TTY renderer and wrong here by up to half a key,
+    # which would light a key the dot below is not sitting on.
     hot = {found for found in
-           (keyboard.locate(half, *cursors.position(half)) for half in HALVES)
+           (keyboard.locate(half, *cursors.position(half), osk.UNITS)
+            for half in HALVES)
            if found is not None}
 
     cr.select_font_face(FONT_FAMILY)

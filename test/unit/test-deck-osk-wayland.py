@@ -4,8 +4,14 @@
 No GTK, no compositor, no display -- `deck_osk_wayland` imports `gi` inside
 main() precisely so this suite runs anywhere. Two layers of coverage:
 
-  * the pure geometry -- one continuous grid, and every drawn rectangle
-    hit-testing back to the key it was drawn for;
+  * the pure geometry -- one continuous grid at the reference's own MEASURED
+    KEY WIDTHS, and every drawn rectangle hit-testing back to the key it was
+    drawn for IN THE METRIC IT WAS DRAWN IN. This renderer draws
+    `Layer.unit_bounds` (visual widths, per row); `deck_osk_tty.py` draws
+    `Layer.cell_bounds` (the integer addressing grid). Drawing one and
+    hit-testing the other puts the cursor's dot up to half a key from the key
+    it lights, so every check about the two agreeing is run under BOTH metrics
+    and the wrong one has to FAIL;
   * the RASTER -- `draw()` onto an in-memory Cairo surface, read back pixel by
     pixel. "Completes without raising" cannot tell a drawn legend from a
     skipped one, a square corner from a rounded one, or a white cursor face
@@ -106,24 +112,134 @@ for width, height in SIZES:
             check(f"row {row_index} has NO gap between any two keys "
                   f"({width}x{height}, {layer.name})", set(seams), {0.0})
 
+# --- 🔴 PROPORTIONAL WIDTHS, against the reference's own pixel table ---------
+#
+# The single largest remaining visual difference before this: the renderer drew
+# the 16-cell ADDRESSING grid, which puts `Tab` and `Caps` at THREE TIMES a
+# letter where the reference draws them at 1.03 and 1.36 units. It now draws
+# `Layer.unit_bounds`, per row.
+#
+# The numbers below are `docs/findings/T8-reference-metrics.md` §2's measured
+# FILL WIDTHS in pixels, written out longhand rather than read back out of
+# `Key.units` -- a wrong `units` must fail here, not agree with itself.
+#
+# ⚠️ NOT §2's "x unit" RATIO COLUMN. That column divides one key's fill by
+# another key's fill and so drops the inter-key gap; laying a row out with
+# 1.75/1.40/2.09/8.53 overshoots every wide key by 2-4px.
+REF_FILL_PX = {
+    0: [("`", 42)] + [(d, 85) for d in "1234567890"]
+       + [("-", 85), ("=", 85), ("Backspace", 149)],
+    1: [("Tab", 89)] + [(c, 86) for c in "qwertyuiop"]
+       + [("[", 86), ("]", 86), ("\\", 86)],
+    2: [("Caps", 119)] + [(c, 86) for c in "asdfghjkl"]
+       + [(";", 86), ("'", 86), ("Enter", 149)],
+    3: [("Shift", 178)] + [(c, 86) for c in "zxcvbnm"]
+       + [(",", 86), (".", 86), ("/", 86), ("Shift", 178)],
+    4: [("☺", 104), ("space", 725), ("◀", 104), ("▶", 104),
+        ("Paste", 104), ("Move", 104)],
+}
+
+# TWO DOCUMENTED DIFFERENCES between our panel and the one §2 was measured on,
+# and they are the only two -- so a drawn fill can be carried back into the
+# reference's own frame and compared there, which is a real comparison and not
+# a restatement of `units`:
+#
+#   * the reference's key fill spans x=5..1273 of a 1280 screen (1269px, i.e.
+#     1273.5 including one gap); ours spans the full width, because the tests
+#     above pin every row to x=0..width and a side inset would read as exactly
+#     the edge gap this renderer had to have removed;
+#   * the reference's inter-key gap is a flat ~4.5px in a 66px row; ours is
+#     KEY_GAP_RATIO of OUR row height, and our rows are 71px because the 358px
+#     panel is tiled over five rows after the 3px stripe band is reserved.
+REF_PANEL_PITCH = 1273.5   # metrics §2: 1269px of fill plus one 4.5px gap
+REF_GAP = 4.5
+
+
+def in_reference_frame(fill_px: float, width: float, gap: float) -> float:
+    """A fill width we drew, expressed as the reference would have measured it."""
+    return (fill_px + gap) * (REF_PANEL_PITCH / width) - REF_GAP
+
+
+_W, _H = 1280.0, 358.0
+_top, _grid_h = wl.grid_origin(_H)
+_row_h = _grid_h / len(osk.LETTERS.rows)
+_gap = _row_h * wl.KEY_GAP_RATIO
+_fills = {}
+for _r, _k, _x, _y, _w, _h in wl.key_rects(osk.LETTERS, _W, _H):
+    _fills.setdefault(_r, []).append((osk.LETTERS.rows[_r][_k].label, _w - _gap))
+
+for _r in range(len(osk.LETTERS.rows)):
+    check(f"row {_r} draws the keys metrics §2 measured, in order",
+          [n for n, _ in _fills[_r]], [n for n, _ in REF_FILL_PX[_r]])
+    check(f"row {_r}'s DRAWN fill widths match metrics §2 to within 1.5px "
+          f"(the same tolerance the units themselves are held to)",
+          [(n, round(in_reference_frame(got, _W, _gap), 1), want)
+           for (n, got), (_n, want) in zip(_fills[_r], REF_FILL_PX[_r])
+           if abs(in_reference_frame(got, _W, _gap) - want) > 1.5], [])
+
+# The headline defect, named. `Tab` at three letters wide is what a 16-cell
+# grid draws and what the operator saw; the reference draws it at barely more
+# than one, and `Caps` at about one and a third.
+_row1 = dict(_fills[1])
+_row2 = dict(_fills[2])
+check("Tab is about ONE letter wide, not the three cells it spans",
+      round(_row1["Tab"] / _row1["q"], 2), round(89 / 86, 2))
+check("Caps is about a third wider than a letter, not three times",
+      abs(_row2["Caps"] / _row2["a"] - 119 / 86) < 0.03, True)
+check("...and the backtick is HALF a letter, though it is a whole cell",
+      abs(dict(_fills[0])["`"] / dict(_fills[0])["1"] - 42 / 85) < 0.03, True)
+
+# 🔴 EACH ROW IS NORMALISED ON ITS OWN. Scaling the whole layer by one factor
+# would leave a ragged right edge; the reference instead fixes its special keys
+# and lets the unit keys absorb the remainder, so a unit key is 85px in row 1
+# and 86-87px in rows 2-4. If these were equal, the per-row scale is gone.
+check("a unit key is NOT the same width on every row -- the rows are scaled "
+      "independently, exactly as the reference's are",
+      round(dict(_fills[0])["1"], 3) == round(_row1["q"], 3), False)
+check("...and the row with more units draws the narrower unit key",
+      (osk.LETTERS.row_units(0) > osk.LETTERS.row_units(1),
+       dict(_fills[0])["1"] < _row1["q"]), (True, True))
+check("row_scale is the row's own pitch, in pixels per unit",
+      [round(wl.row_scale(osk.LETTERS, r, _W)
+             * osk.LETTERS.row_units(r) - _W, 9) for r in range(5)],
+      [0.0] * 5)
+
 # The split is a cursor boundary and must be invisible to the placement code:
 # the key spanning it (the space bar) is ONE rectangle, not two.
+def split_pixel(layer, row_index, width):
+    """Where the two halves meet on this row, in pixels. PER ROW -- see
+    `half_pixel_range`; the cell split interpolates onto each row's own key
+    boundaries and lands at a different x on every one of the five."""
+    return wl.half_pixel_range(layer, "left", width, row_index)[1]
+
+
 straddlers = [r for r in wl.key_rects(osk.LETTERS, 1280, 358)
-              if r[2] < 1280 * osk.LETTERS.split / osk.LETTERS.width < r[2] + r[4]]
+              if r[2] < split_pixel(osk.LETTERS, r[0], 1280.0) < r[2] + r[4]]
 check("a key straddles the split as a single rectangle, so no seam can be "
       "drawn there", len(straddlers), 1)
 check("...and it is the space bar",
       osk.LETTERS.rows[straddlers[0][0]][straddlers[0][1]].label, "space")
 
-check("half_pixel_range covers the whole width between the two halves",
-      (wl.half_pixel_range(osk.LETTERS, "left", 1280.0),
-       wl.half_pixel_range(osk.LETTERS, "right", 1280.0)),
-      ((0.0, 640.0), (640.0, 1280.0)))
-check("...and they meet exactly, with nothing between them",
-      wl.half_pixel_range(osk.LETTERS, "left", 1280.0)[1],
-      wl.half_pixel_range(osk.LETTERS, "right", 1280.0)[0])
+for _r in range(len(osk.LETTERS.rows)):
+    check(f"row {_r}: half_pixel_range covers the whole width between the two "
+          f"halves",
+          (wl.half_pixel_range(osk.LETTERS, "left", 1280.0, _r)[0],
+           round(wl.half_pixel_range(osk.LETTERS, "right", 1280.0, _r)[1], 6)),
+          (0.0, 1280.0))
+    check(f"row {_r}: ...and they meet exactly, with nothing between them",
+          wl.half_pixel_range(osk.LETTERS, "left", 1280.0, _r)[1],
+          wl.half_pixel_range(osk.LETTERS, "right", 1280.0, _r)[0])
+# ⚠️ The boundary is NOT at the same pixel on every row, and it is not at the
+# cell split's 640 on most of them. A renderer that kept one layer-wide
+# boundary would place four of the five cursors' ranges wrongly.
+check("the halves meet at a DIFFERENT pixel on each row",
+      len({round(split_pixel(osk.LETTERS, r, 1280.0), 3) for r in range(5)}), 5)
+check("...and on row 4 the boundary falls INSIDE the space bar, which is how "
+      "both thumbs reach it",
+      (straddlers[0][2] < split_pixel(osk.LETTERS, 4, 1280.0)
+       < straddlers[0][2] + straddlers[0][4], straddlers[0][0]), (True, 4))
 try:
-    wl.half_pixel_range(osk.LETTERS, "middle", 1280.0)
+    wl.half_pixel_range(osk.LETTERS, "middle", 1280.0, 0)
     check("an unknown half raises rather than guessing", "no raise", "ValueError")
 except ValueError:
     check("an unknown half raises rather than guessing", "ValueError", "ValueError")
@@ -133,44 +249,78 @@ except ValueError:
 # The renderer and the hit test compute positions independently. If they
 # disagree the keyboard types a different character from the one under the
 # cursor -- and both halves pass their own tests.
+#
+# 🔴 AND THE METRIC IS THE WHOLE POINT. This file draws `osk.UNITS`; the
+# layout core's default is `osk.CELLS`, which is right for the TTY renderer and
+# wrong here by up to half a key. So the same probe set is run under BOTH, and
+# the cell metric must FAIL -- a suite where either answer passed would let the
+# cursor-offset bug straight through.
 
-mismatches = []
-for width, height in SIZES:
-    for layer in LAYERS:
-        top, grid_h = wl.grid_origin(height)
-        for half in wl.HALVES:
-            hx0, hx1 = wl.half_pixel_range(layer, half, width)
-            for row_index, key_index, x, y, w, h in wl.key_rects(
-                    layer, width, height):
-                # Only the part of the key this thumb can actually reach.
-                lo, hi = max(x, hx0), min(x + w, hx1)
-                if hi - lo < 2:
-                    continue
-                probes = [((lo + hi) / 2, y + h / 2),
-                          (lo + 0.5, y + 0.5), (hi - 0.5, y + 0.5),
-                          (lo + 0.5, y + h - 0.5), (hi - 0.5, y + h - 0.5)]
-                for px, py in probes:
-                    nx = (px - hx0) / (hx1 - hx0)
-                    ny = (py - top) / grid_h
-                    found = osk.locate(layer, half, min(max(nx, 0.0), 1.0),
-                                       min(max(ny, 0.0), 1.0))
-                    if found != (row_index, key_index):
-                        mismatches.append((layer.name, half, row_index, key_index,
-                                           round(px, 2), round(py, 2), found))
-check("every drawn rectangle hit-tests back to the key it was drawn for",
-      mismatches, [])
+
+def seam_mismatches(metric):
+    out = []
+    for width, height in SIZES:
+        for layer in LAYERS:
+            top, grid_h = wl.grid_origin(height)
+            for half in wl.HALVES:
+                for row_index, key_index, x, y, w, h in wl.key_rects(
+                        layer, width, height):
+                    hx0, hx1 = wl.half_pixel_range(layer, half, width, row_index)
+                    # Only the part of the key this thumb can actually reach.
+                    lo, hi = max(x, hx0), min(x + w, hx1)
+                    if hi - lo < 2:
+                        continue
+                    probes = [((lo + hi) / 2, y + h / 2),
+                              (lo + 0.5, y + 0.5), (hi - 0.5, y + 0.5),
+                              (lo + 0.5, y + h - 0.5), (hi - 0.5, y + h - 0.5)]
+                    for px, py in probes:
+                        nx = (px - hx0) / (hx1 - hx0)
+                        ny = (py - top) / grid_h
+                        found = osk.locate(layer, half, min(max(nx, 0.0), 1.0),
+                                           min(max(ny, 0.0), 1.0), metric)
+                        if found != (row_index, key_index):
+                            out.append((layer.name, half, row_index, key_index,
+                                        round(px, 2), round(py, 2), found))
+    return out
+
+
+check("every drawn rectangle hit-tests back to the key it was drawn for, in "
+      "the metric this renderer DRAWS", seam_mismatches(osk.UNITS), [])
+check("...and the cell metric, which the TTY renderer draws, does NOT agree -- "
+      "so the check above is about the metric and not a tautology",
+      len(seam_mismatches(osk.CELLS)) > 100, True)
 
 # --- cursor placement --------------------------------------------------------
 
 check("a left cursor at 0,0 sits at the grid's top-left",
       wl.cursor_pixel(osk.LETTERS, "left", (0.0, 0.0), 1280, 358),
       (0.0, wl.stripe_height(358)))
-check("a left cursor at 1,1 sits on the split, at the bottom",
-      wl.cursor_pixel(osk.LETTERS, "left", (1.0, 1.0), 1280, 358), (640.0, 358.0))
+check("a left cursor at 1,1 sits on ROW 4's split, at the bottom",
+      wl.cursor_pixel(osk.LETTERS, "left", (1.0, 1.0), 1280, 358),
+      (split_pixel(osk.LETTERS, 4, 1280.0), 358.0))
+check("...which is a point inside the space bar, and NOT the 640 the cell "
+      "grid would have put it at",
+      round(split_pixel(osk.LETTERS, 4, 1280.0), 2), 751.82)
 check("the right cursor starts ON the split, with no gutter to skip",
-      wl.cursor_pixel(osk.LETTERS, "right", (0.0, 0.0), 1280, 358)[0], 640.0)
+      wl.cursor_pixel(osk.LETTERS, "right", (0.0, 0.0), 1280, 358)[0],
+      split_pixel(osk.LETTERS, 0, 1280.0))
 check("the right cursor reaches the right edge",
-      wl.cursor_pixel(osk.LETTERS, "right", (1.0, 1.0), 1280, 358), (1280.0, 358.0))
+      tuple(round(v, 6) for v in
+            wl.cursor_pixel(osk.LETTERS, "right", (1.0, 1.0), 1280, 358)),
+      (1280.0, 358.0))
+
+# 🔴 THE ROW IS DERIVED FIRST. Each row has its own pitch and its own half
+# boundary, so the same x in two rows is two different pixels. A `cursor_pixel`
+# that resolved x before y -- or against one layer-wide boundary -- would
+# return the same number five times.
+check("the same x in every row lands at five different pixels",
+      len({round(wl.cursor_pixel(osk.LETTERS, "left", (0.5, (r + 0.5) / 5),
+                                 1280, 358)[0], 4) for r in range(5)}), 5)
+check("cursor_row picks the same row `locate` does, at every boundary",
+      [wl.cursor_row(osk.LETTERS, y)
+       for y in (0.0, 0.19, 0.2, 0.5, 0.79, 0.8, 0.99, 1.0)],
+      [osk.locate(osk.LETTERS, "left", 0.5, y)[0]
+       for y in (0.0, 0.19, 0.2, 0.5, 0.79, 0.8, 0.99, 1.0)])
 
 # A cursor must land inside the key it highlights, or the dot and the white
 # face disagree and the user is told two different things at once.
@@ -186,7 +336,7 @@ for xi in range(0, 11):
             cur.update(ax, vx)
             cur.update(ay, vy)
             px, py = wl.cursor_pixel(kb.layer, half, cur.position(half), 1280, 358)
-            located = kb.locate(half, *cur.position(half))
+            located = kb.locate(half, *cur.position(half), osk.UNITS)
             rect = next(r for r in wl.key_rects(kb.layer, 1280, 358)
                         if (r[0], r[1]) == located)
             _, _, x, y, w, h = rect
@@ -194,6 +344,30 @@ for xi in range(0, 11):
                     and y - 1e-6 <= py <= y + h + 1e-6):
                 outside.append((half, xi, yi, round(px, 2), round(py, 2), rect))
 check("the cursor dot always falls inside the key it highlights", outside, [])
+
+# The same sweep against the metric this renderer does NOT draw. Every one of
+# these is a frame where the white face and the dot would be on different keys,
+# which is the defect the `metric=` parameter exists to prevent -- so the pass
+# above has to be about the metric, and here is the proof that it is.
+cells_outside = 0
+for xi in range(0, 11):
+    for yi in range(0, 11):
+        vx = (MIN + (MAX - MIN) * xi // 10) or 1
+        vy = (MIN + (MAX - MIN) * yi // 10) or 1
+        for half, ax, ay in (("left", e.ABS_HAT0X, e.ABS_HAT0Y),
+                             ("right", e.ABS_HAT1X, e.ABS_HAT1Y)):
+            cur.update(ax, vx)
+            cur.update(ay, vy)
+            px, py = wl.cursor_pixel(kb.layer, half, cur.position(half), 1280, 358)
+            located = kb.locate(half, *cur.position(half))   # CELLS, the default
+            x, y, w, h = next((r[2], r[3], r[4], r[5])
+                              for r in wl.key_rects(kb.layer, 1280, 358)
+                              if (r[0], r[1]) == located)
+            if not (x - 1e-6 <= px <= x + w + 1e-6):
+                cells_outside += 1
+check("hit-testing in CELLS while drawing in units puts the dot outside the "
+      "highlighted key in dozens of poses -- the bug this suite must be able "
+      "to see", cells_outside > 20, True)
 
 # --- the state protocol -------------------------------------------------------
 
@@ -420,18 +594,75 @@ else:
     # And the split itself, directly. Rows 0-3 break on a key boundary there,
     # so an ordinary gap is correct; row 4's space bar straddles it, so there
     # must be no background at all.
-    split_x = int(W * osk.LETTERS.split / osk.LETTERS.width)
+    #
+    # ⚠️ THE SPLIT IS AT A DIFFERENT PIXEL ON EVERY ROW now that each row is
+    # scaled on its own -- 676, 550, 579, 640, 752 at this width. Probing the
+    # cell grid's 640 on all five would test row 3 and, on the other four, a
+    # patch of solid key that proves nothing.
     for row_index in range(4):
         y = int(TOP + row_index * ROW_H + ROW_H / 2)
+        split_x = int(split_pixel(osk.LETTERS, row_index, W))
         band = [px for px in range(split_x - 30, split_x + 30)
                 if near(pixel(idle, px, y), rgb(wl.PANEL_FILL))]
         check(f"row {row_index}: the split carries an ordinary gap and nothing "
-              f"more", len(band) <= MAX_GAP, True)
+              f"more", 0 < len(band) <= MAX_GAP, True)
     y_space = int(TOP + 4 * ROW_H + ROW_H / 2)
+    split_x = int(split_pixel(osk.LETTERS, 4, W))
     check("row 4: the space bar straddles the split, so there is NO background "
           "there at all",
           region_has(idle, split_x - 20, y_space - 2, 40, 4, wl.PANEL_FILL),
           False)
+
+    # --- 🔴 THE DRAWN WIDTHS, MEASURED THE WAY THE REFERENCE WAS -------------
+    #
+    # `docs/findings/T8-reference-metrics.md` §2 was produced by scanning a row
+    # of `01-idle.png` for runs of non-gap colour and reading each key's fill
+    # start and end. This does the same thing to our own raster, so it checks
+    # what is PAINTED rather than what `key_rects` returns -- a renderer that
+    # computed the right rectangle and then filled the wrong one passes every
+    # geometry test above and fails here.
+    #
+    # The scan line sits high in the row, clear of every legend and badge: a
+    # glyph's antialiased edge passes through greys near the panel colour, and
+    # a scan through one would split a key's run in two.
+    def fill_runs(surf, y):
+        out, start = [], None
+        for px in range(int(W)):
+            if near(pixel(surf, px, y), rgb(wl.PANEL_FILL)):
+                if start is not None:
+                    out.append(px - start)
+                    start = None
+            elif start is None:
+                start = px
+        if start is not None:
+            out.append(int(W) - start)
+        return out
+
+    # Two poses, so no row is ever scanned with a cursor dot on it -- the dot
+    # is the one thing drawn across the gaps, and it would bridge two runs.
+    def parked(y):
+        c = osk.Cursors()
+        c.pos["left"] = [0.5, y]
+        c.pos["right"] = [0.5, y]
+        return render(cursors=c)
+
+    parked_low, parked_high = parked(0.98), parked(0.02)
+    for row_index in range(len(osk.LETTERS.rows)):
+        surface = parked_high if row_index == 4 else parked_low
+        scan_y = int(TOP + row_index * ROW_H + 0.12 * ROW_H)
+        measured = fill_runs(surface, scan_y)
+        want = [w for _n, w in REF_FILL_PX[row_index]]
+        check(f"row {row_index}: the raster carries one run of key colour per "
+              f"key, so the gaps are where they should be",
+              len(measured), len(want))
+        # ⚠️ Tolerance 2.0, not the 1.5 the geometry is held to: a fill edge at
+        # a fractional x antialiases, and a blended pixel reads as key rather
+        # than gap, which inflates every run by about 1px.
+        check(f"row {row_index}: and every painted fill matches metrics §2's "
+              f"measured pixels",
+              [(n, m, w) for (n, _u), m, w in
+               zip(REF_FILL_PX[row_index], measured, want)
+               if abs(in_reference_frame(m, W, PAD * 2) - w) > 2.0], [])
 
     # Nothing a key draws may spill into the gap beside it. A legend that
     # overflowed its own key -- `_fit` failing to shrink "Backspace", an arrow
@@ -466,7 +697,7 @@ else:
     check("...which is NOT the letter fill",
           rgb(wl.KEY_FACE_ACTION) == rgb(wl.KEY_FACE), False)
     check("the panel behind the keys is the measured gap colour",
-          region_is(idle, split_x - 1, TOP + ROW_H - 1, 2, 2, wl.PANEL_FILL),
+          region_is(idle, W / 2 - 1, TOP + ROW_H - 1, 2, 2, wl.PANEL_FILL),
           True)
 
     # 🔴 SQUARE CORNERS (metrics §0.1). A rounded key leaves its own corner
@@ -550,6 +781,29 @@ else:
                        wl.KEY_FACE)) > 6, True)
     check("...and all four glyphs come from our own primitives, not a font we "
           "cannot guarantee", set(wl.ARROW_GLYPHS), {"◀", "▶", "▲", "▼"})
+
+    # ⛔ And `_text` really does take that route. DejaVu Sans -- what
+    # `sans-serif` resolves to on the Deck and in the ISO -- carries ▲/▼ but
+    # NOT ◀/▶, so a `_text` that fell through to `show_text` would draw tofu
+    # boxes on the installer's only keyboard, and every "was something
+    # painted" probe would still pass. Rasterise both routes and compare:
+    # byte-identical means the arrow branch was taken.
+    def one_glyph(draw_it):
+        surface = _cairo.ImageSurface(_cairo.FORMAT_ARGB32, 40, 40)
+        context = _cairo.Context(surface)
+        context.select_font_face(wl.FONT_FAMILY)
+        draw_it(context)
+        surface.flush()
+        return bytes(surface.get_data())
+
+    for glyph in sorted(wl.ARROW_GLYPHS):
+        check(f"`{glyph}` is drawn from our own path and never handed to the "
+              f"font",
+              one_glyph(lambda c, g=glyph:
+                        wl._text(c, g, 0, 40, 20, 24, wl.KEY_TEXT))
+              == one_glyph(lambda c, g=glyph:
+                           wl._arrow(c, g, 20, 20, 24, wl.KEY_TEXT)),
+              True)
     arrow_labels = {k.label for row in osk.LETTERS.rows for k in row}
     arrow_labels |= {k.shift_label for row in osk.LETTERS.rows for k in row}
     check("...and every arrow the layout uses has one",
@@ -591,7 +845,10 @@ else:
     cursor_cur.pos["right"] = [0.60, 0.28]
     cursored = render(cursors=cursor_cur)
 
-    hits = [osk.locate(osk.LETTERS, half, *cursor_cur.position(half))
+    # ⚠️ `osk.UNITS` -- the metric this renderer draws. With the default the
+    # probes below would look for a white face on the key the CELL grid points
+    # at, which at this pose is a different key entirely.
+    hits = [osk.locate(osk.LETTERS, half, *cursor_cur.position(half), osk.UNITS)
             for half in wl.HALVES]
     check("the two cursors are on two different keys", hits[0] != hits[1], True)
     for half, hit in zip(wl.HALVES, hits):
@@ -631,11 +888,50 @@ else:
     nudged_surface = render(cursors=nudged)
     scan_y = int(wl.cursor_pixel(osk.LETTERS, "left", (0.30, 0.55), W, H)[1])
     check("the nudge stays on the same key, so only the dot can have moved",
-          osk.locate(osk.LETTERS, "left", *nudged.position("left")), hits[0])
+          osk.locate(osk.LETTERS, "left", *nudged.position("left"), osk.UNITS),
+          hits[0])
     check("moving the thumb inside one key moves the dot, so it is a position "
           "and not a decoration",
           dot_left_edge(nudged_surface, scan_y) > dot_left_edge(cursored, scan_y),
           True)
+
+    # --- 🔴 THE DRAWN RECT AND THE HIT-TESTED KEY AGREE, IN THE RASTER -------
+    #
+    # The reason `locate()` took a `metric=` parameter at all. These four poses
+    # are ones where the two metrics name DIFFERENT keys -- up to half a key
+    # apart -- so a renderer that drew units and hit-tested cells would light
+    # the wrong key while the dot sat on the right one, and every width test
+    # above would still pass. Read off the pixels, not off `key_rects`.
+    DISAGREEING = (("left", 0.457, 0.30, (1, 2), (1, 1)),    # w, not q
+                   ("right", 0.478, 0.90, (4, 3), (4, 4)),   # ▶, not Paste
+                   ("right", 0.535, 0.10, (0, 11), (0, 12)),  # -, not =
+                   ("left", 0.342, 0.10, (0, 3), (0, 2)))    # 3, not 2
+    for half, cx_n, cy_n, want_units, want_cells in DISAGREEING:
+        check(f"{half} at ({cx_n}, {cy_n}): the two metrics really do disagree",
+              (osk.locate(osk.LETTERS, half, cx_n, cy_n, osk.UNITS),
+               osk.locate(osk.LETTERS, half, cx_n, cy_n)),
+              (want_units, want_cells))
+        probe = osk.Cursors()
+        # The other pad is parked in a corner, well clear of both keys.
+        probe.pos[half] = [cx_n, cy_n]
+        other = "right" if half == "left" else "left"
+        probe.pos[other] = [0.99 if other == "right" else 0.01, 0.02]
+        surface = render(cursors=probe)
+        ux, uy, uw, uh = face_box(*want_units)
+        check(f"{half} at ({cx_n}, {cy_n}): the WHITE face is on the key the "
+              f"UNITS hit test names -- the one the renderer drew there",
+              region_has(surface, ux + 2, uy + 2, uw - 4, 4, wl.CURSOR_FACE),
+              True)
+        kx, ky, kw, kh = face_box(*want_cells)
+        check(f"...and NOT on the key the CELL grid would have named",
+              region_has(surface, kx + 2, ky + 2, kw - 4, 4, wl.CURSOR_FACE),
+              False)
+        dx_, dy_ = wl.cursor_pixel(osk.LETTERS, half, (cx_n, cy_n), W, H)
+        check(f"...and the blue dot is inside that same white key, so the two "
+              f"halves of the cursor agree",
+              (ux - PAD <= dx_ <= ux + uw + PAD,
+               region_has(surface, dx_ - 1, dy_ - 1, 3, 3, wl.CURSOR_DOT_FILL)),
+              (True, True))
 
     # --- badges: shape is semantic, and the gate is per-pad ------------------
 
@@ -672,9 +968,15 @@ else:
     # the two apart, so a mutation swapping the shapes is caught here and
     # nowhere else.
     bx, by, bw, bh = badge_centre(0, 13)     # Backspace: circle (face button)
-    check("the Ⓧ badge is a CIRCLE -- its bounding-box corner is NOT badge "
-          "colour",
-          region_has(idle, bx + bh * 0.42, by - bh * 0.46, 2, 2, wl.BADGE_FILL),
+    # ⚠️ Probed at 0.40 of the box in BOTH axes, which is the one place a
+    # circle and a rounded SQUARE of the same size differ by more than
+    # antialiasing: 0.57 of the radius out at 45 degrees is outside the circle
+    # and comfortably inside the rounded rect's corner arc. Probing nearer the
+    # true corner reads the rect's own antialiased edge and cannot tell them
+    # apart, which let a shape mutation survive.
+    check("the Ⓧ badge is a CIRCLE -- it does not reach the corner a rounded "
+          "rect of the same size would fill",
+          region_has(idle, bx + bh * 0.40, by - bh * 0.40, 2, 2, wl.BADGE_FILL),
           False)
     bx, by, bw, bh = badge_centre(2, 12)     # Enter: rounded rect (trigger)
     check("the R2 badge is a ROUNDED RECT -- its own bounding-box corner IS "
