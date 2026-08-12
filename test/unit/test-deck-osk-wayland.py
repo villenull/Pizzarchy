@@ -316,16 +316,17 @@ else:
                          wl.KEY_FACE),
           False)
 
-    # The gutter divider: the exact centre column differs from a column well
-    # inside the same blank gutter but away from the 1.5px line -- proving a
-    # line was actually stroked there, not merely that "gutter" is blank.
+    # ⚠️ INVERTED 2026-08-11. This used to assert a divider line WAS stroked
+    # down the gutter. The operator saw it on the panel beside the reference
+    # keyboard and rejected it -- the reference has no division between the
+    # halves. The assertion is kept, pointing the other way, so that re-adding
+    # the line fails a test instead of quietly reappearing in a later restyle.
     x0_left, half_w = wl.half_bounds(W, G)["left"]
     divider_x = x0_left + half_w + G / 2.0
-    check("the gutter divider line is visibly different from the surrounding "
-          "blank gutter",
+    check("NO divider is stroked down the centre of the gutter",
           region_differs(surface, divider_x - 1, H / 2 - 4, 2, 8, wl.BACKDROP),
-          True)
-    check("...but a column elsewhere in the same blank gutter is not",
+          False)
+    check("...and the rest of the gutter is blank too, so the halves read as one",
           region_differs(surface, divider_x - 15, H / 2 - 4, 2, 8, wl.BACKDROP),
           False)
 

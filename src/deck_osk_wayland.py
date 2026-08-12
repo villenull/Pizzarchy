@@ -160,7 +160,9 @@ CORNER = 6.0
 SECONDARY_TEXT = (0.62, 0.62, 0.68, 1.0)   # dimmer than KEY_TEXT: a hint, not the answer
 HINT_BADGE_FILL = (0.30, 0.30, 0.36, 1.0)  # same tone as KEY_EDGE -- part of the key, not a flag
 HINT_BADGE_TEXT = (0.92, 0.92, 0.95, 1.0)
-GUTTER_LINE = (0.30, 0.30, 0.36, 0.6)
+# GUTTER_LINE removed 2026-08-11 with the divider it coloured. Kept out
+# rather than left unused: an orphan colour constant invites someone to
+# find a use for it, which here means drawing the line back.
 
 
 def draw(cr, keyboard: osk.OnScreenKeyboard, cursors: osk.Cursors,
@@ -170,18 +172,16 @@ def draw(cr, keyboard: osk.OnScreenKeyboard, cursors: osk.Cursors,
     cr.rectangle(0, 0, width, height)
     cr.fill()
 
-    # The split, made VISIBLE rather than only logical (T8 §9): a thin line
-    # down the middle of the gutter, on top of the backdrop and under every
-    # key -- the gutter has no keys drawn in it, so nothing else contests
-    # this pixel column.
-    x0_left, half_w = half_bounds(width, gutter)["left"]
-    if gutter > 0:
-        divider_x = x0_left + half_w + gutter / 2.0
-        cr.set_source_rgba(*GUTTER_LINE)
-        cr.set_line_width(1.5)
-        cr.move_to(divider_x, 4.0)
-        cr.line_to(divider_x, max(4.0, height - 4.0))
-        cr.stroke()
+    # ⚠️ NO VISIBLE DIVIDER between the halves. T8 §9 originally asked for the
+    # split to be "visible, not just logical", and one was drawn here -- then
+    # the operator looked at it on the panel next to the reference keyboard and
+    # rejected it: the reference has no division, and neither should this
+    # (2026-08-11).
+    #
+    # The GUTTER ITSELF STAYS. It is not decoration: `half_bounds` uses it for
+    # hit-testing, so the two trackpad cursors know which half they are in.
+    # Removing the gap would move every key and break that mapping. What went
+    # away is one drawn line, which is all that was ever visual.
 
     highlights = {
         half: keyboard.locate(half, *cursors.position(half))
