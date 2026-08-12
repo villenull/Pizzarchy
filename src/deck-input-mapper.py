@@ -869,13 +869,89 @@ SESSION_ENV_REQUIRED: tuple[str, ...] = (
 )
 
 
+# The C escapes systemd's `cescape_char` can emit, plus the quote characters
+# it escapes inside a `$'...'` string.
+_C_ESCAPES = {"a": 7, "b": 8, "e": 27, "f": 12, "n": 10, "r": 13, "t": 9,
+              "v": 11, "\\": 92, "'": 39, '"': 34, "?": 63}
+_HEX = "0123456789abcdefABCDEF"
+
+
+def unescape_ansi_c(text: str) -> str:
+    r"""Decode the body of a shell `$'...'` string.
+
+    🔴 MEASURED ON THE DECK, and it is why this function exists at all: on a
+    real session `systemctl --user show-environment` emits **six** values in
+    `$'...'` form and **zero** in plain `'...'` or `"..."` form --
+
+        GDK_BACKEND=$'wayland,x11,*'
+        QT_QPA_PLATFORM=$'wayland;xcb'
+        HYPRLAND_CMD=$'Hyprland --watchdog-fd 4'
+        ...
+
+    -- so the ANSI-C form is not an exotic case, it is the ONLY quoted form
+    that actually occurs, and the plain-quote path below never fires here.
+    Passing `$'wayland,x11,*'` through verbatim gave GTK a backend named
+    `$'wayland`, which made the layer-shell keyboard fall back to an ordinary
+    window: it still appeared, full-screen instead of anchored, and would
+    NOT have rendered above `ext-session-lock` -- silently undoing the §5.24
+    lock fix that was verified in pixels. **The keyboard worked, and was
+    wrong.** Nothing on the desktop looks broken; only the lock screen does.
+
+    Works in BYTES and decodes once at the end, so a `\xNN` pair that is half
+    of a multi-byte UTF-8 character reassembles instead of becoming two
+    replacement characters.
+
+    ⚠️ An escape this does not recognise is kept LITERALLY, backslash
+    included. Guessing at an unknown escape silently corrupts a value; the
+    conservative choice leaves it visible.
+    """
+    out = bytearray()
+    i, end = 0, len(text)
+    while i < end:
+        char = text[i]
+        if char != "\\":
+            out += char.encode("utf-8")
+            i += 1
+            continue
+        i += 1
+        if i >= end:                     # a trailing backslash: keep it, never crash
+            out += b"\\"
+            break
+        esc = text[i]
+        i += 1
+        if esc in _C_ESCAPES:
+            out.append(_C_ESCAPES[esc])
+            continue
+        if esc == "x" and len(text[i:i + 2]) == 2 and all(c in _HEX for c in text[i:i + 2]):
+            out.append(int(text[i:i + 2], 16))
+            i += 2
+            continue
+        if esc in "01234567":
+            digits = esc
+            while len(digits) < 3 and i < end and text[i] in "01234567":
+                digits += text[i]
+                i += 1
+            value = int(digits, 8)
+            # \777 is 511, which is not a byte. Keep the whole thing literal
+            # rather than truncating it into a different character.
+            if value <= 0xFF:
+                out.append(value)
+                continue
+            out += ("\\" + digits).encode("utf-8")
+            continue
+        out += ("\\" + esc).encode("utf-8")
+    return out.decode("utf-8", "replace")
+
+
 def parse_show_environment(text: str) -> dict[str, str]:
     """Parse `systemctl --user show-environment` into a dict.
 
     systemd's output is "suitable for eval in a shell", so a value containing
-    anything interesting comes back QUOTED -- `PATH=/usr/bin` but
-    `FOO='a b'`. Unquoting with shlex rather than stripping characters keeps
-    an embedded space or quote intact instead of corrupting it silently.
+    anything interesting comes back QUOTED. Three forms are handled: bare,
+    shell-quoted (`'a b'` / `"a b"`), and **ANSI-C quoted (`$'a\\tb'`), which
+    is the one this machine actually produces** -- see `unescape_ansi_c`.
+    Unquoting rather than stripping characters keeps an embedded space,
+    quote or separator intact instead of corrupting it silently.
 
     ⚠️ A line this cannot make sense of is SKIPPED, not fatal. This parses
     another program's output on a device whose only input path is this
@@ -891,7 +967,11 @@ def parse_show_environment(text: str) -> dict[str, str]:
         # any shell would accept either.
         if not sep or not name.isascii() or not name.isidentifier():
             continue
-        if raw[:1] in ("'", '"'):
+        # ANSI-C first: `$'...'` also starts with a `$`, so testing for the
+        # plain quote characters first would never reach it.
+        if raw.startswith("$'") and raw.endswith("'") and len(raw) >= 3:
+            raw = unescape_ansi_c(raw[2:-1])
+        elif raw[:1] in ("'", '"'):
             try:
                 parts = shlex.split(raw)
             except ValueError:
