@@ -455,3 +455,54 @@ behaviour* is fine; shipping their assets is not.
   verified by driving `face()` directly. ⚠️ **Whether that reaches the screen on
   a shift press is UNVERIFIED** — the operator reported it not visibly changing,
   and the redraw path was traced but not disproved.
+
+### 9d. 📐 Reference layout, transcribed from video frames (2026-08-11)
+
+Two frames supplied by the operator (a 2022 Steam Deck desktop-mode video,
+timestamps 3:15 and 3:29). **Transcribed rather than copied** — this is key
+placement, which we reimplement with our own glyphs (§9's constraint stands).
+
+⚠️ **A webcam overlay covers the bottom-right of both frames.** Anything in that
+region is marked `[obscured]` and must be confirmed before it is built.
+
+```
+row 1   ~`   !1  @2  #3  $4  %5  ^6  &7  *8  (9  )0  _-  +=   [Ⓧ] Backspace
+row 2   Tab      q  w  e  r  t  y  u  i  o  p        {[  }]   |\
+row 3   Caps⇪    a  s  d  f  g  h  j  k  l     :;  "'   [R2] Enter
+row 4   Shift    z  x  c  v  b  n  m     <,  >.  ?/     [obscured: right Shift]
+row 5   ☺        [Ⓨ] ————— space (wide) —————     ◀  ▶   [obscured: Paste, Move]
+```
+
+**Established by these frames:**
+
+- **Dual legends on every number and punctuation key** — shifted face **above**
+  the base face, both always visible. We match this.
+- **`Caps` carries a lock icon**; `Shift` does not.
+- **Space is one wide key** with the `Ⓨ` badge at its **left edge** — not a
+  separate Y key beside it. ⚠️ Our bottom row currently renders `☺`, then a
+  distinct `Y`, then space. **That is the clearest layout divergence.**
+- **`◀ ▶` only** on the bottom row in these frames — no up/down arrows visible,
+  where ours draws four.
+- Row 4's right `Shift` and row 5's `Paste`/`Move` are `[obscured]`. An earlier
+  still showed all three, so they exist; their exact spans do not.
+
+### 9e. 🔬 The badges are CONTEXTUAL — evidence, and the rule is not yet known
+
+| Badge | Frame 1 (3:15) | Frame 2 (3:29) |
+|---|---|---|
+| `Ⓧ` Backspace | present | present |
+| `Ⓨ` Space | present | present |
+| **`L2` Shift** | **absent** | **present** |
+| **`R2` Enter** | **present** | `[obscured]` |
+
+**So `Ⓧ`/`Ⓨ` are persistent and `L2`/`R2` are not.** That fits the semantics:
+`Ⓧ`/`Ⓨ` are true face-button shortcuts, while `L2`/`R2` describe *the triggers*,
+whose relevance depends on state.
+
+**Suspect: cursor position.** The cursor is on `b` in frame 1 and on `Backspace`
+in frame 2. ⚠️ **Two frames cannot establish a rule** — this is a hypothesis, and
+this project has had two die today already. **Do not implement it as fact.**
+A third frame showing a transition, or the cursor parked on each half in turn,
+would settle it.
+
+➡️ **The layout work in §9d is NOT blocked by this** and can proceed alone.
