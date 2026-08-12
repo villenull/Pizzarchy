@@ -617,7 +617,7 @@ row 5   (Ⓨ) ————————— space (wide) ————————�
 |---|---|---|
 | `X` (`BTN_NORTH`) | `KEY_TAB` | **Backspace** |
 | `Y` (`BTN_WEST`) | `KEY_SPACE` | Space *(already correct)* |
-| `L2` | commit left cursor | commit left cursor **+ Shift while the left pad is untouched** |
+| `L2` | commit left cursor | commit left cursor while the left pad is touched; **HOLD-to-Shift while it is lifted** |
 | `R2` | commit right cursor | commit right cursor **+ Enter while the right pad is untouched** |
 | `L3` (`BTN_THUMBL`) | unbound | **Caps** |
 
@@ -629,6 +629,40 @@ it as a badge or a binding without asking.**
 with a gap; Valve's is one continuous keyboard. The two-cursor model does not
 require a visual split — each cursor addresses its own half of a *continuous*
 grid — so this is a rendering change, not an input-model change.
+
+#### ⚠️ Shift is MOMENTARY, not a toggle — corrected on hardware 2026-08-12
+
+It shipped as a one-shot toggle. The operator tested it and asked for
+hold-to-shift *"as on a pc"*, which is now what it does: engaged while `L2` is
+held, released when it comes up.
+
+**The interaction that made this hard, and how it was resolved** (the reasoning
+is in `Mapper.hold_osk_shift`, and it is load-bearing):
+
+- A thumb landing on the left pad **mid-hold does nothing to Shift**. It stays
+  engaged until `L2` physically comes up. A modifier that evaporated because a
+  thumb brushed a pad would type lowercase while the user was visibly holding
+  shift — §9a's *confidently wrong* failure.
+- The hold uses the core's `"locked"`, not `"once"`: `press()` spends a `"once"`
+  on the first key, which would drop Shift after one character. A lock that ends
+  when the finger lifts cannot latch, so the old objection to a trigger reaching
+  a lock does not apply.
+- Release **saves and restores** rather than forcing `"off"`, so a lock set from
+  the on-screen Shift key survives an unrelated trigger pull.
+
+🔴 **The one-handed gesture was recorded as unreachable, and that was wrong.**
+The mapper's comment said "hold L2 while aiming" is a gesture this input model
+cannot offer, leaving only the two-handed form (hold `L2`, aim right, commit
+`R2`). The operator then described how Valve's actually works: **you press
+harder on the trackpad**, i.e. the pad *click* commits — `BTN_THUMB` left,
+`BTN_THUMB2` right, both measured on this hardware. A click commits without
+touching the trigger, so Shift stays held. **Being written down did not make it
+true**; a fifteen-second observation on the real device settled it.
+
+⚠️ One consequence not yet resolved: the TTY renderer maps `"locked"` to the
+text `LOCK`, so the installer's keyboard spells "Shift LOCK" for the duration
+of a hold. Honest, but it needs a fourth shift state in the layout core to say
+"held" instead.
 
 ✅ **And the badge gating is now implementable** — see §9e: a lift reports
 exactly `0,0`, measured on hardware 2026-08-12, so "untouched" is a real state
