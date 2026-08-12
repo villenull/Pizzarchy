@@ -85,7 +85,19 @@ work without waiting for further instruction.**
 > does **not** drop NVIDIA to zero, and `linux-firmware-nvidia` ships in every
 > install, so "zero NVIDIA" was never literally achievable.
 >
+> ### ✅ EVERYTHING BELOW WAS VERIFIED ON THE PANEL, 2026-08-12
+>
+> The operator tested each of these on hardware and confirmed it. Do not
+> re-litigate them; if one regresses, it regressed.
+>
+> Keys type what they draw · the highlighted key matches what appears · pad-click
+> commits · **hold L2, aim left, click** works one-handed · finger touch types ·
+> a lifted pad's click stays silent · the aiming circle vanishes on release ·
+> haptics fire on pad click · the pointer does not jump on lift · the keyboard
+> hides for the screensaver · **and it does NOT hide under a lock**.
+>
 > ### The next actions
+
 >
 > 1. 🔴 **T5d** — the Wi-Fi phase exists; its four additive files and patch
 >    promotion do not. ⚠️ **The staged patch breaks every install without them**
