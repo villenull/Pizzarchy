@@ -517,10 +517,19 @@ _password() {
       deck_form_warn "passwords did not match -- try again"
       continue
     fi
-    # (INFERRED variable name -- see the block comment above _identity/
-    # _hostname; the same "not READ this session" caveat applies here)
+    # 🔴 THE NAME IS `password`, AND IT IS MEASURED. Upstream's configurator
+    # reads `$password` at four sites in the pinned iso/upstream tree:
+    #   256  password_hash=$(printf '%s' "$password" | openssl passwd -6 -stdin)
+    #   441  password_escaped=$(echo -n "$password" | jq -Rsa)
+    #   698  printf "%s" "$password" | cryptsetup luksFormat ...
+    #   699  printf "%s" "$password" | cryptsetup open ...
+    # This was `user_password` for one session, a name configurator never
+    # reads. `configurator` has no `set -u`, so nothing would have failed:
+    # `openssl passwd -6` would have hashed the EMPTY STRING and produced a
+    # valid hash for it, and the install would have finished green with a
+    # PASSWORDLESS ACCOUNT. Nobody would find that until first login.
     # shellcheck disable=SC2034
-    user_password=$pw
+    password=$pw
     return 0
   done
 }
@@ -548,9 +557,11 @@ deck_form_identity_body() {
 omarchy_prompt_identity() { deck_form_identity_body; }
 
 deck_form_hostname_body() {
-  # (INFERRED variable name -- see the block comment above)
+  # MEASURED, same as the password above: configurator reads `$hostname` at
+  # lines 283, 768 and 1154. `hostname_value` was read by nothing, and would
+  # have produced `"hostname": ""` in the archinstall JSON, silently.
   # shellcheck disable=SC2034
-  hostname_value=$DECK_HOSTNAME
+  hostname=$DECK_HOSTNAME
   printf '%s\n' "$DECK_HOSTNAME"
 }
 omarchy_prompt_hostname() { deck_form_hostname_body; }

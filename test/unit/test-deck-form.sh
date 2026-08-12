@@ -387,6 +387,59 @@ out=$(omarchy_prompt_hostname)
 [[ $out == steamdeck ]] || fail "omarchy_prompt_hostname must output the constant hostname" "got: $out"
 pass "omarchy_prompt_hostname outputs 'steamdeck' and prompts for nothing (no read, no blocking)"
 
+echo "--- the variable-name contract, checked against UPSTREAM'S OWN SOURCE ---"
+
+# 🔴 WHY THIS SECTION EXISTS. An override's return value is not its output --
+# what it actually delivers is the GLOBAL it sets, which `configurator` reads
+# later. Those names were INFERRED for one session and two of four were wrong:
+# `user_password` for `password`, `hostname_value` for `hostname`.
+#
+# `configurator` has no `set -u`, so nothing would have failed. `openssl
+# passwd -6` would have hashed the EMPTY STRING into a perfectly valid hash,
+# the JSON would have carried `"hostname": ""`, and the install would have
+# finished GREEN with a passwordless account nobody discovers until first
+# login. On the encrypted path the same empty string reaches
+# `cryptsetup luksFormat`.
+#
+# So the names are asserted against upstream's own file rather than against a
+# list written here -- a list here would just be the same inference again.
+CONFIGURATOR="$REPO_ROOT/iso/upstream/configs/airootfs/root/configurator"
+if [[ -r $CONFIGURATOR ]]; then
+  for v in password hostname full_name email_address; do
+    LC_ALL=C grep -qE "\\\$\{?${v}\b" "$CONFIGURATOR" ||
+      fail "upstream's configurator never reads \$${v} -- the name deck-form.sh sets is wrong, and would fail SILENTLY"
+  done
+  pass "every global the S3 overrides set is one upstream's configurator actually reads"
+
+  # The specific wrong names, pinned as wrong. If a future edit reintroduces
+  # one, this says so instead of leaving it to an installed device.
+  for bad in user_password hostname_value; do
+    if LC_ALL=C grep -qE "\\\$\{?${bad}\b" "$CONFIGURATOR"; then
+      fail "upstream DOES read \$${bad} -- this suite's premise is wrong, re-derive the contract"
+    fi
+    LC_ALL=C grep -qE "^\s*${bad}=" "$REPO_ROOT/src/deck-form.sh" &&
+      fail "deck-form.sh sets \$${bad}, which upstream never reads -- the silent-empty bug is back"
+  done
+  pass "the two names that were silently wrong are pinned as wrong"
+else
+  # Never a silent skip: the submodule not being checked out must be visible,
+  # because this assertion is the only thing standing between an inferred
+  # name and a passwordless installed device.
+  printf 'not ok - iso/upstream is not checked out, so the variable-name contract was NOT verified\n'
+  printf 'run: git submodule update --init iso/upstream\n' >&2
+  exit 1
+fi
+
+# Functional, not just textual: call the overrides and read the globals back.
+( omarchy_prompt_hostname >/dev/null 2>&1; [[ ${hostname:-} == steamdeck ]] ) ||
+  fail "omarchy_prompt_hostname must set \$hostname (the name configurator reads), not some other name"
+pass "omarchy_prompt_hostname really sets \$hostname"
+
+( omarchy_prompt_identity >/dev/null 2>&1
+  [[ ${full_name+set} == set && ${email_address+set} == set ]] ) ||
+  fail "omarchy_prompt_identity must set \$full_name and \$email_address"
+pass "omarchy_prompt_identity really sets \$full_name and \$email_address"
+
 # ===========================================================================
 # S1: Wi-Fi (SSID list builder only)
 # ===========================================================================
