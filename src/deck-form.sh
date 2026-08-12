@@ -69,8 +69,8 @@
 # SCOPE OF WHAT IS ACTUALLY BUILT HERE (see also this session's final report)
 # ===========================================================================
 #
-# Built, in the priority order docs/tasks/T4-screen-spec.md §4 and this
-# session's own task both asked for:
+# Built by an earlier session, in the priority order
+# docs/tasks/T4-screen-spec.md §4 asked for:
 #   1. The bounded text-entry mode (§2.3) -- deck_form_text_prompt and its
 #      collaborators. The mechanism every text screen needs.
 #   2. S0 Welcome/disclosure.
@@ -87,10 +87,63 @@
 #      layer (the one the spec's own §4 S8 flags as needing mutation
 #      testing), plus a real failure_menu loop and log pager wired to them.
 #
-# NOT built at all: S2 (Region/timezone), S4 (Disk), S5 (Summary), S6
-# (Progress/tips), S7 (Completion/reboot). None of their markers, artefact
-# JSON, or gum flows exist in this file. Per this session's own scope
-# instruction: fewer screens, done properly, beats nine screens done badly.
+# ⚠️ CORRECTION found THIS session, by actually reading the real
+# `iso/upstream/configs/airootfs/root/configurator` (not available to the
+# session that built S3): upstream's own `user_form` reads back `$password`
+# (not `user_password`) and `$hostname` (not `hostname_value`) -- see
+# `write_user_files`/`user_step`'s own table, which read `$password` and
+# `$hostname` directly. S3's `_password` and `deck_form_hostname_body` set
+# the WRONG variable names, so on the real ISO today `$password` and
+# `$hostname` are left unset (configurator has no `set -u`, so this fails
+# SILENT -- an empty password hash and an empty hostname reach the artefact,
+# not a crash). NOT fixed here: S3 is out of this session's file-ownership
+# scope ("do not rebuild, do not restructure"). S5 below is built against
+# the REAL contract (matching upstream, which is what write_user_files
+# actually reads), not against S3's current wrong names, so fixing S3 is a
+# prerequisite for S5 to show correct values -- flagged loudly in this
+# session's final report, and as a spawned follow-up task.
+#
+# This session (T4 continuation) adds:
+#   6. S2 Region (timezone) -- overrides `omarchy_prompt_timezone` (the REAL
+#      name, confirmed this session at `configurator` line 260; not a guess).
+#      Two-level area/city pick, geo-guess sanitisation, UTC/empty-list
+#      fallbacks, all as pure functions; the gum-driving wrapper is thin,
+#      proven at [V] like S8's `failure_menu` already is.
+#   7. S4 Disk -- overrides `requires_full_disk_install` (suppresses the
+#      free-space install mode, upstream's own skip path), `disk_form`
+#      (RM-based eligibility, not name-based; auto-skips the picker when
+#      exactly one disk is eligible; a dead-end screen -- Reboot/Power off,
+#      never a shell -- when none is), and `confirm_disk_overwrite` (our
+#      text, cursor defaults to "No", and `encrypt_installation` is an
+#      unconditional constant `false` -- no Ctrl+C toggle exists at all).
+#   8. S5 Summary -- `deck_final_summary`, the NEW function name patch P1
+#      hunk 2 calls directly (`docs/tasks/T4-screen-spec.md §1.2`), not an
+#      override of an existing upstream name. On "Go back" it re-runs
+#      upstream's own `user_step`/`disk_form`/`select_installation` itself
+#      (mirroring upstream's own recap-loop shape in `user_step`), since
+#      nothing later in `configurator`'s flow loops back to it for us.
+#
+# NOT built, and why (see this session's final report for the full
+# reasoning):
+#   - S6 Progress/tips and S7 Completion/reboot. Both upstream screens
+#     (`render_finish`, the dashboard's tips array, `failure_menu`) live in
+#     `configs/airootfs/usr/local/bin/omarchy-install-dashboard` -- a
+#     SEPARATE PROCESS this file is never sourced into (`configurator` only
+#     sources `deck-form.sh`; it never touches the dashboard binary at all,
+#     confirmed by reading both files this session). Defining a function
+#     named `render_finish` or a tips-array override HERE would be exactly
+#     the failure mode T4-screen-spec.md §6.4 exists to catch: a function
+#     defined under a name nothing in this process ever calls, silently
+#     never appearing on the real ISO. T4-screen-spec.md §7 already flags
+#     this ("deck-form.sh cannot reach them ... decide in T4a") and this
+#     session did not invent a new file to work around its own scope
+#     boundary (iso/ is explicitly off limits: two other agents own it).
+#     Fixing S6/S7 needs a THIRD additive overlay file (an
+#     `omarchy-install-dashboard` replacement) or a patch to it -- neither
+#     is `src/deck-form.sh`.
+#   - The keyboard-layout half of §3 deviation 2 ("keyboard becomes the
+#     constant `us`") is `omarchy_prompt_keyboard`/`keyboard_form`, not any
+#     of S2/S4/S5/S6/S7 as scoped by §4. Not touched; flagged as a gap.
 
 set -uo pipefail
 
@@ -722,5 +775,475 @@ failure_menu() {
       poweroff) systemctl poweroff ;;
       *)        : ;;   # redraw: loop again, menu redraws, nothing acted on
     esac
+  done
+}
+
+# ===========================================================================
+# S2 -- Region (timezone)
+# ===========================================================================
+#
+# T4-screen-spec.md §4 S2: narrowed to timezone only (§3 deviation 2 -- the
+# keyboard-layout half is a DIFFERENT override, `omarchy_prompt_keyboard`,
+# out of this session's five named screens; not touched here).
+#
+# Overrides `omarchy_prompt_timezone` -- the REAL name: `user_form` calls it
+# at `configurator` line 260, read directly this session (not inferred).
+# Upstream's own contract (same file, `user_step`'s recap table and both
+# JSON writers): sets the global `timezone`.
+#
+# The flat ~600-row `timedatectl list-timezones` list is replaced by a
+# two-level area/city pick (§3 deviation 3) because lizard mode has no
+# PageUp/PageDown (§2.1) and `gum filter`'s narrow-by-typing fallback needs
+# an OSK this screen does not raise (no text entry here at all -- see below).
+
+# deck_form_tz_areas <timezone-list-file>
+# The area list is DERIVED from the fixture/live list itself (the first
+# path component of every entry, plus the bare "UTC" line as its own
+# pseudo-area) rather than a hand-typed array -- so "every area present" is
+# true by construction against whatever `timedatectl` actually returns,
+# instead of this file's own guess at the IANA zone tree's shape.
+deck_form_tz_areas() {
+  local file=$1
+  awk -F/ '{ print $1 }' "$file" | LC_ALL=C sort -u
+}
+
+# deck_form_tz_cities_for_area <timezone-list-file> <area>
+# Everything after "<area>/" for that area; the bare "UTC" line maps to the
+# single pseudo-city "UTC" so the UTC "area" is reachable and selectable the
+# same way every other area is (T4-screen-spec.md §4 S2: "UTC reachable").
+deck_form_tz_cities_for_area() {
+  local file=$1 area=$2 line
+  while IFS= read -r line; do
+    if [[ $line == "$area" ]]; then
+      [[ $area == UTC ]] && printf 'UTC\n'
+      continue
+    fi
+    [[ $line == "$area"/* ]] || continue
+    printf '%s\n' "${line#"$area"/}"
+  done <"$file" | LC_ALL=C sort -u
+}
+
+# deck_form_tz_full <area> <city>
+# Inverse of the split above -- UTC/UTC collapses back to the bare zone name
+# "UTC" (what `timedatectl` and the JSON writer's "$timezone" both expect),
+# every other pair rejoins with a single slash.
+deck_form_tz_full() {
+  local area=$1 city=$2
+  if [[ $area == UTC && $city == UTC ]]; then
+    printf 'UTC\n'
+  else
+    printf '%s/%s\n' "$area" "$city"
+  fi
+}
+
+# T4-screen-spec.md §4 S2's own verified-by row, quoted exactly: the guess
+# "must match ^[A-Za-z_]+/[A-Za-z0-9_+-]+$ or be discarded" -- tzupdate's
+# output is network-derived text (§4 S1's own "hostile SSID" reasoning
+# applies just as much to a geo-IP lookup result). ⚠️ This pattern (copied
+# verbatim from the spec) has no allowance for a THIRD path segment
+# (e.g. "America/Argentina/Buenos_Aires", a real IANA zone) -- a known,
+# spec-inherited limitation, not something introduced here.
+readonly DECK_TZ_GUESS_PATTERN='^[A-Za-z_]+/[A-Za-z0-9_+-]+$'
+readonly DECK_TZ_DEFAULT_AREA=Europe
+readonly DECK_TZ_FALLBACK_TZ=UTC
+
+# deck_form_tz_sanitize_guess <raw-guess>
+# Prints the guess back out (trimmed) if it matches the pattern above;
+# returns 1 and prints nothing otherwise -- "discarded", per the spec.
+deck_form_tz_sanitize_guess() {
+  local raw
+  raw=$(deck_form_trim "$1")
+  if [[ $raw =~ $DECK_TZ_GUESS_PATTERN ]]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  return 1
+}
+
+deck_form_tz_guess_area() { printf '%s\n' "${1%%/*}"; }
+deck_form_tz_guess_city() { printf '%s\n' "${1#*/}"; }
+
+# deck_form_tz_default_area
+# §4 S2's stated no-guess fallback: "the area list opens on Europe with
+# nothing pre-selected, which is a visible default, not a silent one."
+deck_form_tz_default_area() { printf '%s\n' "$DECK_TZ_DEFAULT_AREA"; }
+
+# omarchy_prompt_timezone -- overrides upstream's own S2 screen.
+#
+# Thin on purpose, same split as S8's failure_menu/deck_form_failure_action_for:
+# every decision the [U] suite can actually prove lives in the pure functions
+# above; this loop's own gum choose/tzupdate/timedatectl calls are real side
+# effects, proven at [V] (T4-screen-spec.md §6.1's own tier assignment for
+# exactly this kind of function).
+#
+# Overridable via DECK_TZ_LIST_CMD_OVERRIDE / DECK_TZ_GUESS_CMD_OVERRIDE so
+# a [V]-tier or manual run can point this at something other than the real
+# `timedatectl`/`tzupdate` binaries; the [U] suite exercises the pure
+# functions directly instead of this wrapper, so it does not need them.
+omarchy_prompt_timezone() {
+  local list_cmd=${DECK_TZ_LIST_CMD_OVERRIDE:-timedatectl list-timezones}
+  local guess_cmd=${DECK_TZ_GUESS_CMD_OVERRIDE:-tzupdate -p}
+  local tzlist_file guess="" raw_guess area city full
+
+  tzlist_file=$(mktemp) || { deck_form_die "mktemp failed"; return 1; }
+  # shellcheck disable=SC2086  # deliberately word-split: these are command lines, not paths
+  $list_cmd >"$tzlist_file" 2>/dev/null
+
+  if [[ ! -s $tzlist_file ]]; then
+    deck_form_warn "timedatectl list-timezones returned nothing -- falling back to $DECK_TZ_FALLBACK_TZ"
+    say "No timezone list is available -- defaulting to $DECK_TZ_FALLBACK_TZ."
+    timezone=$DECK_TZ_FALLBACK_TZ
+    rm -f "$tzlist_file"
+    return 0
+  fi
+
+  if command -v "${guess_cmd%% *}" >/dev/null 2>&1; then
+    # shellcheck disable=SC2086  # deliberately word-split, see list_cmd above
+    raw_guess=$($guess_cmd 2>/dev/null | tail -1) || raw_guess=""
+    guess=$(deck_form_tz_sanitize_guess "$raw_guess") || guess=""
+  fi
+
+  area=$(deck_form_tz_default_area)
+  [[ -n $guess ]] && area=$(deck_form_tz_guess_area "$guess")
+
+  while true; do
+    step "Where are you?"
+    if [[ -n $guess ]]; then
+      say "Detected: $guess -- press A to keep it"
+    fi
+    area=$(deck_form_tz_areas "$tzlist_file" | gum choose --header "Area" --selected "$area") ||
+      { rm -f "$tzlist_file"; return 1; }
+
+    local city_sel=""
+    [[ -n $guess ]] && [[ $(deck_form_tz_guess_area "$guess") == "$area" ]] &&
+      city_sel=$(deck_form_tz_guess_city "$guess")
+    city=$(deck_form_tz_cities_for_area "$tzlist_file" "$area" | gum choose --header "City in $area" --selected "$city_sel") ||
+      continue   # B from the city list: back to the area list
+
+    full=$(deck_form_tz_full "$area" "$city")
+    timezone=$full
+    rm -f "$tzlist_file"
+    return 0
+  done
+}
+
+# ===========================================================================
+# S4 -- Disk
+# ===========================================================================
+#
+# T4-screen-spec.md §4 S4, §3 deviation 5, and the task's own constraint:
+# `docs/PROGRESS.md` §5.12 -- the 4.0 installer defaults to FULL-DISK
+# ENCRYPTION, which bricks a keyboard-less Deck at the LUKS prompt. The
+# ENCRYPTION-DEFAULT DECISION ITSELF (§5.12, `docs/tasks/T5-fork-plan.md`
+# §5.5) is not this file's to make in the sense of picking a policy --
+# T4-screen-spec.md §3 deviation 4 ALREADY MADE that decision in the spec
+# this file implements: "Encryption: cut as a screen; it is a constant,
+# `false`." What follows enforces that constant unconditionally: no Ctrl+C
+# toggle exists in ANY override below, ever -- unlike upstream, where the
+# toggle is merely hidden behind a key this hardware cannot produce (§2.2
+# item 1), here it does not exist as code at all.
+#
+# ⚠️ WHAT THIS FILE CANNOT FIX: `docs/PROGRESS.md` §5.12a /
+# `docs/tasks/T5-fork-plan.md` §5.1's coupling box -- upstream's
+# `configure_login` (in the ORCHESTRATOR, `phases_impl.py`, a Python file in
+# a completely different component this file has no reach into at all, not
+# even in principle the way `omarchy-install-dashboard` at least shares a
+# process boundary with something) writes `autologin.conf` only
+# `if ctx.encrypt`. Forcing `encrypt_installation=false` here, correctly,
+# ALSO means a Deck installed through this file boots to an unanswerable
+# SDDM password prompt unless something else guarantees autologin
+# unconditionally -- T5's job (§5.1+§5.5, "do them in the same slice or
+# neither"), not reachable from `configurator` at all. Building S4 without
+# saying this would be reporting an unbricking fix that only replaces one
+# brick with another. Said here, and in this session's final report.
+
+# deck_form_disk_list <lsblk-fixture-file> [<exclude-device>]
+# lsblk-fixture-file: lines of "NAME TYPE RM" (matches
+# `lsblk -dpno NAME,TYPE,RM`'s own column order). Keeps TYPE=="disk" and
+# RM=="0" -- §3 deviation 5's own warning, quoted: "the microSD must be
+# excluded ... by lsblk -dno RM, not by name. Excluding mmcblk* would also
+# exclude the 64GB LCD Deck's internal eMMC." RM, not a name pattern, is
+# the only test applied here, so an internal eMMC (RM=0) is kept exactly
+# like an internal NVMe. EXCLUDE-DEVICE (the resolved boot/install medium,
+# upstream's own `get_root_disk` walk -- reused live in disk_form below,
+# not reimplemented here) is dropped by exact NAME match. An empty result
+# is a REPORTED failure (return 1), never a silently empty list -- §4 S4's
+# own verified-by row.
+deck_form_disk_list() {
+  local file=$1 exclude=${2:-}
+  local name type rm found=0
+  while read -r name type rm; do
+    [[ -n $name ]] || continue
+    [[ $type == disk ]] || continue
+    [[ $rm == 0 ]] || continue
+    [[ -n $exclude && $name == "$exclude" ]] && continue
+    printf '%s\n' "$name"
+    found=1
+  done <"$file"
+  if [[ $found -eq 0 ]]; then
+    deck_form_warn "no eligible install disk found in $file (every candidate is removable or is the boot medium)"
+    return 1
+  fi
+  return 0
+}
+
+# deck_form_disk_autoselect <newline-separated eligible devices>
+# §4 S4: "When exactly one eligible disk exists -- the expected Deck case --
+# the picker is skipped." Prints the device and succeeds when there is
+# EXACTLY one; fails (prints nothing) for zero or more than one, so the
+# caller knows a real picker is needed. A pure decision, split out
+# specifically so "skip the picker with one disk, show it with two" is
+# provable without a live lsblk/gum -- the same shape as
+# deck_form_failure_action_for.
+deck_form_disk_autoselect() {
+  local list=$1 count
+  count=$(printf '%s\n' "$list" | LC_ALL=C command grep -c .)
+  if [[ $count -eq 1 ]]; then
+    printf '%s\n' "$list"
+    return 0
+  fi
+  return 1
+}
+
+# deck_form_disk_label <device>
+# "<vendor+model> (<size>)", falling back to the bare device path if lsblk
+# has nothing to say. Used both by the S4 confirm text and the S5 summary
+# row, so the two can never independently drift. DECK_LSBLK_BIN is
+# overridable so the [U] suite can point this at a fake `lsblk` instead of
+# needing a real block device on the test machine.
+deck_form_disk_label() {
+  local device=$1 lsblk=${DECK_LSBLK_BIN:-lsblk}
+  local size vendor model label
+  size=$("$lsblk" -dno SIZE "$device" 2>/dev/null)
+  vendor=$("$lsblk" -dno VENDOR "$device" 2>/dev/null | sed 's/ *$//')
+  model=$("$lsblk" -dno MODEL "$device" 2>/dev/null | sed 's/ *$//')
+  if [[ -n $vendor && -n $model && $model != *"$vendor"* ]]; then
+    label="$vendor $model"
+  elif [[ -n $model ]]; then
+    label=$model
+  elif [[ -n $vendor ]]; then
+    label=$vendor
+  else
+    label=$device
+  fi
+  if [[ -n $size ]]; then
+    printf '%s (%s)\n' "$label" "$size"
+  else
+    printf '%s\n' "$label"
+  fi
+}
+
+# deck_form_disk_encryption_mode
+# T4-screen-spec.md §6.5's own named example of a single-string mutation a
+# shallow test would miss ("the encryption constant"). Pulled into its own
+# one-line function, rather than inlined in confirm_disk_overwrite, purely
+# so the [U] suite can assert this exact fact directly instead of only
+# indirectly through a gum-driving function it cannot safely execute.
+deck_form_disk_encryption_mode() { printf 'false\n'; }
+
+# DECK_DISK_CONFIRM_DEFAULT: §6.5's OTHER named example ("S4's default
+# cursor"). gum confirm with no --default flag defaults to the AFFIRMATIVE
+# (matches upstream's own confirm_disk_overwrite, which never passes
+# --default and where the affirmative IS the dangerous action) --
+# T4-screen-spec.md §4 S4 requires the opposite here ("The cursor starts on
+# No"), so this must be explicit, and is kept as its own named constant so a
+# mutation that drops or flips it is a one-line, directly assertable change.
+readonly DECK_DISK_CONFIRM_DEFAULT=false
+
+readonly -a DECK_DISK_DEAD_END_ITEMS=(Reboot "Power off")
+
+deck_form_disk_dead_end_items() { printf '%s\n' "${DECK_DISK_DEAD_END_ITEMS[@]}"; }
+
+# deck_form_disk_dead_end_action_for <gum-choose-output-or-empty>
+# Same shape and same reason as deck_form_failure_action_for: an empty or
+# unrecognised choice redraws, NEVER guesses at reboot/poweroff -- §4 S4:
+# "a dead-end screen offering Reboot / Power off, never a shell."
+deck_form_disk_dead_end_action_for() {
+  local choice=$1
+  case $choice in
+    Reboot)       printf 'reboot\n' ;;
+    "Power off")  printf 'poweroff\n' ;;
+    *)            printf 'redraw\n' ;;
+  esac
+}
+
+# deck_form_disk_dead_end -- the "no eligible disk" screen.
+# Thin wrapper around the pure decision above, proven at [V] like
+# failure_menu. Never returns to a caller that would fall through to a bare
+# shell; if systemctl itself fails, the loop simply redraws rather than
+# guessing at anything else to do.
+deck_form_disk_dead_end() {
+  local choice action
+  while true; do
+    clear_logo
+    echo
+    say --foreground 1 "No eligible install disk was found."
+    say "Every disk on this machine is either removable or is the boot medium."
+    echo
+    choice=$(deck_form_disk_dead_end_items | gum choose --header "What next?") || choice=""
+    action=$(deck_form_disk_dead_end_action_for "$choice")
+    case $action in
+      reboot)   systemctl reboot ;;
+      poweroff) systemctl poweroff ;;
+      *)        : ;;
+    esac
+  done
+}
+
+# disk_form -- overrides upstream's own disk picker.
+# Reuses upstream's OWN `get_root_disk`/`get_disk_info` (still defined --
+# this file does not override them) rather than reimplementing the boot-
+# medium walk, per this file's general wrap philosophy: override only the
+# screen, not machinery upstream already got right.
+disk_form() {
+  step "Let's select where to install Omarchy..."
+
+  local boot_source exclude_disk lsblk_bin=${DECK_LSBLK_BIN:-lsblk}
+  boot_source=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
+  exclude_disk=$(get_root_disk "$boot_source")
+
+  local lsblk_tmp
+  lsblk_tmp=$(mktemp) || { deck_form_die "mktemp failed"; abort; return; }
+  "$lsblk_bin" -dpno NAME,TYPE,RM >"$lsblk_tmp" 2>/dev/null
+
+  local eligible
+  if ! eligible=$(deck_form_disk_list "$lsblk_tmp" "$exclude_disk"); then
+    rm -f "$lsblk_tmp"
+    deck_form_disk_dead_end
+    abort "No eligible install disk was found."
+    return
+  fi
+  rm -f "$lsblk_tmp"
+
+  local sole
+  if sole=$(deck_form_disk_autoselect "$eligible"); then
+    disk=$sole
+    return 0
+  fi
+
+  local disk_options="" device disk_info
+  while IFS= read -r device; do
+    [[ -n $device ]] || continue
+    disk_info=$(get_disk_info "$device")
+    disk_options="$disk_options$disk_info"$'\n'
+  done <<<"$eligible"
+
+  local selected_display
+  selected_display=$(echo "$disk_options" | gum choose --header "Select install disk") || abort
+  disk=$(echo "$selected_display" | awk '{print $1}')
+}
+
+# requires_full_disk_install -- overrides upstream's own free-space
+# eligibility check. §3 deviation 5: the free-space install mode (BitLocker
+# scan, Windows-ESP detection, a `cfdisk` fallback -- none of it navigable
+# with a controller, §4 S4's own citation of `run_partition_decide` /
+# `not_enough_space` / `open_partition_tool`) is suppressed entirely by
+# always reporting "yes, only full-disk is available", which is upstream's
+# OWN existing skip path: `select_installation` sets `full_disk_only=true`
+# and never calls `install_mode_form` when this returns success (0).
+# Unconditional and on purpose -- this does NOT run upstream's real
+# filesystem/parted probe, because the whole point is that the answer must
+# always be the same regardless of what is actually on the disk.
+requires_full_disk_install() { return 0; }
+
+# confirm_disk_overwrite -- overrides upstream's own S4 confirm screen.
+confirm_disk_overwrite() {
+  local label confirm_status
+  label=$(deck_form_disk_label "$disk")
+
+  clear_logo
+  echo
+  say "Everything on $label will be erased. There is no recovery."
+  say "This install is not encrypted, so the Deck can start without anyone typing a passphrase."
+  echo
+  gum confirm --affirmative "Yes, erase and install" --negative "No, go back" \
+    --default="$DECK_DISK_CONFIRM_DEFAULT" "Confirm erasing $disk?"
+  confirm_status=$?
+
+  # Unconditional, every path through this function, including the decline
+  # branch below -- there is no code path in which this is ever anything
+  # but false (see deck_form_disk_encryption_mode's own comment above).
+  encrypt_installation=$(deck_form_disk_encryption_mode)
+
+  [[ $confirm_status -eq 0 ]] && return 0
+  return 1
+}
+
+# ===========================================================================
+# S5 -- Summary
+# ===========================================================================
+#
+# T4-screen-spec.md §4 S5 / §1.2 patch P1 hunk 2: `deck_final_summary` is
+# NOT an override of an existing upstream function -- it is the exact new
+# name the spec's own patch calls directly
+# (`deck_final_summary || abort`, placed immediately before
+# `write_user_files`). That call site is owned by patch P1 (iso/, not this
+# file), but the NAME is fixed by the spec, and defining it here is what
+# makes that hunk's call resolve to something real instead of "command not
+# found" the first time an install reaches it.
+
+readonly DECK_WIFI_NOT_CONNECTED="Not connected"
+readonly DECK_SUMMARY_DESKTOP=Omarchy
+readonly DECK_SUMMARY_BOOT="Gaming Mode"
+
+# deck_form_summary_rows
+# Prints "Field,Value" CSV rows -- upstream's own `user_step` table
+# convention (`gum table -s ","`) -- built from the SAME globals
+# `write_user_files` / the JSON writers read when they emit the real
+# artefacts. T4-screen-spec.md §4 S5's own warning: "the only screen whose
+# bug would be invisible in both a screenshot and an artefact taken alone"
+# is exactly the case where the screen and the artefact are built from two
+# DIFFERENT values that happen to agree by accident -- reading the same
+# globals here is what rules that out structurally rather than by
+# inspection.
+#
+# DECK_WIFI_SSID is set by S1's (not yet built, see this file's own header)
+# interactive flow; read defensively here so this function has a defined
+# answer even before that exists.
+deck_form_summary_rows() {
+  local pw_mask disk_label wifi_display encryption_display
+  # shellcheck disable=SC2154  # set by upstream's user_form / S3's override -- see this file's header CORRECTION note
+  pw_mask=$(printf '%*s' "${#password}" '' | tr ' ' '*')
+  disk_label=$(deck_form_disk_label "$disk")
+  wifi_display=${DECK_WIFI_SSID:-$DECK_WIFI_NOT_CONNECTED}
+  if [[ $encrypt_installation == true ]]; then
+    encryption_display=On
+  else
+    encryption_display=Off
+  fi
+
+  printf 'Field,Value\n'
+  printf 'Username,%s\n' "$username"
+  printf 'Password,%s\n' "$pw_mask"
+  # shellcheck disable=SC2154  # set by upstream's user_form / S3's override -- see this file's header CORRECTION note
+  printf 'Hostname,%s\n' "$hostname"
+  printf 'Timezone,%s\n' "$timezone"
+  printf 'Wi-Fi,%s\n' "$wifi_display"
+  printf 'Disk,%s\n' "$disk_label"
+  printf 'Encryption,%s\n' "$encryption_display"
+  printf 'Desktop,%s\n' "$DECK_SUMMARY_DESKTOP"
+  printf 'Boot,%s\n' "$DECK_SUMMARY_BOOT"
+}
+
+# deck_final_summary -- the S5 screen.
+# On decline ("Go back"), §4 S5: "matching upstream's existing user_step
+# recap loop." Nothing later in configurator's own flow loops back INTO
+# this function for us (it runs once, right before write_user_files), so
+# this re-drives upstream's own user_step/disk_form/select_installation
+# itself and redraws the summary -- the same recap-then-redo shape
+# user_step already uses internally, applied here to the whole flow instead
+# of just the account fields.
+deck_final_summary() {
+  while true; do
+    clear_logo
+    echo
+    deck_form_summary_rows | gum table -s ',' -p | sed "s/^/${PADDING_LEFT_SPACES:-}/"
+    echo
+    if gum confirm --affirmative "Install" --negative "Go back" --default=true "Ready to install?"; then
+      return 0
+    fi
+    user_step || return 1
+    disk_form
+    select_installation
   done
 }

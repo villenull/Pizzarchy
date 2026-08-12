@@ -544,5 +544,424 @@ LC_ALL=C grep -qF "line one" <<<"$out" || fail "show_log's fallback must actuall
 LC_ALL=C grep -qF "Press A to continue" <<<"$out" || fail "show_log's fallback must show the 'press A to continue' prompt"
 pass "show_log falls back to tail + 'press A to continue' when gum is unavailable"
 
+# ===========================================================================
+# Stubs for upstream `configurator` helpers this file's screen OVERRIDES
+# call but does not itself define -- clear_logo/say/step/abort/
+# get_root_disk/get_disk_info are all real functions in the real
+# `configurator` (READ this session), not in deck-form.sh, so sourcing
+# deck-form.sh ALONE (this suite's whole point -- no VM, no real
+# configurator) leaves them undefined. Minimal stand-ins, not
+# reimplementations of upstream's real behaviour: just enough for
+# confirm_disk_overwrite/disk_form/deck_final_summary to run to completion
+# so THIS file's own logic (which is what this suite is actually proving)
+# can be exercised. `abort` is deliberately non-fatal here (`return 1`, not
+# upstream's real `exit 1`) so a path that reaches it fails an assertion
+# instead of killing the whole test process.
+# ===========================================================================
+
+clear_logo() { :; }
+say() { printf '%s\n' "$*" >>"${DECK_TEST_SAY_LOG:-/dev/null}"; }
+step() { printf '%s\n' "$*" >>"${DECK_TEST_SAY_LOG:-/dev/null}"; }
+abort() { printf 'ABORT: %s\n' "$*" >&2; return 1; }
+get_root_disk() { printf '%s\n' "${DECK_TEST_ROOT_DISK:-}"; }
+get_disk_info() { printf '%s\n' "$1"; }
+
+# A dispatching fake `gum` -- confirm/choose/table only, everything else
+# no-ops. Every real gum-driving function this suite exercises below
+# (confirm_disk_overwrite, disk_form's picker branch, deck_final_summary's
+# affirmative path) calls gum EXACTLY ONCE per test, never in a loop this
+# fake could spin forever in -- the looping paths (deck_final_summary's
+# decline branch, omarchy_prompt_timezone's interactive area/city picker,
+# deck_form_disk_dead_end) are [V]-tier by this file's own design (same
+# precedent as S8's failure_menu, which this suite also does not drive
+# live) and are NOT exercised here.
+mkdir -p "$work/bin-fakegum"
+cat >"$work/bin-fakegum/gum" <<'FAKEGUM'
+#!/usr/bin/env bash
+sub=${1:-}
+printf '%s\n' "$*" >>"${FAKE_GUM_LOG:-/dev/null}"
+case "$sub" in
+  confirm) exit "${FAKE_GUM_CONFIRM_RC:-0}" ;;
+  choose)
+    [[ -n ${FAKE_GUM_CHOOSE_RC:-} && ${FAKE_GUM_CHOOSE_RC} != 0 ]] && exit "$FAKE_GUM_CHOOSE_RC"
+    printf '%s\n' "${FAKE_GUM_CHOOSE_OUTPUT:-}"
+    exit 0
+    ;;
+  table) cat; exit 0 ;;
+  *) exit 0 ;;
+esac
+FAKEGUM
+chmod +x "$work/bin-fakegum/gum"
+
+# ===========================================================================
+# S2: Region (timezone)
+# ===========================================================================
+
+echo "--- S2 area/city derivation ------------------------------------------------"
+
+cat >"$work/tz.list" <<'EOF'
+Africa/Abidjan
+America/New_York
+America/Argentina/Buenos_Aires
+Asia/Tokyo
+Atlantic/Reykjavik
+Australia/Sydney
+Europe/Copenhagen
+Europe/London
+Indian/Maldives
+Pacific/Auckland
+UTC
+EOF
+
+areas=$(deck_form_tz_areas "$work/tz.list")
+for a in Africa America Asia Atlantic Australia Europe Indian Pacific UTC; do
+  LC_ALL=C grep -qxF "$a" <<<"$areas" || fail "tz_areas must include area '$a'" "$areas"
+done
+n_areas=$(printf '%s\n' "$areas" | LC_ALL=C command grep -c .)
+[[ $n_areas -eq 9 ]] || fail "tz_areas must derive EXACTLY the areas present in the fixture, no more" "got $n_areas: $areas"
+pass "tz_areas derives every area present in the fixture, and nothing else"
+
+cities_europe=$(deck_form_tz_cities_for_area "$work/tz.list" Europe)
+LC_ALL=C grep -qxF "Copenhagen" <<<"$cities_europe" || fail "Copenhagen must belong to Europe" "$cities_europe"
+LC_ALL=C grep -qxF "London" <<<"$cities_europe" || fail "London must belong to Europe" "$cities_europe"
+if LC_ALL=C grep -qxF "Tokyo" <<<"$cities_europe"; then
+  fail "Tokyo must NOT belong to Europe -- a city from another area leaked in"
+fi
+pass "tz_cities_for_area returns exactly the cities that belong to the given area"
+
+cities_america=$(deck_form_tz_cities_for_area "$work/tz.list" America)
+LC_ALL=C grep -qxF "Argentina/Buenos_Aires" <<<"$cities_america" ||
+  fail "a three-level zone's remainder (Argentina/Buenos_Aires) must survive as one 'city' entry" "$cities_america"
+pass "tz_cities_for_area keeps a three-level zone's remainder intact as a single city entry"
+
+cities_utc=$(deck_form_tz_cities_for_area "$work/tz.list" UTC)
+[[ $cities_utc == UTC ]] || fail "UTC must be reachable as its own single-entry pseudo-area" "got: $cities_utc"
+pass "UTC is reachable as its own area with a single 'UTC' city entry"
+
+[[ $(deck_form_tz_full Europe Copenhagen) == Europe/Copenhagen ]] || fail "tz_full must rejoin area/city"
+[[ $(deck_form_tz_full UTC UTC) == UTC ]] || fail "tz_full must collapse UTC/UTC back to the bare zone name 'UTC'"
+pass "tz_full rejoins area/city, and collapses UTC/UTC to the bare 'UTC' zone name"
+
+[[ $(deck_form_tz_default_area) == Europe ]] || fail "tz_default_area must be the spec's stated fallback, Europe"
+pass "tz_default_area is 'Europe' -- the visible, stated no-guess default"
+
+echo "--- S2 geo-guess sanitisation ------------------------------------------------"
+
+got=$(deck_form_tz_sanitize_guess "Europe/Copenhagen") || fail "a well-formed guess must be accepted"
+[[ $got == Europe/Copenhagen ]] || fail "sanitize_guess must return the guess unchanged when valid" "got: $got"
+pass "a well-formed Area/City guess is accepted unchanged"
+
+got=$(deck_form_tz_sanitize_guess "  Europe/Copenhagen  ") || fail "a guess with surrounding whitespace must still be accepted (trimmed)"
+[[ $got == Europe/Copenhagen ]] || fail "sanitize_guess must trim surrounding whitespace" "got: $got"
+pass "sanitize_guess trims surrounding whitespace before validating"
+
+if deck_form_tz_sanitize_guess "not a real place" >/dev/null; then
+  fail "sanitize_guess must reject text with no Area/City shape at all"
+fi
+pass "sanitize_guess rejects text with no Area/City shape"
+
+if deck_form_tz_sanitize_guess $'Europe/Copenhagen\x1b[31m' >/dev/null; then
+  fail "sanitize_guess must reject a guess carrying a raw ANSI escape byte (network-derived text, §4 S1's own hostile-input reasoning)"
+fi
+pass "sanitize_guess rejects a guess with an embedded ANSI escape"
+
+# The spec's own pattern (copied verbatim -- see this file's own comment)
+# has no allowance for a second slash, so a real three-level IANA zone is
+# REJECTED as a guess -- a known, spec-inherited limitation, asserted here
+# so a future change to the pattern is a deliberate, visible decision.
+if deck_form_tz_sanitize_guess "America/Argentina/Buenos_Aires" >/dev/null; then
+  fail "sanitize_guess must reject a three-level zone per the spec's own two-segment-only pattern (known limitation, asserted not assumed)"
+fi
+pass "sanitize_guess rejects a three-level zone, per the spec's own literal pattern (a documented, not accidental, limitation)"
+
+[[ $(deck_form_tz_guess_area "Europe/Copenhagen") == Europe ]] || fail "guess_area must return the first segment"
+[[ $(deck_form_tz_guess_city "Europe/Copenhagen") == Copenhagen ]] || fail "guess_city must return everything after the first slash"
+pass "tz_guess_area / tz_guess_city split a valid guess correctly"
+
+echo "--- S2 omarchy_prompt_timezone: the real override name, and its no-network fallback ---"
+
+declare -f omarchy_prompt_timezone >/dev/null ||
+  fail "omarchy_prompt_timezone must be defined -- it is the name upstream's user_form actually calls (configurator line 260, read this session)"
+pass "the timezone override uses the name upstream's configurator calls"
+
+# The empty-list fallback returns BEFORE any gum call, so it is safely
+# exercisable at [U] without a live terminal -- point DECK_TZ_LIST_CMD_OVERRIDE
+# at a command that produces no output, standing in for `timedatectl
+# list-timezones` returning nothing (§4 S2: "should be impossible ... fall
+# back to UTC and say so").
+unset timezone 2>/dev/null || true
+# NOT run inside $(...): a command substitution forks a subshell, and the
+# whole point of this assertion is that `timezone` (a GLOBAL upstream reads
+# back later) survives in THIS shell -- a subshell's assignment would vanish
+# on return and this test would falsely pass against its own stale/unset
+# value instead of what the function actually did.
+DECK_TZ_LIST_CMD_OVERRIDE=true omarchy_prompt_timezone 2>"$work/tz-warnings"
+rc=$?
+[[ $rc -eq 0 ]] || fail "omarchy_prompt_timezone must succeed (return 0) on the empty-list fallback" "rc=$rc"
+[[ $timezone == UTC ]] || fail "omarchy_prompt_timezone must set timezone=UTC when the timezone list is empty" "got: ${timezone:-unset}"
+LC_ALL=C grep -qF "falling back to" "$work/tz-warnings" ||
+  fail "omarchy_prompt_timezone must SAY it fell back to UTC, not go silent"
+pass "omarchy_prompt_timezone falls back to UTC and says so, when the timezone list comes back empty -- no gum call needed to prove it"
+
+# ===========================================================================
+# S4: Disk
+# ===========================================================================
+
+echo "--- S4 disk eligibility filter (lsblk fixtures) -----------------------------"
+
+cat >"$work/lsblk.disks" <<'EOF'
+/dev/nvme0n1 disk 0
+/dev/sda disk 1
+/dev/mmcblk0 disk 0
+/dev/loop0 loop 0
+EOF
+
+got=$(deck_form_disk_list "$work/lsblk.disks") || fail "disk_list must succeed when eligible disks exist"
+LC_ALL=C grep -qxF "/dev/nvme0n1" <<<"$got" || fail "an internal NVMe disk must be kept" "$got"
+LC_ALL=C grep -qxF "/dev/mmcblk0" <<<"$got" || fail "an internal eMMC disk must be kept (excluded by RM, never by the mmcblk* NAME pattern -- §3 deviation 5)" "$got"
+if LC_ALL=C grep -qxF "/dev/sda" <<<"$got"; then
+  fail "a removable disk (RM=1) must be excluded"
+fi
+if LC_ALL=C grep -qxF "/dev/loop0" <<<"$got"; then
+  fail "a non-disk TYPE (loop) must be excluded"
+fi
+pass "disk_list keeps internal NVMe and eMMC, excludes removable (by RM, not name) and non-disk types"
+
+got=$(deck_form_disk_list "$work/lsblk.disks" "/dev/nvme0n1") || fail "disk_list must still succeed with one disk excluded and one remaining"
+[[ $got == /dev/mmcblk0 ]] || fail "the boot/install medium must be excluded by exact NAME match" "got: $got"
+pass "disk_list excludes the boot/install medium by exact device-name match"
+
+cat >"$work/lsblk.none.disks" <<'EOF'
+/dev/sda disk 1
+/dev/mmcblk1 disk 1
+EOF
+out=$(deck_form_disk_list "$work/lsblk.none.disks" 2>&1) && fail "disk_list must return nonzero when nothing is eligible"
+LC_ALL=C grep -qF "no eligible install disk" <<<"$out" || fail "disk_list must SAY why it found nothing, not go silent" "got: $out"
+pass "disk_list fails loudly (nonzero, says why) rather than returning a silently empty list -- §4 S4's own verified-by row"
+
+echo "--- S4 picker auto-skip with exactly one eligible disk -----------------------"
+
+got=$(deck_form_disk_autoselect $'/dev/nvme0n1') || fail "autoselect must succeed with exactly one device"
+[[ $got == /dev/nvme0n1 ]] || fail "autoselect must print the sole device" "got: $got"
+pass "autoselect succeeds and prints the device when exactly one is eligible"
+
+if deck_form_disk_autoselect $'/dev/nvme0n1\n/dev/mmcblk0' >/dev/null; then
+  fail "autoselect must NOT auto-pick when more than one disk is eligible -- a picker is required"
+fi
+pass "autoselect declines (a picker is needed) when more than one disk is eligible"
+
+if deck_form_disk_autoselect "" >/dev/null; then
+  fail "autoselect must not succeed on an empty list"
+fi
+pass "autoselect declines on an empty list"
+
+echo "--- S4 disk label formatting -------------------------------------------------"
+
+mkdir -p "$work/bin-fakelsblk"
+cat >"$work/bin-fakelsblk/lsblk" <<'EOF'
+#!/usr/bin/env bash
+# args: -dno FIELD DEVICE
+field=$2
+case "$field" in
+  SIZE)   echo "512G" ;;
+  VENDOR) echo "Sandisk  " ;;
+  MODEL)  echo "SND512G  " ;;
+esac
+EOF
+chmod +x "$work/bin-fakelsblk/lsblk"
+
+got=$(DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" deck_form_disk_label /dev/nvme0n1)
+[[ $got == "Sandisk SND512G (512G)" ]] || fail "disk_label must combine vendor+model+size" "got: $got"
+pass "disk_label combines vendor, model and size"
+
+cat >"$work/bin-fakelsblk/lsblk" <<'EOF'
+#!/usr/bin/env bash
+field=$2
+case "$field" in
+  SIZE) echo "256G" ;;
+  *) : ;;
+esac
+EOF
+got=$(DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" deck_form_disk_label /dev/sda)
+[[ $got == "/dev/sda (256G)" ]] || fail "disk_label must fall back to the bare device path when lsblk has no vendor/model" "got: $got"
+pass "disk_label falls back to the device path when vendor/model are both empty"
+
+echo "--- S4 the mutation-named targets: default cursor and encryption constant ----"
+
+[[ $(deck_form_disk_encryption_mode) == false ]] ||
+  fail "deck_form_disk_encryption_mode must always print 'false' -- T4-screen-spec.md §6.5's own named mutation target"
+pass "deck_form_disk_encryption_mode is unconditionally 'false'"
+
+[[ $DECK_DISK_CONFIRM_DEFAULT == false ]] ||
+  fail "DECK_DISK_CONFIRM_DEFAULT must be 'false' -- the cursor must default to No (§6.5's other named mutation target)"
+pass "DECK_DISK_CONFIRM_DEFAULT is 'false' -- the confirm screen's cursor defaults to No"
+
+body=$(declare -f confirm_disk_overwrite)
+LC_ALL=C grep -qF 'DECK_DISK_CONFIRM_DEFAULT' <<<"$body" ||
+  fail "confirm_disk_overwrite must use the named DECK_DISK_CONFIRM_DEFAULT constant, not a hardcoded --default value"
+LC_ALL=C grep -qF 'deck_form_disk_encryption_mode' <<<"$body" ||
+  fail "confirm_disk_overwrite must set encryption via the named deck_form_disk_encryption_mode function, not inline"
+if LC_ALL=C grep -qF '130' <<<"$body"; then
+  fail "confirm_disk_overwrite must NOT contain a Ctrl+C (130) branch -- there is no encryption toggle on this hardware, ever (§2.2 item 1)"
+fi
+pass "confirm_disk_overwrite is wired to the named constant/function (not hardcoded) and carries no Ctrl+C toggle branch"
+
+echo "--- S4 confirm_disk_overwrite: full behaviour, with a faked gum --------------"
+
+disk=/dev/nvme0n1
+PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
+DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" \
+FAKE_GUM_CONFIRM_RC=0 \
+  confirm_disk_overwrite >/dev/null
+rc=$?
+[[ $rc -eq 0 ]] || fail "confirm_disk_overwrite must return 0 when gum confirm reports the affirmative" "rc=$rc"
+[[ $encrypt_installation == false ]] || fail "encrypt_installation must be false after an AFFIRMATIVE confirm" "got: $encrypt_installation"
+pass "confirm_disk_overwrite: affirmative -> returns 0, encrypt_installation is false"
+
+set +e
+PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
+DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" \
+FAKE_GUM_CONFIRM_RC=1 \
+  confirm_disk_overwrite >/dev/null
+rc=$?
+set -e
+[[ $rc -eq 1 ]] || fail "confirm_disk_overwrite must return nonzero when gum confirm reports the negative (declined)" "rc=$rc"
+[[ $encrypt_installation == false ]] || fail "encrypt_installation must STILL be false even on the decline path -- it is a constant, not something only set on the happy path" "got: $encrypt_installation"
+pass "confirm_disk_overwrite: declined -> returns nonzero, and encrypt_installation is STILL unconditionally false"
+
+echo "--- S4 requires_full_disk_install: always suppresses the free-space picker ---"
+
+requires_full_disk_install
+rc=$?
+[[ $rc -eq 0 ]] || fail "requires_full_disk_install must always return 0 (true) -- the free-space install mode is suppressed unconditionally (§3 deviation 5)" "rc=$rc"
+pass "requires_full_disk_install unconditionally reports 'full disk only', suppressing upstream's install_mode_form"
+
+echo "--- S4 dead-end menu (no eligible disk) ---------------------------------------"
+
+menu=$(deck_form_disk_dead_end_items)
+LC_ALL=C grep -qF "Reboot" <<<"$menu" || fail "dead-end menu must offer Reboot"
+LC_ALL=C grep -qF "Power off" <<<"$menu" || fail "dead-end menu must offer Power off"
+if LC_ALL=C grep -qiF "shell" <<<"$menu"; then
+  fail "dead-end menu must never offer a shell"
+fi
+pass "the dead-end menu offers only Reboot and Power off, never a shell"
+
+[[ $(deck_form_disk_dead_end_action_for "") == redraw ]] || fail "a cancelled dead-end choose must redraw, never act"
+[[ $(deck_form_disk_dead_end_action_for "Reboot") == reboot ]] || fail "'Reboot' must map to reboot"
+[[ $(deck_form_disk_dead_end_action_for "Power off") == poweroff ]] || fail "'Power off' must map to poweroff"
+[[ $(deck_form_disk_dead_end_action_for "anything else") == redraw ]] || fail "an unrecognised choice must redraw, never guess"
+pass "dead-end action mapping: cancel/unrecognised redraw, never act; Reboot/Power off map correctly"
+
+echo "--- S4 disk_form: auto-skips the picker with exactly one eligible disk -------"
+
+unset disk 2>/dev/null || true
+# This fake lsblk answers BOTH the `-dpno NAME,TYPE,RM` query disk_form
+# itself makes (one eligible disk, one removable) AND the `-dno SIZE`-style
+# query deck_form_disk_label makes internally (via get_disk_info, not
+# exercised on the auto-select path, but kept consistent).
+cat >"$work/bin-fakelsblk/lsblk" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM" ]]; then
+  printf '/dev/nvme0n1 disk 0\n/dev/sda disk 1\n'
+  exit 0
+fi
+field=$3
+case "$field" in
+  SIZE) echo "512G" ;;
+  *) : ;;
+esac
+EOF
+: >"$work/gum.log"
+DECK_TEST_ROOT_DISK="" \
+DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" \
+FAKE_GUM_LOG="$work/gum.log" \
+PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
+  disk_form
+[[ $disk == /dev/nvme0n1 ]] || fail "disk_form must auto-select the sole eligible disk without showing a picker" "got: ${disk:-unset}"
+if LC_ALL=C grep -qF "choose" "$work/gum.log"; then
+  fail "disk_form must not have invoked the picker (gum choose) when only one disk was eligible" "$(cat "$work/gum.log")"
+fi
+pass "disk_form auto-selects the sole eligible disk, skipping the picker entirely"
+
+echo "--- S4 disk_form: shows a picker with more than one eligible disk ------------"
+
+cat >"$work/bin-fakelsblk/lsblk" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM" ]]; then
+  printf '/dev/nvme0n1 disk 0\n/dev/mmcblk0 disk 0\n'
+  exit 0
+fi
+field=$3
+case "$field" in
+  SIZE) echo "512G" ;;
+  *) : ;;
+esac
+EOF
+unset disk 2>/dev/null || true
+: >"$work/gum.log"
+DECK_TEST_ROOT_DISK="" \
+DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" \
+FAKE_GUM_LOG="$work/gum.log" \
+FAKE_GUM_CHOOSE_OUTPUT="/dev/mmcblk0" \
+PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
+  disk_form
+[[ $disk == /dev/mmcblk0 ]] || fail "disk_form must set 'disk' to whatever the (faked) picker returned" "got: ${disk:-unset}"
+LC_ALL=C grep -qF "choose" "$work/gum.log" || fail "disk_form must have actually invoked a picker when two disks were eligible" "$(cat "$work/gum.log")"
+pass "disk_form shows a picker (and honours its answer) when more than one disk is eligible"
+
+# ===========================================================================
+# S5: Summary
+# ===========================================================================
+
+echo "--- S5 summary rows are built from the SAME globals the artefact writers read"
+
+username=deck
+password=hunter22
+hostname=steamdeck
+timezone=Europe/Copenhagen
+disk=/dev/nvme0n1
+encrypt_installation=false
+unset DECK_WIFI_SSID 2>/dev/null || true
+
+rows=$(DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" deck_form_summary_rows)
+LC_ALL=C grep -qF "Username,deck" <<<"$rows" || fail "summary must show the real username" "$rows"
+LC_ALL=C grep -qF "Password,********" <<<"$rows" || fail "summary must mask the password to its own length in asterisks" "$rows"
+LC_ALL=C grep -qF "Hostname,steamdeck" <<<"$rows" || fail "summary must show the real hostname" "$rows"
+LC_ALL=C grep -qF "Timezone,Europe/Copenhagen" <<<"$rows" || fail "summary must show the real timezone" "$rows"
+LC_ALL=C grep -qF "Wi-Fi,Not connected" <<<"$rows" || fail "summary must show 'Not connected' when DECK_WIFI_SSID is unset" "$rows"
+LC_ALL=C grep -qF "Encryption,Off" <<<"$rows" || fail "summary must show Encryption: Off when encrypt_installation is false" "$rows"
+LC_ALL=C grep -qF "Desktop,Omarchy" <<<"$rows" || fail "summary must show Desktop: Omarchy"
+LC_ALL=C grep -qF "Boot,Gaming Mode" <<<"$rows" || fail "summary must show Boot: Gaming Mode"
+pass "summary rows reflect username/password-mask/hostname/timezone/Wi-Fi/encryption/desktop/boot"
+
+DECK_WIFI_SSID="MyHomeNetwork"
+rows=$(DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" deck_form_summary_rows)
+LC_ALL=C grep -qF "Wi-Fi,MyHomeNetwork" <<<"$rows" || fail "summary must show the connected SSID when DECK_WIFI_SSID is set" "$rows"
+unset DECK_WIFI_SSID
+
+encrypt_installation=true
+rows=$(DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" deck_form_summary_rows)
+LC_ALL=C grep -qF "Encryption,On" <<<"$rows" || fail "summary must show Encryption: On if encrypt_installation is ever true (defense in depth, even though S4 forces it false)" "$rows"
+encrypt_installation=false
+pass "summary reflects DECK_WIFI_SSID when set, and the real encrypt_installation value either way (not a hardcoded 'Off' string)"
+
+echo "--- S5 deck_final_summary: the exact name patch P1 hunk 2 calls --------------"
+
+declare -f deck_final_summary >/dev/null ||
+  fail "deck_final_summary must be defined -- it is the exact new name T4-screen-spec.md §1.2 patch P1 hunk 2 calls directly"
+pass "deck_final_summary is defined under the exact name the spec's own patch calls"
+
+: >"$work/gum.log"
+FAKE_GUM_LOG="$work/gum.log" \
+FAKE_GUM_CONFIRM_RC=0 \
+DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" \
+PATH="$work/bin-fakegum:$PATH" \
+  deck_final_summary >/dev/null
+rc=$?
+[[ $rc -eq 0 ]] || fail "deck_final_summary must return 0 when the final confirm is affirmative" "rc=$rc"
+LC_ALL=C grep -qF "table" "$work/gum.log" || fail "deck_final_summary must render the summary via gum table" "$(cat "$work/gum.log")"
+LC_ALL=C grep -qF "confirm" "$work/gum.log" || fail "deck_final_summary must ask for a final confirm"
+pass "deck_final_summary renders the table and returns 0 on an affirmative confirm"
+
 echo "========================================================================"
 echo "ALL deck-form.sh TESTS PASSED"
