@@ -109,3 +109,53 @@ setting helped — there was no setting to find.
   turn Wayland into X11, but nobody has run it. ~1h if certainty is ever wanted.
 - Nothing here concerns **Gaming Mode**, where Valve's session brings its own
   keyboard and reads the controller directly. That is untouched and works.
+
+---
+
+## 🔴 ADDENDUM, same evening — R-54: the option is REOPENED at the mechanism level
+
+**The operator asked for one last try at maximum effort, and it found a path the
+analysis above missed.** The verdict "option closed" was overbroad: it covered
+stock Steam, and there is a known, purpose-built bridge for exactly this gap —
+**[extest](https://github.com/Supreeeme/extest)** (MIT, v1.0.4), an `LD_PRELOAD`
+library that reimplements the `XTestFake*` symbols and re-emits them as **kernel
+uinput events**, created for "allowing the desktop functionality on the Steam
+Controller to work while Steam is open on Wayland". The XTEST calls never need
+to reach the compositor at all — they are converted before leaving the process.
+
+**Measured (R-54, same probe discipline as R-53):** built extest for the host
+target, loaded its library directly, and drove its functions:
+
+| Via extest → uinput | Result |
+|---|---|
+| Device created | ✅ `extest fake device` appeared on an evdev node |
+| Keystrokes → **Wayland-native** alacritty (`xwayland=False`) | ✅ **`'hello\n'` received** — the case that got nothing via real XTEST |
+| `XTestFakeMotionEvent` → Hyprland cursor | ✅ moved `(1217,657) → (499,299)` |
+
+**What this proves:** the mechanism Steam needs exists and works on this
+compositor. **What it does not prove:** that Steam itself, preloaded with the
+**32-bit** build (Steam's input process is 32-bit — the repo pins
+`i686-unknown-linux-gnu` for this reason), delivers its trackpad-mouse and
+keyboard through it on the Deck. That is the remaining test, and it needs the
+Deck and an i686 Rust target.
+
+⚠️ **The blockers R-41/R-42 measured are all still true** — Steam creates no
+input devices itself, XTEST proper reaches nothing, a resident Steam takes the
+pad over hidraw. extest changes the *consequence* of the last fact: Steam owning
+the pad stops meaning "no desktop input" and becomes the input path, exactly as
+on SteamOS.
+
+**Product trade-offs if pursued, known now:**
+
+- 🔴 **The session lock stays OURS.** Steam's keyboard is an XWayland window;
+  `above_lock` applies only to layer surfaces, so Steam's keyboard cannot answer
+  `ext-session-lock`. The §5.24 fix (our OSK over the lock, verified in pixels
+  today) remains load-bearing regardless.
+- **Our STEAM/QAM menu bindings die while Steam holds the pad** — the mapper
+  loses `event7` (R-41: the node vanishes), so `omarchy-menu` on STEAM-tap and
+  QAM (built and deployed today, §5.23) stop working under a resident Steam.
+- The **StatusNotifier tray-host requirement returns** (retired in session 18
+  only because Steam stopped being resident).
+- Steam startup latency and §5.28-class session-ordering fragility attach to the
+  keyboard itself; a Steam update can break the preload at any time.
+- The **installer keeps our TTY keyboard** unconditionally — no compositor there.
