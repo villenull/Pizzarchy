@@ -1,0 +1,11 @@
+--- a/shell/plugins/lock/Service.qml
++++ b/shell/plugins/lock/Service.qml
+@@ -373,7 +373,7 @@
+ 
+   Timer {
+     id: idleBlankTimer
+-    interval: 5000
++    interval: 20000
+     repeat: false
+     property double armedAt: 0
+     onTriggered: {

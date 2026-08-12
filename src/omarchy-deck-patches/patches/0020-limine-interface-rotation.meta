@@ -1,0 +1,36 @@
+# 0020-limine-interface-rotation -- metadata and post-conditions.
+#
+# WHY THIS PATCH EXISTS
+#
+# The Steam Deck's panel is mounted rotated; the Limine boot menu is therefore
+# sideways without `interface_rotation: 270` (docs/PROGRESS.md §5.11,
+# docs/tasks/T5-fork-plan.md §5.2, operator decision §5.25 #5).
+#
+# ⚠️ THIS IS THE TEMPLATE, NOT /boot/limine.conf. `omarchy-refresh-limine`
+# moves /boot/limine.conf aside and copies $OMARCHY_PATH/default/limine/limine.conf
+# over it. So the *template* is what has to carry the value, or the rotation
+# is lost the first time anyone runs `omarchy refresh limine`. /boot/limine.conf
+# itself is NOT package-owned and is NOT this applier's business -- it stays
+# with configure_deck plus the S6 pre-refresh hook (T12 finding §5). This
+# applier owns /usr/share/omarchy and nothing else; a mechanism that tried to
+# own both would have to know about two completely different destruction events.
+#
+# 🔴 NOT VISUALLY VERIFIED. `270` has never been seen on a screen. §5.11's
+# history is a recorded transform that turned out upside down. T5 §5.2 makes
+# a T6 hardware look mandatory before this value is trusted.
+#
+# No qmllint post-condition: this is a Limine config, not QML. The applier
+# requires at least one post-condition per patch, and the assert_count below
+# is it.
+
+requirement: docs/tasks/T5-fork-plan.md §5.2 (Limine menu surface) / docs/PROGRESS.md §5.11
+description: add interface_rotation: 270 to the packaged Limine config template
+target: default/limine/limine.conf
+
+# Exactly once. Twice would mean a previous run appended rather than patched,
+# and Limine's behaviour on a duplicated key is not something this project has
+# measured -- so it is asserted against, not reasoned about.
+assert_count: default/limine/limine.conf|^interface_rotation: 270$|1
+# Any other rotation value in the template means somebody else is also writing
+# this file and we are fighting them.
+assert_count: default/limine/limine.conf|^interface_rotation: (0|90|180)$|0
