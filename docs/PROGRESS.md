@@ -1972,7 +1972,62 @@ Deck-free and can be written and tested before the hands-on pass.
 
 ---
 
-## 5.24 🔴 NEW — the POWER BUTTON locks this Deck, and the lock is unanswerable
+## 5.24 ✅ FIXED AND SEEN ON THE PANEL 2026-08-11 — but the fix exposed three worse things
+
+**The fix works, verified the only way it can be:** with the session locked, the
+operator pressed **STEAM+X, the keyboard appeared over the lock screen, they
+typed the password with the trackpads, and the Deck unlocked.** Both halves of
+`above_lock = 2` are therefore real — it draws above `ext-session-lock` *and* it
+is hit-testable there. `hyprctl layers` reported the surface identically
+throughout and could never have distinguished this.
+
+Applied: `hl.layer_rule({ match = { namespace = "deck-osk" }, above_lock = 2 })`
+in `~/.config/hypr/input.lua` (**not** a new `deck.lua` — the five user files are
+upstream's sanctioned override seam, so this reuses the bake-in mechanism §5.2
+already needs for `monitors.lua` instead of adding a `require` line to
+`hyprland.lua`), plus `systemctl --user mask omarchy-sleep-lock.service`.
+
+⚠️ **A Lua syntax error makes Hyprland discard the whole file silently, and
+`hyprctl configerrors` still comes back clean.** The file therefore ends in a
+sentinel global read back by evaluating Lua that writes it to a file —
+**`hyprctl eval 'return X'` prints `ok`, its own status, not the value**, and
+that nearly recorded a false pass here. Both are in `input.lua`'s comments.
+
+### 🔴 Three defects this session exposed, none of them the lock rule
+
+1. 🔴 **A locked Deck whose panel is asleep may be unwakeable by its own
+   controls.** Observed once, reproducibly enough to matter: the screen was
+   **completely black** — no artwork, no password field — and **a trackpad touch
+   and an A press did nothing**. Only a **USB keyboard** keypress brought the
+   lock screen up. Backlight was on at 33% and `bl_power` was 0, so the panel was
+   lit and the compositor was drawing black; this is not DPMS and not brightness.
+   On the second attempt, with the panel already awake, everything worked. **The
+   suspected trigger is locking while the display has idle-blanked** (screensaver
+   is 150 s). ⚠️ If the mapper's uinput events genuinely cannot wake a locked
+   panel, this is the §5.24 scenario again by another route, and it is a release
+   blocker for a device with no keyboard. **Not yet isolated** — the alternative
+   explanation is the `lock-pending: screen-stabilizing` phase seen in the
+   journal resolving coincidentally. Distinguishing them is one deliberate test.
+2. 🔴 **There is no `unlock` IPC.** `qs ipc show` gives the `lock` target exactly
+   `lock`, `isLocked`, `status`, `preview`, `hidePreview`. Nothing releases a
+   lock but the password. Combined with #3, a keyboard-less Deck that locks with
+   a broken OSK has **no software escape at all**.
+3. 🔴 **`docs/RECOVERY.md`'s escape does not work, in two independent ways.**
+   `hyprctl eval 'hl.clear_crashed_lockscreen()'` is documented as the answer to
+   "my screen is locked". Over SSH it dies with `HYPRLAND_INSTANCE_SIGNATURE not
+   set`; once that is supplied it **refuses**: *"session is locked with a client,
+   refusing to unlock"* — it only clears a **crashed** lock, and a healthy one is
+   the case a user actually hits. `omarchy-shell` needs three env vars over SSH
+   (`XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`, `OMARCHY_PATH`) and the runbook supplied
+   none. **The documented recovery path for an unanswerable screen had never been
+   executed.** Working forms are in the session scratch; RECOVERY.md must be
+   corrected before release, and `omarchy-shell` is **not** a systemd unit
+   (parent 1029), so killing the lock client leaves the shell down until it is
+   restarted by hand.
+
+*(Historic statement of the defect follows.)*
+
+## 5.24 (original) 🔴 the POWER BUTTON locks this Deck, and the lock is unanswerable
 
 **Found 2026-08-11 while designing a defence against something else.** Full
 trace: **`docs/findings/T9-lock-service-mitigation.md`**. This is a live defect
