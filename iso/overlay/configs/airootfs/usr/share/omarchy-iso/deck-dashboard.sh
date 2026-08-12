@@ -2,12 +2,17 @@
 # deck-dashboard.sh -- the Deck-specific install-progress/completion/failure
 # screens (T4a: S6 tips, S7 completion, S8 failure menu).
 #
-# INSTALL PATH: this file lives here, at src/deck-dashboard.sh, and T5's ISO
-# overlay build installs it to /usr/share/omarchy-iso/deck-dashboard.sh, the
-# sibling of src/deck-form.sh at the same path. This repo's location and the
-# shipped location are deliberately different -- same pattern as
-# src/deck-form.sh and src/deck-input-mapper.py. T5 owns the install step;
-# this file does not install itself anywhere.
+# INSTALL PATH: this file lives in the ISO overlay, at
+# iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-dashboard.sh, which
+# is its SHIPPED path minus the overlay prefix -- iso/bin/build step 4 rsyncs
+# overlay/configs/ over the scratch upstream tree, so it lands on the ISO at
+# /usr/share/omarchy-iso/deck-dashboard.sh with no install step of its own.
+# There is exactly ONE copy and this is it; it was promoted out of
+# src/deck-dashboard.sh on 2026-08-12, in the same change as the patch that
+# sources it. src/iso-patches/README.md states the rule: a file that ships on
+# the ISO and nowhere else lives in the overlay, at its shipped path -- no
+# src/ duplicate, because a second copy is drift and it hides the file from
+# tools/iso-payload-audit.sh, which walks the overlay tree.
 #
 # ===========================================================================
 # WHY THIS IS A SEPARATE FILE FROM deck-form.sh, NOT MORE FUNCTIONS IN IT
@@ -30,9 +35,12 @@
 #
 #     source /usr/share/omarchy-iso/deck-dashboard.sh
 #
-# added by src/iso-patches/omarchy-install-dashboard.patch immediately
-# (staged there, NOT in iso/overlay/patches/, until T5a proves parity --
-#  see src/iso-patches/README.md for why that distinction is load-bearing)
+# added by iso/overlay/patches/omarchy-install-dashboard.patch immediately
+# (promoted 2026-08-12, in the same change that moved THIS file into the
+#  overlay -- the patch and the file it sources are one unit, and
+#  test/unit/test-iso-build.sh section 19 enforces that mechanically by
+#  deriving the sourced path out of every promoted patch and requiring a
+#  file behind it)
 # after `launch_child` (the last function `omarchy-install-dashboard`
 # defines) and before that file's own main flow runs
 # (`[[ -e $TTY_PATH ]] || exit 2`). Bash keeps the LAST definition of a

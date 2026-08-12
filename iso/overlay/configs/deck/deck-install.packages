@@ -63,3 +63,27 @@
 # runs Arch's vulkan-radeon with Gaming Mode working.
 vulkan-radeon
 lib32-vulkan-radeon
+
+# ---------------------------------------------------------------------------
+# Our own package -- T5-fork-plan.md §3 seam S4
+# ---------------------------------------------------------------------------
+#
+# Built by us, from pkgbuilds/omarchy-deck/, straight into the ISO's offline
+# mirror. It exists in NO online repository, which makes it different from
+# every other entry in this file and is why the patched build-iso.sh has to
+# know about it in four separate places (build it / strip it from the online
+# `pacman -Syw` / add it back to the prune keep-set / exclude it from
+# deck-nvidia-dry-run.sh's online resolve). Those four all read one
+# declaration, derived from the pkgbuilds/ directory listing itself.
+#
+# It is safe HERE, in the install list, precisely because this file is
+# resolved against the OFFLINE mirror -- by resolve_expected_packages after
+# repo-add, and by pacstrap at install time -- and the package is in that
+# mirror by then. Not repo-qualified, per this file's header: the offline
+# pacman.conf declares one repo and a `foo/bar` entry aborts both resolves.
+#
+# 🔴 If you delete this line, the pipeline still builds a package and still
+# carries it in the mirror -- and nothing installs it. That failure is silent
+# on the build side and only visible on the target, which is what
+# test/unit/test-omarchy-deck-package.sh exists to catch in seconds.
+omarchy-deck

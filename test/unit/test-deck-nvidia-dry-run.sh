@@ -32,9 +32,13 @@
 #     shipped omarchy-base.packages            (case 11)
 #   * a repo-qualified name in the install list(case 12)
 #   * the matcher's own shape                  (cases 13-14)
+#   * every way T5d's seam-S4 exclusion could
+#     silently widen the hole it opens         (case 15)
 #
 # Cases 6-10 are the ones that matter: each is a state in which a naive
-# implementation exits 0 and reports "no NVIDIA packages".
+# implementation exits 0 and reports "no NVIDIA packages". Case 15 is the same
+# question asked of the one thing T5d added that CAN legitimately be absent
+# from the resolved set.
 
 set -euo pipefail
 
@@ -335,7 +339,98 @@ matcher_case libnvidia-container    ignored "no '-' before 'nvidia', so not the 
 matcher_case egl-wayland-utils      ignored "anchored: only the exact NVIDIA EGL package names"
 pass "the matcher catches every NVIDIA driver package shape and none of the look-alikes (11 cases)"
 
-# --- 15. the real overlay lists are self-consistent ------------------------
+# --- 15. 🔴 DECK_LOCAL_PACKAGES: the seam-S4 exclusion ---------------------
+#
+# T5d adds `omarchy-deck` -- a package this build produces ITSELF, which exists
+# in no online repository. This script resolves against the ONLINE repos, and
+# `pacman -S --print` aborts the whole transaction on one unresolvable target,
+# so the name has to come out of the target set. That is a HOLE in the guard's
+# question, and the cases below are what stop it widening:
+#
+#   * the exclusion actually happens, PROVEN from the resolve's argument list
+#     rather than from the guard's own log line (15a);
+#   * the rest of the question is unchanged -- steam is still asked about, the
+#     negative control still fires, the positive control still runs (15a);
+#   * excluding a name that is in no install list is refused, so the list
+#     cannot accumulate names that excuse nothing (15b);
+#   * a locally built name missing from the shipped omarchy-base.packages is
+#     refused -- that is the seam-S1 desync, and it is the failure that ends
+#     with the ISO carrying a package nothing installs (15c);
+#   * a locally built name that DOES resolve online is refused: the positive
+#     control cannot cover these names, so they get the mirror-image
+#     assertion rather than an exemption (15d);
+#   * an install list consisting only of locally built names is refused,
+#     because the negative control would then have nothing to remove (15e).
+
+make_local_fixture() {
+  local root=$1
+  make_fixture "$root"
+  printf '# a comment\nvulkan-radeon\nlib32-vulkan-radeon\nomarchy-deck\n' \
+    >"$root/deck/deck-install.packages"
+  # The seam-S1 merge put it in the shipped base list too; it is installed at
+  # pacstrap time from the OFFLINE mirror, which is why it belongs there.
+  printf 'omarchy-deck\n' >>"$root/base.packages"
+  # Deliberately NOT added to either closure file: it cannot resolve online.
+}
+
+# 15a. the happy path, with the exclusion actually observed
+f="$work/f15a"; make_local_fixture "$f"
+run_guard "$f" DECK_LOCAL_PACKAGES=omarchy-deck
+[[ $GUARD_STATUS -eq 0 ]] || fail "a locally built package must not break the dry run" "status=$GUARD_STATUS
+$GUARD_OUT"
+[[ $GUARD_OUT == *"excluded 1 locally built package"* ]] ||
+  fail "the guard reports the exclusion it made" "$GUARD_OUT"
+# The log line is the guard's own account of itself. The argument list is not:
+# every recorded pacman invocation must be free of the excluded name, or the
+# resolve would have aborted in the real container no matter what was logged.
+grep -q 'omarchy-deck' "$f/calls" &&
+  fail "the excluded package still reached a pacman resolve" "$(cat "$f/calls")"
+# ...and the question the guard claims to ask is otherwise intact.
+grep -q -- '--print-format %n.*steam' "$f/calls" ||
+  fail "the resolve still carries steam after the exclusion" "$(cat "$f/calls")"
+[[ $(grep -c -- '--print-format' "$f/calls") -eq 2 ]] ||
+  fail "both resolves still run with an exclusion in play" "$(cat "$f/calls")"
+[[ $GUARD_OUT == *"negative control fired as designed"* ]] ||
+  fail "the negative control still fires with an exclusion in play" "$GUARD_OUT"
+pass "🔴 a locally built package is excluded from the ONLINE resolve, proven from pacman's own argument list, with every other control intact"
+
+# 15b. excluding a name nothing installs
+f="$work/f15b"; make_fixture "$f"
+run_guard "$f" DECK_LOCAL_PACKAGES=omarchy-deck
+[[ $GUARD_STATUS -ne 0 ]] || fail "excluding a name absent from the install list must fail" "$GUARD_OUT"
+[[ $GUARD_OUT == *"is not in"*"deck-install.packages"* ]] ||
+  fail "the failure says the excluded name is in no install list" "$GUARD_OUT"
+pass "an exclusion for a package the ISO does not install is refused (an exclusion that excuses nothing is a hole)"
+
+# 15c. the seam-S1 desync, for a locally built name
+f="$work/f15c"; make_local_fixture "$f"
+grep -vx 'omarchy-deck' "$f/base.packages" >"$f/tmp" && mv "$f/tmp" "$f/base.packages"
+run_guard "$f" DECK_LOCAL_PACKAGES=omarchy-deck
+[[ $GUARD_STATUS -ne 0 ]] || fail "a locally built package missing from the shipped base list must fail" "$GUARD_OUT"
+[[ $GUARD_OUT == *"but not in the shipped"* ]] ||
+  fail "the failure names the seam-S1 desync" "$GUARD_OUT"
+pass "a locally built package absent from the shipped omarchy-base.packages fails -- the exclusion never hides a package nothing installs"
+
+# 15d. a name collision with a real online package
+f="$work/f15d"; make_local_fixture "$f"
+printf 'omarchy-deck\n' >>"$f/closure-clean"
+printf 'omarchy-deck\n' >>"$f/closure-nvidia"
+run_guard "$f" DECK_LOCAL_PACKAGES=omarchy-deck
+[[ $GUARD_STATUS -ne 0 ]] || fail "a locally built name that resolves online must fail" "$GUARD_OUT"
+[[ $GUARD_OUT == *"RESOLVES ONLINE"* ]] || fail "the failure names the collision" "$GUARD_OUT"
+pass "a package we build ourselves that ALSO resolves from an online repo fails (the positive control's mirror image, not an exemption)"
+
+# 15e. nothing left for the negative control to remove
+f="$work/f15e"; make_fixture "$f"
+printf 'omarchy-deck\n' >"$f/deck/deck-install.packages"
+printf 'omarchy-deck\n' >>"$f/base.packages"
+run_guard "$f" DECK_LOCAL_PACKAGES=omarchy-deck
+[[ $GUARD_STATUS -ne 0 ]] || fail "an all-local install list must fail" "$GUARD_OUT"
+[[ $GUARD_OUT == *"every entry in"*"is a locally built package"* ]] ||
+  fail "the failure explains that the negative control would be vacuous" "$GUARD_OUT"
+pass "an install list of nothing but locally built packages is refused -- the negative control must keep something to remove"
+
+# --- 16. the real overlay lists are self-consistent ------------------------
 #
 # Runs against the files this repo actually ships rather than a fixture, so a
 # later edit to them is covered.

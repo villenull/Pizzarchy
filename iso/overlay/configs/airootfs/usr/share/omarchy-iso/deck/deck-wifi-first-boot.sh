@@ -4,7 +4,7 @@
 # network.
 #
 # SHIPPED AS: /usr/share/omarchy-iso/deck/deck-wifi-first-boot.sh in the ISO;
-# copied by `configure_deck` (src/deck_wifi.py) onto the target as
+# copied by `configure_deck` (../orchestrator/deck_wifi.py) onto the target as
 # /usr/local/bin/omarchy-deck-wifi-first-boot, driven by
 # omarchy-deck-wifi-first-boot.service.
 #
@@ -60,8 +60,9 @@ warn() { printf '[%s] %s\n' "$PROG" "$*" >&2; }
 
 # strip_controls <text> -- delete control bytes and DEL, keep everything else.
 # Identical treatment to deck_form_sanitize_ssid in src/deck-form.sh and
-# sanitize_text in src/deck_configure.py: an SSID may legitimately be UTF-8, so
-# the answer is to delete the bytes that could repaint a console or forge a
+# sanitize_text in ../orchestrator/deck_configure.py: an SSID may legitimately
+# be UTF-8, so the answer is to delete the bytes that could repaint a console
+# or forge a
 # line, not to reduce the name to ASCII and report a network that is not the
 # one the user joined.
 strip_controls() {

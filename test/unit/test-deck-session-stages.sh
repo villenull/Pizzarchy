@@ -2520,7 +2520,383 @@ lz_real_after="<absent>"
 pass "the real ${LIZARD_SYSFS} is unchanged by §11 (still '${lz_real_after}')"
 
 # ===========================================================================
-# 12. The harness's own safety invariant
+# 12. stage-menu-row -- the Quickshell half of "return to Gaming Mode"
+# ===========================================================================
+#
+# 🔴 WHY EVERY ASSERTION HERE IS ABOUT SOMETHING NOBODY WOULD SEE FAIL.
+#
+# Read out of the pinned runtime (git 6d7826d):
+#
+#   shell/plugins/menu/MenuModel.js  parseMenuJsonc:
+#       try { JSON.parse(stripped) } catch (e) { return [] }
+#   shell/plugins/menu/Menu.qml      the user file's FileView:
+#       printErrors: false
+#
+# So a malformed extension file drops EVERY user row and logs nothing, in either
+# place. "The row is not in the menu" and "the file has a typo in it" are the
+# same observable, and there is no third one. That is docs/PROGRESS.md §5.30c.
+#
+# The stage therefore parses what it wrote and reads the row back out; this
+# section drives that check with files that are wrong in one way each.
+#
+# TWO DESTINATIONS. docs/tasks/T5-fork-plan.md §3 trap (a): the ISO's `useradd`
+# runs in phase 3 of 14, before configure_deck, so /etc/skel is TOO LATE for the
+# only user a shipped Deck ever has. A stage that writes just skel is invisible
+# to every check that reads skel. The assertions below read the USER's copy.
+
+user_ext="$FAKE_HOME/$MENU_EXT_REL"
+skel_ext=/etc/skel/$MENU_EXT_REL
+
+# Parse a file the way Quickshell does and print one row's action, or nothing.
+menu_action_in() {   # menu_action_in <path> [row-id]
+  python3 - "$1" "${2:-$MENU_ROW_ID}" <<'PY'
+import json, pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+if not path.exists():
+    sys.exit(1)
+stripped = re.sub(r"^\s*//[^\n]*(\n|$)", "", path.read_text(), flags=re.M)
+stripped = re.sub(r",(\s*[}\]])", r"\1", stripped)
+menu = json.loads(stripped)
+row = menu.get(sys.argv[2])
+sys.stdout.write("" if row is None else row.get("action", ""))
+PY
+}
+
+reset_root
+run_stage_body stage_menu_row
+ok_rc 0 "stage-menu-row completes against a fake root"
+
+# --- both destinations, and the one that is verified ----------------------
+[[ -f $user_ext ]] ||
+  fail_test "the row is written to the INVOKING USER's home" \
+    "missing: ${user_ext}. /etc/skel is too late for the user the ISO creates (T5 §3 trap a), so a skel-only stage ships a Deck whose only user has no way back to Gaming Mode."$'\n'"stderr: $(err)"
+pass "the row is written to ${MENU_EXT_REL} in the invoking user's home"
+
+ok_file "$skel_ext" "the row is ALSO written to /etc/skel, for users created later"
+ok_mode "$skel_ext" 644 "skel's copy is mode 0644"
+[[ $(mode_of "$user_ext") == 644 ]] ||
+  fail_test "the user's copy is mode 0644" "it is $(mode_of "$user_ext")"
+pass "the user's copy is mode 0644"
+
+# install -D has to create .config/omarchy/extensions itself: none of it is in
+# STOCK_DIRS, and neither is /etc/skel.
+ok_called "install -D -m 0644" "the write uses 'install -D', which creates the extensions directory it lands in"
+
+# 🔴 THE TRAP-(a) ASSERTION. The stage prints the path it verified; it must be
+# the user's file. A stage that verified skel's copy would pass every other
+# assertion in this section while shipping a broken Deck.
+ok_in_out "verified: ${user_ext}" \
+  "the stage's own verification reads the USER's copy, not /etc/skel's -- T5 §3 trap (a)"
+
+# --- what the file actually says, parsed rather than grepped --------------
+got=$(menu_action_in "$user_ext") ||
+  fail_test "the user's copy parses as Quickshell parses it" \
+    "it did not parse at all, which on the device means every row in it silently disappears"$'\n'"$(cat "$user_ext")"
+[[ $got == "$RETURN_ACTION" ]] ||
+  fail_test "the '${MENU_ROW_ID}' row runs the same command as the .desktop entry" \
+    "it runs '${got}', expected '${RETURN_ACTION}'"$'\n'"$(cat "$user_ext")"
+pass "the user's copy parses and its '${MENU_ROW_ID}' row runs '${RETURN_ACTION}'"
+
+got=$(menu_action_in "$root$skel_ext") ||
+  fail_test "skel's copy parses too" "$(cat "$root$skel_ext")"
+[[ $got == "$RETURN_ACTION" ]] ||
+  fail_test "skel's copy carries the same row" "it runs '${got}'"
+pass "skel's copy parses and carries the same row"
+
+# --- the real parser, when it is available --------------------------------
+#
+# Everything above uses this suite's own mirror of MenuModel.js:stripJsonc. That
+# mirror could be wrong in the same direction as the code under test. When the
+# pinned runtime checkout and a JS engine are both present, ask the ACTUAL
+# parser instead -- MenuModel.js has a CommonJS export at its foot.
+runtime_src=${OMARCHY_DECK_RUNTIME_SRC:-$HOME/.cache/omarchy-deck/iso-build/runtime-src}
+menu_model="$runtime_src/shell/plugins/menu/MenuModel.js"
+if command -v node >/dev/null 2>&1 && [[ -f $menu_model ]]; then
+  node -e '
+    const fs = require("fs");
+    const M = require(process.argv[1]);
+    const user = M.parseMenuJsonc(fs.readFileSync(process.argv[2], "utf8"));
+    const def  = M.parseMenuJsonc(fs.readFileSync(process.argv[3], "utf8"));
+    const merged = M.mergeMenuSources(def, user);
+    const row = merged.items[process.argv[4]];
+    if (!row) { console.error("the real parser found no row; user rows parsed: " + user.length); process.exit(1); }
+    if (row.action !== process.argv[5]) { console.error("action is " + JSON.stringify(row.action)); process.exit(1); }
+    if (row.parent !== "root") { console.error("parent is " + JSON.stringify(row.parent)); process.exit(1); }
+    if (row.kind !== "action") { console.error("kind is " + JSON.stringify(row.kind)); process.exit(1); }
+    const roots = merged.itemOrder.filter(id => merged.items[id].parent === "root");
+    if (roots[roots.length - 1] !== process.argv[4]) { console.error("root order: " + roots.join(" ")); process.exit(1); }
+  ' "$menu_model" "$user_ext" "$runtime_src/default/omarchy/omarchy-menu.jsonc" \
+    "$MENU_ROW_ID" "$RETURN_ACTION" 2>"$work/node.err" ||
+    fail_test "Omarchy's OWN MenuModel.js parses the installed file and finds the row on the root menu" \
+      "$(cat "$work/node.err")"$'\n'"$(cat "$user_ext")"
+  pass "Omarchy's own MenuModel.js parses the installed file: '${MENU_ROW_ID}' is a root ACTION row, last in the root order"
+else
+  note "node and/or the pinned runtime checkout are absent, so the row was checked against this suite's mirror of stripJsonc and not against Omarchy's real parser (set OMARCHY_DECK_RUNTIME_SRC to enable it)"
+fi
+
+# --- idempotency (CLAUDE.md): a re-run must not duplicate or corrupt -------
+cp "$user_ext" "$work/menu-first-run"
+run_stage_body stage_menu_row
+ok_rc 0 "a second run succeeds"
+diff -q "$work/menu-first-run" "$user_ext" >/dev/null ||
+  fail_test "a re-run leaves the file byte-for-byte identical" \
+    "$(diff "$work/menu-first-run" "$user_ext" || true)"
+pass "a re-run rewrites the marked block in place -- the file is byte-for-byte identical"
+[[ $(grep -cxF -- "$MENU_ROW_BEGIN" "$user_ext") -eq 1 ]] ||
+  fail_test "there is exactly one copy of our block after two runs" \
+    "found $(grep -cxF -- "$MENU_ROW_BEGIN" "$user_ext")"
+pass "two runs leave exactly one copy of the block, not two rows with the same id"
+
+# --- a user who already has their own rows --------------------------------
+#
+# This file is a DOCUMENTED extension point, so it usually exists before we get
+# there -- on a stock Omarchy it is the shipped template, all comments. Nothing
+# outside our two markers may change, comments included: assert_ours_or_absent
+# cannot be used here (it would refuse on every stock install), so the guarantee
+# has to be that the splice is non-destructive.
+reset_root
+mkdir -p "$(dirname "$user_ext")"
+cat >"$user_ext" <<'JSONC'
+{
+  // My own rows. This comment must survive.
+  "personal": {"icon":"x","label":"Personal"},
+  "personal.notes": {"label":"Notes","action":"true"},
+}
+JSONC
+cp "$user_ext" "$work/menu-user-before"
+run_stage_body stage_menu_row
+ok_rc 0 "the stage runs against a file the user already owns"
+
+while IFS= read -r line; do
+  grep -qxF -- "$line" "$user_ext" ||
+    fail_test "every line of the user's own file survives the splice" \
+      "this line is gone: ${line}"$'\n'"$(cat "$user_ext")"
+done <"$work/menu-user-before"
+pass "every line the user wrote -- their comment included -- survives the splice"
+
+got=$(menu_action_in "$user_ext" personal.notes)
+[[ $got == "true" ]] ||
+  fail_test "the user's own rows still parse after ours is spliced in" \
+    "personal.notes runs '${got}'"$'\n'"$(cat "$user_ext")"
+pass "the user's own rows still parse alongside ours (personal.notes kept its action)"
+got=$(menu_action_in "$user_ext")
+[[ $got == "$RETURN_ACTION" ]] ||
+  fail_test "and our row is there too" "it runs '${got}'"
+pass "and our row is in the same file, with the right action"
+
+# --- a file that was ALREADY broken ---------------------------------------
+#
+# Quickshell is silently discarding every row in it before we arrive. The stage
+# must say so, and must not write over it.
+reset_root
+mkdir -p "$(dirname "$user_ext")"
+printf '{ "broken": }\n' >"$user_ext"
+run_stage_body stage_menu_row
+ok_failed "a user extension file that does not parse stops the stage"
+ok_in_err "not valid JSONC" "the refusal names the parse failure"
+ok_in_err "silently discarded" \
+  "and explains that Quickshell is already dropping every row in that file, which is the thing nobody would otherwise find out"
+[[ $(cat "$user_ext") == '{ "broken": }' ]] ||
+  fail_test "the broken file is left exactly as it was" \
+    "it now reads: $(cat "$user_ext")"
+pass "the broken file is left byte-for-byte alone rather than being repaired by guesswork"
+
+# --- our own block, half-removed by hand ----------------------------------
+reset_root
+mkdir -p "$(dirname "$user_ext")"
+{ printf '{\n'; printf '%s\n' "$MENU_ROW_BEGIN"; printf '"%s": {"action":"x"},\n}\n' "$MENU_ROW_ID"; } >"$user_ext"
+run_stage_body stage_menu_row
+ok_failed "our start marker with no end marker stops the stage"
+ok_in_err "no end marker" "the refusal says it will not guess where the old block ended"
+
+# --- verify_menu_row: the guards, one broken at a time --------------------
+#
+# These drive the verifier directly, because the faults they represent cannot be
+# produced by the stage: they are what a FUTURE change to the writer would
+# produce. Exit codes alone would not distinguish them, so each pins its message.
+bad="$work/menu-bad.jsonc"
+
+printf '{"%s": {"label":"x","action":"/usr/bin/steamos-session-select desktop"}}\n' \
+  "$MENU_ROW_ID" >"$bad"
+run_stage_body verify_menu_row "$(sandboxed "$bad")"
+ok_failed "a file that PARSES but whose row runs the wrong command fails verification"
+ok_in_err "not '${RETURN_ACTION}'" \
+  "the failure names the command it wanted -- a row that switches to the desktop is the worst outcome here: it is in the menu, it is pressable, and it does not return to Gaming Mode"
+
+printf '{"apps": {"label":"x","action":"true"}}\n' >"$bad"
+run_stage_body verify_menu_row "$(sandboxed "$bad")"
+ok_failed "a file that parses with no '${MENU_ROW_ID}' row at all fails verification"
+ok_in_err "carries no '${MENU_ROW_ID}' row" "the failure says which id was missing"
+
+printf '{"%s": {"action": }}\n' "$MENU_ROW_ID" >"$bad"
+run_stage_body verify_menu_row "$(sandboxed "$bad")"
+ok_failed "a file that does not parse fails verification"
+ok_in_err "does not parse as JSONC" "the failure says the file is unparseable rather than reporting a missing row"
+
+rm -f "$bad"
+run_stage_body verify_menu_row "$(sandboxed "$bad")"
+ok_failed "a file that is not there at all fails verification"
+ok_in_err "does not exist" "an absent file is reported as absent, not as a parse error"
+
+# ===========================================================================
+# 13. stage-boot-default-gaming -- a reboot always lands in Gaming Mode
+# ===========================================================================
+#
+# 🔴 ORDERING IS THE ENTIRE UNIT. sddm reads /etc/sddm.conf.d when it starts, so
+# a re-assert that runs afterwards writes the file, succeeds, logs success, and
+# changes nothing until the boot after next. There is no error, no failed unit
+# and no journal entry that distinguishes it from working. Determined from the
+# units on this machine rather than from habit:
+#
+#   /usr/lib/systemd/system/sddm.service  [Install] Alias=display-manager.service
+#   /etc/systemd/system/display-manager.service -> ...sddm.service
+#   graphical.target                      Wants=/After= display-manager.service
+#
+# so graphical.target pulls the display manager in, and being WantedBy that
+# target plus Before= the display manager puts the re-assert first inside the
+# one transaction.
+
+# systemd's answers, DERIVED FROM THE RENDERED UNIT rather than hardcoded. That
+# is what makes the ordering assertions mutation-sensitive: flip Before= to
+# After= in src/ and this oracle reports it, exactly as systemd would.
+boot_oracle_from_render() {
+  local before="" after="" line
+  while IFS= read -r line; do
+    case $line in
+      Before=*) before="${before:+${before} }${line#Before=}" ;;
+      After=*)  after="${after:+${after} }${line#After=}" ;;
+    esac
+  done < <(render_boot_default_unit)
+  # The two systemd adds itself to any unit with default dependencies, so the
+  # oracle is not accidentally "only what we wrote".
+  export FAKE_SYSTEMCTL_SHOW_Before="${before:+${before} }shutdown.target"
+  export FAKE_SYSTEMCTL_SHOW_After="${after:+${after} }basic.target sysinit.target"
+}
+
+# --- the gate: the writer this unit schedules must already exist ----------
+reset_root
+boot_oracle_from_render
+run_stage_body stage_boot_default_gaming
+ok_failed "the stage refuses to run before stage-session-select has installed ${SELECT_BIN}"
+ok_in_err "stage-session-select" \
+  "the refusal names the stage to run first -- the unit would otherwise fail at every boot with a 203/EXEC nothing connects to this"
+ok_absent /etc/systemd/system/deck-boot-default-gaming.service \
+  "and nothing is installed when the gate refuses"
+
+# --- the happy path -------------------------------------------------------
+reset_root
+printf '#!/bin/sh\nexit 0\n' >"$root$SELECT_BIN"; chmod +x "$root$SELECT_BIN"
+boot_oracle_from_render
+run_stage_body stage_boot_default_gaming
+ok_rc 0 "stage-boot-default-gaming completes"
+ok_file /etc/systemd/system/deck-boot-default-gaming.service "it installs ${BOOT_DEFAULT_UNIT}"
+ok_mode /etc/systemd/system/deck-boot-default-gaming.service 644 "the unit is mode 0644"
+ok_line /etc/systemd/system/deck-boot-default-gaming.service "$INSTALL_MARKER" \
+  "the unit carries the install marker, so a re-run recognises its own file"
+
+ok_line /etc/systemd/system/deck-boot-default-gaming.service \
+  "Before=${BOOT_DEFAULT_BEFORE_ALIAS}" \
+  "it is ordered before display-manager.service"
+ok_line /etc/systemd/system/deck-boot-default-gaming.service \
+  "Before=${BOOT_DEFAULT_BEFORE_REAL}" \
+  "and before sddm.service under its real name -- the alias only exists once sddm has been enabled"
+ok_line /etc/systemd/system/deck-boot-default-gaming.service \
+  "ExecStart=${SELECT_BIN} gamescope --no-restart" \
+  "it re-runs the EXISTING writer rather than reimplementing the drop-in write"
+ok_line /etc/systemd/system/deck-boot-default-gaming.service \
+  "ConditionPathExists=!${BOOT_DEFAULT_OVERRIDE}" \
+  "the escape hatch is one 'touch' away, with no editor and no unit file"
+ok_line /etc/systemd/system/deck-boot-default-gaming.service \
+  "WantedBy=graphical.target" \
+  "it is wanted by the target that pulls the display manager in, not by sddm.service (which a session SWITCH restarts)"
+
+# --- the escape hatch has to be usable from a TTY -------------------------
+[[ -d "$root$(dirname "$BOOT_DEFAULT_OVERRIDE")" ]] ||
+  fail_test "the stage creates $(dirname "$BOOT_DEFAULT_OVERRIDE")" \
+    "the escape hatch is 'sudo touch ${BOOT_DEFAULT_OVERRIDE}' at a TTY on a device with no desktop; touch does not create directories"
+pass "the stage creates $(dirname "$BOOT_DEFAULT_OVERRIDE") so the escape hatch is a single 'touch'"
+ok_absent "$BOOT_DEFAULT_OVERRIDE" \
+  "creating that directory does NOT arm the override -- the unit checks for the file"
+
+ok_in_out "sudo touch ${BOOT_DEFAULT_OVERRIDE}" \
+  "the stage PRINTS the escape hatch, because the operator has one device and this unit re-asserts at every boot"
+ok_in_out "systemctl disable ${BOOT_DEFAULT_UNIT_NAME}" \
+  "and the permanent form of it"
+ok_in_out "Ctrl+Alt+F2" "and how to reach a terminal to type either"
+
+# --- the unit is loaded and enabled, in that order ------------------------
+ok_called "systemctl daemon-reload" "systemd is told to re-read the unit"
+ok_called "systemctl enable ${BOOT_DEFAULT_UNIT_NAME}" \
+  "and the unit is ENABLED -- an installed-but-not-enabled unit never runs and nothing reports that"
+ok_before "daemon-reload" "enable ${BOOT_DEFAULT_UNIT_NAME}" \
+  "the reload happens before the enable, so systemd enables the unit it just read"
+ok_before "install -D -m 0644" "daemon-reload" \
+  "and the unit is on disk before the reload"
+
+# --- idempotency ----------------------------------------------------------
+run_stage_body stage_boot_default_gaming
+ok_rc 0 "a second run succeeds -- assert_ours_or_absent recognises the unit as ours"
+
+# --- somebody else's unit at that path ------------------------------------
+reset_root
+printf '#!/bin/sh\nexit 0\n' >"$root$SELECT_BIN"; chmod +x "$root$SELECT_BIN"
+printf '[Unit]\nDescription=Somebody else\n' \
+  >"$root/etc/systemd/system/deck-boot-default-gaming.service"
+run_stage_body stage_boot_default_gaming
+ok_failed "a foreign unit at ${BOOT_DEFAULT_UNIT} stops the stage"
+grep -qF "Somebody else" "$root/etc/systemd/system/deck-boot-default-gaming.service" ||
+  fail_test "the foreign unit is left exactly as it was" "it was overwritten anyway"
+pass "the foreign unit is left byte-for-byte alone"
+
+# --- verify_boot_default_ordering: the answers that must FAIL -------------
+#
+# 🔴 These are the section's reason for existing. Every one of them describes a
+# unit that installs cleanly, starts cleanly and does nothing -- so an
+# exit-code-only assertion on the stage would pass with any of them shipped.
+# Each pins the message, because they all share exit 1.
+
+export FAKE_SYSTEMCTL_SHOW_Before="shutdown.target"
+export FAKE_SYSTEMCTL_SHOW_After="basic.target sysinit.target"
+run_stage_body verify_boot_default_ordering "$BOOT_DEFAULT_UNIT_NAME"
+ok_failed "a unit systemd orders before nothing relevant fails verification"
+ok_in_err "names neither" \
+  "the failure says the ordering does not reach the display manager at all"
+
+# The mutation this whole section exists to catch: Before= written as After=.
+export FAKE_SYSTEMCTL_SHOW_Before="shutdown.target"
+export FAKE_SYSTEMCTL_SHOW_After="basic.target ${BOOT_DEFAULT_BEFORE_ALIAS}"
+run_stage_body verify_boot_default_ordering "$BOOT_DEFAULT_UNIT_NAME"
+ok_failed "a unit ordered AFTER the display manager fails verification"
+ok_in_err "ordered AFTER the display manager" \
+  "and says so in those words -- it would write the config successfully, log success, and change nothing until the boot after next"
+
+# Ordered after sddm under its real name rather than the alias: the same fault
+# wearing the other name.
+export FAKE_SYSTEMCTL_SHOW_Before="shutdown.target ${BOOT_DEFAULT_BEFORE_ALIAS}"
+export FAKE_SYSTEMCTL_SHOW_After="basic.target ${BOOT_DEFAULT_BEFORE_REAL}"
+run_stage_body verify_boot_default_ordering "$BOOT_DEFAULT_UNIT_NAME"
+ok_failed "ordering after sddm.service fails even when the alias is named in Before="
+ok_in_err "ordered AFTER the display manager" \
+  "both names are checked, because display-manager.service and sddm.service are the same unit"
+
+export FAKE_SYSTEMCTL_SHOW_Before=""
+export FAKE_SYSTEMCTL_SHOW_After=""
+run_stage_body verify_boot_default_ordering "$BOOT_DEFAULT_UNIT_NAME"
+ok_failed "systemd reporting NO ordering at all fails verification"
+ok_in_err "NO Before= ordering" \
+  "an empty answer means the unit did not load or its directives were dropped -- not that everything is fine"
+
+# And the shipped unit's own ordering passes, against an oracle derived from it.
+boot_oracle_from_render
+run_stage_body verify_boot_default_ordering "$BOOT_DEFAULT_UNIT_NAME"
+ok_rc 0 "the ordering the shipped unit actually declares passes verification"
+ok_in_out "orders ${BOOT_DEFAULT_UNIT_NAME} before the display manager" \
+  "and says which ordering it verified, rather than only that it passed"
+
+unset FAKE_SYSTEMCTL_SHOW_Before FAKE_SYSTEMCTL_SHOW_After
+
+# ===========================================================================
+# 14. The harness's own safety invariant
 # ===========================================================================
 #
 # Everything above is only trustworthy if none of it touched the real system.

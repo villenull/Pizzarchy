@@ -1429,4 +1429,285 @@ pass "nothing in src/ writes /etc/modprobe.d -- boot always leaves lizard mode o
     "that is the boot-time form of the same hazard, and it does not need a /etc/modprobe.d path in this repo to end up in one. Found:"$'\n'"$(grep -rn 'options[[:space:]]\+hid_steam' "$REPO_ROOT/src")"
 pass "no 'options hid_steam ...' line is generated anywhere in src/"
 
+# ---------------------------------------------------------------------------
+# 9. The two ways back to Gaming Mode must run the SAME command
+#
+# There are two of them -- a .desktop entry every shell reads, and a Quickshell
+# menu row -- and the failure they invite is not that one breaks. It is that one
+# is renamed and the other is not, leaving a pressable affordance that does
+# nothing, reports nothing, and looks exactly like the working one.
+#
+# So: one constant, both renderers derive from it, and the check compares what
+# is RENDERED rather than what the constants say.
+
+# --- the static half: neither renderer may carry its own copy of the string --
+#
+# assert_return_action_agrees compares the two outputs at install time, which
+# catches a drift only once they already disagree in value. This catches the
+# shape that ALLOWS them to disagree: a literal path typed into either heredoc.
+# Both halves are needed -- a second literal that happens to be identical today
+# passes the runtime check and is one rename away from failing silently.
+for renderer in render_return_desktop render_menu_row_block; do
+  body=$(declare -f "$renderer")
+  grep -q 'RETURN_ACTION' <<<"$body" ||
+    fail_test "${renderer} emits the shared \$RETURN_ACTION" \
+      "it does not name the constant at all, so the .desktop entry and the menu row can drift apart with nothing to notice:"$'\n'"${body}"
+  ! grep -qF -- "${STEAM_SHIM} gamescope" <<<"$body" ||
+    fail_test "${renderer} carries no second literal copy of the command" \
+      "a literal '${STEAM_SHIM} gamescope' beside the constant is a copy that survives a rename of the constant:"$'\n'"${body}"
+  pass "${renderer} derives the command from \$RETURN_ACTION and carries no literal copy of it"
+done
+
+# --- the runtime half, against the real renderers -------------------------
+desktop_exec=$(render_return_desktop | grep '^Exec=' || true)
+[[ ${desktop_exec#Exec=} == "$RETURN_ACTION" ]] ||
+  fail_test "the rendered .desktop entry's Exec= is exactly \$RETURN_ACTION" \
+    "got '${desktop_exec}', expected 'Exec=${RETURN_ACTION}'"
+pass "the rendered .desktop entry runs '${RETURN_ACTION}'"
+
+# assert_return_action_agrees is what the stage runs. It calls `fail` (exit 1),
+# so it goes in a subshell like every other such check in this suite.
+( assert_return_action_agrees ) >"$work/agree.out" 2>"$work/agree.err" ||
+  fail_test "assert_return_action_agrees passes on the shipped renderers" \
+    "$(cat "$work/agree.err")"
+pass "assert_return_action_agrees passes on the shipped renderers"
+
+# ---------------------------------------------------------------------------
+# 9a. The menu row block -- the file Quickshell silently discards when wrong
+#
+# 🔴 MenuModel.js:parseMenuJsonc does `try { JSON.parse(stripped) } catch (e) {
+# return [] }` and Menu.qml sets printErrors: false on the user file's FileView.
+# A malformed extension file therefore drops EVERY user row with no error
+# anywhere. These assertions exist because nothing on the device would report
+# any of these faults.
+
+menu_block="$work/menu-row.jsonc"
+render_menu_row_block >"$menu_block"
+
+grep -qxF -- "$MENU_ROW_BEGIN" "$menu_block" ||
+  fail_test "the block opens with the begin marker" "expected: ${MENU_ROW_BEGIN}"
+grep -qxF -- "$MENU_ROW_END" "$menu_block" ||
+  fail_test "the block closes with the end marker" \
+    "without it the splice cannot find its own previous copy, and a re-run would append a second row"
+pass "the rendered menu row is delimited by both whole-line markers"
+
+grep -qF -- "$INSTALL_MARKER_TEXT" "$menu_block" ||
+  fail_test "the block carries the install marker text" "expected: ${INSTALL_MARKER_TEXT}"
+grep -qxF -- "$INSTALL_MARKER_JSONC" "$menu_block" ||
+  fail_test "the marker uses the '//' JSONC prefix" \
+    "'#' is not a comment in JSONC and Quickshell reports nothing when the parse fails -- the whole file's rows would vanish. Expected the line: ${INSTALL_MARKER_JSONC}"
+pass "the block carries '${INSTALL_MARKER_JSONC}' -- the marker text with the one prefix this format accepts"
+
+# ⚠️ EVERY comment must occupy a WHOLE line. stripJsonc only removes
+# /^\s*\/\/[^\n]*(\n|$)/gm, so a comment placed after a value on the same line
+# survives stripping and breaks JSON.parse -- silently.
+while IFS= read -r line; do
+  [[ $line == *"//"* ]] || continue
+  [[ ${line#"${line%%[![:space:]]*}"} == //* ]] ||
+    fail_test "every '//' in the block is a whole-line comment" \
+      "this line has one after content, which stripJsonc does NOT remove: ${line}"
+done <"$menu_block"
+pass "every '//' in the block starts its line -- the only comment form stripJsonc removes"
+
+# The row itself must be strict JSON, checked by a parser rather than by eye.
+python3 - "$menu_block" "$MENU_ROW_ID" "$RETURN_ACTION" "$RETURN_LABEL" <<'PY' ||
+import json, re, sys
+raw = open(sys.argv[1]).read()
+row_id, action, label = sys.argv[2], sys.argv[3], sys.argv[4]
+stripped = re.sub(r"^\s*//[^\n]*(\n|$)", "", raw, flags=re.M)
+stripped = re.sub(r",(\s*$)", r"\1", stripped)
+menu = json.loads("{" + stripped + "}")
+assert list(menu) == [row_id], list(menu)
+assert menu[row_id]["action"] == action, menu[row_id]["action"]
+assert menu[row_id]["label"] == label, menu[row_id]["label"]
+# `action` is what makes this a row rather than a submenu: MenuModel.js
+# normalizeItem reads kind = value.action ? "action" : (value.target ? ...).
+assert "target" not in menu[row_id], "a target would make it a link, not an action"
+PY
+  fail_test "the rendered row is strict JSON with the right id, label and action" \
+    "$(cat "$menu_block")"
+pass "the rendered row parses as strict JSON: one id ('${MENU_ROW_ID}'), the shared action, no 'target' that would make it a link"
+
+# The trailing comma is what lets the block be spliced in at one fixed position
+# whether the rest of the object is empty or full. stripJsonc removes it in the
+# empty case; it separates entries in the full one.
+grep -q '^"'"$MENU_ROW_ID"'":.*},$' "$menu_block" ||
+  fail_test "the row line ends with a comma" \
+    "without it, splicing our block above an existing entry produces '}\"personal\"' and the whole file stops parsing"
+pass "the row line ends with a trailing comma, so the same block splices into an empty file and a full one"
+
+# --- the glyph ------------------------------------------------------------
+#
+# docs/findings/P16-redistribution-and-trademark.md: ship a codepoint, not
+# Valve's artwork. And ONE codepoint -- Nerd Font glyphs live in a plane where
+# it is easy to paste a surrogate pair and get two tofu boxes instead.
+python3 - "$MENU_ROW_ICON" <<'PY' ||
+import sys, unicodedata
+icon = sys.argv[1]
+assert len(icon) == 1, f"the icon is {len(icon)} characters, not one glyph: {icon!r}"
+cp = ord(icon)
+assert unicodedata.category(icon) == "Co", "the icon is not a private-use codepoint"
+assert 0xF0000 <= cp <= 0xFFFFD, f"U+{cp:X} is outside the Nerd Font private-use plane"
+PY
+  fail_test "the menu row's icon is exactly one private-use codepoint" \
+    "got $(printf '%q' "$MENU_ROW_ICON")"
+pass "the menu row's icon is a single Nerd Font codepoint, not a surrogate pair and not an icon-theme name"
+
+# Nothing in src/ may name Valve's or a console vendor's glyph. Checked on the
+# rendered block rather than on the constant, so a future second row is covered
+# too.
+for banned in $'' $'' $'' $'\U000F04D3' $'\U000F05BA'; do
+  ! grep -qF -- "$banned" "$menu_block" ||
+    fail_test "the block ships no vendor-branded glyph" \
+      "it carries U+$(printf '%X' "'$banned"), a Steam or Xbox glyph -- P16 says ship a neutral one"
+done
+pass "the block carries none of the Steam or Xbox glyphs the same font offers"
+
+# ---------------------------------------------------------------------------
+# 9b. Where the two new stages sit in the run
+#
+# stage-menu-row belongs IN the full install: it writes per-user config, adds a
+# row, and changes no default. stage-boot-default-gaming must NOT be, for the
+# same reason stage-default-session is not -- with it enabled a broken Gaming
+# Mode is re-asserted at every boot, on a device with one screen and no session
+# picker. Both properties are invisible at runtime: a stage missing from
+# INSTALL_STAGES still works when invoked by hand, and a stage wrongly added to
+# it still works too.
+
+menu_at=-1
+icon_at=-1
+for i in "${!INSTALL_STAGES[@]}"; do
+  [[ ${INSTALL_STAGES[$i]} == stage-menu-row ]]    && menu_at=$i
+  [[ ${INSTALL_STAGES[$i]} == stage-return-icon ]] && icon_at=$i
+done
+[[ $menu_at -ge 0 ]] ||
+  fail_test "stage-menu-row is registered in INSTALL_STAGES" \
+    "a full install would skip it and every single-stage run would still work, so nothing would notice. Stages: ${INSTALL_STAGES[*]}"
+pass "stage-menu-row is in INSTALL_STAGES, so a full install actually installs the row"
+
+[[ $icon_at -ge 0 && $menu_at -gt $icon_at ]] ||
+  fail_test "stage-menu-row runs after stage-return-icon" \
+    "return-icon at ${icon_at}, menu-row at ${menu_at}; the menu stage asserts the two agree, and it should be the one that runs second"
+pass "stage-menu-row runs after stage-return-icon, so the agreement check runs with both halves rendered"
+
+for banned_stage in stage-boot-default-gaming stage-default-session; do
+  for s in "${INSTALL_STAGES[@]}"; do
+    [[ $s != "$banned_stage" ]] ||
+      fail_test "${banned_stage} is NOT in INSTALL_STAGES" \
+        "a bare './deck-session.sh' would flip the default session on a machine whose Gaming Mode has never been proven to start, and with stage-boot-default-gaming it would do so at every boot. Both are opt-in on purpose."
+  done
+  pass "${banned_stage} is not in INSTALL_STAGES -- a bare run cannot leave a Deck with no graphical way back"
+done
+
+for fn in stage_menu_row stage_boot_default_gaming; do
+  declare -F "$fn" >/dev/null ||
+    fail_test "the stage name resolves to a function" "run_stage maps to ${fn}, which does not exist"
+done
+pass "stage-menu-row and stage-boot-default-gaming both resolve to the functions run_stage derives"
+
+# `list-stages` is the CI-facing inventory, and a stage missing from it is a
+# stage nobody outside this file can discover. Run the real dispatcher: the
+# list-stages arm prints and exits without touching the system.
+bash "$REPO_ROOT/src/deck-session.sh" list-stages >"$work/list-stages" 2>"$work/list-stages.err" ||
+  fail_test "'deck-session.sh list-stages' exits 0" "$(cat "$work/list-stages.err")"
+for s in stage-menu-row stage-boot-default-gaming stage-default-session stage-audit-privileges; do
+  grep -qx -- "$s" "$work/list-stages" ||
+    fail_test "list-stages names ${s}" \
+      "it is invocable and undiscoverable, which is how the opt-in stages get forgotten. Got:"$'\n'"$(cat "$work/list-stages")"
+done
+pass "list-stages names both new stages alongside the two that were already opt-in"
+
+# Every name it prints must dispatch. run_stage turns dashes into underscores.
+while IFS= read -r s; do
+  [[ -n $s ]] || continue
+  declare -F "${s//-/_}" >/dev/null ||
+    fail_test "every name list-stages prints resolves to a function" \
+      "'${s}' maps to ${s//-/_}, which does not exist -- CI would invoke it and get a usage error"
+done <"$work/list-stages"
+pass "every stage list-stages prints dispatches to a real function"
+
+# The help text is the only place the escape hatch is discoverable before you
+# need it. On a Deck, "need it" means no graphical session.
+bash "$REPO_ROOT/src/deck-session.sh" --help >"$work/help" 2>&1 ||
+  fail_test "'deck-session.sh --help' exits 0" "$(cat "$work/help")"
+for needle in stage-boot-default-gaming stage-menu-row "$BOOT_DEFAULT_OVERRIDE" "systemctl disable ${BOOT_DEFAULT_UNIT_NAME}"; do
+  grep -qF -- "$needle" "$work/help" ||
+    fail_test "--help mentions '${needle}'" \
+      "the boot-time re-assert has to be undoable by someone who cannot reach a desktop, and this is where they would look. Got:"$'\n'"$(cat "$work/help")"
+done
+pass "--help documents both new stages and both forms of the escape hatch"
+
+# ---------------------------------------------------------------------------
+# 9c. The boot unit -- ordering is the entire point of it
+#
+# 🔴 A unit ordered AFTER the display manager parses cleanly, starts cleanly,
+# writes the config successfully, logs success, and does nothing at all: sddm
+# has already read /etc/sddm.conf.d by then. That is the exact class of silent
+# no-op this project exists to eliminate, and it is invisible from everywhere
+# except the ordering directives.
+#
+# The ordering was determined from the units on this machine, not from habit:
+#   /usr/lib/systemd/system/sddm.service  ->  [Install] Alias=display-manager.service
+#   graphical.target                      ->  Wants= and After= display-manager.service
+
+boot_unit="$work/deck-boot-default-gaming.service"
+render_boot_default_unit >"$boot_unit"
+
+grep -qF -- "$INSTALL_MARKER" "$boot_unit" ||
+  fail_test "the boot unit carries the '#'-commented marker" "expected: ${INSTALL_MARKER}"
+pass "the boot unit carries '${INSTALL_MARKER}', so a re-run recognises its own file"
+
+for section in '[Unit]' '[Service]' '[Install]'; do
+  grep -qxF -- "$section" "$boot_unit" ||
+    fail_test "the boot unit declares ${section}" \
+      "a setting outside its section is 'Unknown key ... ignoring' and the unit still loads. File:"$'\n'"$(cat "$boot_unit")"
+done
+pass "the boot unit declares [Unit], [Service] and [Install]"
+
+grep -qx "Before=${BOOT_DEFAULT_BEFORE_ALIAS}" "$boot_unit" ||
+  fail_test "the boot unit is ordered Before=${BOOT_DEFAULT_BEFORE_ALIAS}" \
+    "without it the re-assert lands after sddm has read its config: the write succeeds, nothing complains, and the Deck boots to whatever the desktop left behind. File:"$'\n'"$(cat "$boot_unit")"
+grep -qx "Before=${BOOT_DEFAULT_BEFORE_REAL}" "$boot_unit" ||
+  fail_test "the boot unit is ordered Before=${BOOT_DEFAULT_BEFORE_REAL} as well" \
+    "display-manager.service is only an ALIAS, created by 'systemctl enable sddm'. Ordering against a unit name that does not exist is a silent no-op in systemd, so both names are named."
+pass "the boot unit is ordered before the display manager under both of its names"
+
+! grep -qE '^After=.*(display-manager|sddm)' "$boot_unit" ||
+  fail_test "the boot unit is never ordered AFTER the display manager" \
+    "that is the silent no-op: sddm reads /etc/sddm.conf.d at start, so a write that lands afterwards changes nothing until the boot after next. File:"$'\n'"$(cat "$boot_unit")"
+pass "no After= in the boot unit names the display manager"
+
+grep -qx "ExecStart=${SELECT_BIN} gamescope --no-restart" "$boot_unit" ||
+  fail_test "the boot unit re-runs the EXISTING writer" \
+    "expected exactly 'ExecStart=${SELECT_BIN} gamescope --no-restart'. A second implementation of that write is the drift this project keeps paying for; --no-restart is required because sddm has not started yet. File:"$'\n'"$(cat "$boot_unit")"
+pass "the boot unit runs '${SELECT_BIN} gamescope --no-restart' -- the writer stage-session-select already installed"
+
+! grep -qE '^ExecStart=-' "$boot_unit" ||
+  fail_test "the boot unit's ExecStart= is not prefixed with '-'" \
+    "a '-' tells systemd to ignore a non-zero exit; the unit would go active on a re-assert that failed, and a failed unit is this project's only no-terminal signal"
+pass "the boot unit's ExecStart= carries no '-' prefix, so a failed re-assert shows up in 'systemctl --failed'"
+
+# 🔴 Loud, but never fatal. Nothing may make the graphical boot DEPEND on this
+# unit: a Requires= would turn a failed re-assert into a Deck that does not
+# reach a display manager at all.
+! grep -qE '^(Requires|RequiredBy|BindsTo|Requisite)=' "$boot_unit" ||
+  fail_test "nothing in the boot unit creates a hard dependency" \
+    "failure must leave the machine booting normally into whatever the default was. Only ordering and Wants= are allowed here. File:"$'\n'"$(cat "$boot_unit")"
+grep -qx 'WantedBy=graphical.target' "$boot_unit" ||
+  fail_test "the boot unit is WantedBy=graphical.target" \
+    "graphical.target is what pulls the display manager in, so being wanted by it is what puts this unit in the same transaction the Before= orders. WantedBy=sddm.service would drag it into every session SWITCH instead. File:"$'\n'"$(cat "$boot_unit")"
+pass "the boot unit is Wanted by graphical.target and required by nothing -- a failure cannot stop the Deck booting"
+
+grep -qx "ConditionPathExists=!${BOOT_DEFAULT_OVERRIDE}" "$boot_unit" ||
+  fail_test "the boot unit carries the escape-hatch condition" \
+    "with this unit enabled a broken Gaming Mode is re-asserted at EVERY boot, and the operator has one device. 'touch ${BOOT_DEFAULT_OVERRIDE}' has to be enough to stop it. File:"$'\n'"$(cat "$boot_unit")"
+pass "a single 'touch ${BOOT_DEFAULT_OVERRIDE}' skips the unit -- no editor, no unit file, no systemctl"
+
+grep -qx 'Type=oneshot' "$boot_unit" ||
+  fail_test "the boot unit is Type=oneshot" "it runs one command and exits"
+grep -qx 'RemainAfterExit=yes' "$boot_unit" ||
+  fail_test "the boot unit is RemainAfterExit=yes" \
+    "without it the unit returns to inactive and could be re-triggered mid-boot; with it, the re-assert happens once per boot, which is what makes Desktop Mode a one-shot session"
+pass "the boot unit is a Type=oneshot with RemainAfterExit=yes -- one re-assert per boot"
+
 echo "all deck-session.sh tests passed"

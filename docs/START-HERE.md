@@ -99,14 +99,22 @@ work without waiting for further instruction.**
 > ### The next actions
 
 >
-> 1. 🔴 **T5d** — the Wi-Fi phase exists; its four additive files and patch
->    promotion do not. ⚠️ **The staged patch breaks every install without them**
->    (`src/iso-patches/README.md`).
+> 1. ✅ **T5d — DONE 2026-08-12.** The phase patch and its four files are
+>    promoted into `iso/overlay/` (one copy each, at their shipped paths), the
+>    payload audit is wired into `bin/build` as guard 6.5, and the
+>    `omarchy-deck` package skeleton builds through four wiring points that all
+>    read one derived list. The coupling is now **mechanical**, not a README
+>    warning: `test-iso-build.sh` derives every relative import *and* every
+>    `source`d absolute path a promoted patch introduces and demands a file
+>    behind it.
 > 2. **T5e/T5f/T5g** — bake-ins (now **four** rotations, not three), then CI.
-> 3. **T4** — `--osk-start-shown` and the mapper's "bound" line still do not
->    exist, so S1's Wi-Fi passphrase prompt degrades on a real ISO.
-> 4. **Deck-only:** P2.4's menu row, P2.1's Gaming-Mode button mapping,
->    §5.24a #1 and #3.
+> 3. ✅ **T4's two missing mapper features EXIST** — `--osk-start-shown` and the
+>    `deck-input-mapper: bound` readiness marker, which means *the keyboard is
+>    drawn*, not merely requested. S1's passphrase prompt no longer degrades by
+>    construction. ⚠️ **Still open, and the same trap one file over:**
+>    `src/deck-form.sh` has **no route onto the ISO at all** — no overlay copy,
+>    no `configurator` patch — so the form it implements cannot run yet.
+> 4. **Deck-only:** P2.1's Gaming-Mode button mapping, §5.24a #1 and #3.
 >
 > ⚠️ **Two things have never actually run:** a real build with T5c's overlay
 > (its patches apply and its guard fired against live repos, but the container
@@ -190,11 +198,15 @@ work without waiting for further instruction.**
 >
 > **Not finished, work parked:**
 >
-> - **The T4 installer-screens harness**: its agent never committed. Three
->   untracked files sit in `.claude/worktrees/agent-abe947f455288211c/` —
->   `test/lib/vm-installer-screens.sh`, `test/unit/test-installer-harness-primitives.sh`,
->   `test/vm/vm-installer-screens-test.sh`. **Inspect and salvage or re-run the
->   task; do not assume they work** — nothing has ever executed them.
+> - ~~**The T4 installer-screens harness**: its agent never committed. Three
+>   untracked files sit in a worktree; do not assume they work.~~
+>   🟢 **CORRECTED 2026-08-12 — this is stale, and was already stale when it was
+>   written down here.** All three files are **tracked on `main`**: salvaged in
+>   `cca6ce5`, then actually run in `e476601`. `docs/findings/T4-harness-first-run.md`
+>   records three runs — 35/40, 35/40 again, then **57/57 PASS** once the five
+>   failures were fixed, **all five of which were the harness, not upstream's
+>   wizard**. `test/unit/test-installer-harness-primitives.sh` is green in the
+>   current baseline. Verify with `git ls-files`, not by re-reading this page.
 > - **The T8 §9d layout-parity agent**: paused deliberately, plan-ready, zero
 >   commits (see the T10 section below for why). The operator's two decisions it
 >   was waiting on — **wire Y through then badge it; Caps/Shift option C** — are

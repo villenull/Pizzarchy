@@ -540,6 +540,107 @@ fi
 build_log "guard 6.4a OK: all ${#REQUIRED_TARGET_BINS[@]} orchestrator-called binaries (${REQUIRED_TARGET_BINS[*]}) exist in $RUNTIME_SLUG@$RUNTIME_SHORT's bin/ (${#RUNTIME_BIN_NAMES[@]} candidates)"
 
 # ---------------------------------------------------------------------------
+# Guard 6.5 -- the payload audit (T5-fork-plan.md §6.5, specified in §5.4).
+#
+# WHY: docs/PROGRESS.md §5.17 and operator decision §5.25 #7. The dev Deck
+# keeps /etc/sudoers.d/99-deck-testing on purpose -- the iterate-in-place SSH
+# loop needs it, and §5.17 established that no narrower grant does the job --
+# and the ISO must REFUSE to carry it. §5.4 is explicit that this FAILS THE
+# BUILD. A warning here would be a comment with extra steps: the whole reason
+# the file exists on the Deck is that it is convenient, which is exactly the
+# pressure that gets a warning ignored.
+#
+# tools/iso-payload-audit.sh is the check itself (16 assertions of its own in
+# test/unit/test-iso-payload-audit.sh). It runs on the HOST, not in the
+# container: it sources src/deck-session.sh to share the blanket/passwordless
+# predicate with `stage-audit-privileges` rather than reimplement it, so it
+# needs this repo's tree, which the container never sees.
+#
+# Like guard 6.4 this is in two halves, and neither alone is honest.
+# ---------------------------------------------------------------------------
+
+PAYLOAD_AUDIT="$REPO_ROOT/tools/iso-payload-audit.sh"
+
+# run_payload_audit <label> <root>... -- sets PAYLOAD_AUDIT_STATUS, and returns
+# it so callers can write `if ! run_payload_audit ...; then`.
+#
+# The status is captured HERE rather than at the call site because `if ! cmd`
+# sets $? to the negated value: inside the `then` branch of `if ! cmd`, $? is 0
+# no matter what cmd returned. A call site could therefore not tell exit 2
+# (usage -- a bug in this wiring) from exit 1 (a real finding in the payload),
+# and reporting the second as the first would send the reader hunting through
+# the overlay for a file that is not there. Same reason verify_checkout_at_pin
+# sets a global: the honest value has to survive the control flow.
+PAYLOAD_AUDIT_STATUS=0
+run_payload_audit() {
+  local label=$1
+  shift
+  PAYLOAD_AUDIT_STATUS=0
+  # A missing or unrunnable audit is a FAILURE, never a skipped check. In a
+  # green build log "the audit found nothing" and "the audit never ran" look
+  # identical, and this project has shipped that mistake before (docs/PROGRESS.md
+  # §5.30c). 126/127 are the shell's own cannot-execute/not-found codes,
+  # borrowed so they cannot collide with the audit's documented 0/1/2.
+  if [[ ! -f $PAYLOAD_AUDIT ]]; then PAYLOAD_AUDIT_STATUS=127; return 127; fi
+  if [[ ! -x $PAYLOAD_AUDIT ]]; then PAYLOAD_AUDIT_STATUS=126; return 126; fi
+  # Named roots, so a green build says what was audited. The audit prints its
+  # own denominator (files/roots/archives inspected) and that is not repeated.
+  build_log "payload audit ($label): $*"
+  bash "$PAYLOAD_AUDIT" "$@" || PAYLOAD_AUDIT_STATUS=$?
+  return "$PAYLOAD_AUDIT_STATUS"
+}
+
+# payload_audit_verdict <status> -- one sentence saying what a status MEANS.
+# Shared by both halves so they cannot describe the same code differently.
+payload_audit_verdict() {
+  case $1 in
+    1) printf '%s' "the audit FOUND a sudoers grant giving blanket root with NO password -- its own WARNING lines above name the file and the offending line" ;;
+    2) printf '%s' "the audit exited 2, which is its USAGE code. That is a bug in this script's wiring (no roots passed, or a path that is not a directory), not a finding about the payload -- fix the call, do not delete it" ;;
+    126) printf '%s' "$PAYLOAD_AUDIT exists but is not executable, so the audit did not run" ;;
+    127) printf '%s' "$PAYLOAD_AUDIT does not exist, so the audit did not run" ;;
+    *) printf '%s' "the audit exited $1, which is none of its documented codes (0 clean, 1 finding, 2 usage). An unknown status is a failure, not a pass" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Guard 6.5a -- before Docker, beside 6.4a, and for the same reason: it costs a
+# find(1) and it refuses the build before six gigabytes of downloads.
+#
+# Two roots, answering different questions:
+#
+#   $ISO_ROOT/overlay      what this fork ADDS. The likeliest route for the
+#                          accident is a file copied out of src/ or off the dev
+#                          Deck, where that grant is deliberate.
+#   $SCRATCH_SRC/configs   the overlaid, PATCHED airootfs source -- upstream's
+#                          tree plus our rsync (step 4) plus our patches
+#                          (step 5), i.e. what mkarchiso is about to be handed.
+#
+# ⚠️ The second root is NOT §5.4's "assembled airootfs work dir", and saying so
+# matters more than the guard reading tidily. mkarchiso's real work dir is
+# built inside the container and is never bind-mounted out, so nothing on this
+# host can read it. $SCRATCH_SRC/configs is the closest thing that exists here:
+# it is the exact input to that assembly, so it covers everything WE put in the
+# live filesystem -- but not a drop-in that arrives from a package during the
+# airootfs pacstrap. That case belongs to 6.5b, which is why there are two.
+# ---------------------------------------------------------------------------
+
+if ! run_payload_audit "overlay + overlaid airootfs source" \
+  "$ISO_ROOT/overlay" "$SCRATCH_SRC/configs"; then
+  build_fail "guard 6.5a: $(payload_audit_verdict "$PAYLOAD_AUDIT_STATUS")
+
+  roots audited
+    $ISO_ROOT/overlay        (what this fork adds)
+    $SCRATCH_SRC/configs     (upstream + overlay + patches, as handed to mkarchiso)
+
+  docs/tasks/T5-fork-plan.md §5.4: /etc/sudoers.d/99-deck-testing is deliberate
+  on the dev Deck (docs/PROGRESS.md §5.17, operator decision §5.25 #7) and an
+  ISO that ships one is not a product. Take it out of the payload -- do not
+  weaken the audit."
+fi
+
+build_log "guard 6.5a OK: no blanket passwordless root in the overlay or in the airootfs source handed to mkarchiso"
+
+# ---------------------------------------------------------------------------
 # 7. The build. Mirrors iso/upstream/bin/omarchy-iso-make's docker invocation
 #    of builder/build-iso.sh, minus the two things guard 6.3 forbids (see the
 #    file header) and minus the interactive "boot it?" prompt at the end.
@@ -715,6 +816,46 @@ $(printf '    /usr/bin/%s\n' "${missing_bins[@]}")
 fi
 
 build_log "guard 6.4b OK: all ${#REQUIRED_TARGET_BINS[@]} orchestrator-called binaries are present in the packages this ISO carries"
+
+# ---------------------------------------------------------------------------
+# Guard 6.5b -- the payload audit, re-asked of what the build actually produced.
+#
+# 6.5a read TREES. This reads the offline mirror, which is packages, and that
+# is the half that matters most: a sudoers drop-in shipped INSIDE a
+# .pkg.tar.zst lands on the installed system exactly like one baked into
+# airootfs, and no tree scan would ever see it. It is also the route our own
+# future omarchy-deck package would take (T5-fork-plan.md §5.4 names that
+# package as one of the four roots), so this is the one place the audit can
+# catch us shipping the dev Deck's grant by way of our own packaging.
+#
+# The mirror is readable from the host because build-iso.sh writes it into a
+# bind mount (/var/cache/airootfs/var/cache/omarchy) -- the same reason 6.4b
+# can read the built packages at all.
+#
+# ⚠️ It is the slowest check in this script: the audit opens every
+# *.pkg.tar.* in the mirror with bsdtar, which on a full build is ~1250
+# archives. That is why it runs once, here, rather than per package -- and why
+# 6.5a is the cheap half that runs before Docker.
+#
+# On any failure this goes through reject_iso, not build_fail: the ISO already
+# exists on disk by this point, and an image that would ship blanket
+# passwordless root must not keep a name that can be flashed or picked up by a
+# later run's *.iso glob.
+# ---------------------------------------------------------------------------
+
+if ! run_payload_audit "offline mirror" "$OFFLINE_MIRROR_DIR"; then
+  reject_iso "guard 6.5b: $(payload_audit_verdict "$PAYLOAD_AUDIT_STATUS")
+
+  root audited
+    $OFFLINE_MIRROR_DIR   (the packages this ISO carries)
+
+  A drop-in inside a package installs exactly like one baked into airootfs, so
+  this is not a lesser finding than 6.5a's -- it is the likelier one, and the
+  route our own omarchy-deck package would take (T5-fork-plan.md §5.4,
+  docs/PROGRESS.md §5.17). The ISO has been renamed .rejected above."
+fi
+
+build_log "guard 6.5b OK: no blanket passwordless root in any package in the offline mirror"
 
 # ---------------------------------------------------------------------------
 # 9. Name and report the result. Matches omarchy-iso-make's own

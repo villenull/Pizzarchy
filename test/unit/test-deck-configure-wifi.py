@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Unit tests for the target side of the Wi-Fi carry-over: `configure_deck`'s
-`wifi` step (`src/deck_configure.py`, `src/deck_wifi.py`), its first-boot unit
-script (`src/deck-wifi-first-boot.sh`) and the staged `build_phases` patch
-(`src/iso-patches/configure-deck-phase.patch`).
+`wifi` step (`deck_configure.py`, `deck_wifi.py`), its first-boot unit script
+(`deck-wifi-first-boot.sh`) and the `build_phases` patch
+(`configure-deck-phase.patch`) -- all five promoted into `iso/overlay/` by
+T5d, at the paths they occupy inside the ISO.
 
 No VM, no root, no network, no ISO build. Run directly:
 
@@ -60,7 +61,20 @@ import textwrap
 sys.dont_write_bytecode = True
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-SRC = REPO_ROOT / "src"
+
+# ⚠️ These four files and the patch live in the OVERLAY, not in src/, and the
+# move was the point of T5d's promotion commit: `iso/overlay/` is the whole of
+# what this fork adds to the ISO, so the payload audit that walks that tree
+# sees everything that ships. A second copy under src/ would be the drift this
+# project has been bitten by; there is exactly one home, and it is the path the
+# file lands on inside the ISO.
+OVERLAY_AIROOTFS = (
+    REPO_ROOT / "iso" / "overlay" / "configs" / "airootfs"
+)
+OVERLAY_ORCH = (
+    OVERLAY_AIROOTFS / "usr" / "share" / "omarchy-iso" / "orchestrator"
+)
+OVERLAY_DECK = OVERLAY_AIROOTFS / "usr" / "share" / "omarchy-iso" / "deck"
 UPSTREAM_ORCH = (
     REPO_ROOT
     / "iso"
@@ -72,9 +86,9 @@ UPSTREAM_ORCH = (
     / "omarchy-iso"
     / "orchestrator"
 )
-PATCH = REPO_ROOT / "src" / "iso-patches" / "configure-deck-phase.patch"
-SCRIPT = SRC / "deck-wifi-first-boot.sh"
-UNIT = SRC / "omarchy-deck-wifi-first-boot.service"
+PATCH = REPO_ROOT / "iso" / "overlay" / "patches" / "configure-deck-phase.patch"
+SCRIPT = OVERLAY_DECK / "deck-wifi-first-boot.sh"
+UNIT = OVERLAY_DECK / "omarchy-deck-wifi-first-boot.service"
 
 FAILURES = 0
 CHECKS = 0
@@ -150,8 +164,13 @@ def build_package(main_py: pathlib.Path | None = None) -> pathlib.Path:
     pkg.mkdir()
     (pkg / "__init__.py").write_text("")
     shutil.copyfile(UPSTREAM_ORCH / "ui.py", pkg / "ui.py")
-    shutil.copyfile(SRC / "deck_configure.py", pkg / "deck_configure.py")
-    shutil.copyfile(SRC / "deck_wifi.py", pkg / "deck_wifi.py")
+    shutil.copyfile(OVERLAY_ORCH / "deck_configure.py", pkg / "deck_configure.py")
+    shutil.copyfile(OVERLAY_ORCH / "deck_wifi.py", pkg / "deck_wifi.py")
+    # deck_steps() imports every registered step module lazily, so the whole
+    # registry has to be assemblable here even though this suite is about the
+    # wifi step. That coupling is the point: a step added without its module
+    # landing in the overlay fails here, loudly, rather than at install time.
+    shutil.copyfile(OVERLAY_ORCH / "deck_patches.py", pkg / "deck_patches.py")
     (pkg / "phases_impl.py").write_text(PHASES_IMPL_STUB)
     (pkg / "context.py").write_text(CONTEXT_STUB)
     (pkg / "phases.py").write_text(PHASES_STUB)
@@ -237,7 +256,7 @@ def mode_of(path: pathlib.Path) -> str:
 
 print("\n## 1. the payload exists and is shellcheck-clean")
 
-for f in (SRC / "deck_configure.py", SRC / "deck_wifi.py", SCRIPT, UNIT, PATCH):
+for f in (OVERLAY_ORCH / "deck_configure.py", OVERLAY_ORCH / "deck_wifi.py", SCRIPT, UNIT, PATCH):
     check_true(f"payload present: {f.relative_to(REPO_ROOT)}", f.is_file())
 
 check("the first-boot script is executable in the repo", os.access(SCRIPT, os.X_OK), True)
@@ -696,9 +715,27 @@ check_raises(
     lambda: deck_configure.DeckStep("x", lambda ctx: None),
     TypeError,
 )
-check("the wifi step is registered", [s.name for s in deck_configure.deck_steps()], ["wifi"])
+check("the wifi step is registered", [s.name for s in deck_configure.deck_steps()], ["wifi", "patches"])
 check("…and is non-critical: an offline install must still finish", deck_configure.deck_steps()[0].critical, False)
 check("…and points at carry_wifi_step", deck_configure.deck_steps()[0].fn, deck_wifi.carry_wifi_step)
+
+# T12's step, asserted from here as well as from its own suite: this is the file
+# that owns the registry, and "the step is registered at all" is a fact about
+# the registry rather than about the applier.
+from orchestrator import deck_patches  # noqa: E402
+
+check("🔴 the T12 patches step is registered", deck_configure.deck_steps()[1].name, "patches")
+check("…and points at apply_patches_step", deck_configure.deck_steps()[1].fn, deck_patches.apply_patches_step)
+check(
+    "…and is non-critical (deck_patches.py decision 2: a stale patch degrades, it does not brick)",
+    deck_configure.deck_steps()[1].critical,
+    False,
+)
+check(
+    "…and it runs after wifi, before finalize_limine_boot regenerates /boot from the template",
+    [s.name for s in deck_configure.deck_steps()].index("patches"),
+    1,
+)
 
 
 def with_steps(steps):

@@ -1,0 +1,59 @@
+omarchy-deck
+============
+
+The Steam Deck enablement layer for Omarchy, shipped as a pacman package.
+
+Installed at /usr/share/omarchy-deck/README on every target installed from the
+Omarchy Deck ISO. If you are reading this file on a running system, the seam-S4
+pipeline worked end to end.
+
+
+What this package is
+--------------------
+
+Omarchy installs itself as a pacman package, so everything the Steam Deck needs
+at install time ships the same way rather than as edits to the ISO builder.
+That is seam S4 of the fork plan (docs/tasks/T5-fork-plan.md §3), and the line
+it draws is:
+
+    patches to the ISO builder  ->  BUILD-time behaviour only
+    this package                ->  everything INSTALL-time
+
+The line is not tidiness. Phase 4 of the roadmap wants the Deck layer to be
+portable to an already-installed Omarchy system (docs/tasks/T7-enablement-layer
+.md); anything that lives as a patch to somebody else's builder cannot come
+along.
+
+
+How it gets here
+----------------
+
+  1. builder/build-iso.sh (patched by iso/overlay/patches/deck-packages.patch)
+     builds this recipe with makepkg, straight into the ISO's offline mirror.
+  2. It is stripped from the online `pacman -Syw` target list -- it exists in
+     no online repository, and leaving it in aborts a ~6 GB download.
+  3. It is added back to prune-offline-mirror.sh's keep-set, or the prune
+     deletes it again: the online transaction never selected it.
+  4. It is excluded from deck-nvidia-dry-run.sh's ONLINE resolve, for the same
+     reason as (2) -- while that guard still asserts the exclusion was
+     deliberate and that the name really is in deck-install.packages.
+  5. deck-install.packages carries the name, so pacstrap installs it on every
+     target from the offline mirror.
+
+All five read one declaration in the patched builder, derived from the
+pkgbuilds/ directory itself. A desync between any two of them is silent until
+pacstrap fails on the target.
+
+
+What is NOT here yet
+--------------------
+
+This is a skeleton: it proves the pipeline, it carries no behaviour. Landing
+inside it later:
+
+  T5e   boot-to-Gaming-Mode, the encryption default, the lock producers
+  T5f   the rotation surfaces, and the ALPM hook that re-applies them
+  T12   omarchy-deck-apply-patches, registered as its own configure_deck step
+
+Until those land, the only thing this package asserts about a machine is that
+the ISO that installed it was built by the Omarchy Deck overlay.

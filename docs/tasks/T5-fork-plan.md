@@ -385,10 +385,20 @@ keyboard is T8's, drawn by us.
 **Source:** `docs/PROGRESS.md` §5.17 + operator decision §5.25 #7 — the test Deck
 **keeps** it, the ISO must **refuse** to carry it, and it must FAIL THE BUILD.
 
-**Where:** ✅ **Started in-tree this session** — `tools/iso-payload-audit.sh`,
-with 16 assertions in `test/unit/test-iso-payload-audit.sh`. `bin/build` calls it
-on: the overlay tree, the assembled `airootfs` work dir, our `omarchy-deck`
-package, and the offline mirror directory. It:
+**Where:** ✅ **`tools/iso-payload-audit.sh`**, with 16 assertions in
+`test/unit/test-iso-payload-audit.sh`, **wired into `bin/build` as guard 6.5 on
+2026-08-12 (T5d)** — 6.5a pre-Docker, 6.5b post-build through `reject_iso`, so a
+finding renames the ISO rather than shipping it.
+
+🔴 **This row named four roots and one of them does not exist.** "The assembled
+`airootfs` work dir" is built by mkarchiso **inside the container** and is never
+bind-mounted out, so nothing on the host can read it. What 6.5a audits instead
+is `$SCRATCH_SRC/configs` — that work dir's *input*, after the overlay rsync and
+the patches — which covers everything we put into the live filesystem but **not**
+a drop-in arriving inside a package. That gap is closed by 6.5b, which reads the
+offline mirror, and "our `omarchy-deck` package" is covered there transitively:
+the package lands in that mirror. So it is three roots and a container blind
+spot, not four roots. The audit:
 
 - shares the predicate with `stage-audit-privileges` **by sourcing**, not
   copying, and fails loudly if either function is renamed;
@@ -811,11 +821,15 @@ blank line before it leaks into the container's `/etc/pacman.conf`.
 - 🔴 **A real build.** Nothing here has been executed by `iso/bin/build`. The
   patches apply and the patched builder parses; that the container run succeeds
   is **(INFERRED)**.
-- `src/iso-patches/README.md` still says parity is unproven and that
-  `test-iso-build.sh` enforces an empty overlay. Both are now false. It was not
-  edited because another agent owns that path.
-- The two staged patches (`omarchy-install-dashboard.patch`,
-  `configure-deck-phase.patch`) were left staged, per T5a/T5d ownership.
+- ~~`src/iso-patches/README.md` still says parity is unproven and that
+  `test-iso-build.sh` enforces an empty overlay.~~ **Corrected** in `5a3d612`,
+  and rewritten again by T5d.
+- ~~The two staged patches (`omarchy-install-dashboard.patch`,
+  `configure-deck-phase.patch`) were left staged.~~ **`configure-deck-phase.patch`
+  is promoted** (T5d, below). `omarchy-install-dashboard.patch` is still staged
+  and still waits on T4a — and it has the same shape as the hazard T5d closed:
+  it sources `/usr/share/omarchy-iso/deck-dashboard.sh`, which is currently
+  `src/deck-dashboard.sh`, i.e. nowhere on the ISO.
 
 ---
 
@@ -874,12 +888,19 @@ Deck touched, no `ssh`. Nothing committed.
 
 ## 10. Implementation notes — what building the Wi-Fi carry-over found in §3/§4.1
 
-**Written 2026-08-12, after implementing `configure_deck`'s first step
-(`src/deck_configure.py`, `src/deck_wifi.py`, `src/deck-wifi-first-boot.sh`,
-`src/omarchy-deck-wifi-first-boot.service`, staged patch
-`src/iso-patches/configure-deck-phase.patch`, suite
-`test/unit/test-deck-configure-wifi.py`).** Everything here is a correction or
-an addition to this plan, not a restatement of it.
+**Written 2026-08-12, after implementing `configure_deck`'s first step.**
+Everything here is a correction or an addition to this plan, not a restatement
+of it.
+
+⚠️ **The paths in this section were written while those five files were staged
+under `src/`. T5d promoted all five into `iso/overlay/`**, at the paths they
+occupy inside the ISO:
+`iso/overlay/configs/airootfs/usr/share/omarchy-iso/orchestrator/deck_{configure,wifi}.py`,
+`…/usr/share/omarchy-iso/deck/deck-wifi-first-boot.sh`,
+`…/deck/omarchy-deck-wifi-first-boot.service`, and
+`iso/overlay/patches/configure-deck-phase.patch`. The suite
+(`test/unit/test-deck-configure-wifi.py`) moved with them. There is one copy of
+each, in the overlay.
 
 **1. 🔴 §5's bake-in list has six items and none of them is the Wi-Fi
 credentials.** T4's U1 is the highest-cost open unknown in
@@ -933,7 +954,13 @@ install.** `main.py`'s patched `build_phases` does
 `from .deck_configure import configure_deck`, which is evaluated *before* any
 phase runs — a loud, early failure, deliberately, but it means the additive
 overlay files must land in the same commit as the patch.
-`src/iso-patches/README.md` now carries that four-row list.
+
+🔴 **That was written down and enforced by nothing for a day.** T5d promoted
+them together *and* made the coupling mechanical: `test/unit/test-iso-build.sh`
+now derives the relative-import module names each promoted patch introduces and
+requires a matching module in the overlay's orchestrator directory. Derived,
+not hard-coded — the same reason guard 6.4a greps its binary names out of the
+patched tree instead of listing them.
 
 **6. Where the phase sits, exactly.** Immediately after
 `("Configuring system", run_system_finalizer)` and therefore before

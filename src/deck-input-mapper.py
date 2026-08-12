@@ -2358,6 +2358,105 @@ def menu_binding_report(lizard: str | None) -> list[str]:
     return [f"deck-input-mapper: {line}" for line in lines]
 
 
+# --- the readiness signal: "bound" (T4-screen-spec.md §2.3) ------------------
+#
+# 🔴 WHAT THIS MARKER PROMISES, AND WHY A CONSUMER MAY TRUST IT.
+#
+# `src/deck-form.sh` starts a mapper, waits up to 5 s for a line containing
+# `DECK_OSK_BOUND_MARKER` (its own constant, spelled exactly as BOUND_MARKER
+# below), and then runs a `gum` prompt that the user types into. So the marker
+# is not "the process started" and not "a device was opened": it is
+#
+#     EVERY INPUT PATH THIS INVOCATION WAS ASKED FOR IS LIVE RIGHT NOW.
+#
+# Concretely, at the moment it is printed:
+#
+#   1. a pad has been picked (`pick_device` WAITS rather than returning a
+#      half-open device, so reaching this point is itself the guarantee), it
+#      has been grabbed if `--grab` asked, its haptics are armed, and
+#   2. its fd is registered in the selector -- i.e. the very next thing this
+#      process does is read that pad. A marker printed before the register is
+#      a marker printed while the pad's events go nowhere, which is exactly
+#      T4-screen-spec.md §6.4's lie #2 ("a silent input path"), and
+#   3. the uinput keyboard is open (or `--dry-run` deliberately replaced it
+#      with printing), so a keystroke has somewhere to go, and
+#   4. if `--osk-start-shown` asked for a keyboard, THE KEYBOARD IS DRAWN.
+#      Not requested -- drawn. The tty backend can fail to draw for three
+#      separate reasons that all leave the process alive and navigating (no
+#      OSK modules, an unopenable tty, a console too narrow to fit a row), and
+#      every one of them would otherwise produce a mapper that looks ready and
+#      types blind.
+#
+# When 4 cannot be established the marker is NOT printed and a line saying so
+# is printed instead -- deliberately worded so it does NOT contain BOUND_MARKER
+# as a substring, because the consumer greps for it with `grep -F`. The
+# consumer then times out and degrades loudly, which is the behaviour
+# T4-screen-spec.md §2.3 step 2 specifies ("the prompt runs WITHOUT an OSK,
+# which is a degradation the screen must state, not swallow").
+#
+# ⚠️ THE ONE THING IT CANNOT VOUCH FOR IS SQUEEKBOARD. The `dbus` backend shows
+# the keyboard by spawning a detached toggle command in another process; there
+# is nothing to observe and nothing to wait on. Rather than either lying or
+# hanging, the marker is printed with the state named in the line itself. No
+# consumer waits on a dbus mapper today (deck-form.sh spawns `--osk-backend=tty`
+# only), and a future one reading this line can see exactly which half of the
+# promise it is getting.
+BOUND_MARKER = "deck-input-mapper: bound"
+
+# The four things the report can say about the keyboard. Named rather than
+# spelled inline at each site so a typo is an ImportError-shaped failure
+# instead of a branch that quietly never matches.
+OSK_NOT_ASKED = "not-asked"    # no --osk-start-shown: navigation only, and ready
+OSK_DRAWN = "drawn"            # ours, and on the screen. The strong promise
+OSK_DISPATCHED = "dispatched"  # squeekboard was asked over DBus; unobservable
+OSK_MISSING = "missing"        # asked for, ours to draw, and NOT on the screen
+
+
+def osk_state_at_bind(want: bool, backend: str, *, visible: bool,
+                      usable: bool) -> str:
+    """Which OSK_* state a bind report should carry.
+
+    `want`    -- should a keyboard be on the screen at this instant? At startup
+                 that is `--osk-start-shown`; after a re-enumeration it is
+                 whether one was up when the pad vanished, so a keyboard the
+                 user dismissed on purpose is not reported as missing.
+    `visible` -- what this process BELIEVES (`osk_visible`).
+    `usable`  -- what is actually true of the drawing machinery (the caller
+                 knows which backend it is; see `osk_usable` in main()).
+
+    Both of the last two, never one: `set_osk_visible(True)` sets `osk_visible`
+    unconditionally, including on the paths where the tty backend has already
+    been disabled and nothing is drawn at all.
+    """
+    if not want:
+        return OSK_NOT_ASKED
+    if backend == "dbus":
+        return OSK_DISPATCHED
+    return OSK_DRAWN if (visible and usable) else OSK_MISSING
+
+
+def bound_report(path: str, name: str, osk: str) -> list[str]:
+    """The lines to print at a bind -- with the marker, or with the reason.
+
+    ⚠️ THE ONLY PLACE BOUND_MARKER IS PRODUCED. Both bind sites in main()
+    (startup and the ENODEV re-bind) go through here, so "ready" has one
+    definition rather than two that agreed on the day they were written.
+    """
+    if osk == OSK_MISSING:
+        # NB: must not contain BOUND_MARKER -- the consumer greps -F.
+        return [f"deck-input-mapper: reading {path} ({name}), but the "
+                "on-screen keyboard was asked for and is NOT on the screen; "
+                "NOT reporting ready. Navigation still works and text entry "
+                "does not"]
+    suffix = {
+        OSK_NOT_ASKED: "no keyboard was asked for, so this is navigation only",
+        OSK_DRAWN: "with the on-screen keyboard drawn",
+        OSK_DISPATCHED: "the keyboard was requested from squeekboard over "
+                        "DBus, whose appearance this process cannot observe",
+    }[osk]
+    return [f"{BOUND_MARKER} to {path} ({name}) -- {suffix}"]
+
+
 # --- the tty keyboard's console geometry (T8 §9g) ----------------------------
 #
 # 🔴 READ AT RUNTIME, ON BOTH AXES, NEVER ASSUMED. `docs/PROGRESS.md` §7 measured
@@ -2634,6 +2733,14 @@ def main() -> None:
     ap.add_argument("--osk-top-row", type=int, default=0, metavar="N",
                     help="1-based console row for the keyboard's first line; "
                          "0 means 'as low as it fits' (default)")
+    ap.add_argument("--osk-start-shown", action="store_true",
+                    help="come up with the keyboard already on the screen, "
+                         "instead of waiting for the STEAM+X chord. The "
+                         "installer's entry point (T4-screen-spec.md §2.3): "
+                         "the chord is one of the six buttons lizard mode "
+                         "swallows, so it cannot be how the keyboard is first "
+                         "summoned on a Deck that has not yet turned lizard "
+                         "mode off")
     ap.add_argument("--osk-auto-show", action="store_true",
                     help="also show the keyboard when a text field takes focus, "
                          "and hide it when focus leaves. ⚠️ Needs the Wayland "
@@ -2644,6 +2751,24 @@ def main() -> None:
                          "(default: deck_osk_focus.py beside the other OSK "
                          "modules)")
     args = ap.parse_args()
+
+    # ⚠️ REFUSED, NOT RECONCILED. "Start with the keyboard shown" and "there is
+    # no keyboard" cannot both be honoured, and silently dropping either one
+    # ships a caller that believes something false: drop the flag and a prompt
+    # waits out its whole deadline for a marker that will never come; drop the
+    # backend and a device the operator deliberately gave no keyboard grows
+    # one. CLAUDE.md: never silently swallow a failure. `ap.error` exits 2 with
+    # the message on stderr, which is where every other complaint here goes.
+    #
+    # Repeating either flag is a no-op (`store_true`), so this stays true of
+    # `--osk-start-shown --osk-start-shown` and of a wrapper that appends the
+    # flag to an argv that already had it -- the idempotence the installer's
+    # re-runnable scripts need.
+    if args.osk_start_shown and args.osk_backend == "none":
+        ap.error("--osk-start-shown asks for the keyboard to be on the screen "
+                 "at startup, and --osk-backend=none asks for there to be no "
+                 "keyboard at all. Pick one: drop --osk-start-shown for "
+                 "navigation only, or name a backend (dbus, tty, layer)")
 
     if args.list:
         for path in list_devices():
@@ -3187,6 +3312,61 @@ def main() -> None:
         if osk_backend == "dbus":
             osk_dbus_toggle(visible)
 
+    def osk_usable() -> bool:
+        """Is the keyboard WE draw actually on the screen right now?
+
+        The counterpart to `osk_visible`, which is only ever what this process
+        was ASKED for. Every branch below is a way the tty or layer keyboard
+        can be absent while `osk_visible` is True and this process is happily
+        alive and navigating:
+
+          * `osk_tty is None`   -- the modules would not load, `--osk-tty`
+                                   would not open, or `osk_fall_back` disabled
+                                   it after a failed write (backend "none").
+          * `osk_narrow_at`     -- the console is narrower than the keyboard,
+                                   so `_osk_draw` drew a NOTICE instead of a
+                                   keyboard (§9g / R-49). Blind typing, drawn
+                                   politely.
+          * the overlay's exit  -- a layer-shell client that started and died
+                                   looks identical to a healthy one until its
+                                   pipe is used.
+
+        Only consulted at a bind, so `poll()` here costs nothing in the loop.
+        """
+        if osk_backend == "tty":
+            return (osk_tty is not None and osk_stream is not None
+                    and osk_narrow_at is None)
+        if osk_backend == "layer":
+            return (osk_drawn_here and osk_layer_proc is not None
+                    and osk_layer_proc.poll() is None)
+        return False
+
+    def report_bound(want_osk: bool) -> None:
+        """Say whether this mapper is ready to deliver keystrokes.
+
+        🔴 CALLED FROM EXACTLY TWO PLACES -- once after the startup bind, once
+        after the ENODEV re-bind -- and from nowhere else, because everything
+        the marker promises (BOUND_MARKER's comment) has to be true at the call
+        site and only those two sites can make it so.
+
+        THE RE-BIND RE-EMITS IT, DELIBERATELY. `src/deck-form.sh` waits once and
+        then types for as long as the user takes, so re-emitting cannot confuse
+        it (its `grep -F` already matched the first line, and matching again is
+        the same answer). What re-emitting buys is the honesty of the pairing:
+        a re-enumeration TEARS THE KEYBOARD DOWN (§5.9's ENODEV path hides it
+        before rescanning), and a mapper that came back with no keyboard, or
+        that came back on a pad whose axes it could not re-range, would
+        otherwise be indistinguishable in the log from one that never wobbled.
+        R-44 made this a hot path, not a theoretical one. So: one line per bind,
+        each one meaning the same thing about the state at that moment, and a
+        consumer that wants "is it ready NOW" can read the last one.
+        """
+        for line in bound_report(
+                pad.path, pad.name,
+                osk_state_at_bind(want_osk, osk_backend,
+                                  visible=osk_visible, usable=osk_usable())):
+            print(line, file=sys.stderr, flush=True)
+
     def run_pending(actions: list[str]) -> None:
         """Perform queued side effects. Never blocks the input loop: a DBus
         call, or a menu that takes a moment to draw, must not freeze the
@@ -3248,6 +3428,15 @@ def main() -> None:
     auto_fd = auto.fileno() if auto is not None else None
     if auto_fd is not None:
         sel.register(auto_fd, selectors.EVENT_READ)
+    # ⚠️ ORDER IS THE WHOLE POINT OF THESE TWO STATEMENTS, and it is why they
+    # sit here rather than beside the "reading ..." line 15 lines up. The
+    # keyboard is drawn BEFORE readiness is claimed, and readiness is claimed
+    # AFTER the pad's fd is in the selector. Move the report above either one
+    # and it starts meaning "the process got this far", which is precisely the
+    # marker T4-screen-spec.md §2.3 refused to accept.
+    if args.osk_start_shown:
+        set_osk_visible(True)
+    report_bound(args.osk_start_shown)
     try:
         while True:
             deadline = mapper.next_deadline()
@@ -3328,6 +3517,13 @@ def main() -> None:
                     print(f"deck-input-mapper: the pad disappeared ({exc}); "
                           "waiting for it to come back",
                           file=sys.stderr, flush=True)
+                    # What was on the screen when the pad went away -- read
+                    # BEFORE the hide below, because that hide is ours and not
+                    # the user's. It decides two things: whether the keyboard
+                    # comes back (a user who pressed `close` must not have one
+                    # forced back on), and what the re-bind report is allowed
+                    # to promise.
+                    osk_was_visible = osk_visible
                     if osk_visible:
                         set_osk_visible(False)
                     try:
@@ -3347,15 +3543,32 @@ def main() -> None:
                         pad.grab()
                     mapper.haptics = arm_haptics(pad)
                     sel.register(pad.fd, selectors.EVENT_READ)
+                    # Kept verbatim: this is the line the journal has always
+                    # carried for a recovery, and it is the ONLY thing that
+                    # distinguishes the report below from the startup one.
                     print(f"deck-input-mapper: re-bound to {pad.path} ({pad.name})",
                           file=sys.stderr, flush=True)
-                    # The replacement pad may advertise different ranges.
+                    # ⚠️ RE-RANGED BEFORE IT IS RE-DRAWN, and both before the
+                    # report. The replacement pad may advertise different
+                    # ranges, and the show below places both cursors from them
+                    # -- with the old ones the keyboard comes back with its
+                    # cursors somewhere the thumbs are not, until the next
+                    # sample moves them.
                     if mapper.cursors is not None and osk_layout is not None:
                         mapper.cursors.ranges = {
                             code: (ai.min, ai.max)
                             for code, ai in dict(pad.capabilities().get(e.EV_ABS, [])).items()
                             if code in osk_layout.PAD_AXES
                         }
+                    # Put back what the re-enumeration took away. Without this
+                    # a pad that wobbles mid-passphrase leaves the user typing
+                    # into a masked field with no keyboard drawn and no way to
+                    # know why -- and on the installer's own screens the chord
+                    # that would summon it back is not something a first-time
+                    # user knows exists.
+                    if osk_was_visible:
+                        set_osk_visible(True)
+                    report_bound(osk_was_visible)
                     continue
                 for event in events:
                     if event.type == e.EV_SYN and event.code == e.SYN_REPORT:

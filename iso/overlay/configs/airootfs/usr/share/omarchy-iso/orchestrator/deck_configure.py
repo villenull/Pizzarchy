@@ -80,13 +80,27 @@ def deck_steps() -> list[DeckStep]:
     in the traceback, and so this module stays importable while later slices
     are mid-flight.
     """
-    from . import deck_wifi
+    from . import deck_patches, deck_wifi
 
     return [
         DeckStep("wifi", deck_wifi.carry_wifi_step, critical=False),
         # T5e: 5.1 autologin + 5.5 encryption-off (coupled -- do not split).
         # T5f: 5.2 rotations, before finalize_limine_boot runs limine-update.
-        # T12: omarchy-deck-apply-patches, after the runtime is in place.
+        #
+        # T12. `critical=False` is argued at length in deck_patches.py's
+        # docstring (decision 2) -- it deliberately overrules
+        # `docs/findings/T12-upstream-patch-seam.md` §3.4's "a non-zero exit
+        # fails the install", because the failure is a degradation (~2s instead
+        # of ~20s of panel-on after lock) while the abort is a Deck with no
+        # operating system, and the hard failure belongs at build time in guard
+        # 6.6 instead.
+        #
+        # Last on purpose, in two senses. It runs inside the target via
+        # arch-chroot, so it is the slowest step and the one most likely to be
+        # interfered with by anything else that touches /usr/share/omarchy;
+        # and it patches the packaged Limine template, so it must land before
+        # the LATER PHASE `finalize_limine_boot` regenerates /boot from it.
+        DeckStep("patches", deck_patches.apply_patches_step, critical=False),
     ]
 
 

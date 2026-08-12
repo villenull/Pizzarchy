@@ -225,12 +225,30 @@ Why bounded rather than flipping once at boot:
   of ours at all.** Every navigation-only screen in §4 works on a stock Deck with
   the mapper absent, which is the cheapest possible dependency.
 
-⚠️ **Two mapper flags do not exist yet** and are T4 work items, not T8's:
-`--osk-start-shown` (come up with the keyboard visible — the STEAM+X chord that
-normally summons it is one of the six buttons lizard mode swallows, so it cannot
-be the entry point) and a machine-readable "pad bound" line on stderr that step 2
-can wait on with a deadline. The mapper already places the keyboard at the bottom
-of the console by default (`--osk-top-row 0`), so no placement flag is needed.
+✅ **Both mapper features now EXIST (2026-08-12).** They were T4 work items, not
+T8's, and they are why every real passphrase prompt used to time out and
+degrade:
+
+- **`--osk-start-shown`** — come up with the keyboard visible, because the
+  STEAM+X chord that normally summons it is one of the six buttons lizard mode
+  swallows, so it cannot be the entry point. Combining it with
+  `--osk-backend=none` is refused loudly (exit 2), not silently ignored.
+- **A machine-readable readiness line on stderr**, `deck-input-mapper: bound`
+  (the mapper's `BOUND_MARKER`, which `deck-form.sh` greps with `-F`).
+
+🔴 **The marker's meaning is stronger than "pad bound", and step 2 depends on
+that.** It is emitted only when every input path this invocation was asked for
+is live: a pad is bound *and registered in the selector*, the uinput keyboard is
+open, and — when `--osk-start-shown` was given — **the keyboard is drawn, not
+merely requested**. If the keyboard was asked for and is not on screen (console
+too narrow, tty unavailable), **no marker is printed** and a refusal line is
+emitted instead, worded so it cannot match the marker as a substring. The
+consumer then times out and degrades loudly, which is what step 2 specifies.
+A re-enumeration re-emits it, through the same code path, and restores whatever
+was on screen before the re-bind.
+
+The mapper already places the keyboard at the bottom of the console by default
+(`--osk-top-row 0`), so no placement flag is needed.
 
 ⚠️ **`hid_steam` may not be loaded in QEMU, and `lizard_mode` will not exist
 there.** Step 1 must treat a missing file as "not applicable, continue", and that
@@ -880,7 +898,7 @@ file at that path is silently overwritten **(READ)**. Function redefinition in
 
 | # | Unknown | Cost if wrong |
 |---|---|---|
-| **U1** ✅ **ANSWERED — NO, and it never could have** (2026-08-12) | **Measured against the pinned `iso/upstream` tree, not inferred:** `root/configurator` contains no `iwd`/`iwctl`/`nmcli`/`NetworkManager` reference at all — its only network statement is the literal `"network_config": {"type": "iso"}` at lines 770 and 1156 — the 14-phase orchestrator has no network code, and `system-connections`/`nmconnection` appear **zero** times anywhere in the tree. The whole hand-off is delegated to archinstall's `type: iso` handler, which copies `/var/lib/iwd/*.psk` and enables **iwd** on the target, while Omarchy enables **NetworkManager** (`manifests/fresh-4.json`; a fresh install's manifest carries no iwd package). Two managers claiming wlan0 is **a conflict, not a hand-off** | **Closed by building it, both ends.** S1 stages the profile (`src/deck-form.sh`, `d49dbe4`); `configure_deck`'s `wifi` step carries it across (`src/deck_wifi.py`, `src/deck_configure.py`, staged patch `src/iso-patches/configure-deck-phase.patch`, suite `test/unit/test-deck-configure-wifi.py`). ⚠️ The destination filename is `deck-wifi.nmconnection`, **not** `<ssid>.nmconnection` as §5 item 1 says: an SSID is attacker-controlled and a filename is a path. The SSID assertion §5 asks for is made against the `ssid=` line *inside* the keyfile, which is what NetworkManager actually reads. **Still [V]-unverified:** nothing has been through a real install — see the T5d list in `src/iso-patches/README.md` |
+| **U1** ✅ **ANSWERED — NO, and it never could have** (2026-08-12) | **Measured against the pinned `iso/upstream` tree, not inferred:** `root/configurator` contains no `iwd`/`iwctl`/`nmcli`/`NetworkManager` reference at all — its only network statement is the literal `"network_config": {"type": "iso"}` at lines 770 and 1156 — the 14-phase orchestrator has no network code, and `system-connections`/`nmconnection` appear **zero** times anywhere in the tree. The whole hand-off is delegated to archinstall's `type: iso` handler, which copies `/var/lib/iwd/*.psk` and enables **iwd** on the target, while Omarchy enables **NetworkManager** (`manifests/fresh-4.json`; a fresh install's manifest carries no iwd package). Two managers claiming wlan0 is **a conflict, not a hand-off** | **Closed by building it, both ends.** S1 stages the profile (`src/deck-form.sh`, `d49dbe4`); `configure_deck`'s `wifi` step carries it across (`deck_wifi.py`, `deck_configure.py` and the now-**promoted** `configure-deck-phase.patch`, all three in `iso/overlay/` since T5d; suite `test/unit/test-deck-configure-wifi.py`). ⚠️ The destination filename is `deck-wifi.nmconnection`, **not** `<ssid>.nmconnection` as §5 item 1 says: an SSID is attacker-controlled and a filename is a path. The SSID assertion §5 asks for is made against the `ssid=` line *inside* the keyfile, which is what NetworkManager actually reads. **Still [V]-unverified:** nothing has been through a real install — see the T5d list in `src/iso-patches/README.md` |
 | **U2** | Does the SMBIOS-credential probe injection work against an **archiso** ISO, and does plymouth hide tty1 from `/dev/vcs1`? | The entire [V] tier is unavailable, and T4 falls back to hardware for things QEMU should catch. **Test this first, before writing any screen** |
 | **U3** | The Deck's live console geometry. Never recorded, in three hardware sessions | The OSK is 73 columns and the logo ~81. If the console is 80×25, upstream's frame already wraps and the keyboard eats half the screen |
 | **U4** | Does the mapper repaint the OSK after `clear_logo` wipes the screen (§2.5)? | Every validation failure in S1/S3 leaves the user typing blind |

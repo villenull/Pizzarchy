@@ -1,0 +1,80 @@
+# omarchy-deck -- the Steam Deck enablement layer, as a pacman package.
+#
+# T5-fork-plan.md §3 seam S4, docs/PROGRESS.md §3.1's architecture: Omarchy
+# itself installs as a pacman package, so the Deck logic ships as its own
+# pacman package, built into the ISO's offline mirror and pacstrapped onto
+# every target from deck-install.packages.
+#
+# ---------------------------------------------------------------------------
+# 🔴 THIS IS A SKELETON. Its job in T5d is to prove the PIPELINE, not to carry
+# behaviour: that the package builds inside builder/build-iso.sh's container,
+# lands in the offline mirror, survives prune-offline-mirror.sh, is selected by
+# the offline resolve, and installs at pacstrap time. The behaviour lands
+# later, in slices that already exist on the plan:
+#
+#   T5e  boot-to-Gaming-Mode, the encryption default, the lock producers
+#   T5f  the rotation surfaces and the ALPM re-apply hook
+#   T12  omarchy-deck-apply-patches (registered as a configure_deck step, not
+#        bolted onto an existing one -- T5-fork-plan.md §10 note 4)
+#
+# ---------------------------------------------------------------------------
+# Rules this file has to keep
+#
+#  * NO derived pkgver. Not `git describe`, not a date. The build must not
+#    depend on the repo's git state or on the clock: /configs is a read-only
+#    bind mount with no .git in it, and a version that moves per build breaks
+#    the "exactly one artifact per name" check in the patched build-iso.sh.
+#    Bump `pkgver` by hand, in a commit, like a decision.
+#  * ANY entry added to depends=() must ALSO exist in the offline mirror --
+#    i.e. be in deck-install.packages or deck-mirror.packages. The target
+#    install is offline; pacstrap fails on a dependency the mirror does not
+#    carry, ~1000 packages into the install.
+#  * No install= scriptlet, no systemd units, no sudoers drop-ins in this
+#    slice. tools/iso-payload-audit.sh reads inside this package's archive at
+#    build time and fails the build on a blanket passwordless sudoers grant.
+
+pkgname=omarchy-deck
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Steam Deck enablement layer for Omarchy (skeleton: seam S4 pipeline only)"
+arch=('any')
+url='https://github.com/villenull/Pizzarchy'
+
+# ✅ DECIDED by the operator, 2026-08-12. This slice opened as
+# `custom:unspecified` because the repo declared no licence at all -- correctly
+# refusing to invent a grant the repo had never made -- and the decision was
+# escalated rather than guessed. MIT was chosen: it matches
+# `omacom-io/omarchy-iso`, which this fork vendors and whose MIT licence
+# `docs/tasks/T5-fork-plan.md` §1 relies on, and it puts no obligation on
+# anyone who redistributes the ISO. LICENSE now exists at the repo root.
+#
+# This is not cosmetic. CLAUDE.md forbids depending on anything unlicensed, and
+# an ISO that redistributes an unlicensed package of OUR own is that same
+# objection pointed inward.
+license=('MIT')
+
+# Deliberately empty. See the rule above before adding anything here.
+depends=()
+
+# Local source, copied alongside this file into the build's work directory by
+# the patched builder/build-iso.sh. Listing it (rather than reaching into
+# $startdir) means makepkg itself fails loudly if it is missing.
+#
+# ⚠️ LICENSE is a COPY of the repository root's LICENSE, and it has to be: the
+# container only ever sees this directory (`/configs/deck/pkgbuilds/omarchy-deck/`
+# is copied into the build's work dir), so a file outside it cannot reach
+# makepkg. MIT is not in `/usr/share/licenses/common` -- each MIT text carries
+# its own copyright line -- so a package under it must ship the text. The copy
+# is kept honest by `test/unit/test-omarchy-deck-package.sh`, which asserts it
+# is byte-identical to the root LICENSE; an edit to one and not the other goes
+# red in seconds rather than shipping two different grants.
+source=('README' 'LICENSE')
+sha256sums=('SKIP' 'SKIP')
+
+package() {
+  # One real file, so this is not an empty package -- and so there is a cheap
+  # [V]-tier probe after a QEMU install: "is our package actually on the
+  # target?" is `test -f /usr/share/omarchy-deck/README`.
+  install -Dm644 "$srcdir/README" "$pkgdir/usr/share/omarchy-deck/README"
+  install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

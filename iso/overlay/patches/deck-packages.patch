@@ -1,8 +1,132 @@
 diff --git i/builder/build-iso.sh w/builder/build-iso.sh
-index 6f919d0..4cae5ea 100755
+index 6f919d0..5314438 100755
 --- i/builder/build-iso.sh
 +++ w/builder/build-iso.sh
-@@ -163,6 +163,45 @@ else
+@@ -103,6 +103,123 @@ if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
+   LOCAL_OMARCHY_BUILD=1
+ fi
+ 
++# ===========================================================================
++# Steam Deck (omarchy-deck overlay, T5-fork-plan.md §3 seam S4)
++#
++# 🔴 ONE LIST, FOUR CONSUMERS. `deck_local_packages` is declared exactly once,
++# right here, and is derived from the directory that actually builds them --
++# not hand-written a second time. Every consumer below reads this one array:
++#
++#   1. this block          -- makepkg builds them straight into the mirror
++#   2. deck-nvidia-dry-run -- excludes them from its ONLINE resolve
++#   3. the `pacman -Syw`   -- strips them from the online download list
++#   4. the prune keep-set  -- adds them back, or they are deleted again
++#
++# A desync between any two of them is SILENT: the package builds, the mirror
++# is pruned, and the failure surfaces at pacstrap on the target. This is the
++# same lesson seam S1 already encodes one screen further down.
++# ===========================================================================
++
++deck_list_dir=/configs/deck
++if [[ ! -d $deck_list_dir ]]; then
++  echo "ERROR: $deck_list_dir is missing from the ISO configs." >&2
++  echo "       The omarchy-deck overlay's package lists live there; without them" >&2
++  echo "       this build would quietly produce a stock Omarchy ISO instead." >&2
++  exit 1
++fi
++
++deck_pkgbuild_dir="$deck_list_dir/pkgbuilds"
++if [[ ! -d $deck_pkgbuild_dir ]]; then
++  echo "ERROR: $deck_pkgbuild_dir is missing from the ISO configs." >&2
++  echo "       This directory IS the declaration of which packages we build" >&2
++  echo "       ourselves; an absent one would silently produce an ISO with no" >&2
++  echo "       Deck package on the target at all." >&2
++  exit 1
++fi
++
++# The directory listing is the single declaration. A stray directory without a
++# PKGBUILD is an error rather than a skipped entry -- a name that quietly drops
++# out here drops out of all four consumers at once, which is exactly the
++# silent-desync failure this block exists to make impossible.
++deck_local_packages=()
++for deck_pkgbuild_path in "$deck_pkgbuild_dir"/*/; do
++  [[ -d $deck_pkgbuild_path ]] || continue
++  deck_pkg_name=$(basename "$deck_pkgbuild_path")
++  if [[ ! -f "$deck_pkgbuild_path/PKGBUILD" ]]; then
++    echo "ERROR: $deck_pkgbuild_dir/$deck_pkg_name has no PKGBUILD." >&2
++    echo "       Every directory here names a package this build must produce." >&2
++    exit 1
++  fi
++  deck_local_packages+=("$deck_pkg_name")
++done
++if ((${#deck_local_packages[@]} == 0)); then
++  echo "ERROR: $deck_pkgbuild_dir contains no package directories." >&2
++  echo "       Nothing would be built, the target would get no omarchy-deck" >&2
++  echo "       package, and every check below would pass over an empty set." >&2
++  exit 1
++fi
++echo "Steam Deck: building ${#deck_local_packages[@]} local package(s): ${deck_local_packages[*]}"
++
++# CONSUMER 1: build them into the offline mirror.
++#
++# They cannot go through /builder/build-omarchy-packages.sh -- that script
++# lives in the upstream tree and reads /omarchy-pkgs. The mechanics below are
++# deliberately its mechanics: makepkg refuses to run as root, /configs is a
++# read-only bind mount, so the recipe is copied to a writable work dir, chowned
++# and built under `su builder` with PKGDEST set.
++#
++# The builder user may or may not exist already: build-omarchy-packages.sh
++# creates it, and it only runs under --local-source. Handle both, loudly.
++deck_pkg_work=/tmp/omarchy-deck-pkg-build
++rm -rf "$deck_pkg_work"
++mkdir -p "$deck_pkg_work"
++if id builder &>/dev/null; then
++  echo "Steam Deck: reusing the existing 'builder' user"
++else
++  echo "Steam Deck: creating the 'builder' user (build-omarchy-packages.sh did not run)"
++  useradd -m -s /bin/bash builder
++fi
++chown builder:builder "$deck_pkg_work"
++
++for deck_pkg in "${deck_local_packages[@]}"; do
++  echo "----------------------------------------"
++  echo "Building $deck_pkg (omarchy-deck overlay)"
++  echo "----------------------------------------"
++  # The offline mirror is a PERSISTENT bind mount across builds (iso/bin/build
++  # guard 6.3), so a previous run's artifact survives here. Left in place, a
++  # pkgver bump would leave two files for one name and the keep-set check below
++  # would refuse the build. Every local package is rebuilt in this same loop, so
++  # clearing a sibling's file by prefix is harmless.
++  rm -f "$offline_mirror_dir/$deck_pkg-"*.pkg.tar.*
++
++  deck_pkg_work_dir="$deck_pkg_work/$deck_pkg"
++  cp -a "$deck_pkgbuild_dir/$deck_pkg" "$deck_pkg_work_dir"
++  chown -R builder:builder "$deck_pkg_work_dir"
++  su builder -c "
++    cd '$deck_pkg_work_dir' &&
++    PKGDEST='$deck_pkg_work' \
++    makepkg --noconfirm --skippgpcheck --skipchecksums --nodeps -f
++  "
++done
++
++shopt -s nullglob
++deck_built_files=("$deck_pkg_work"/*.pkg.tar.zst)
++shopt -u nullglob
++if ((${#deck_built_files[@]} < ${#deck_local_packages[@]})); then
++  echo "ERROR: makepkg produced ${#deck_built_files[@]} archive(s) for ${#deck_local_packages[@]} package(s)." >&2
++  echo "       A recipe built without producing a package would be pruned out of" >&2
++  echo "       the mirror and fail pacstrap on the target instead of here." >&2
++  exit 1
++fi
++for deck_built_file in "${deck_built_files[@]}"; do
++  deck_destination="$offline_mirror_dir/$(basename "$deck_built_file")"
++  # A cached signature belongs to whatever was there before; pacman rejects an
++  # otherwise valid local build sitting beside a stale .sig.
++  rm -f "$deck_destination" "$deck_destination.sig"
++  mv "$deck_built_file" "$deck_destination"
++  echo "Steam Deck: placed $(basename "$deck_destination") in the offline mirror"
++done
++
+ # Node.js binary for offline mise install.
+ NODE_DIST_URL="https://nodejs.org/dist/latest"
+ NODE_SHASUMS=$(curl -fsSL "$NODE_DIST_URL/SHASUMS256.txt")
+@@ -163,6 +280,39 @@ else
    setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
  fi
  
@@ -19,13 +143,7 @@ index 6f919d0..4cae5ea 100755
 +# base_pkg_lists[0] can be a read-only bind mount (/omarchy-source, under
 +# --local-source), so the merged list is written to scratch and the array
 +# repointed rather than edited in place.
-+deck_list_dir=/configs/deck
-+if [[ ! -d $deck_list_dir ]]; then
-+  echo "ERROR: $deck_list_dir is missing from the ISO configs." >&2
-+  echo "       The omarchy-deck overlay's package lists live there; without them" >&2
-+  echo "       this build would quietly produce a stock Omarchy ISO instead." >&2
-+  exit 1
-+fi
++# $deck_list_dir is declared and checked once, up beside the seam-S4 block.
 +# Both lists are read inside command substitutions further down, where an empty
 +# grep would abort a subshell mid-stream and silently truncate the package set.
 +# Refuse now, out loud, instead.
@@ -48,7 +166,7 @@ index 6f919d0..4cae5ea 100755
  mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
  cp "${base_pkg_lists[0]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
  cp "${base_pkg_lists[1]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-other.packages"
-@@ -186,12 +225,31 @@ if [[ ! -f $setup_form ]]; then
+@@ -186,12 +336,40 @@ if [[ ! -f $setup_form ]]; then
  fi
  cp "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"
  
@@ -58,7 +176,16 @@ index 6f919d0..4cae5ea 100755
 +# errors. Ask before the ~6 GB download below, so a wrong package set costs
 +# seconds rather than a full mirror. The script documents how it proves it was
 +# looking rather than merely exiting 0.
-+bash "$deck_list_dir/deck-nvidia-dry-run.sh" \
++#
++# CONSUMER 2 of deck_local_packages: the resolve above is against the ONLINE
++# repositories, and our own packages exist in none of them -- `pacman -S
++# --print` aborts the WHOLE transaction on one unresolvable target, so leaving
++# them in would kill the build here. The guard is told which names to exclude
++# rather than being taught to tolerate failure: it still asserts each excluded
++# name IS in deck-install.packages, and that excluding it actually removed
++# something from the target list.
++DECK_LOCAL_PACKAGES="${deck_local_packages[*]}" \
++  bash "$deck_list_dir/deck-nvidia-dry-run.sh" \
 +  "/configs/pacman-online-${OMARCHY_MIRROR}.conf" \
 +  "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages" \
 +  /builder/archinstall.packages \
@@ -80,3 +207,69 @@ index 6f919d0..4cae5ea 100755
      grep -hv '^#\|^$' /builder/archinstall.packages
      # Always include the selected Omarchy packages so the target install can
      # find the runtime and companion packages in the offline mirror.
+@@ -212,6 +390,28 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+   )
+ fi
+ 
++# CONSUMER 3 of deck_local_packages (T5-fork-plan.md §3 seam S4): the same
++# treatment, but UNCONDITIONAL -- unlike upstream's three, ours are always
++# locally built and exist in no online repository at all. They reach
++# all_packages through deck-install.packages (merged into base_pkg_lists[0]
++# above), and leaving them in makes the ~6 GB `pacman -Syw` below abort with
++# "target not found" after the download rather than before it.
++deck_strip_args=()
++for deck_pkg in "${deck_local_packages[@]}"; do
++  deck_strip_args+=(-e "$deck_pkg")
++done
++mapfile -t all_packages < <(
++  printf '%s\n' "${all_packages[@]}" | grep -Fxv "${deck_strip_args[@]}" || true
++)
++# grep -Fxv exits 1 when it prints nothing and 2 on a real error, and `|| true`
++# cannot tell them apart. The emptiness check makes the distinction instead:
++# a mirror target list of nothing is never correct.
++if ((${#all_packages[@]} == 0)); then
++  echo "ERROR: stripping the locally built Deck packages emptied the offline" >&2
++  echo "       mirror target list (${deck_local_packages[*]})." >&2
++  exit 1
++fi
++
+ mkdir -p /tmp/offlinedb
+ download_offline_packages() {
+   pacman --config /configs/pacman-online-${OMARCHY_MIRROR}.conf --noconfirm -Syw \
+@@ -265,6 +465,36 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+   done
+ fi
+ 
++# CONSUMER 4 of deck_local_packages (T5-fork-plan.md §3 seam S4). Same reason
++# as the block above, same verification (exactly one artifact per name, its
++# identity read out of the archive with `pacman -Qp` rather than guessed from
++# the filename), but again unconditional.
++#
++# 🔴 Without this, prune-offline-mirror.sh DELETES our package: the online
++# transaction that produced required_package_files never selected it, because
++# it is in no online repo. Nothing errors at build time; the install fails at
++# pacstrap, on a target the mirror no longer carries.
++for deck_pkg in "${deck_local_packages[@]}"; do
++  deck_pkg_file=""
++  for candidate in "$offline_mirror_dir/$deck_pkg-"*.pkg.tar.*; do
++    [[ -f $candidate && $candidate != *.sig ]] || continue
++    read -r candidate_name _ < <(pacman -Qp "$candidate" 2>/dev/null) || continue
++    [[ $candidate_name == "$deck_pkg" ]] || continue
++    if [[ -n $deck_pkg_file ]]; then
++      echo "ERROR: multiple local builds found for $deck_pkg in $offline_mirror_dir" >&2
++      exit 1
++    fi
++    deck_pkg_file="${candidate##*/}"
++  done
++  if [[ -z $deck_pkg_file ]]; then
++    echo "ERROR: the locally built $deck_pkg is not in $offline_mirror_dir" >&2
++    echo "       It was built above, so it was pruned, moved, or never placed." >&2
++    echo "       Continuing would ship a mirror pacstrap cannot install from." >&2
++    exit 1
++  fi
++  required_package_files+=("$deck_pkg_file")
++done
++
+ printf '%s\n' "${required_package_files[@]}" |
+   bash /builder/prune-offline-mirror.sh "$offline_mirror_dir"
+ 

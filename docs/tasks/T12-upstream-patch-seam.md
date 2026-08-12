@@ -3,7 +3,18 @@
 **Design and evidence: `docs/findings/T12-upstream-patch-seam.md`. Read it
 first — this file is the build order, not the argument.**
 
-**Status:** specified 2026-08-11 (session 21), **not started**.
+**Status:** specified 2026-08-11 (session 21). ⚠️ **The "not started" that stood
+here until 2026-08-12 was wrong** — session 21 built most of §3 and never
+updated this line. Already in the tree: `src/omarchy-deck-patches/` with the
+applier (`omarchy-deck-apply-patches`), the ALPM re-apply hook
+(`50-omarchy-deck-reapply-patches.hook`), the failure-surfacing unit
+(`omarchy-deck-patch-check.service`) and two patches with `.meta` files
+(`0010-lock-blank-timer-20s`, `0020-limine-interface-rotation`), plus
+`test/unit/test-t12-patch-applier.sh` at **38 passing assertions**.
+**Still owed:** `bin/build`'s guard 6.6, registering the applier as a
+`configure_deck` step, shipping the payload in the `omarchy-deck` package, and
+every `[V]`/`[H]` row in §2 — including the destruction test. Check §2's boxes
+against the tree before believing any of them.
 **Model:** Opus. Same class as `docs/PLAN.md` §11's pacman-hook row — a wrong
 guess is silent and boot-adjacent.
 **Depends on:** T5d (the `omarchy-deck` package + the `configure_deck` phase

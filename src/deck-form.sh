@@ -201,18 +201,30 @@ deck_form_die()  { printf '[%s] ERROR: %s\n' "$DECK_FORM_PROG" "$*" >&2; return 
 readonly DECK_LIZARD_SYSFS=/sys/module/hid_steam/parameters/lizard_mode
 readonly DECK_MAPPER_BIN=/usr/local/bin/deck-input-mapper
 readonly DECK_OSK_BOUND_MARKER="deck-input-mapper: bound"
-# ⚠️ ASPIRATIONAL, NOT YET REAL: T4-screen-spec.md §2.3 names TWO mapper
-# flags that do not exist in src/deck-input-mapper.py at the time this file
-# was written -- `--osk-start-shown` and a machine-readable "bound" line on
-# stderr. Growing the mapper to speak them is explicitly a T4/T8 follow-on,
-# NOT this session's job (this session's file ownership is src/deck-form.sh
-# and its test only -- src/deck-input-mapper.py is untouched). Until they
-# land, the mapper this file spawns will not print DECK_OSK_BOUND_MARKER,
-# deck_form_wait_for_marker will time out on every real prompt, and
-# deck_form_text_prompt will degrade exactly the way §2.3 requires an
-# unavailable OSK to degrade: LOUDLY, with the prompt still running. That
-# degrade path is real and unit-tested below; the "OSK comes up" path is
-# exercised against a FAKE mapper standing in for the not-yet-real flags.
+# ✅ BOTH OF THESE ARE REAL AS OF 2026-08-12. T4-screen-spec.md §2.3's two
+# named mapper flags -- `--osk-start-shown` and a machine-readable "bound"
+# line -- now exist in src/deck-input-mapper.py (see its `BOUND_MARKER`
+# block, which is the authority on what the marker promises; the two spellings
+# are cross-checked by BOTH suites). This block used to say they did not, and
+# that every real prompt therefore timed out and degraded.
+#
+# What the marker means, from the consumer's side: the mapper is bound to a
+# pad, that pad's fd is in its selector, its uinput keyboard is open, and --
+# because we pass `--osk-start-shown` -- the on-screen keyboard is DRAWN.
+# Not requested, drawn. So it is safe to start typing the moment it appears,
+# which is the only property this file needs from it.
+#
+# The mapper prints it on STDERR. This file redirects the mapper's stdout and
+# stderr into one file (see deck_form_text_prompt), so the stream is not
+# load-bearing here -- but it is what §2.3 specifies and what the journal
+# gets, so do not "simplify" the capture to stdout only.
+#
+# ⚠️ THE DEGRADE PATH IS STILL LIVE AND STILL THE POINT. The mapper
+# deliberately withholds the marker when the keyboard was asked for and is not
+# on the screen -- no OSK modules, an unopenable tty, or a console too narrow
+# to draw a row -- so a timeout here still means exactly what it meant before:
+# run the prompt, WITHOUT an OSK, and say so. Both paths are unit-tested below
+# against fake mappers (one that prints the marker, one that never does).
 readonly -a DECK_MAPPER_ARGS=(--osk-backend=tty --osk-start-shown)
 readonly DECK_OSK_BIND_DEADLINE=5      # seconds -- §2.3 step 2's "a deadline"
 readonly DECK_OSK_POLL_INTERVAL=0.1

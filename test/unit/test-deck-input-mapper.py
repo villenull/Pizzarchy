@@ -3555,5 +3555,510 @@ check("...decided by measuring the render against the console, not by guessing",
 check("...and NEVER by falling back -- that would be terminal on the tty backend",
       "osk_fall_back" in draw_calls, False)
 
+# =============================================================================
+# T4 §2.3 -- `--osk-start-shown` and the machine-readable "bound" line
+# =============================================================================
+#
+# 🔴 WHAT MAKES THESE TESTS WORTH ANYTHING. `src/deck-form.sh` waits up to 5 s
+# for BOUND_MARKER and then starts typing a Wi-Fi passphrase into a MASKED
+# field. Two failures are therefore possible and only one of them is obvious:
+#
+#   never printing it   -> the prompt degrades loudly after 5 s. Annoying,
+#                          visible, and already handled by the consumer.
+#   printing it EARLY   -> the consumer types into a device that is not
+#                          reading its pad yet, or onto a screen with no
+#                          keyboard drawn. Nothing complains, on either side.
+#
+# The second is the one this project keeps shipping (docs/PROGRESS.md §5.30c:
+# "every pointer test drove one axis, which is exactly why the suite stayed
+# green while the cursor was unusable"), so the checks below are split to catch
+# it two independent ways: the STATE machine refuses to call an undrawn
+# keyboard ready, and the ORDER of main()'s statements is pinned so the report
+# cannot drift above the show or above the selector registration.
+
+# --- the state machine, behaviourally ----------------------------------------
+
+check("no keyboard asked for -> ready, and said to be navigation only",
+      m.osk_state_at_bind(False, "tty", visible=False, usable=False),
+      m.OSK_NOT_ASKED)
+# ...and `want` decides that ALONE. A mapper started without --osk-start-shown
+# is ready as soon as it is bound, whatever the keyboard happens to be doing.
+check("...whatever the keyboard is doing",
+      {m.osk_state_at_bind(False, backend, visible=v, usable=u)
+       for backend in ("dbus", "tty", "layer", "none")
+       for v in (True, False) for u in (True, False)},
+      {m.OSK_NOT_ASKED})
+
+check("asked for, drawn, and believed -> the strong promise",
+      m.osk_state_at_bind(True, "tty", visible=True, usable=True), m.OSK_DRAWN)
+# 🔴 THE "TOO EARLY" CASE, and it is the whole point of taking two inputs.
+# Reporting before `set_osk_visible(True)` runs leaves `visible` False with the
+# machinery perfectly healthy -- a state that reads as "fine" from every
+# direction except the screen the user is looking at.
+check("asked for but not shown YET -> not ready (the too-early case)",
+      m.osk_state_at_bind(True, "tty", visible=False, usable=True),
+      m.OSK_MISSING)
+# ...and the mirror: `set_osk_visible(True)` sets `osk_visible` unconditionally,
+# including when the tty backend was disabled before it ran, so believing the
+# flag alone is how a mapper claims a keyboard it never drew.
+check("shown according to us, but nothing can draw -> not ready",
+      m.osk_state_at_bind(True, "tty", visible=True, usable=False),
+      m.OSK_MISSING)
+check("...same for a layer keyboard whose overlay died",
+      m.osk_state_at_bind(True, "layer", visible=True, usable=False),
+      m.OSK_MISSING)
+# `osk_fall_back` degrades the tty backend to "none" at RUNTIME, after argparse
+# has long since accepted the flags. A re-bind report must notice.
+check("...and for a backend that degraded to none while running",
+      m.osk_state_at_bind(True, "none", visible=True, usable=False),
+      m.OSK_MISSING)
+check("squeekboard is REQUESTED, never confirmed -- and says so",
+      m.osk_state_at_bind(True, "dbus", visible=True, usable=False),
+      m.OSK_DISPATCHED)
+
+# --- the report lines --------------------------------------------------------
+
+for state, want_marker in ((m.OSK_NOT_ASKED, True), (m.OSK_DRAWN, True),
+                           (m.OSK_DISPATCHED, True), (m.OSK_MISSING, False)):
+    lines = m.bound_report("/dev/input/event7", "Valve Steam Deck", state)
+    check(f"{state}: exactly one line, so a consumer's grep is unambiguous",
+          len(lines), 1)
+    check(f"{state}: the marker is {'present' if want_marker else 'ABSENT'}",
+          any(m.BOUND_MARKER in line for line in lines), want_marker)
+    # The device is named on every path INCLUDING the refusal -- "not ready" is
+    # useless in a journal if it does not say which node it is not ready on.
+    check(f"{state}: names the node and the device",
+          all("/dev/input/event7" in line and "Valve Steam Deck" in line
+              for line in lines), True)
+
+# 🔴 THE SUBSTRING TRAP. The consumer greps with `grep -F`, so any wording that
+# happens to contain the marker turns the refusal into a false "ready" --
+# "bound to the pad but the keyboard is missing" would do exactly that. This is
+# the single most likely way a future edit to that sentence breaks the contract
+# without touching a line of logic.
+missing_line = m.bound_report("/dev/input/event7", "Valve Steam Deck",
+                              m.OSK_MISSING)[0]
+check("the refusal cannot be mistaken for the marker by a fixed-string grep",
+      m.BOUND_MARKER in missing_line, False)
+check("...and it says what still works, so it is a degradation and not a crash",
+      "avigation" in missing_line, True)
+
+# --- the marker string itself, and the consumer that greps for it ------------
+
+check("the marker is anchored at the start of its line",
+      m.bound_report("/dev/x", "y", m.OSK_DRAWN)[0].startswith(m.BOUND_MARKER),
+      True)
+# The re-bind line has always existed and must NOT read as a readiness signal:
+# "re-bound" does not contain "bound" with the prefix attached, and that near
+# miss is load-bearing rather than lucky.
+check("the long-standing re-bind line is not mistaken for the marker",
+      m.BOUND_MARKER in "deck-input-mapper: re-bound to /dev/input/event7 (x)",
+      False)
+
+# 🔴 CROSS-FILE, and the reason this check is in the PRODUCER's suite as well as
+# the consumer's: these are two files in two languages that must spell one
+# string identically, and whichever suite the next editor runs has to go red.
+form_sh = (REPO_ROOT / "src" / "deck-form.sh").read_text()
+form_marker = next(
+    (line.split("=", 1)[1].strip().strip('"')
+     for line in form_sh.splitlines()
+     if line.startswith("readonly DECK_OSK_BOUND_MARKER=")), None)
+check("src/deck-form.sh still declares the marker this suite can find",
+      form_marker is not None, True)
+check("...and it is spelled EXACTLY as the mapper prints it",
+      form_marker, m.BOUND_MARKER)
+# The flags deck-form.sh spawns the mapper with must be flags the mapper has.
+# A rename here is silent on both sides: argparse rejects the argv, the mapper
+# exits 2, and deck-form.sh sees only a marker that never came.
+form_args = next(
+    (line for line in form_sh.splitlines()
+     if line.startswith("readonly -a DECK_MAPPER_ARGS=")), "")
+check("deck-form.sh's mapper argv is still the one this file parses",
+      sorted(word.split("=")[0] for word in form_args.split("(", 1)[-1]
+             .rstrip(")").split() if word.startswith("--")),
+      ["--osk-backend", "--osk-start-shown"])
+
+# --- argparse: the contradiction is refused, loudly --------------------------
+
+import contextlib as _contextlib   # noqa: E402 -- block-local, like the others
+import io as _io                   # noqa: E402
+
+
+class _Reached(Exception):
+    """`main()` got past argument handling. Raised instead of touching a real
+    device -- this suite has no pad, and pick_device WAITS for one."""
+
+
+def parsed(argv: list[str]):
+    """Run main()'s argument handling only. Returns (exception, stderr).
+
+    ⚠️ `raised()` above is deliberately not reused: it catches `Exception`, and
+    argparse refuses by raising `SystemExit`, which is a BaseException. Using it
+    here made this whole block exit(2) silently mid-run -- a suite that stops
+    early looks a lot like a suite that passed.
+    """
+    saved_argv, saved_pick = sys.argv, m.pick_device
+    sys.argv = ["deck-input-mapper", *argv]
+    m.pick_device = lambda selector: (_ for _ in ()).throw(_Reached())
+    err = _io.StringIO()
+    try:
+        with _contextlib.redirect_stderr(err):
+            try:
+                m.main()
+            except BaseException as exc:   # noqa: BLE001 -- SystemExit included
+                return exc, err.getvalue()
+        return None, err.getvalue()
+    finally:
+        sys.argv, m.pick_device = saved_argv, saved_pick
+
+
+exc, err = parsed(["--osk-backend=none", "--osk-start-shown"])
+check("--osk-start-shown with --osk-backend=none is REFUSED, not reconciled",
+      isinstance(exc, SystemExit), True)
+check("...with argparse's usage exit status", getattr(exc, "code", None), 2)
+check("...naming BOTH halves of the contradiction, on stderr",
+      all(flag in err for flag in ("--osk-start-shown", "--osk-backend=none")),
+      True)
+# The order of the two flags on the command line must not decide whether the
+# contradiction is seen -- it is a property of the parsed arguments.
+exc, _ = parsed(["--osk-start-shown", "--osk-backend=none"])
+check("...whichever order they were given in", isinstance(exc, SystemExit), True)
+
+exc, _ = parsed(["--osk-backend=tty", "--osk-start-shown"])
+check("--osk-start-shown with a real backend is accepted",
+      isinstance(exc, _Reached), True)
+# Idempotent: `store_true` twice is the same argv as once. A wrapper that
+# appends the flag to a command line that already carries it must not fail.
+exc, _ = parsed(["--osk-backend=tty", "--osk-start-shown", "--osk-start-shown"])
+check("...and repeating it changes nothing (idempotent flags)",
+      isinstance(exc, _Reached), True)
+exc, _ = parsed(["--osk-backend=none"])
+check("--osk-backend=none on its own is still perfectly legal",
+      isinstance(exc, _Reached), True)
+
+# --- a REAL main() run, start to finish --------------------------------------
+#
+# 🔴 EVERYTHING ELSE IN THIS BLOCK TESTS A PIECE. This runs the actual `main()`
+# -- its argument handling, its device setup, its uinput, its selector, one
+# pass of its loop and its teardown -- with a pad-shaped object on a real pipe
+# and the keyboard drawn into a real file. Only three things are replaced
+# (`pick_device`, `UInput`, and which copy of `deck_osk_tty` gets loaded, so the
+# draw can be timestamped); the ordering under test is main()'s own.
+#
+# It exists because the ordering checks below are read off the source tree, and
+# a source-shaped check cannot see a `set_osk_visible` that returns without
+# drawing. Here the marker and the draw land in ONE recording, in the order they
+# actually happened, so "printed the marker too early" is a failed assertion
+# rather than an argument about the AST.
+
+import evdev as _evdev   # noqa: E402 -- block-local, like the others
+
+
+class LivePad:
+    """A pad-shaped object with a REAL fd, so main()'s selector really selects.
+
+    `read()` raises KeyboardInterrupt: main() catches exactly that and runs its
+    teardown, which is how one pass of an infinite loop is a unit test.
+    """
+
+    def __init__(self, path="/dev/input/event9", name="Valve Steam Deck fake"):
+        self.path, self.name = path, name
+        self._r, self._w = os.pipe()
+        self.fd = self._r
+        self.reads = 0
+
+    def capabilities(self):
+        info = _evdev.AbsInfo(value=0, min=-32767, max=32767, fuzz=0, flat=0,
+                              resolution=0)
+        axes = sorted({*m.STICK_AXES, *m.POINTER_AXES, *osk_mod.PAD_AXES})
+        return {e.EV_KEY: [e.BTN_SOUTH], e.EV_ABS: [(c, info) for c in axes]}
+
+    def wake(self):
+        os.write(self._w, b"\0")
+
+    def read(self):
+        self.reads += 1
+        raise KeyboardInterrupt
+
+    def close(self):
+        os.close(self._r)
+        os.close(self._w)
+
+
+class FakeUInput:
+    def __init__(self, *args, **kwargs):
+        self.closed = False
+
+    def write(self, *args):
+        pass
+
+    def syn(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+class Tape:
+    """A stderr-shaped recorder that shares ONE timeline with the OSK's draws."""
+
+    def __init__(self, log):
+        self.log = log
+
+    def write(self, text):
+        if text.strip():
+            self.log.append(("stderr", text))
+        return len(text)
+
+    def flush(self):
+        pass
+
+
+def run_main(argv, osk_tty_path):
+    """One whole main() run. Returns (timeline, what the tty got, the pad)."""
+    timeline = []
+    pad = LivePad()
+    pad.wake()   # so the first select() returns at once and the loop ends
+    tty_module = m._load_module("deck_osk_tty")
+    real_write_at = tty_module.write_at
+
+    def spy_write_at(*args, **kwargs):
+        timeline.append(("draw", None))
+        return real_write_at(*args, **kwargs)
+
+    tty_module.write_at = spy_write_at
+    saved = (sys.argv, m.pick_device, m.UInput, m._load_module)
+    sys.argv = ["deck-input-mapper", f"--osk-tty={osk_tty_path}", *argv]
+    m.pick_device = lambda selector: pad
+    m.UInput = FakeUInput
+    m._load_module = (lambda name, _real=saved[3]:
+                      tty_module if name == "deck_osk_tty" else _real(name))
+    try:
+        with _contextlib.redirect_stderr(Tape(timeline)):
+            m.main()
+    finally:
+        sys.argv, m.pick_device, m.UInput, m._load_module = saved
+        tty_module.write_at = real_write_at
+        pad.close()
+    target = pathlib.Path(osk_tty_path)
+    drawn = target.read_text() if target.is_file() else ""
+    return timeline, drawn, pad
+
+
+def marker_index(timeline) -> int:
+    return next((i for i, (kind, text) in enumerate(timeline)
+                 if kind == "stderr" and m.BOUND_MARKER in text), -1)
+
+
+import tempfile as _tempfile   # noqa: E402
+
+with _tempfile.TemporaryDirectory() as _tmp:
+    console = pathlib.Path(_tmp) / "console"
+
+    # 1. THE INSTALLER'S OWN COMMAND LINE, exactly as src/deck-form.sh spawns it.
+    timeline, drawn, pad = run_main(["--osk-backend=tty", "--osk-start-shown"],
+                                    str(console))
+    i_marker = marker_index(timeline)
+    check("a real main() run prints the marker on stderr", i_marker >= 0, True)
+    i_draw = next((i for i, (kind, _) in enumerate(timeline) if kind == "draw"), -1)
+    check("...having actually drawn the keyboard first, in one timeline",
+          0 <= i_draw < i_marker, True)
+    # The draw is a real one: the keyboard's own glyphs reached the console.
+    check("...and what it drew is the keyboard, not an empty frame",
+          all(label in drawn for label in ("Backspace", "Shift", "space")), True)
+    # ...and the loop really was entered: the marker is printed on the way IN
+    # to select(), so a run that never got there would still have printed it.
+    check("...and the loop was entered, so this is a run and not a setup",
+          pad.reads, 1)
+
+    # 2. THE DEGRADE PATH, run for real: an unopenable console. `--osk-tty` at a
+    #    DIRECTORY is the cheapest honest stand-in for the three ways the tty
+    #    keyboard fails to come up on the ISO. Nothing is drawn, so nothing may
+    #    be promised -- and src/deck-form.sh's five-second timeout is what turns
+    #    this into the visible degradation §2.3 asks for.
+    timeline, _, _ = run_main(["--osk-backend=tty", "--osk-start-shown"], _tmp)
+    check("an OSK that cannot be drawn gets NO marker, from a real run",
+          marker_index(timeline), -1)
+    check("...and says so, naming the keyboard and what still works",
+          any(kind == "stderr" and "NOT reporting ready" in text
+              for kind, text in timeline), True)
+    check("...and nothing was drawn to claim otherwise",
+          [kind for kind, _ in timeline if kind == "draw"], [])
+
+    # 3. Navigation only: no keyboard was asked for, so being bound IS ready.
+    console2 = pathlib.Path(_tmp) / "console2"
+    timeline, drawn, _ = run_main(["--osk-backend=tty"], str(console2))
+    check("without --osk-start-shown the mapper is ready as soon as it is bound",
+          marker_index(timeline) >= 0, True)
+    check("...and no keyboard was drawn uninvited",
+          [kind for kind, _ in timeline if kind == "draw"], [])
+
+# --- the wiring in main(), enforced against the SOURCE ------------------------
+#
+# Everything above tests functions main() CALLS. None of it can see main()
+# calling them in the wrong order, or from the wrong place -- and the ordering
+# IS the contract here, exactly as it is for the lift gate and the §5.28
+# resolver above.
+
+marker_loads = [node for node in ast.walk(tree)
+                if isinstance(node, ast.Name) and node.id == "BOUND_MARKER"
+                and isinstance(node.ctx, ast.Load)]
+report_def = next(node for node in ast.walk(tree)
+                  if isinstance(node, ast.FunctionDef) and node.name == "bound_report")
+check("BOUND_MARKER is produced in exactly one function, so 'ready' has one "
+      "definition",
+      [node.lineno for node in marker_loads
+       if not report_def.lineno <= node.lineno <= report_def.end_lineno], [])
+# ...and nothing anywhere else spells it out as a literal and sidesteps that.
+check("...and no other string in the file spells the marker out by hand",
+      [node.lineno for node in ast.walk(tree)
+       if isinstance(node, ast.Constant) and isinstance(node.value, str)
+       and "deck-input-mapper: bound" in node.value
+       and node.lineno != next(n.lineno for n in ast.walk(tree)
+                               if isinstance(n, ast.Assign)
+                               and any(isinstance(t, ast.Name) and t.id == "BOUND_MARKER"
+                                       for t in n.targets))],
+      [])
+
+report_calls = [node for node in ast.walk(main_def)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "report_bound"]
+check("main() reports bound at exactly two points -- startup and the re-bind",
+      len(report_calls), 2)
+check("...and both go through the one report builder",
+      len([node for node in ast.walk(main_def)
+           if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+           and node.func.id == "bound_report"]), 1)
+# 🔴 The re-bind's argument is the CAPTURED state, never a constant. `True`
+# here forces a keyboard back onto a user who dismissed it and then calls a
+# missing one a failure; `False` reports ready with the keyboard torn down.
+check("...each asked what SHOULD be on screen, from a variable not a literal",
+      sorted(ast.unparse(node.args[0]) for node in report_calls),
+      ["args.osk_start_shown", "osk_was_visible"])
+
+
+def body_index(body, pred) -> int:
+    """Where in a statement list the statement containing `pred` sits. -1 if
+    absent -- which fails the comparisons below rather than raising.
+
+    ⚠️ NESTED `def`s ARE SKIPPED. main() defines ~20 closures before it runs a
+    single statement, and several of them call `set_osk_visible` and
+    `sel.register`. Counting those made every ordering check below trivially
+    true (a definition near the top of main() precedes everything), which is a
+    check that cannot fail -- caught here by writing the mutation first.
+    """
+    for index, stmt in enumerate(body):
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if any(pred(node) for node in ast.walk(stmt)):
+            return index
+    return -1
+
+
+def calls(name):
+    return lambda node: (isinstance(node, ast.Call)
+                         and isinstance(node.func, ast.Name)
+                         and node.func.id == name)
+
+
+def calls_attr(name, on=None):
+    return lambda node: (isinstance(node, ast.Call)
+                         and isinstance(node.func, ast.Attribute)
+                         and node.func.attr == name
+                         and (on is None or (isinstance(node.func.value, ast.Name)
+                                             and node.func.value.id == on)))
+
+
+def calls_with(name, first_arg):
+    """`name(first_arg, ...)` specifically. The ENODEV branch both HIDES and
+    SHOWS the keyboard, so "a statement mentioning set_osk_visible" cannot tell
+    the two apart -- and an ordering check that cannot tell them apart passed a
+    mutation that redrew the keyboard from the dead pad's axis ranges."""
+    return lambda node: (isinstance(node, ast.Call)
+                         and isinstance(node.func, ast.Name)
+                         and node.func.id == name and node.args
+                         and ast.unparse(node.args[0]) == first_arg)
+
+
+# STARTUP. `sel.register(pad.fd, ...)` is what makes the pad's events reachable
+# at all; a marker above it is T4-screen-spec.md §6.4 lie #2 (a bound-looking,
+# silent input path) printed by us rather than merely tolerated.
+top = main_def.body
+i_register = body_index(top, calls_attr("register", on="sel"))
+i_show = body_index(top, calls_with("set_osk_visible", "True"))
+i_report = body_index(top, calls("report_bound"))
+check("the startup report comes AFTER the pad's fd is in the selector",
+      i_register != -1 and i_report > i_register, True)
+check("...and AFTER the start-shown keyboard has been drawn",
+      i_show != -1 and i_report > i_show, True)
+# ...and that show is the one --osk-start-shown asked for, not an unconditional
+# one that would open a keyboard on every Desktop Mode boot.
+start_show = top[i_show]
+check("...which is drawn only when --osk-start-shown asked for it",
+      isinstance(start_show, ast.If)
+      and "osk_start_shown" in ast.unparse(start_show.test), True)
+
+# THE RE-BIND, in the ENODEV handler. Same three orderings, and one more: the
+# replacement pad's axis ranges must be in place before the keyboard is redrawn
+# from them.
+handler = next(node for node in ast.walk(main_def)
+               if isinstance(node, ast.ExceptHandler)
+               and any(calls("pick_device")(sub) for sub in ast.walk(node)))
+hb = handler.body
+i_pick = body_index(hb, calls("pick_device"))
+i_reregister = body_index(hb, calls_attr("register", on="sel"))
+i_ranges = body_index(hb, lambda node: isinstance(node, ast.Attribute)
+                      and node.attr == "ranges" and isinstance(node.ctx, ast.Store))
+i_rehide = body_index(hb, calls_with("set_osk_visible", "False"))
+i_reshow = body_index(hb, calls_with("set_osk_visible", "True"))
+i_rereport = body_index(hb, calls("report_bound"))
+check("the re-bind picks a replacement pad before anything else happens",
+      0 <= i_pick < i_reregister, True)
+# 🔴 The replacement pad may advertise different axis ranges. Redrawing before
+# they are in place puts both cursors where the old device's midpoint was --
+# which on a keyboard is a different key, and reads as "the keyboard came back
+# wrong" rather than as anything anyone would call a bug.
+check("...re-ranges the cursors before the keyboard is put back",
+      0 <= i_ranges < i_reshow, True)
+check("...and reports bound last of all",
+      i_rereport > max(i_reregister, i_ranges, i_reshow), True)
+# The hide is the mapper's own (the node is gone); the show is the restore.
+# Capturing the state after the hide reads False every time, which silently
+# converts "put the keyboard back" into "never".
+i_capture = body_index(hb, lambda node: isinstance(node, ast.Name)
+                       and node.id == "osk_was_visible"
+                       and isinstance(node.ctx, ast.Store))
+check("what was on screen is captured BEFORE the mapper's own hide",
+      0 <= i_capture < i_rehide, True)
+check("...and the restore is conditional on it, not unconditional",
+      "osk_was_visible" in ast.unparse(hb[i_reshow]), True)
+
+# `osk_usable` is the half of the state machine no behavioural test can reach --
+# it reads main()'s own locals. Pinned by the facts it consults: dropping any
+# one of them makes some real, measured failure invisible.
+usable_def = next(node for node in ast.walk(main_def)
+                  if isinstance(node, ast.FunctionDef) and node.name == "osk_usable")
+usable_names = {node.id for node in ast.walk(usable_def)
+                if isinstance(node, ast.Name)}
+check("osk_usable asks every way the keyboard we draw can be absent",
+      sorted({"osk_backend", "osk_tty", "osk_stream", "osk_narrow_at",
+              "osk_layer_proc", "osk_drawn_here"} - usable_names), [])
+# 🔴 `osk_narrow_at` specifically. A console too narrow for the keyboard draws
+# a NOTICE where the keyboard would be (R-49 / §9g) -- the process is healthy,
+# the pads commit, and the user types blind. It is the only "on screen" failure
+# with nothing broken behind it, and so the easiest one to drop from this list.
+check("...including the too-narrow console, where nothing is broken but the "
+      "keyboard is still not on the screen",
+      "osk_narrow_at" in usable_names, True)
+state_calls = [node for node in ast.walk(main_def)
+               if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+               and node.func.id == "osk_state_at_bind"]
+check("the report asks for BOTH halves -- what we believe and what is true",
+      [sorted(kw.arg for kw in node.keywords) for node in state_calls],
+      [["usable", "visible"]])
+check("...taking `usable` from the live check, not from a placeholder",
+      [ast.unparse(kw.value) for node in state_calls for kw in node.keywords
+       if kw.arg == "usable"], ["osk_usable()"])
+
 print(f"\n{'PASS' if FAILURES == 0 else 'FAILED'} — {FAILURES} failure(s)")
 sys.exit(1 if FAILURES else 0)

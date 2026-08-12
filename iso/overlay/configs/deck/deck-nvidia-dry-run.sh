@@ -14,6 +14,10 @@
 # Env:
 #   DECK_NVIDIA_DRYRUN_ROOT   scratch --root for the resolve
 #                             (default /tmp/omarchy-deck-nvidia-dryrun)
+#   DECK_LOCAL_PACKAGES       space-separated names that this build produces
+#                             ITSELF and that therefore exist in no online
+#                             repository (T5-fork-plan.md §3 seam S4). Empty or
+#                             unset is legal and means "we build nothing".
 #
 # ---------------------------------------------------------------------------
 # What it asserts, and why it is shaped this way
@@ -65,6 +69,15 @@
 #     matcher matches nothing any more or upstream changed the default
 #     provider -- and in both cases the green result above proves nothing, so
 #     the build stops.
+#  7. DECK_LOCAL_PACKAGES is an EXCLUSION, and an exclusion is a hole. It has
+#     to prove it was deliberate, so each excluded name must (a) actually be in
+#     deck-install.packages -- excluding a name nobody installs is excluding
+#     nothing, and (b) actually be removed from the assembled target list, with
+#     the arithmetic checked. A name that silently vanished from the list makes
+#     the count wrong and fails the build. The positive control in (4) is NOT
+#     widened to tolerate their absence; they get the opposite assertion
+#     instead -- a locally built name that DOES resolve online is a name
+#     collision with a real package, and that is its own failure.
 #
 # None of the matchers below use grep's exit status to mean "found/not found";
 # they are awk filters, which exit 0 whether or not they printed. The
@@ -151,6 +164,52 @@ mapfile -t fetched < <(read_list "$FETCH_LIST")
 ((${#pinned[@]} > 0)) || fail "$INSTALL_LIST contains no package entries"
 ((${#fetched[@]} > 0)) || fail "$FETCH_LIST contains no package entries"
 
+# ---------------------------------------------------------------------------
+# (7) Locally built packages -- T5-fork-plan.md §3 seam S4
+#
+# These are produced by builder/build-iso.sh itself, straight into the offline
+# mirror, and exist in no online repository. This whole script resolves against
+# the ONLINE repos, and `pacman -S --print` aborts the entire transaction on a
+# single unresolvable target -- so they must come out of the target set, and
+# the hole that makes has to be shown to be deliberate.
+# ---------------------------------------------------------------------------
+
+# `read -a` on an empty string yields an empty array, which is the "we build
+# nothing" case and is legal. Kept as text as well, so membership tests never
+# have to expand a possibly-empty array under `set -u`.
+local_packages=()
+[[ -n ${DECK_LOCAL_PACKAGES:-} ]] && read -r -a local_packages <<<"$DECK_LOCAL_PACKAGES"
+local_packages_text=${DECK_LOCAL_PACKAGES:-}
+local_packages_text=${local_packages_text// /$'\n'}
+pinned_text=$(printf '%s\n' "${pinned[@]}")
+
+# (7a) Every excluded name must be one this ISO actually installs. Excluding a
+# name that is in no install list excludes nothing and hides nothing -- it is
+# the shape of an exclusion list that has outlived what it was for.
+for local_pkg in "${local_packages[@]-}"; do
+  [[ -n $local_pkg ]] || continue
+  contains "$local_pkg" <<<"$pinned_text" || fail \
+    "'$local_pkg' is named in DECK_LOCAL_PACKAGES but is not in $INSTALL_LIST" \
+    "This variable exists to excuse a package from the ONLINE resolve because" \
+    "we build it ourselves. A name that nothing installs needs no excuse, so" \
+    "either add it to the install list or stop excluding it. Silently" \
+    "tolerating it would leave a permanent hole in the target set below."
+done
+
+# The pins that the negative and positive controls can legitimately use: the
+# locally built ones can never appear in an online resolve, so folding them
+# into either control would make it assert a falsehood.
+online_pinned=()
+for entry in "${pinned[@]}"; do
+  if contains "$entry" <<<"$local_packages_text"; then continue; fi
+  online_pinned+=("$entry")
+done
+((${#online_pinned[@]} > 0)) || fail \
+  "every entry in $INSTALL_LIST is a locally built package" \
+  "The negative control below removes the online pins to prove the matcher can" \
+  "fire; with none left to remove it would compare a set against itself and" \
+  "pass for the wrong reason."
+
 # deck-install.packages is resolved against the single-repo offline mirror
 # twice (resolve_expected_packages, and pacstrap at install time), so a
 # repo-qualified name there aborts both. Catch it here rather than 40 minutes
@@ -214,13 +273,48 @@ pac -Sy >/dev/null || fail \
   "could not sync the package databases for the dry run" \
   "config: $PACMAN_CONF"
 
-mapfile -t targets < <(
+mapfile -t assembled_targets < <(
   {
     read_list "$ARCHINSTALL_PACKAGES" "$BASE_PACKAGES" "$FETCH_LIST"
     if ((${#EXTRA_TARGETS[@]} > 0)); then printf '%s\n' "${EXTRA_TARGETS[@]}"; fi
   } | sort -u
 )
-((${#targets[@]} > 0)) || fail "assembled an empty target list"
+((${#assembled_targets[@]} > 0)) || fail "assembled an empty target list"
+
+# (7b) Drop the locally built names, and CHECK THE ARITHMETIC. Removing them is
+# the only way this resolve can run at all, but a silent removal would also
+# hide the case where one of them fell out of the shipped package lists
+# entirely -- which is the failure that ends with the ISO carrying a package
+# nothing installs. The count is the proof that the exclusion did work rather
+# than that there was nothing to exclude.
+#
+# ⚠️ Stated honestly about what it can and cannot catch. No INPUT can make this
+# fire on its own: $BASE_PACKAGES is both the list the shipped-base agreement
+# check above reads and one of the files the target set is assembled from, so a
+# name that passed (7a) and that check is necessarily in $assembled_targets.
+# What it does catch, measured by mutation: a broken exclusion LOOP -- delete
+# the filter below and this line is what notices, before anything downstream
+# resolves a package no repo has. The end-to-end proof that the exclusion
+# reached pacman lives in test/unit/test-deck-nvidia-dry-run.sh, which reads
+# the resolve's actual argument list rather than this script's own account.
+targets=()
+for entry in "${assembled_targets[@]}"; do
+  if contains "$entry" <<<"$local_packages_text"; then continue; fi
+  targets+=("$entry")
+done
+excluded_count=$((${#assembled_targets[@]} - ${#targets[@]}))
+((excluded_count == ${#local_packages[@]})) || fail \
+  "excluding DECK_LOCAL_PACKAGES removed $excluded_count target(s), expected ${#local_packages[@]}" \
+  "Names: ${DECK_LOCAL_PACKAGES:-<none>}" \
+  "Every locally built package must be IN the assembled target set before it is" \
+  "taken out -- it reaches that set through deck-install.packages, merged into" \
+  "the shipped omarchy-base.packages by seam S1. A count that is short means" \
+  "the name is not really being installed, so excluding it from this resolve" \
+  "would be hiding a target that does not exist rather than one we build."
+((${#targets[@]} > 0)) || fail "the target list is empty after the seam-S4 exclusion"
+if ((excluded_count > 0)); then
+  log "excluded ${excluded_count} locally built package(s) from the online resolve: ${DECK_LOCAL_PACKAGES:-}"
+fi
 
 log "dry run over ${#targets[@]} targets (installed set + ${fetched[*]})"
 
@@ -229,25 +323,29 @@ log "dry run over ${#targets[@]} targets (installed set + ${fetched[*]})"
 #     before any passing result from it is believed.
 # ---------------------------------------------------------------------------
 
+# online_pinned, not pinned: the locally built names are already gone from
+# $targets, so asking to remove them again would make the arithmetic below
+# short by exactly the number of them and fail for a reason that is not real.
 mapfile -t control_targets < <(
   awk 'NR == FNR { drop[$0] = 1; next } !($0 in drop)' \
-    <(printf '%s\n' "${pinned[@]}") <(printf '%s\n' "${targets[@]}")
+    <(printf '%s\n' "${online_pinned[@]}") <(printf '%s\n' "${targets[@]}")
 )
-((${#control_targets[@]} == ${#targets[@]} - ${#pinned[@]})) || fail \
-  "the negative control removed ${#targets[@]} - ${#control_targets[@]} targets, expected ${#pinned[@]}" \
-  "Every entry in $INSTALL_LIST must appear in the assembled target list, or" \
-  "the control is not testing the thing the real assertion depends on."
+((${#control_targets[@]} == ${#targets[@]} - ${#online_pinned[@]})) || fail \
+  "the negative control removed ${#targets[@]} - ${#control_targets[@]} targets, expected ${#online_pinned[@]}" \
+  "Every non-locally-built entry in $INSTALL_LIST must appear in the assembled" \
+  "target list, or the control is not testing the thing the real assertion" \
+  "depends on."
 
 if ! control=$(resolve "${control_targets[@]}"); then
   fail "the negative control's resolve failed" \
-    "It uses the same targets as the real assertion minus ${pinned[*]}, so this" \
-    "is not a control-only problem."
+    "It uses the same targets as the real assertion minus ${online_pinned[*]}," \
+    "so this is not a control-only problem."
 fi
 control_hits=$(printf '%s\n' "$control" | nvidia_matches)
 if [[ -z $control_hits ]]; then
   fail \
     "the NEGATIVE CONTROL did not fire" \
-    "Resolving the same targets WITHOUT ${pinned[*]} is supposed to make pacman" \
+    "Resolving the same targets WITHOUT ${online_pinned[*]} is supposed to make pacman" \
     "satisfy steam's virtual vulkan-driver / lib32-vulkan-driver dependencies" \
     "with the NVIDIA stack (docs/PROGRESS.md §3.8, measured 2026-08-12:" \
     "egl-gbm egl-wayland egl-wayland2 egl-x11 lib32-nvidia-utils nvidia-utils)." \
@@ -280,10 +378,34 @@ resolved_count=$(printf '%s\n' "$resolved" | wc -l)
   "its NVIDIA content is meaningless."
 
 # (4) POSITIVE CONTROL: the packages we asked about by name must be in the answer.
-for probe in "${pinned[@]}" "${fetched[@]}"; do
+#
+# online_pinned rather than pinned -- and that is a NARROWING, not a widening.
+# The locally built names were never asked about here (they cannot be, they are
+# in no online repo), so demanding their presence would be a control nobody can
+# satisfy; but they are not simply dropped either. They get the mirror-image
+# assertion immediately below, and the exclusion that removed them was already
+# proved deliberate by (7a)/(7b) above.
+for probe in "${online_pinned[@]}" "${fetched[@]}"; do
   contains "$probe" <<<"$resolved" || fail \
     "'$probe' was a target but is not in the $resolved_count-package result" \
     "The dry run did not ask the question this guard claims it asked."
+done
+
+# (7c) The mirror image, for the names (4) can no longer cover: a package we
+# build ourselves must NOT resolve out of the online repositories. If one does,
+# the name collides with a real published package, and every later step --
+# `pacman -Syw`, the prune keep-set, pacstrap -- would be silently choosing
+# between two different packages with one name.
+for local_pkg in "${local_packages[@]-}"; do
+  [[ -n $local_pkg ]] || continue
+  if contains "$local_pkg" <<<"$resolved"; then fail \
+    "'$local_pkg' is supposed to be built by this ISO, but it RESOLVES ONLINE" \
+    "A locally built package name that also exists in a configured online" \
+    "repository is a collision: pacman -Syw would download the other one, the" \
+    "prune keep-set would then hold two files for one name, and which of them" \
+    "pacstrap installs on the target is not something this build decides." \
+    "Rename our package, or stop building it."
+  fi
 done
 
 # (5) The exception must still be needed. An exception that no longer matches

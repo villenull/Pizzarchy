@@ -184,6 +184,31 @@ pass "lizard_write on a missing knob degrades (returns 0, warns, creates nothing
 
 echo "--- deck_form_wait_for_marker ------------------------------------------"
 
+# --- the cross-file contract: this marker is the MAPPER'S line -------------
+#
+# Same discipline as DECK_CONSOLE_KEYMAP above, and the same failure if it is
+# skipped. DECK_OSK_BOUND_MARKER is not a string this file invented: it is
+# what src/deck-input-mapper.py prints when it is ready to deliver keystrokes
+# (its `BOUND_MARKER`). Two files, two languages, one string, and if they ever
+# drift NOTHING here goes red on its own -- every prompt just waits out its
+# five seconds and degrades, on a real ISO, silently as far as this suite is
+# concerned. Both suites check it, so whichever one the next editor runs fails.
+mapper_marker=$(sed -n 's/^BOUND_MARKER = "\(.*\)"$/\1/p' "$REPO_ROOT/src/deck-input-mapper.py")
+[[ -n $mapper_marker ]] ||
+  fail "could not find 'BOUND_MARKER = ' in src/deck-input-mapper.py -- this cross-check is broken, not the code"
+[[ $mapper_marker == "$DECK_OSK_BOUND_MARKER" ]] ||
+  fail "DECK_OSK_BOUND_MARKER ('$DECK_OSK_BOUND_MARKER') and the mapper's BOUND_MARKER ('$mapper_marker') disagree -- every text prompt would wait out its deadline and degrade, with nothing on either side saying why"
+pass "DECK_OSK_BOUND_MARKER is exactly the mapper's BOUND_MARKER ('$mapper_marker')"
+
+# ...and the argv this file spawns it with is argv the mapper accepts. A flag
+# renamed on that side makes argparse exit 2 before a single line is printed,
+# which arrives here as the same silent five-second degrade.
+for flag in "${DECK_MAPPER_ARGS[@]}"; do
+  LC_ALL=C grep -qF -- "\"${flag%%=*}\"" "$REPO_ROOT/src/deck-input-mapper.py" ||
+    fail "deck-form.sh spawns the mapper with '${flag}', but src/deck-input-mapper.py declares no '${flag%%=*}' -- argparse would reject the whole command line"
+done
+pass "every flag in DECK_MAPPER_ARGS (${DECK_MAPPER_ARGS[*]}) is one src/deck-input-mapper.py declares"
+
 printf 'deck-input-mapper: bound\n' >"$work/mapper.out"
 deck_form_wait_for_marker "$work/mapper.out" "deck-input-mapper: bound" 1 0.05 ||
   fail "wait_for_marker finds a marker that is already there"

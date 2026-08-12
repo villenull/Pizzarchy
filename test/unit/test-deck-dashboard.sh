@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Unit tests for src/deck-dashboard.sh -- T4a's S6/S7/S8 screens, which live
+# Unit tests for deck-dashboard.sh -- T4a's S6/S7/S8 screens, which live
 # in `omarchy-install-dashboard`, a process separate from `configurator`
 # (see deck-dashboard.sh's own header, and docs/tasks/T4a-dashboard-screens.md
 # §1). No VM, no gum, no Deck: every collaborator this file would normally
@@ -27,6 +27,17 @@ fi
 
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 
+# deck-dashboard.sh was promoted out of src/ into the ISO overlay on
+# 2026-08-12, together with the patch that sources it (src/iso-patches/
+# README.md: a file that ships on the ISO and nowhere else lives in the
+# overlay, at its shipped path -- one copy, no src/ duplicate). The overlay
+# path below is the shipped path with iso/overlay/configs/ prefixed;
+# iso/bin/build step 4 rsyncs overlay/configs/ over the upstream tree, so
+# what this suite sources is byte-for-byte what the ISO carries.
+DASHBOARD_SH="$REPO_ROOT/iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-dashboard.sh"
+[[ -r $DASHBOARD_SH ]] ||
+  { printf 'not ok - %s\n' "deck-dashboard.sh is not at $DASHBOARD_SH -- it ships on the ISO and nowhere else, so the overlay is its only home"; exit 1; }
+
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1"; [[ -n ${2:-} ]] && printf '%s\n' "$2" >&2; exit 1; }
 
@@ -40,8 +51,8 @@ trap 'rm -rf "$work"' EXIT
 # stricter mode so a real bug (an unset variable, a broken pipe) still
 # surfaces here, matching test-deck-form.sh's identical choice for
 # src/deck-form.sh.
-# shellcheck source=../../src/deck-dashboard.sh
-source "$REPO_ROOT/src/deck-dashboard.sh"
+# shellcheck source=../../iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-dashboard.sh
+source "$DASHBOARD_SH"
 
 DASHBOARD="$REPO_ROOT/iso/upstream/configs/airootfs/usr/local/bin/omarchy-install-dashboard"
 CONFIGURATOR="$REPO_ROOT/iso/upstream/configs/airootfs/root/configurator"
@@ -205,7 +216,7 @@ cat >"$work/driver.sh" <<'DRIVER'
 set -uo pipefail
 REPO_ROOT="$1"
 # shellcheck source=/dev/null
-source "$REPO_ROOT/src/deck-dashboard.sh"
+source "$REPO_ROOT/iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-dashboard.sh"
 
 TTY_PATH="$2"
 interactive() { [[ ${FAKE_INTERACTIVE:-yes} == yes ]]; }
@@ -339,7 +350,7 @@ echo "--- the OVERRIDE-NAME contract, checked against upstream's own source ---"
 [[ -r $DASHBOARD ]] ||
   fail "iso/upstream is not checked out, so the override-name contract was NOT verified. Run: git submodule update --init iso/upstream"
 
-overrides=$(grep -oE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' "$REPO_ROOT/src/deck-dashboard.sh" |
+overrides=$(grep -oE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' "$DASHBOARD_SH" |
               tr -d '()' | grep -v '^deck_dashboard_' | sort -u)
 [[ -n $overrides ]] ||
   fail "found NO override functions in deck-dashboard.sh -- this scanner is broken, not the file"
@@ -400,11 +411,17 @@ fi
 
 echo "--- the patch applies, and lands the source line in the right place -----"
 
-PATCH="$REPO_ROOT/src/iso-patches/omarchy-install-dashboard.patch"
-[[ -r $PATCH ]] || fail "src/iso-patches/omarchy-install-dashboard.patch is missing"
+# Promoted 2026-08-12 out of src/iso-patches/ into the overlay, in the same
+# change that moved deck-dashboard.sh -- iso/bin/build applies every
+# overlay/patches/*.patch it finds, so from here on this patch is live on the
+# very next build and its target file had better be on the ISO.
+PATCH="$REPO_ROOT/iso/overlay/patches/omarchy-install-dashboard.patch"
+[[ -r $PATCH ]] || fail "iso/overlay/patches/omarchy-install-dashboard.patch is missing"
+[[ ! -e "$REPO_ROOT/src/iso-patches/omarchy-install-dashboard.patch" ]] ||
+  fail "omarchy-install-dashboard.patch exists in BOTH src/iso-patches/ and iso/overlay/patches/ -- promotion is a git mv, not a copy"
 
 command -v patch >/dev/null 2>&1 ||
-  fail "no 'patch' binary available to verify src/iso-patches/omarchy-install-dashboard.patch applies -- cannot verify the patch, not skipping silently"
+  fail "no 'patch' binary available to verify iso/overlay/patches/omarchy-install-dashboard.patch applies -- cannot verify the patch, not skipping silently"
 
 scratch_root="$work/patch-scratch"
 mkdir -p "$scratch_root/configs/airootfs/usr/local/bin"

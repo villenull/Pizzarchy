@@ -153,6 +153,96 @@ readonly STEAM_RUNTIME_PATH=/usr/bin:/bin
 readonly SUDOERS_FILE=/etc/sudoers.d/99-deck-session-select
 readonly RETURN_DESKTOP_FILE=/usr/share/applications/deck-return-to-gaming.desktop
 
+# --- the one command that means "go back to Gaming Mode" -------------------
+#
+# ONE constant, used by BOTH ways back: the .desktop entry's Exec= and the
+# Quickshell menu row's action. They were separate string literals in two
+# heredocs for exactly one session, which is one session too many -- a shim
+# rename that reached only one of them leaves a launcher icon and a menu row
+# that disagree, and the one that is wrong does nothing at all with no error
+# anywhere. assert_return_action_agrees() re-derives both from what actually
+# gets rendered and refuses to install if they have drifted.
+#
+# ${STEAM_SHIM}, NOT ${SELECT_BIN}: the shim in /usr/bin is the unprivileged
+# entry point (it re-invokes ${SELECT_BIN} through the sudoers grant). A menu
+# row or .desktop pointing at ${SELECT_BIN} would need a password nobody on a
+# Deck can type.
+readonly RETURN_ACTION="${STEAM_SHIM} gamescope"
+readonly RETURN_LABEL="Return to Gaming Mode"
+readonly RETURN_DESCRIPTION="Switch back to the Steam Big Picture session"
+
+# --- the Quickshell menu row (Omarchy 4.0) --------------------------------
+#
+# Omarchy 4.0's menu is Quickshell, and its ONE documented extension point is a
+# per-user JSONC file. Read out of the pinned runtime rather than a blog post:
+# shell/plugins/menu/Menu.qml:51 --
+#
+#   property string userMenuPath: Quickshell.env("HOME")
+#                                 + "/.config/omarchy/extensions/omarchy-menu.jsonc"
+#
+# IDs are object keys and the parent is inferred from the dotted id, so
+# "gaming" is a ROOT row and "system.gaming" would sit under System. See
+# stage_menu_row for why this one is at the root.
+readonly MENU_EXT_REL=.config/omarchy/extensions/omarchy-menu.jsonc
+# /etc/skel as well as the invoking user's home, and that is not belt and
+# braces: docs/tasks/T5-fork-plan.md §3 trap (a) records that the ISO's
+# `useradd` runs in phase 3 of 14, BEFORE our configure_deck phase, so a stage
+# that seeds only skel produces a Deck whose first and only user never gets the
+# row. The verification below reads the USER's copy for the same reason.
+readonly MENU_EXT_SKEL="/etc/skel/${MENU_EXT_REL}"
+
+# The row's id. A NEW id lands at the END of the root order
+# (MenuModel.js:mergeMenuSources appends); reusing an existing id would keep
+# that id's position and merge our fields on top of Omarchy's. Deliberately new
+# -- overriding one of Omarchy's own rows to make room would be a surprise.
+readonly MENU_ROW_ID=gaming
+
+# 🔴 U+F0297, Nerd Font `md-gamepad_variant`. A GLYPH, not an icon file, which
+# sidesteps docs/findings/P16-redistribution-and-trademark.md entirely -- we
+# ship a codepoint, not artwork.
+#
+# ⚠️ The value this comment block used to suggest (U+F04B4) was WRONG. Checked
+# against the cmap of the font Omarchy's menu actually asks for
+# (Style.qml:272, "JetBrainsMono Nerd Font"): U+F04B4 is `md-smoking`, a
+# cigarette. Nothing would have reported that -- a wrong-but-present glyph
+# renders perfectly. U+F0297 is one codepoint (verified: `len(s) == 1`, not a
+# surrogate pair), it is in that font, and its Nerd Font name carries no
+# vendor: `md-steam`, `fa-steam` and `md-microsoft_xbox_controller` all exist
+# and are all the wrong answer here.
+readonly MENU_ROW_ICON=$'\U000F0297'
+
+# The row is spliced into a file this script does not own, between whole-line
+# markers, exactly as install_osk_kb_layout_rule does for Hyprland's Lua. See
+# stage_menu_row for why this is a splice and not a rewrite.
+readonly MENU_ROW_BEGIN="// >>> deck-session.sh: return to Gaming Mode >>>"
+readonly MENU_ROW_END="// <<< deck-session.sh: return to Gaming Mode <<<"
+
+# --- the boot-time re-assert (operator decision, 2026-08-12) ---------------
+#
+# Steam's own Power -> "Switch to Desktop" REWRITES the default session to the
+# desktop, undoing stage-default-session. The product behaves the way stock
+# SteamOS does instead: Desktop Mode is a one-shot session and any reboot
+# returns to Gaming Mode.
+readonly BOOT_DEFAULT_UNIT_NAME=deck-boot-default-gaming.service
+readonly BOOT_DEFAULT_UNIT="/etc/systemd/system/${BOOT_DEFAULT_UNIT_NAME}"
+
+# 🔴 THE ESCAPE HATCH. With this unit enabled a broken Gaming Mode is
+# re-asserted on EVERY boot, and the operator has one device. Touch this file
+# and the unit's ConditionPathExists=! skips it -- no edit, no unit file, no
+# systemctl, and `systemctl status` says out loud that a condition skipped it.
+# stage_boot_default_gaming creates the directory so the escape is one `touch`,
+# and prints both this path and the `systemctl disable` form.
+readonly BOOT_DEFAULT_OVERRIDE=/etc/deck-session/no-boot-default-gaming
+
+# The display manager, by BOTH names. sddm.service carries
+# `[Install] Alias=display-manager.service` and `systemctl enable sddm` makes
+# /etc/systemd/system/display-manager.service a symlink to it -- confirmed on
+# this machine, not assumed. Ordering against a unit name that does not exist
+# is a silent no-op in systemd, so naming only the alias would leave the
+# re-assert unordered on a machine where the alias was never installed.
+readonly BOOT_DEFAULT_BEFORE_ALIAS=display-manager.service
+readonly BOOT_DEFAULT_BEFORE_REAL=sddm.service
+
 # --- Desktop session settings (PROGRESS.md §5.20, §2.6, R-38) -------------
 #
 # Three values that decide whether the shipped device works and which lived,
@@ -512,6 +602,15 @@ readonly UPSTREAM_GREETER_SHA256=353fe59d7d46b21946cdc48000eef7b131e9e577c1d6117
 readonly INSTALL_MARKER_TEXT="installed-by: ${PROG}.sh"
 readonly INSTALL_MARKER="# ${INSTALL_MARKER_TEXT}"        # shell, ini/sddm.conf
 readonly INSTALL_MARKER_LUA="-- ${INSTALL_MARKER_TEXT}"   # lua (hyprland config)
+# jsonc (the Quickshell menu extension). A NEW prefix rather than a reused one,
+# per the paragraph above: '#' is not a comment in JSON or in JSONC, and
+# Quickshell's parser does not report the error -- MenuModel.js:parseMenuJsonc
+# catches and `return []`, and Menu.qml's FileView sets printErrors: false, so a
+# '#' in that file silently drops EVERY user row with nothing logged anywhere.
+# ⚠️ Only WHOLE-LINE '//' comments survive: stripJsonc matches
+# /^\s*\/\/[^\n]*(\n|$)/gm, so a comment after a value on the same line breaks
+# the parse.
+readonly INSTALL_MARKER_JSONC="// ${INSTALL_MARKER_TEXT}"
 
 # BUG FIX (was 95-deck-session.conf): SDDM reads /etc/sddm.conf.d/*.conf in
 # lexical order and LATER files win. The previous name carried a comment
@@ -535,6 +634,11 @@ readonly -a INSTALL_STAGES=(
   stage-greeter-rotation
   stage-sddm-resilience
   stage-return-icon
+  # Immediately after the .desktop entry, and the adjacency is the point: the
+  # two halves of "return to Gaming Mode" run the same command string, and
+  # stage-menu-row asserts that they still agree before it writes anything. Run
+  # apart, a drift in one would be found by whichever ran second, later.
+  stage-menu-row
   stage-input-mapper
   # Immediately after the mapper, and the adjacency is the point: this stage
   # turns lizard mode off only for as long as deck-input-mapper.service runs,
@@ -3240,6 +3344,30 @@ PY
 
 # ---------------------------------------------------------------------------
 
+# The .desktop entry's body. Split out as a render_* function for the reason
+# every other one here was: the string that matters (Exec=) has a second copy
+# in the Quickshell menu row, and assert_return_action_agrees compares what is
+# RENDERED rather than what a comment claims is rendered.
+#
+# The marker goes on line 1 as a '#' comment: the Desktop Entry spec ignores
+# comment lines and does not require the group header to be first, and
+# desktop-file-validate accepts it (asserted in
+# test/unit/test-deck-session-stages.sh \u00a75).
+render_return_desktop() {
+  cat <<EOF
+${INSTALL_MARKER}
+[Desktop Entry]
+Type=Application
+Name=${RETURN_LABEL}
+Comment=${RETURN_DESCRIPTION}
+Exec=${RETURN_ACTION}
+Icon=input-gaming
+Terminal=false
+Categories=Game;
+Keywords=steam;gaming;gamescope;deck;
+EOF
+}
+
 stage_return_icon() {
   # A .desktop entry is the shell-agnostic half of "return to Gaming Mode":
   # every launcher on every shell reads /usr/share/applications, so this works
@@ -3255,46 +3383,364 @@ stage_return_icon() {
   # docs/findings/P16-redistribution-and-trademark.md says not to ship Valve's
   # iconography. input-gaming is a standard freedesktop name.
   #
-  # PINNING it to a bar/dock IS shell-specific and is deliberately NOT done
-  # here -- see TASK-T3 step 6. For Omarchy 4.0 the mechanism is the Quickshell
-  # menu, extended via ~/.config/omarchy/extensions/omarchy-menu.jsonc:
-  #
-  #   "gaming": {"icon":"\udb81\udcb4","label":"Return to Gaming Mode",
-  #              "action":"${STEAM_SHIM} gamescope"}
-  #
-  # That takes a Nerd Font GLYPH rather than an icon file, which sidesteps the
-  # artwork question entirely. It is per-user config, so T5 has to seed it the
-  # same way it seeds monitors.lua -- see PROGRESS.md 5.11.
+  # \u26a0\ufe0f THIS COMMENT USED TO SAY pinning "is deliberately NOT done here" and
+  # described the Quickshell menu row as future work. That stopped being true
+  # when stage-menu-row landed: the SHELL-SPECIFIC half is now
+  # ${PROG}.sh stage-menu-row, which splices a row into
+  # ~/${MENU_EXT_REL} (and /etc/skel's copy). The two halves share
+  # ${RETURN_ACTION} through one constant and stage-menu-row refuses to run if
+  # they have drifted apart.
   #
   # This stage used to be the one that silently clobbered: no marker in the file
   # it wrote and no ownership check in front of the write, so a .desktop that
   # some other package (or a user) had put at this path was overwritten without
-  # a word. Every other stage refuses that, and now so does this one. The marker
-  # goes on line 1 as a '#' comment: the Desktop Entry spec ignores comment
-  # lines and does not require the group header to be first, and
-  # desktop-file-validate accepts it.
+  # a word. Every other stage refuses that, and now so does this one.
   assert_ours_or_absent "$RETURN_DESKTOP_FILE" "another package's desktop entry"
 
   log "installing ${RETURN_DESKTOP_FILE}"
   local tmp
   tmp=$(mktemp) || fail "mktemp failed"
-  cat >"$tmp" <<EOF
-${INSTALL_MARKER}
-[Desktop Entry]
-Type=Application
-Name=Return to Gaming Mode
-Comment=Switch back to the Steam Big Picture session
-Exec=${STEAM_SHIM} gamescope
-Icon=input-gaming
-Terminal=false
-Categories=Game;
-Keywords=steam;gaming;gamescope;deck;
-EOF
+  render_return_desktop >"$tmp" || fail "could not render the return-to-Gaming .desktop entry"
   $SUDO install -m 0644 -o root -g root "$tmp" "$RETURN_DESKTOP_FILE" ||
     fail "could not install ${RETURN_DESKTOP_FILE}"
   rm -f "$tmp"
   log "stage-return-icon: ok"
-  log "NOTE: pinning this to a bar/dock is shell-specific and is not done here"
+  log "NOTE: the Quickshell menu row is the shell-specific half and is installed"
+  log "      by '${PROG}.sh stage-menu-row', which runs next in a full install."
+}
+
+# ---------------------------------------------------------------------------
+# THE QUICKSHELL MENU ROW
+# ---------------------------------------------------------------------------
+#
+# \ud83d\udd34 WHY THIS STAGE VALIDATES WHAT IT WRITES, read out of the pinned runtime:
+#
+#   MenuModel.js:parseMenuJsonc   try { JSON.parse(stripped) } catch (e) { return [] }
+#   Menu.qml (user FileView)      printErrors: false
+#
+# A malformed extension file therefore drops EVERY user row and reports nothing,
+# anywhere. Our row would simply not be there and nothing would say why -- this
+# project's cardinal failure mode (docs/PROGRESS.md \u00a75.30c). So the file is
+# parsed after it is written and the row is read back out of it, the way
+# deck-session-select greps its own three keys back out of the SDDM drop-in.
+#
+# What is emitted is strict, comment-free JSON for the row itself (which is
+# valid JSONC), because stripJsonc only removes WHOLE-LINE '//' comments and
+# trailing commas: a comment after a value on the same line breaks the parse.
+
+# The marker-delimited block spliced into the extension file. Everything about
+# its shape is load-bearing:
+#
+#   - whole-line '//' comments only, so stripJsonc removes them cleanly;
+#   - the row itself is strict JSON on ONE line;
+#   - it ends with a trailing comma, which stripJsonc removes when our block is
+#     the only content and which separates entries when it is not. That is what
+#     lets the block be spliced in at a fixed position (immediately after the
+#     object's opening brace) whether the rest of the file is empty or full.
+render_menu_row_block() {
+  cat <<EOF
+${MENU_ROW_BEGIN}
+${INSTALL_MARKER_JSONC}
+// The controller-only way back to Gaming Mode. Everything between these two
+// markers is rewritten by ${PROG}.sh; edit outside them.
+// Remove the row by deleting these lines, or by adding your own "${MENU_ROW_ID}"
+// entry below -- a later duplicate key wins in JSON.
+"${MENU_ROW_ID}": {"icon": "${MENU_ROW_ICON}", "label": "${RETURN_LABEL}", "action": "${RETURN_ACTION}", "description": "${RETURN_DESCRIPTION}"},
+${MENU_ROW_END}
+EOF
+}
+
+# The two halves of "return to Gaming Mode" must run the SAME command.
+#
+# Compared from what is rendered, not from the constants, because a constant
+# both sides agree on proves nothing if one of the heredocs stopped using it.
+# This is cheap and it runs before anything is written.
+assert_return_action_agrees() {
+  local from_desktop from_menu line
+
+  from_desktop=""
+  while IFS= read -r line; do
+    [[ $line == Exec=* ]] || continue
+    from_desktop=${line#Exec=}
+    break
+  done < <(render_return_desktop)
+  [[ -n $from_desktop ]] ||
+    fail "render_return_desktop emits no Exec= line at all, so the .desktop entry launches nothing. Refusing to install a menu row that claims to match it."
+
+  from_menu=$(render_menu_row_block | python3 -c '
+import json, re, sys
+raw = sys.stdin.read()
+raw = re.sub(r"^\s*//[^\n]*(\n|$)", "", raw, flags=re.M)
+raw = re.sub(r",(\s*$)", r"\1", raw)
+try:
+    row = json.loads("{" + raw + "}")
+except ValueError as exc:
+    sys.exit("the rendered menu row is not valid JSON: %s" % exc)
+sys.stdout.write(list(row.values())[0].get("action", ""))
+') || fail "could not read the action back out of the rendered menu row block"
+
+  [[ $from_desktop == "$RETURN_ACTION" ]] ||
+    fail "${RETURN_DESKTOP_FILE}'s Exec= renders as '${from_desktop}' but the shared constant is '${RETURN_ACTION}'. The two ways back to Gaming Mode have drifted; whichever is wrong does nothing at all and reports no error."
+  [[ $from_menu == "$RETURN_ACTION" ]] ||
+    fail "the Quickshell menu row's action renders as '${from_menu}' but the shared constant is '${RETURN_ACTION}'. The two ways back to Gaming Mode have drifted; whichever is wrong does nothing at all and reports no error."
+  [[ $from_menu == "$from_desktop" ]] ||
+    fail "the .desktop entry runs '${from_desktop}' and the menu row runs '${from_menu}'. They must be the same command."
+  log "verified: the .desktop entry and the menu row both run '${RETURN_ACTION}'"
+}
+
+# splice_menu_row <existing-or-absent path> <block file>  -> new content on stdout
+#
+# \u26a0\ufe0f A SPLICE, NOT A REWRITE, and that is the whole answer to "do not clobber".
+#
+# This file is a DOCUMENTED, user-facing extension point, and on a stock Omarchy
+# it already exists: the shipped template is all comments and parses to {}. So
+# assert_ours_or_absent cannot be used here -- it would refuse on every stock
+# install, which is a stage that never runs. Rewriting the file as strict JSON
+# would work and would silently delete the schema documentation in it, plus any
+# comment the user wrote.
+#
+# So this preserves every byte outside its own markers, exactly as
+# install_osk_kb_layout_rule does for input.lua. No JSONC merger is invented:
+# the row is inserted immediately after the object's opening brace as text, and
+# the RESULT is then parsed the way Quickshell parses it. A file that would not
+# parse is never installed.
+#
+# It refuses, loudly, on the three cases where a splice cannot be honest:
+#   - the existing file does not parse (Quickshell is ALREADY silently dropping
+#     every row in it -- that gets said out loud);
+#   - our begin marker is present with no end marker (do not guess where the
+#     old block ended);
+#   - the file is not a JSON object at all.
+splice_menu_row() {
+  local target=$1 block=$2
+
+  python3 - "$target" "$block" "$MENU_ROW_BEGIN" "$MENU_ROW_END" \
+           "$MENU_ROW_ID" "$RETURN_ACTION" "$INSTALL_MARKER_JSONC" <<'PY'
+import json, pathlib, re, sys
+
+target, block = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+begin, end, row_id, action, marker = sys.argv[3:8]
+
+# Quickshell's own two transformations, copied from
+# shell/plugins/menu/MenuModel.js:stripJsonc at the pinned runtime.
+COMMENT = re.compile(r"^\s*//[^\n]*(\n|$)", re.M)
+TRAILING = re.compile(r",(\s*[}\]])")
+
+
+def strip_jsonc(text):
+    return TRAILING.sub(r"\1", COMMENT.sub("", text))
+
+
+def parse(text, what):
+    stripped = strip_jsonc(text)
+    if not stripped.strip():
+        return {}
+    try:
+        value = json.loads(stripped)
+    except ValueError as exc:
+        sys.exit(
+            f"{what} is not valid JSONC ({exc}).\n"
+            "  Quickshell does not report this: MenuModel.js catches the parse error and\n"
+            "  returns an empty list, and Menu.qml sets printErrors: false -- so EVERY row\n"
+            "  in that file is being silently discarded right now, not just ours.\n"
+            "  Fix it or move it aside, then re-run this stage."
+        )
+    if not isinstance(value, dict):
+        sys.exit(f"{what} parses as {type(value).__name__}, not a JSON object of menu ids")
+    return value
+
+
+raw = target.read_text() if target.exists() else ""
+
+# Validate what is already there BEFORE touching it, so a file that was already
+# broken is reported as already broken rather than blamed on this stage.
+parse(raw, str(target))
+
+kept, skipping, seen = [], False, False
+for line in raw.splitlines():
+    if line.strip() == begin:
+        skipping, seen = True, True
+        continue
+    if skipping:
+        if line.strip() == end:
+            skipping = False
+        continue
+    kept.append(line)
+if skipping:
+    sys.exit(
+        f"{target} carries our start marker with no end marker. Refusing to guess where "
+        "the old block ended -- remove it by hand and re-run."
+    )
+
+block_lines = block.read_text().splitlines()
+
+# Where the object opens. Whole-line comments and blanks are skipped; the first
+# line with content must open the object, and '{' must be the first thing on it.
+opener = None
+for i, line in enumerate(kept):
+    bare = line.strip()
+    if not bare or bare.startswith("//"):
+        continue
+    if not bare.startswith("{"):
+        sys.exit(
+            f"{target} does not open with a JSON object (first content line is {line!r}). "
+            "The Quickshell menu extension is an object of menu ids; refusing to splice into "
+            "something else."
+        )
+    opener = (i, line.index("{"))
+    break
+
+out = []
+if opener is None:
+    # No object at all: an absent file, or one that is nothing but comments and
+    # has already lost its braces. Anything that WAS there is kept above the new
+    # object only if it is comments, which is exactly what `kept` holds here.
+    out.extend(kept)
+    out.append(marker)
+    out.append("{")
+    out.extend(block_lines)
+    out.append("}")
+else:
+    i, col = opener
+    out.extend(kept[:i])
+    out.append(kept[i][: col + 1])
+    out.extend(block_lines)
+    rest = kept[i][col + 1 :]
+    if rest.strip():
+        out.append(rest)
+    out.extend(kept[i + 1 :])
+
+text = "\n".join(out).rstrip("\n") + "\n"
+
+# The check this whole stage exists for: parse the RESULT the way Quickshell
+# will, and refuse to hand back something it would silently discard.
+merged = parse(text, "the patched " + str(target))
+if row_id not in merged:
+    sys.exit(f"the patched {target} parses but has no '{row_id}' row in it")
+got = merged[row_id].get("action")
+if got != action:
+    sys.exit(
+        f"the patched {target} parses but '{row_id}' runs {got!r}, not {action!r}. "
+        "A row with the wrong action is the worst outcome here: it appears in the menu, "
+        "it is pressable, and it does not switch the session."
+    )
+
+sys.stdout.write(text)
+sys.stderr.write("replaced-existing-block\n" if seen else "inserted-new-block\n")
+PY
+}
+
+# verify_menu_row <path> -- read the row back out of an INSTALLED file.
+#
+# The path is a parameter and the caller passes the USER's copy, never skel's:
+# docs/tasks/T5-fork-plan.md \u00a73 trap (a) is explicit that a check reading only
+# /etc/skel is the check that passes on a Deck whose only user never got the file.
+verify_menu_row() {
+  local path=${1:?verify_menu_row needs the file to read}
+
+  local got
+  got=$(python3 - "$path" "$MENU_ROW_ID" <<'PY'
+import json, pathlib, re, sys
+path, row_id = pathlib.Path(sys.argv[1]), sys.argv[2]
+if not path.exists():
+    sys.exit(f"{path} does not exist after being installed")
+raw = path.read_text()
+stripped = re.sub(r",(\s*[}\]])", r"\1", re.sub(r"^\s*//[^\n]*(\n|$)", "", raw, flags=re.M))
+try:
+    menu = json.loads(stripped)
+except ValueError as exc:
+    sys.exit(f"{path} does not parse as JSONC after being installed: {exc}")
+if row_id not in menu:
+    sys.exit(f"{path} parses but carries no '{row_id}' row (ids: {sorted(menu)})")
+sys.stdout.write(menu[row_id].get("action", ""))
+PY
+  ) || fail "could not read the '${MENU_ROW_ID}' row back out of ${path}. Quickshell reports nothing when this file is wrong, so an unverified write here is an unverified feature."
+
+  [[ $got == "$RETURN_ACTION" ]] ||
+    fail "${path} carries a '${MENU_ROW_ID}' row whose action is '${got}', not '${RETURN_ACTION}'. The row would appear in the menu and not switch the session."
+  log "verified: ${path} parses as Quickshell parses it and '${MENU_ROW_ID}' runs '${RETURN_ACTION}'"
+}
+
+stage_menu_row() {
+  # PLACEMENT: a ROOT row ("${MENU_ROW_ID}"), not "system.${MENU_ROW_ID}".
+  #
+  # Two presses versus one, on the one affordance CLAUDE.md's controller-only
+  # rule cannot let fail. Under System it would sit beside lock/restart, which
+  # is the tidier taxonomy and the wrong tradeoff: this is the way OUT of the
+  # desktop on a device whose owner is expected to spend most of its life in
+  # Gaming Mode. MenuModel.js appends new ids to the END of the root order, so
+  # it lands last on the root menu and reorders nothing Omarchy ships.
+  command -v python3 >/dev/null 2>&1 ||
+    fail "python3 not found; ${MENU_EXT_REL} must be edited and validated as JSON, not by regex -- and an unvalidated write here is silently discarded by Quickshell"
+
+  # Before anything is written: the two ways back must run the same command.
+  assert_return_action_agrees
+
+  local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
+  [[ -n $invoking_user && $invoking_user != root ]] ||
+    fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
+  local home
+  home=$(getent passwd "$invoking_user" | cut -d: -f6) ||
+    fail "could not resolve ${invoking_user}'s home directory"
+  [[ -n $home ]] || fail "empty home directory for ${invoking_user}"
+
+  local user_ext="${home}/${MENU_EXT_REL}"
+
+  # \u26a0\ufe0f NOT seeded from Omarchy's shipped template when absent, and the contrast
+  # with shell.json is the reason. A user shell.json REPLACES Omarchy's
+  # defaults, so an idle-only file strips the bar. This file MERGES:
+  # mergeMenuSources(defaults, user) walks the defaults first and then the user
+  # file, so a file containing nothing but our row is complete and safe.
+  local block tmp
+  block=$(mktemp) || fail "mktemp failed"
+  render_menu_row_block >"$block" || { rm -f "$block"; fail "could not render the menu row"; }
+
+  local dest
+  for dest in "$user_ext" "$MENU_EXT_SKEL"; do
+    tmp=$(mktemp) || { rm -f "$block"; fail "mktemp failed"; }
+
+    # The skel copy is read through $SUDO (it is root-owned); the user's own
+    # file is read directly, which is correct in both contexts this stage runs
+    # in -- as the user under sudo (EUID 0) or as the user with $SUDO set.
+    local existing=$dest
+    if [[ $dest == "$MENU_EXT_SKEL" ]]; then
+      if $SUDO test -e "$dest"; then
+        $SUDO cat "$dest" >"$tmp.in" 2>/dev/null || { rm -f "$block" "$tmp"; fail "could not read ${dest}"; }
+      else
+        : >"$tmp.in"
+      fi
+      existing="$tmp.in"
+    fi
+
+    log "splicing the '${MENU_ROW_ID}' row into ${dest}"
+    splice_menu_row "$existing" "$block" >"$tmp" || {
+      rm -f "$block" "$tmp" "$tmp.in"
+      fail "refusing to install ${dest}: the merged file would not survive Quickshell's own parser (see the message above). Nothing was written."
+    }
+    chmod 0644 "$tmp" || { rm -f "$block" "$tmp" "$tmp.in"; fail "could not stage ${dest}"; }
+
+    if [[ $dest == "$MENU_EXT_SKEL" ]]; then
+      $SUDO install -D -m 0644 -o root -g root "$tmp" "$dest" ||
+        { rm -f "$block" "$tmp" "$tmp.in"; fail "could not install ${dest}"; }
+    else
+      run_as_desktop_user "$invoking_user" install -D -m 0644 "$tmp" "$dest" ||
+        { rm -f "$block" "$tmp"; fail "could not install ${dest} as ${invoking_user}"; }
+    fi
+    rm -f "$tmp" "$tmp.in"
+  done
+  rm -f "$block"
+
+  # \ud83d\udd34 The USER's copy is what gets verified. /etc/skel is too late for the user
+  # the ISO creates (T5 \u00a73 trap (a)), so a check that read skel's copy would
+  # pass on precisely the Deck where the row is missing.
+  verify_menu_row "$user_ext"
+
+  log "stage-menu-row: ok"
+  log "NOTE: the row lands at the END of the root menu (new ids are appended),"
+  log "      it runs '${RETURN_ACTION}', and Omarchy re-reads this file live."
+  log "NOTE: /etc/skel's copy is for users created LATER. The user the ISO"
+  log "      creates already exists by our phase, which is why ${user_ext}"
+  log "      is written and verified separately."
 }
 
 # ---------------------------------------------------------------------------
@@ -3395,6 +3841,190 @@ stage_default_session() {
   log "default session set. It takes effect on the next login or reboot."
   log "To undo: sudo ${SELECT_BIN} desktop --no-restart"
   log "If Gaming Mode fails to start, Ctrl+Alt+F2 reaches a TTY."
+  log "NOTE: Steam's own Power -> 'Switch to Desktop' REWRITES this default."
+  log "      '${PROG}.sh stage-boot-default-gaming' re-asserts it at every boot,"
+  log "      which is what makes Desktop Mode a one-shot session like SteamOS's."
+}
+
+# ---------------------------------------------------------------------------
+# A REBOOT ALWAYS LANDS IN GAMING MODE
+# ---------------------------------------------------------------------------
+#
+# THE DECISION (operator, 2026-08-12). Steam's Power -> "Switch to Desktop"
+# ultimately drives ${STEAM_SHIM}, which rewrites Session= in ${SDDM_DROPIN} --
+# it undoes stage-default-session, permanently, from a menu the user reaches in
+# two presses. Stock SteamOS does not behave that way: its desktop is a one-shot
+# session and a reboot returns to Gaming Mode. This makes that true here.
+#
+# 🔴 IT RE-RUNS THE EXISTING WRITER. `${SELECT_BIN} gamescope --no-restart`, not
+# a second copy of the same write. That writer already checks the target
+# session's .desktop exists before committing, and already re-reads Session=,
+# User= and Relogin= back out of the drop-in. A second implementation of one
+# write is the drift this project keeps paying for -- see the two halves of
+# "return to Gaming Mode" and assert_return_action_agrees, in this file, one
+# session ago.
+#
+# --no-restart is not an optimisation: the restart path hands sddm to a
+# transient unit, and doing that from a unit ordered BEFORE sddm has even
+# started would be a race against a display manager that does not exist yet.
+# All the boot-time re-assert has to do is write the config sddm is about to
+# read.
+render_boot_default_unit() {
+  cat <<EOF
+${INSTALL_MARKER}
+#
+# Re-assert Gaming Mode as the default session, once per boot, BEFORE the
+# display manager reads its configuration.
+#
+# ORDERING IS THE WHOLE UNIT. Landing after sddm has read /etc/sddm.conf.d is a
+# silent no-op: the write succeeds, the journal says so, and the machine logs
+# into the desktop anyway. Determined from the units on disk rather than from
+# habit --
+#
+#   /usr/lib/systemd/system/sddm.service   [Install] Alias=display-manager.service
+#   /etc/systemd/system/display-manager.service -> ../../../usr/lib/systemd/system/sddm.service
+#   graphical.target                       Wants=display-manager.service
+#                                          After=display-manager.service
+#
+# so graphical.target is what pulls the display manager in, both names resolve
+# to the same unit, and being Before= it inside that same transaction is what
+# guarantees the write happens first. Both names are listed because ordering
+# against a unit that does not exist is a silent no-op in systemd, and the alias
+# only exists once sddm has been enabled.
+#
+# WantedBy=graphical.target, NOT WantedBy=${BOOT_DEFAULT_BEFORE_REAL}: a session
+# SWITCH restarts sddm, and a unit wanted by sddm would be dragged into that
+# restart and fight the switch the user just asked for. Wanted by the target, it
+# runs once per boot and stays active for the rest of it -- which is exactly
+# "Desktop Mode is a one-shot session".
+#
+# FAILURE IS LOUD BUT NOT FATAL. Nothing Requires= this unit, so if
+# ${SELECT_BIN} dies (no gamescope session on the machine, say) the unit fails,
+# sddm still starts, and the Deck still boots -- into whatever the default was.
+# A failed unit is this project's established no-terminal signal: it survives a
+# reboot and shows up in \`systemctl --failed\` (the same reasoning as
+# omarchy-deck-patch-check.service). ExecStart carries NO leading '-'.
+#
+# THE ESCAPE HATCH is the ConditionPathExists=! below. With this unit enabled a
+# broken Gaming Mode is re-asserted on EVERY boot, so there has to be a way out
+# that needs no editor:
+#
+#   sudo touch ${BOOT_DEFAULT_OVERRIDE}
+#
+# skips it from the next boot on, and \`systemctl status ${BOOT_DEFAULT_UNIT_NAME}\`
+# then says out loud that a condition skipped it. \`sudo systemctl disable
+# ${BOOT_DEFAULT_UNIT_NAME}\` is the permanent form.
+
+[Unit]
+Description=Re-assert Gaming Mode as the default session before the display manager starts
+Documentation=file://${BOOT_DEFAULT_UNIT}
+Before=${BOOT_DEFAULT_BEFORE_ALIAS}
+Before=${BOOT_DEFAULT_BEFORE_REAL}
+After=local-fs.target
+ConditionPathExists=!${BOOT_DEFAULT_OVERRIDE}
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${SELECT_BIN} gamescope --no-restart
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical.target
+EOF
+}
+
+# verify_boot_default_ordering [unit-name]
+#
+# Ask systemd what it PARSED, not what we wrote. stage_sddm_resilience
+# established this: a drop-in that looks right and did not apply is the failure
+# mode, and only the manager can tell the difference. The unit name is a
+# parameter so the unit suite can point this at a name its stub answers for.
+#
+# Both directions are checked, and the second is the one that matters: a unit
+# ordered AFTER the display manager parses cleanly, starts cleanly, logs a
+# successful write, and does nothing at all.
+verify_boot_default_ordering() {
+  local unit=${1:-$BOOT_DEFAULT_UNIT_NAME}
+  local before after
+
+  before=$(systemctl show "$unit" -p Before --value 2>/dev/null) ||
+    fail "systemctl could not report ${unit}'s ordering. The unit is on disk; whether systemd will run it before the display manager is unknown, and an unknown here is a silent no-op."
+  after=$(systemctl show "$unit" -p After --value 2>/dev/null) || after=""
+
+  # ⚠️ THE ORDER OF THESE THREE GUARDS IS DELIBERATE, and it is the session-16
+  # lesson: they share an exit code, so whichever fires first is the whole
+  # diagnosis a human gets. A unit ordered AFTER the display manager also names
+  # neither unit in Before=, so the generic "names neither" message would fire
+  # first and describe the symptom instead of the cause. Most specific first.
+  [[ $after != *"$BOOT_DEFAULT_BEFORE_ALIAS"* && $after != *"$BOOT_DEFAULT_BEFORE_REAL"* ]] ||
+    fail "systemd parsed ${unit} with After='${after}', i.e. ordered AFTER the display manager. That is the silent no-op this unit exists to avoid -- sddm reads ${SDDM_DROPIN} at start, so a write that lands afterwards changes nothing until the boot after next."
+
+  [[ -n $before ]] ||
+    fail "systemd reports NO Before= ordering for ${unit} at all. Either the unit did not load or the ordering directives were dropped -- either way the re-assert would race the display manager."
+
+  [[ $before == *"$BOOT_DEFAULT_BEFORE_ALIAS"* || $before == *"$BOOT_DEFAULT_BEFORE_REAL"* ]] ||
+    fail "systemd parsed ${unit} with Before='${before}', which names neither ${BOOT_DEFAULT_BEFORE_ALIAS} nor ${BOOT_DEFAULT_BEFORE_REAL}. The re-assert would land after sddm had already read its configuration: the write succeeds, nothing complains, and the Deck boots to the desktop anyway."
+
+  log "verified: systemd orders ${unit} before the display manager (Before='${before}')"
+}
+
+# NOT in INSTALL_STAGES, and deliberately -- same reasoning as
+# stage_default_session, which it is meant to be run beside.
+#
+# stage_default_session is excluded because flipping the default is the one
+# irreversible-feeling step: autologin means no session picker, so a Gaming Mode
+# that fails to start leaves no graphical way back. This stage carries that same
+# risk on EVERY boot rather than on one, so if anything the argument for keeping
+# it opt-in is stronger, not weaker. A bare `./deck-session.sh` on a machine
+# whose Gaming Mode has never been proven would otherwise arm a boot-time
+# re-assert nobody asked for.
+#
+# The pair is the intended usage:
+#   sudo ./deck-session.sh stage-default-session        (now)
+#   sudo ./deck-session.sh stage-boot-default-gaming    (and at every boot)
+stage_boot_default_gaming() {
+  # The unit runs the writer stage-session-select installs. Without it the unit
+  # would fail at every boot with a 203/EXEC nobody would connect to this.
+  $SUDO test -x "$SELECT_BIN" ||
+    fail "${SELECT_BIN} is not installed or not executable. Run '${PROG}.sh stage-session-select' first -- this stage only schedules that writer, it does not contain a second copy of it."
+
+  assert_ours_or_absent "$BOOT_DEFAULT_UNIT" "another package's unit"
+
+  # The escape hatch has to be one `touch` at a TTY, so its directory exists
+  # before anyone needs it. Creating it does NOT arm the override: the unit
+  # checks for the FILE.
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$BOOT_DEFAULT_OVERRIDE")" ||
+    fail "could not create $(dirname "$BOOT_DEFAULT_OVERRIDE") -- the escape hatch has to be reachable with a single 'touch' from a TTY"
+
+  log "installing ${BOOT_DEFAULT_UNIT}"
+  local tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_boot_default_unit >"$tmp" || fail "could not render ${BOOT_DEFAULT_UNIT_NAME}"
+  $SUDO install -D -m 0644 -o root -g root "$tmp" "$BOOT_DEFAULT_UNIT" ||
+    fail "could not install ${BOOT_DEFAULT_UNIT}"
+  rm -f "$tmp"
+
+  $SUDO systemctl daemon-reload ||
+    fail "systemctl daemon-reload failed; ${BOOT_DEFAULT_UNIT_NAME} is on disk but systemd has not read it"
+  $SUDO systemctl enable "$BOOT_DEFAULT_UNIT_NAME" ||
+    fail "could not enable ${BOOT_DEFAULT_UNIT_NAME}. An installed-but-not-enabled unit is silent: it would never run and nothing would report that."
+
+  verify_boot_default_ordering
+
+  log "stage-boot-default-gaming: ok"
+  log "Every boot now re-asserts Gaming Mode as the default session. Steam's"
+  log "Power -> 'Switch to Desktop' still works and still lasts until reboot,"
+  log "which is how stock SteamOS behaves."
+  log ""
+  log "🔴 ESCAPE HATCH -- read this before rebooting:"
+  log "   If Gaming Mode is broken, this unit re-asserts it at EVERY boot."
+  log "   Reach a TTY with Ctrl+Alt+F2 and run ONE of:"
+  log "     sudo touch ${BOOT_DEFAULT_OVERRIDE}     (skip it, keep the unit)"
+  log "     sudo systemctl disable ${BOOT_DEFAULT_UNIT_NAME}   (permanent)"
+  log "   Then: sudo ${SELECT_BIN} desktop --no-restart"
+  log "   Removing ${BOOT_DEFAULT_OVERRIDE} re-arms it. See docs/RECOVERY.md."
 }
 
 # ---------------------------------------------------------------------------
@@ -3418,7 +4048,7 @@ main() {
       log "Test first:  ${STEAM_SHIM} gamescope     (switches now, ends this session)"
       log "Then, once proven: ./${PROG}.sh stage-default-session"
       ;;
-    list-stages) printf '%s\n' "${INSTALL_STAGES[@]}" stage-audit-privileges stage-default-session ;;
+    list-stages) printf '%s\n' "${INSTALL_STAGES[@]}" stage-audit-privileges stage-default-session stage-boot-default-gaming ;;
     -h|--help|help)
       cat <<EOF
 ${PROG}.sh -- two-way Gaming Mode <-> Desktop session switching for a Deck
@@ -3429,12 +4059,29 @@ ${PROG}.sh -- two-way Gaming Mode <-> Desktop session switching for a Deck
   ${PROG}.sh stage-audit-privileges report sudoers drop-ins that grant blanket
                                     root; fails if any do (release check, T6)
   ${PROG}.sh stage-default-session  make Gaming Mode the default (do this last)
+  ${PROG}.sh stage-boot-default-gaming
+                                    re-assert Gaming Mode as the default at
+                                    EVERY boot, so Desktop Mode is a one-shot
+                                    session the way stock SteamOS's is. Steam's
+                                    own 'Switch to Desktop' rewrites the default
+                                    and this is what undoes that. Opt-in for the
+                                    same reason stage-default-session is, and
+                                    meant to be run beside it.
+                                    Escape hatch, no editor needed:
+                                      sudo touch ${BOOT_DEFAULT_OVERRIDE}
+                                      sudo systemctl disable ${BOOT_DEFAULT_UNIT_NAME}
 
 After installing:
   steamos-session-select gamescope  switch to Gaming Mode now
   steamos-session-select desktop    switch to the desktop now
 
 Stages also cover Gaming Mode / display defects (PROGRESS.md 5.11, 5.14, 5.15):
+  stage-menu-row           splices a 'Return to Gaming Mode' row into the
+                           Quickshell menu (~/${MENU_EXT_REL}
+                           and /etc/skel's copy). Same command as the .desktop
+                           entry, by one shared constant; the file is parsed
+                           after writing because Quickshell silently discards
+                           every row in one it cannot parse.
   stage-update-stub        a steamos-update stub, so Steam's first run stops
                            reporting a false network error
   stage-timezone-helper    steamos-set-timezone, so OOBE's timezone picker

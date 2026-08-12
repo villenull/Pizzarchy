@@ -52,6 +52,25 @@
 #      but its local package build on both, so "one of the two" is a real and
 #      silent failure mode.
 #
+# T5d added two more, both about things that were documented and enforced by
+# nothing:
+#
+#  12. guard 6.5 (T5-fork-plan.md §5.4/§6.5) actually calls
+#      tools/iso-payload-audit.sh from bin/build and a non-zero exit actually
+#      STOPS the build -- proved by a fixture whose overlay carries the dev
+#      Deck's real `deck ALL=(ALL) NOPASSWD: ALL` line, and by the tolerance
+#      case beside it, because a check that fires on the ordinary
+#      password-protected grant is a check people learn to ignore
+#      (docs/PROGRESS.md §5.17). The post-build half is proved on a package
+#      planted in the offline mirror, which is the route our own omarchy-deck
+#      package would take;
+#  13. a promoted overlay patch and the modules it imports move TOGETHER.
+#      configure-deck-phase.patch makes main.py's build_phases do
+#      `from .deck_configure import configure_deck`, evaluated before any phase
+#      runs, so a promotion missing its additive files is an install that dies
+#      before partitioning. That hazard lived in prose in src/iso-patches/README.md
+#      and in T5-fork-plan.md §10 point 5 for a day; section 19 derives it.
+#
 # Everything through step 5 is tested by running the ACTUAL iso/bin/build
 # script against a throwaway fixture tree that has the same iso/ layout but a
 # trivial local-git "upstream" instead of the real omarchy-iso submodule --
@@ -146,6 +165,18 @@ make_fixture() {
   chmod +x "$root/iso/bin/build"
   touch "$root/iso/overlay/configs/airootfs/.gitkeep" "$root/iso/overlay/patches/.gitkeep"
 
+  # bin/build derives REPO_ROOT as iso/.., and guard 6.5 runs
+  # tools/iso-payload-audit.sh from there -- on the HOST, because the audit
+  # sources src/deck-session.sh to share the blanket/passwordless predicate
+  # rather than reimplement it. Symlinked, not stubbed: a fixture that faked
+  # the audit would prove that bin/build calls SOMETHING, which is not the
+  # claim. The symlinks are followed for content but not for $BASH_SOURCE, so
+  # the audit still resolves its own repo root to this fixture -- which is why
+  # deck-session.sh has to be here too.
+  mkdir -p "$root/tools" "$root/src"
+  ln -s "$REPO_ROOT/tools/iso-payload-audit.sh" "$root/tools/iso-payload-audit.sh"
+  ln -s "$REPO_ROOT/src/deck-session.sh" "$root/src/deck-session.sh"
+
   # A trivial repo standing in for omarchy-iso: enough files that later steps
   # (overlay rsync onto configs/, a patch touching a real file) have
   # somewhere real to land, but no submodules of its own -- `git submodule
@@ -206,6 +237,25 @@ make_fake_package() {
   done
   mkdir -p "$mirror"
   bsdtar -cf "$mirror/$name-$ver-any.pkg.tar.zst" -C "$stage" .PKGINFO usr
+  rm -rf "$stage"
+}
+
+# make_sudoers_package <mirror-dir> <pkgname> <pkgver> <sudoers-line>
+#
+# A package that carries etc/sudoers.d/99-deck-testing. This is the shape of
+# the accident guard 6.5b exists for: a drop-in that ships INSIDE a package
+# installs exactly like one baked into airootfs, no tree scan would ever see
+# it, and our own omarchy-deck package is the likeliest carrier
+# (T5-fork-plan.md §5.4 names it as one of the four roots).
+make_sudoers_package() {
+  local mirror=$1 name=$2 ver=$3 line=$4
+  local stage
+  stage=$(mktemp -d)
+  mkdir -p "$stage/etc/sudoers.d"
+  printf 'pkgname = %s\npkgver = %s\narch = any\n' "$name" "$ver" >"$stage/.PKGINFO"
+  printf '%s\n' "$line" >"$stage/etc/sudoers.d/99-deck-testing"
+  mkdir -p "$mirror"
+  bsdtar -cf "$mirror/$name-$ver-any.pkg.tar.zst" -C "$stage" .PKGINFO etc
   rm -rf "$stage"
 }
 
@@ -786,8 +836,137 @@ BUILD_PATH="$NO_BSDTAR_PATH" run_build "$f31" \
   fail "it must refuse for the absent tool, not stumble into using it and blame the package" "$BUILD_OUT"
 pass "guard 6.4b with no bsdtar fails loudly instead of skipping the artifact check"
 
+# ===========================================================================
+# T5d: guard 6.5 -- tools/iso-payload-audit.sh, wired into bin/build.
+#
+# The audit itself has its own suite (test/unit/test-iso-payload-audit.sh, 16
+# assertions). What is tested HERE is the wiring, which is a separate claim and
+# was the missing half: §5.4 says "bin/build calls it ... and a non-zero exit
+# stops the build", and until T5d bin/build never called it at all. The fixture
+# symlinks the REAL audit into place (see make_fixture) rather than stubbing
+# it, because "bin/build calls something" is not the claim being made.
+# ===========================================================================
+
+# --- 17. guard 6.5a: the audit runs before docker, and its findings stop the
+#         build -----------------------------------------------------------
+
+# A clean payload. The denominator line is the assertion that matters here:
+# "guard 6.5a OK" would be printed just as happily by a call that inspected
+# nothing, and in a green log an audit that never ran is indistinguishable from
+# one that found nothing (docs/PROGRESS.md §5.30c).
+f32="$work/f32"
+make_fixture "$f32"
+run_build "$f32"
+[[ $BUILD_OUT == *"docker is required"* ]] ||
+  fail "a clean fixture must still reach the docker step now that the audit is wired in" "$BUILD_OUT"
+[[ $BUILD_OUT == *"guard 6.5a OK"* ]] || fail "guard 6.5a reports success on a clean payload" "$BUILD_OUT"
+[[ $BUILD_OUT == *"[iso-payload-audit] inspected "*"across 2 root(s)"* ]] ||
+  fail "the audit's own denominator line appears in the build log, over BOTH roots" "$BUILD_OUT"
+[[ $BUILD_OUT == *"payload audit (overlay + overlaid airootfs source):"*"$f32/iso/overlay"* ]] ||
+  fail "the build log names the roots it passed to the audit" "$BUILD_OUT"
+pass "guard 6.5a runs the real payload audit over both roots and prints its denominator, not just a verdict"
+
+# 🔴 THE NEGATIVE CONTROL. The exact line the dev Deck carries on purpose
+# (docs/PROGRESS.md §5.17, operator decision §5.25 #7), in the exact file, in
+# the overlay -- the likeliest route for the accident, since the file already
+# exists on the machine this repo is developed on. A guard nobody has seen fail
+# is not a guard.
+f33="$work/f33"
+make_fixture "$f33"
+mkdir -p "$f33/iso/overlay/configs/airootfs/etc/sudoers.d"
+printf 'deck ALL=(ALL) NOPASSWD: ALL\n' \
+  >"$f33/iso/overlay/configs/airootfs/etc/sudoers.d/99-deck-testing"
+run_build "$f33"
+[[ $BUILD_STATUS -ne 0 ]] ||
+  fail "an overlay carrying 99-deck-testing must FAIL the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"guard 6.5a"* ]] || fail "the refusal cites guard 6.5a" "$BUILD_OUT"
+[[ $BUILD_OUT == *"99-deck-testing"* ]] ||
+  fail "the refusal names the offending file, so the reader can delete it" "$BUILD_OUT"
+[[ $BUILD_OUT == *"NOPASSWD"* ]] || fail "the refusal quotes the offending line" "$BUILD_OUT"
+[[ $BUILD_OUT != *"docker is required"* ]] ||
+  fail "a payload finding must STOP the build before docker, not be logged and passed" "$BUILD_OUT"
+pass "🔴 an overlay carrying 'deck ALL=(ALL) NOPASSWD: ALL' fails the build by name, before docker (§5.4)"
+
+# The tolerance case, and it is not a footnote. `deck ALL=(ALL) ALL` is blanket
+# but password-protected -- the ordinary admin grant every Arch/Omarchy install
+# ships. Failing on it is the false positive that teaches people to ignore the
+# check, which is how stage_audit_privileges' first version went wrong
+# (docs/PROGRESS.md §5.17).
+f34="$work/f34"
+make_fixture "$f34"
+mkdir -p "$f34/iso/overlay/configs/airootfs/etc/sudoers.d"
+printf 'deck ALL=(ALL) ALL\n' >"$f34/iso/overlay/configs/airootfs/etc/sudoers.d/10-installer"
+run_build "$f34"
+[[ $BUILD_OUT == *"docker is required"* ]] ||
+  fail "an ordinary password-protected blanket grant must NOT fail the build" "$BUILD_OUT"
+[[ $BUILD_OUT == *"guard 6.5a OK"* ]] || fail "guard 6.5a passes on the ordinary admin grant" "$BUILD_OUT"
+[[ $BUILD_OUT == *"blanket grant, password required"* ]] ||
+  fail "the tolerated grant is still REPORTED -- tolerated is not invisible" "$BUILD_OUT"
+[[ $BUILD_OUT != *"PASSWORDLESS BLANKET ROOT"* ]] ||
+  fail "a password-protected grant must not be reported as passwordless" "$BUILD_OUT"
+pass "guard 6.5a tolerates (and still reports) 'deck ALL=(ALL) ALL' -- the false positive that gets a check ignored"
+
+# The audit missing is a FAILURE, not a skip. Without this, deleting
+# tools/iso-payload-audit.sh would turn every build green.
+f35="$work/f35"
+make_fixture "$f35"
+rm -f "$f35/tools/iso-payload-audit.sh"
+run_build "$f35"
+[[ $BUILD_STATUS -eq 1 ]] || fail "a missing payload audit must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"does not exist, so the audit did not run"* ]] ||
+  fail "the refusal says the audit did not run, rather than reporting a clean payload" "$BUILD_OUT"
+[[ $BUILD_OUT != *"docker is required"* ]] || fail "it must stop the build" "$BUILD_OUT"
+pass "a missing tools/iso-payload-audit.sh fails the build instead of silently skipping the check"
+
+# Present but not executable: a distinct code path in bin/build, and a distinct
+# diagnosis. Copied rather than chmod'ing the symlink -- chmod follows symlinks,
+# and this fixture would otherwise strip +x from the real repo's script.
+f35b="$work/f35b"
+make_fixture "$f35b"
+rm -f "$f35b/tools/iso-payload-audit.sh"
+cp "$REPO_ROOT/tools/iso-payload-audit.sh" "$f35b/tools/iso-payload-audit.sh"
+chmod -x "$f35b/tools/iso-payload-audit.sh"
+run_build "$f35b"
+[[ $BUILD_STATUS -eq 1 ]] || fail "a non-executable payload audit must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"is not executable, so the audit did not run"* ]] ||
+  fail "the refusal distinguishes 'not executable' from 'not there'" "$BUILD_OUT"
+pass "a non-executable tools/iso-payload-audit.sh is refused with its own diagnosis, not treated as absent"
+
+# --- 17b. guard 6.5b: the same question, asked of the packages -------------
+
+# A drop-in inside a package is the route no tree scan can see, and the route
+# our own omarchy-deck package would take. Reached through the same docker stub
+# section 16 uses: the offline mirror is a bind mount the container writes and
+# the host reads, so a fixture can populate it and the guard cannot tell.
+f36="$work/f36"
+make_fixture "$f36"
+scratch36="$work/scratch-36"
+mirror36="$scratch36/offline-mirror-cache/mirror/offline"
+make_fake_package "$mirror36" omarchy-dev "4.0.0.r1617.g${FIXTURE_RUNTIME_SHA:0:7}" \
+  omarchy-setup-system omarchy-provision-user
+make_fake_package "$mirror36" omarchy-settings-dev "4.0.0.r1617.g${FIXTURE_RUNTIME_SHA:0:7}" \
+  omarchy-upload-log
+make_sudoers_package "$mirror36" omarchy-deck "1.0.0-1" 'deck ALL=(ALL) NOPASSWD: ALL'
+BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f36" \
+  "OMARCHY_DECK_ISO_BUILD_DIR=$scratch36" \
+  "DOCKER_STUB_ARGS=$work/docker-args-36" \
+  "DOCKER_STUB_RELEASE=$scratch36/release"
+[[ $BUILD_STATUS -eq 1 ]] ||
+  fail "a sudoers drop-in inside a mirror package must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+# The earlier guards must have PASSED, or this proves nothing about 6.5b.
+[[ $BUILD_OUT == *"guard 6.5a OK"* && $BUILD_OUT == *"guard 6.4b OK"* ]] ||
+  fail "6.5a and 6.4b should both pass here -- the finding is inside a package, which neither of them reads" "$BUILD_OUT"
+[[ $BUILD_OUT == *"guard 6.5b"* ]] || fail "the refusal cites guard 6.5b" "$BUILD_OUT"
+[[ $BUILD_OUT == *"omarchy-deck-1.0.0-1-any.pkg.tar.zst!etc/sudoers.d/99-deck-testing"* ]] ||
+  fail "the refusal names the package AND the member inside it" "$BUILD_OUT"
+[[ -f "$scratch36/release/omarchy-2026.08.11-x86_64.iso.rejected" ]] ||
+  fail "an ISO rejected by 6.5b is renamed so it cannot be flashed or picked up by a later run" "$BUILD_OUT"
+[[ ! -f "$scratch36/release/omarchy-2026.08.11-x86_64.iso" ]] ||
+  fail "the rejected ISO must not keep its .iso name" "$BUILD_OUT"
+pass "guard 6.5b catches a passwordless grant shipped INSIDE a mirror package and rejects the built ISO"
+
 # ---------------------------------------------------------------------------
-# 17. The real repo's iso/ skeleton matches docs/tasks/T5-fork-plan.md §1.
+# 18. The real repo's iso/ skeleton matches docs/tasks/T5-fork-plan.md §1.
 #
 # The submodule pin check is conditional: actions/checkout in
 # .github/workflows/ci.yml does not fetch submodules (no `submodules:` key),
@@ -947,5 +1126,174 @@ if [[ -e "$ISO_ROOT/upstream/.git" ]]; then
 else
   printf 'skip - iso/upstream is not checked out in this environment (actions/checkout has no submodules: key in .github/workflows/ci.yml, which this suite does not own) -- the fixture-based tests above cover bin/build'"'"'s pin-verification logic regardless\n'
 fi
+
+# ---------------------------------------------------------------------------
+# 19. A promoted patch and the code it imports move TOGETHER.
+#
+# docs/tasks/T5-fork-plan.md §10 point 5, and src/iso-patches/README.md's
+# "does not stand alone" section: configure-deck-phase.patch makes main.py's
+# build_phases do `from .deck_configure import configure_deck`, and
+# build_phases(ctx) is evaluated as an ARGUMENT to run() -- i.e. before any
+# phase executes. So a patch promoted without its additive module does not
+# degrade the install; it turns every install into an immediate traceback,
+# before partitioning. The hazard was written down in two places and enforced
+# by nothing. This section is the enforcement.
+#
+# The module list is DERIVED from the patches, never hard-coded, for exactly
+# the reason guard 6.4a derives its binary names (bin/build's §6.4a comment): a
+# hand-kept list goes stale against our own next edit, and it goes stale
+# silently, which is worse than not having one.
+# ---------------------------------------------------------------------------
+
+ORCHESTRATOR_OVERLAY="$ISO_ROOT/overlay/configs/airootfs/usr/share/omarchy-iso/orchestrator"
+ORCHESTRATOR_UPSTREAM="$ISO_ROOT/upstream/configs/airootfs/usr/share/omarchy-iso/orchestrator"
+
+# orchestrator_module_missing <name> -- empty if the module resolves, otherwise
+# a sentence saying why not. A relative import may legitimately name an
+# UPSTREAM module (deck_configure's own `from .ui import error, info` does), so
+# the overlay is checked first and upstream second. When the submodule is not
+# checked out the upstream half cannot be consulted, and that is reported as
+# part of the failure rather than quietly treated as a pass.
+orchestrator_module_missing() {
+  local name=$1
+  [[ -f "$ORCHESTRATOR_OVERLAY/$name.py" ]] && return 0
+  if [[ -d $ORCHESTRATOR_UPSTREAM ]]; then
+    [[ -f "$ORCHESTRATOR_UPSTREAM/$name.py" ]] && return 0
+    printf 'no %s.py in the overlay orchestrator, and none in the pinned upstream orchestrator either' "$name"
+    return 0
+  fi
+  printf 'no %s.py in the overlay orchestrator (iso/upstream is not checked out here, so it could not be confirmed as an upstream module either)' "$name"
+}
+
+(( ${#overlay_patches[@]} > 0 )) ||
+  fail "there are no promoted patches to derive imports from" \
+    "This section would otherwise affirm nothing. If the overlay legitimately carries no patches, delete this block deliberately rather than letting it pass over an empty set."
+
+# Added lines only ('^+'), because a relative import that a patch merely quotes
+# in context is already in the tree it applies to.
+mapfile -t patch_new_imports < <(
+  grep -hoE '^\+.*from \.[A-Za-z_][A-Za-z0-9_]* import' "${overlay_patches[@]}" |
+    sed -E 's/.*from \.([A-Za-z_][A-Za-z0-9_]*) import.*/\1/' | sort -u
+)
+(( ${#patch_new_imports[@]} > 0 )) ||
+  fail "no promoted patch introduces a relative import" \
+    "configure-deck-phase.patch adds 'from .deck_configure import configure_deck', so an empty derivation means the PATTERN went stale, not that the coupling went away -- the same shape guard 6.4a's empty-match case refuses. Fix the pattern, or remove this block on purpose."
+
+for mod in "${patch_new_imports[@]}"; do
+  why=$(orchestrator_module_missing "$mod")
+  [[ -z $why ]] ||
+    fail "a promoted patch imports .$mod, but $why" \
+      "An overlay patch that introduces a relative import with no module behind it is an install that dies BEFORE phase 1: build_phases(ctx) is evaluated as an argument to run(), so the ImportError happens before partitioning, on every install. Promote the patch and its additive files in one commit (src/iso-patches/README.md)."
+done
+pass "every relative import promoted patches introduce (${patch_new_imports[*]}) has a module behind it"
+
+# The transitive half. The patch names deck_configure; deck_configure names
+# deck_wifi (`from . import deck_wifi`, imported lazily inside the step). A
+# check that stopped at the patch would let deck_wifi.py be left behind, which
+# fails later but just as hard.
+shopt -s nullglob
+overlay_orchestrator_modules=("$ORCHESTRATOR_OVERLAY"/*.py)
+shopt -u nullglob
+if (( ${#overlay_orchestrator_modules[@]} > 0 )); then
+  mapfile -t overlay_module_imports < <(
+    grep -hoE '^[[:space:]]*from \.[A-Za-z_][A-Za-z0-9_]* import|^[[:space:]]*from \. import [A-Za-z_][A-Za-z0-9_]*' \
+      "${overlay_orchestrator_modules[@]}" |
+      sed -E 's/^[[:space:]]*from \. import ([A-Za-z_][A-Za-z0-9_]*)$/\1/; s/^[[:space:]]*from \.([A-Za-z_][A-Za-z0-9_]*) import$/\1/' |
+      sort -u
+  )
+  (( ${#overlay_module_imports[@]} > 0 )) ||
+    fail "the overlay's orchestrator modules import nothing relative" \
+      "${#overlay_orchestrator_modules[@]} module(s) are there and they are members of upstream's orchestrator package; zero relative imports means the pattern went stale."
+  for mod in "${overlay_module_imports[@]}"; do
+    why=$(orchestrator_module_missing "$mod")
+    [[ -z $why ]] ||
+      fail "the overlay's orchestrator imports .$mod, but $why" \
+        "Every module an overlay orchestrator file imports must exist -- in the overlay if it is ours, in the pinned upstream if it is theirs."
+  done
+  pass "every relative import the overlay's own orchestrator modules make (${overlay_module_imports[*]}) resolves in the overlay or the pinned upstream"
+else
+  printf 'skip - the overlay carries no orchestrator modules, so there are no transitive imports to resolve\n'
+fi
+
+# The two ASSETS cannot be derived from the patch: the phase COPIES them onto
+# the target, it does not import them, so nothing in the patch mentions them.
+# They are derived from deck_wifi.py's constants instead -- ASSET_DIR plus the
+# two names beside it are the one place those paths are written down. Deriving
+# beats a hand-kept list here too: if the constants are renamed, the extraction
+# below finds nothing and this block FAILS, rather than silently checking a
+# stale pair of filenames.
+mapfile -t asset_const_files < <(grep -lE '^ASSET_DIR = Path\("' "${overlay_orchestrator_modules[@]}" 2>/dev/null || true)
+(( ${#asset_const_files[@]} == 1 )) ||
+  fail "expected exactly one overlay orchestrator module to define ASSET_DIR, found ${#asset_const_files[@]}" \
+    "That constant is meant to be the single place the on-ISO asset directory is written down (src/iso-patches/README.md). Zero means it was renamed and this derivation is now checking nothing; more than one means it was duplicated, which is the drift the single definition exists to prevent."
+asset_src=${asset_const_files[0]}
+asset_dir=$(sed -nE 's|^ASSET_DIR = Path\("([^"]+)"\).*|\1|p' "$asset_src" | head -n1)
+[[ $asset_dir == /* ]] ||
+  fail "could not derive an absolute ASSET_DIR from $(basename -- "$asset_src")" "got: '$asset_dir'"
+mapfile -t asset_names < <(
+  sed -nE 's#^(FIRST_BOOT_UNIT|FIRST_BOOT_SCRIPT_ASSET) = "([^"/]+)".*#\2#p' "$asset_src" | sort -u
+)
+(( ${#asset_names[@]} == 2 )) ||
+  fail "expected two asset filenames (FIRST_BOOT_UNIT, FIRST_BOOT_SCRIPT_ASSET) in $(basename -- "$asset_src"), derived ${#asset_names[@]}" \
+    "The constants were renamed or moved. Re-point this derivation rather than hard-coding the filenames -- ${asset_names[*]:-none}"
+for asset in "${asset_names[@]}"; do
+  [[ -f "$ISO_ROOT/overlay/configs/airootfs$asset_dir/$asset" ]] ||
+    fail "$(basename -- "$asset_src") copies $asset_dir/$asset onto the target, but the overlay does not ship it" \
+      "A missing asset does not stop the install (it is recorded in /var/log/omarchy-deck-install.json and test/unit/test-deck-configure-wifi.py asserts both halves), so nothing else would ever tell you: the Deck simply never reconnects to Wi-Fi after first boot. Promote the asset with the phase."
+done
+pass "both first-boot assets derived from $(basename -- "$asset_src") (${asset_names[*]}) ship in the overlay at $asset_dir"
+
+# ---------------------------------------------------------------------------
+# The SHELL half of the same hazard, added 2026-08-12 with T4a's promotion.
+#
+# A promoted patch can couple itself to a file it does not import: it can
+# `source` one. omarchy-install-dashboard.patch adds
+# `source /usr/share/omarchy-iso/deck-dashboard.sh` to a script that runs on
+# EVERY install, and that script runs under `set -e` by the time the line
+# executes -- so a missing target is not a degraded dashboard, it is a
+# dashboard that dies, on every install, on hardware, at the one moment the
+# user is watching a progress bar. Identical class to the ImportError above;
+# different mechanism, so the import derivation above cannot see it.
+#
+# DERIVED, not hard-coded -- no filename appears below, for the same reason
+# the import list is derived: a hand-kept list goes stale silently. The path
+# comes out of the patch text, and where it resolves is decided the same way
+# orchestrator_module_missing decides it: ours (the overlay) first, upstream's
+# second, because a patch may legitimately source a file upstream already
+# ships. When the submodule is not checked out, the upstream half cannot be
+# consulted and that is said out loud in the failure rather than waved through.
+# ---------------------------------------------------------------------------
+
+# sourced_path_missing <abs-path> -- empty if the file resolves, otherwise a
+# sentence saying why not.
+sourced_path_missing() {
+  local abs=$1
+  [[ -f "$ISO_ROOT/overlay/configs/airootfs$abs" ]] && return 0
+  if [[ -d "$ISO_ROOT/upstream/configs/airootfs" ]]; then
+    [[ -f "$ISO_ROOT/upstream/configs/airootfs$abs" ]] && return 0
+    printf 'nothing ships it at %s -- not in the overlay (iso/overlay/configs/airootfs%s) and not in the pinned upstream airootfs either' "$abs" "$abs"
+    return 0
+  fi
+  printf 'the overlay does not ship it at %s (iso/upstream is not checked out here, so it could not be confirmed as an upstream file either)' "$abs"
+}
+
+# Added lines only ('^+'), and only where `source`/`.` opens the statement --
+# a commented mention or a context line the patch merely quotes is already in
+# the tree it applies to. The path may be quoted; the quotes are stripped.
+mapfile -t patch_sourced_paths < <(
+  grep -hoE '^\+[[:space:]]*(source|\.)[[:space:]]+["'"'"']?/usr/share/omarchy-iso/[^"'"'"'[:space:];&|)]+' "${overlay_patches[@]}" |
+    sed -E 's|^\+[[:space:]]*(source\|\.)[[:space:]]+["'"'"']?||' | sort -u
+)
+(( ${#patch_sourced_paths[@]} > 0 )) ||
+  fail "no promoted patch sources a file under /usr/share/omarchy-iso/" \
+    "omarchy-install-dashboard.patch adds 'source /usr/share/omarchy-iso/deck-dashboard.sh', so an empty derivation means this PATTERN went stale, not that the coupling went away -- the same refusal-to-pass-vacuously the import block above uses. Fix the pattern, or remove this block on purpose."
+
+for sourced in "${patch_sourced_paths[@]}"; do
+  why=$(sourced_path_missing "$sourced")
+  [[ -z $why ]] ||
+    fail "a promoted patch sources $sourced, but $why" \
+      "The patched script runs on every install, under 'set -e', and sourcing a file that is not there kills it there and then. A patch and the files it references are ONE unit: promote them in the same commit, into the overlay at their shipped path (src/iso-patches/README.md)."
+done
+pass "every absolute path promoted patches source (${patch_sourced_paths[*]}) has a file behind it"
 
 printf '\nall iso-build tests passed\n'
