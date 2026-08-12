@@ -395,3 +395,63 @@ styling change break the installer's keyboard, which is the one with no fallback
 - [ ] `test-deck-osk-layout.py` still green, extended to cover the new legends
 - [ ] The TTY renderer still passes `test/osk-tty-e2e.py` by hand
 - [ ] **[H]** the operator looks at it on the Deck and says it reads as familiar
+
+### 9a. 🔴 The badges cannot copy Valve's without copying Valve's INPUT MODEL
+
+**Found 2026-08-11 when the restyle was first seen on the panel.** The `hint`
+field means two incompatible things, and the suites caught the collision before
+it shipped.
+
+**Ours:** `hint` = *which trigger presses keys in this half* (`L2` left, `R2`
+right). `test-deck-osk-layout.py` enforces it: *"every hinted key's glyph names
+the trigger for the half it is drawn in."*
+
+**Valve's:** the badge = *which face button is a shortcut for this key.*
+
+Checked against the mapper's real table, only one of Valve's four is true here:
+
+| Valve's badge | True in our mapper? |
+|---|---|
+| `Y` = Space | ✅ `BTN_WEST → KEY_SPACE` |
+| `X` = Backspace | ❌ X is **Tab**, and is the STEAM+X chord key |
+| `L2` = Shift | ❌ L2 **selects** whatever the left cursor is on |
+| `R2` = Enter | ❌ R2 selects in the right half; **A** sends Enter |
+
+🔴 **Exact parity would mean abandoning the dual-cursor design.** Valve drives
+**one** cursor with face-button shortcuts; T8 chose **two** cursors with the
+triggers as select, one per thumb — and the operator confirmed on hardware that
+this is right ("that's exactly as it should be"). The badges are downstream of
+that choice. **Copying them faithfully means copying the interaction model.**
+
+⚠️ **And the reference is not static.** The operator reports (2026-08-11, from
+video) that **the badges appear and disappear** during use. That explains why
+two reference screenshots disagreed and why reading a mapping off either one
+kept contradicting the code. **Whatever this is, it is contextual behaviour, not
+a label set** — and it must be understood before any mapping is copied.
+
+**Operator's stated intent so far:** X = Backspace · Y = Space · **no button for
+Enter** · L2 = Shift. Y is already true; the rest are not.
+
+### 9b. What the next session needs before touching this
+
+1. **Reference frames**, since video cannot be read from a session: the keyboard
+   **at rest**, with **shift held**, and at the moment **a badge appears or
+   disappears**. Without the third, the contextual rule is unknowable.
+2. **A decision on the collision above** — truthful subset, or full parity with
+   the input-model change it implies.
+3. ⚠️ **Exact layout placement** (space, tab, the bottom row) is also requested
+   and is *not* blocked by any of this — it is independent of the badges.
+
+⛔ **Unchanged and non-negotiable:** our own glyphs, never Valve's artwork
+(`docs/findings/P16-redistribution-and-trademark.md`). Matching *placement and
+behaviour* is fine; shipping their assets is not.
+
+### 9c. ✅ Landed already
+
+- **Divider removed** between the halves — drawn, seen, rejected, and the
+  suite's assertion **inverted** so it cannot creep back.
+- Glyph badges, shifted-symbol legends and the digit dual-legend **shipped and
+  deployed**; `shift=once` correctly gives `q→Q` and `1→!` **in the logic**,
+  verified by driving `face()` directly. ⚠️ **Whether that reaches the screen on
+  a shift press is UNVERIFIED** — the operator reported it not visibly changing,
+  and the redraw path was traced but not disproved.
