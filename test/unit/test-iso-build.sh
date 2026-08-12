@@ -22,7 +22,12 @@
 #   5. a patch that does not apply FAILS LOUDLY (git apply --3way, "failing
 #      loudly on any reject" from §1) rather than being skipped;
 #   6. the real iso/UPSTREAM, iso/RUNTIME, and iso/overlay/ in this repo match
-#      the shape docs/tasks/T5-fork-plan.md §1 specifies.
+#      the shape docs/tasks/T5-fork-plan.md §1 specifies -- including, since
+#      T5c, that every promoted overlay patch APPLIES to the pinned upstream
+#      and that the Valve repos it adds stay last in repo order. The
+#      "iso/overlay/ is empty" assertion this suite carried from T5a was
+#      retired in the same commit that first put content there; the block in
+#      section 11 records why, and what replaced it.
 #
 # Everything through step 5 is tested by running the ACTUAL iso/bin/build
 # script against a throwaway fixture tree that has the same iso/ layout but a
@@ -303,11 +308,129 @@ pass "iso/RUNTIME is exactly 'basecamp/omarchy@6d7826d'"
 
 [[ -d "$ISO_ROOT/overlay/configs/airootfs" ]] || fail "iso/overlay/configs/airootfs/ exists"
 [[ -d "$ISO_ROOT/overlay/patches" ]] || fail "iso/overlay/patches/ exists"
-# "EMPTY of content" -- only .gitkeep (or nothing) may be tracked under these.
+
+# ---------------------------------------------------------------------------
+# 🔴 RETIRED 2026-08-12 (T5c): "iso/overlay/ is empty of content".
+#
+# That assertion existed for one reason, recorded in src/iso-patches/README.md:
+# bin/build applies EVERY overlay/patches/*.patch it finds, and an overlay
+# whose base build had never been shown to reproduce the known-good ISO could
+# not attribute a later failure to either cause. docs/findings/T5a-parity.md
+# Appendix A closed that -- P1/P2/P3/P4 all pass against
+# ~/ISOs/omarchy-2026.08.10-…iso, 1177 of 1180 same-version packages are
+# byte-identical, and the three exceptions are exactly our --local-source
+# builds -- so the reason expired and T5c is the slice entitled to add content.
+#
+# It is replaced, not deleted, because "the overlay is empty" was doing real
+# work: it made every overlay file a deliberate act. What is true NOW, and what
+# the assertions below pin instead:
+#
+#   A. the overlay is no longer empty, and says how much it carries -- so this
+#      section cannot quietly regress to a vacuous pass over nothing;
+#   B. the patch budget from T5-fork-plan.md §1 point 3 (<= 4 files, "a fifth
+#      should have to argue for itself") is enforced rather than aspirational;
+#   C. a patch is never staged and promoted at the same time (two divergent
+#      copies of the same edit is worse than either place alone);
+#   D. every promoted patch APPLIES to the pinned upstream, and the result
+#      still parses -- which is the direct descendant of the retired rule's
+#      purpose: attributability. A patch that no longer applies must be found
+#      by a suite that runs in seconds, not by a 40-minute Docker build.
+# ---------------------------------------------------------------------------
+
 overlay_tracked=$(cd "$REPO_ROOT" && git ls-files iso/overlay | grep -v '\.gitkeep$' || true)
-[[ -z $overlay_tracked ]] ||
-  fail "iso/overlay/ must be empty of content in this slice (T5a)" "tracked, non-.gitkeep files: $overlay_tracked"
-pass "iso/overlay/ has the required directory structure and is empty of content"
+[[ -n $overlay_tracked ]] ||
+  fail "iso/overlay/ has content" \
+    "The empty-overlay rule was retired in T5c; an overlay that is empty again means content was reverted without its assertion being restored."
+overlay_file_count=$(printf '%s\n' "$overlay_tracked" | grep -c .)
+pass "iso/overlay/ carries content ($overlay_file_count tracked files) -- the T5a empty-overlay rule is retired, see the block above"
+
+shopt -s nullglob
+overlay_patches=("$ISO_ROOT"/overlay/patches/*.patch)
+staged_patches=("$REPO_ROOT"/src/iso-patches/*.patch)
+shopt -u nullglob
+
+# B. The patch budget. T5-fork-plan.md §1 point 3: patches are only allowed for
+# build-time behaviour, because anything install-time has to stay extractable
+# into the omarchy-deck package for Phase 4 (T7's enablement layer). The budget
+# is the pressure that keeps that line.
+(( ${#overlay_patches[@]} <= 4 )) ||
+  fail "iso/overlay/patches/ holds ${#overlay_patches[@]} patches; the budget is 4 (T5-fork-plan.md §1 point 3)" \
+    "A fifth patch has to argue for itself -- and the argument is usually that the change belongs in the omarchy-deck package instead."
+pass "the overlay patch budget is respected (${#overlay_patches[@]}/4 -- T5-fork-plan.md §1 point 3)"
+
+# C. Staged and promoted are mutually exclusive states for the same patch.
+for staged in "${staged_patches[@]}"; do
+  staged_name=$(basename -- "$staged")
+  [[ ! -f "$ISO_ROOT/overlay/patches/$staged_name" ]] ||
+    fail "$staged_name exists in BOTH src/iso-patches/ and iso/overlay/patches/" \
+      "Promotion is a git mv, not a copy: two divergent copies of one edit is worse than either location alone."
+done
+pass "no patch is simultaneously staged in src/iso-patches/ and promoted into iso/overlay/patches/ (${#staged_patches[@]} staged, ${#overlay_patches[@]} promoted)"
+
+# D. Every promoted patch applies to the pinned upstream, and the result still
+#    parses. Conditional on the submodule for the same reason as the pin check
+#    below -- and reported out loud rather than skipped quietly.
+if [[ -e "$ISO_ROOT/upstream/.git" ]]; then
+  (( ${#overlay_patches[@]} > 0 )) ||
+    fail "there are no overlay patches to apply" \
+      "This assertion would otherwise pass vacuously; if the overlay legitimately has no patches, delete this block rather than letting it affirm nothing."
+  apply_scratch="$work/overlay-apply"
+  rm -rf "$apply_scratch"
+  git clone --quiet --local --no-hardlinks "$ISO_ROOT/upstream" "$apply_scratch" ||
+    fail "could not clone iso/upstream for the patch-apply check"
+  # `checkout --quiet` still narrates the detached HEAD on stderr, which would
+  # bury this suite's output; the status is checked instead of the chatter.
+  git -C "$apply_scratch" -c advice.detachedHead=false checkout --quiet \
+    "$(git -C "$ISO_ROOT/upstream" rev-parse HEAD)" 2>/dev/null ||
+    fail "could not check the patch-apply clone out at the UPSTREAM pin"
+  for p in "${overlay_patches[@]}"; do
+    git -C "$apply_scratch" apply --3way "$p" >/dev/null 2>&1 ||
+      fail "$(basename -- "$p") does not apply to the pinned upstream" \
+        "iso/bin/build applies every overlay/patches/*.patch with git apply --3way and fails loudly on a reject; this suite finds that in seconds instead of 40 minutes into a Docker build. Rebase the patch by hand."
+  done
+  pass "all ${#overlay_patches[@]} overlay patches apply cleanly to $upstream_content"
+
+  # The patched builder must still be valid bash. A patch can apply cleanly and
+  # still produce a file that dies at line 1 of the container run.
+  bash -n "$apply_scratch/builder/build-iso.sh" ||
+    fail "the patched builder/build-iso.sh is valid bash"
+  pass "the patched builder/build-iso.sh still parses"
+
+  # The Valve repos must come AFTER [arch-mact2], i.e. last. pacman resolves
+  # -S <name> by REPO ORDER, not version; putting Valve first was measured and
+  # rejected (docs/findings/P16-repo-overlap-audit.md: 101 overlapping names,
+  # Valve older in 50). This is the assertion that stops a well-meaning
+  # "match SteamOS" edit from silently downgrading the mesa/vulkan stack.
+  edge_conf="$apply_scratch/configs/pacman-online-edge.conf"
+  repo_order=$(grep -n '^\[' "$edge_conf" | sed 's/:.*\[/ /; s/\]//')
+  for valve in jupiter-staging holo-staging; do
+    grep -q "^\[$valve\]" "$edge_conf" ||
+      fail "the patched pacman-online-edge.conf declares [$valve]" "$repo_order"
+    valve_line=$(grep -n "^\[$valve\]" "$edge_conf" | cut -d: -f1)
+    for arch_repo in core extra multilib; do
+      arch_line=$(grep -n "^\[$arch_repo\]" "$edge_conf" | cut -d: -f1)
+      (( valve_line > arch_line )) ||
+        fail "[$valve] is declared before [$arch_repo] in pacman-online-edge.conf" \
+          "pacman resolves by repo order, not version. docs/PROGRESS.md §5.13: 101 names overlap and Valve's build is OLDER in 50 of them, the whole mesa/vulkan stack included. Qualify the one package that needs Valve's build (jupiter-staging/gamescope) instead of reordering."
+    done
+  done
+  pass "Valve's repos are declared AFTER core/extra/multilib (docs/PROGRESS.md §5.13: repo order beats version)"
+
+  # build-iso.sh extracts the [omarchy] stanza into the container's own
+  # pacman.conf with `awk '/^\[omarchy\]/,/^$/'` -- a range that ends at the
+  # first blank line. Appending repos is safe only while that stays true.
+  extracted=$(awk '/^\[omarchy\]/,/^$/' "$edge_conf")
+  [[ $extracted == *"pkgs.omarchy.org"* ]] ||
+    fail "build-iso.sh's [omarchy] stanza extraction still finds the omarchy repo" "$extracted"
+  [[ $extracted != *"steamdeck-packages"* && $extracted != *"arch-mact2"* ]] ||
+    fail "build-iso.sh's awk range now swallows a repo beyond [omarchy]" \
+      "It ends at the first blank line; a stanza appended without a blank line before it would leak into the container's /etc/pacman.conf.
+extracted:
+$extracted"
+  pass "the [omarchy] stanza build-iso.sh copies into the container is still exactly one repo"
+else
+  printf 'skip - iso/upstream is not checked out here, so the overlay patches could not be applied against the pin (see the note below)\n'
+fi
 
 if [[ -e "$ISO_ROOT/upstream/.git" ]]; then
   real_head=$(git -C "$ISO_ROOT/upstream" rev-parse HEAD)

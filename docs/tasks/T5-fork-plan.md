@@ -694,6 +694,129 @@ touches the boot chain, the orchestrator or `/usr/bin`.
 now runs past phase 5 is an argument from ingredients, not an execution. `[V]`
 tier (`test/vm/`) still owes that.
 
+### 🟢 Outcome, 2026-08-12 — T5c landed. The overlay has content, and the empty-overlay rule is retired
+
+**Everything below is MEASURED against the live repositories on 2026-08-12,
+using pacman's own resolver. No ISO was built** — a real `iso/bin/build` run is
+still owed and is the only thing that can prove the patched `build-iso.sh`
+executes end to end.
+
+**What landed:** two patches (`deck-valve-repos.patch`, `deck-packages.patch`),
+three package lists and one guard script under
+`iso/overlay/configs/deck/`. Patch budget now **4/4** — §1 point 3's "a fifth
+should have to argue for itself" is now enforced by
+`test/unit/test-iso-build.sh`, not merely written down.
+
+#### 🔴 Three things this plan got wrong, all corrected by measurement
+
+**1. §3.8's fix is incomplete, and its symptom list is short by two.**
+`pacman -S steam` resolves **six** NVIDIA packages, not four: §3.8 names
+`nvidia-utils`, `egl-wayland`, `egl-gbm`, `egl-x11` and omits
+`lib32-nvidia-utils` and `egl-wayland2`. And its claim that naming
+`lib32-vulkan-radeon` "drops them to zero" is **true only by accident of
+resolution order**: `lib32-vulkan-radeon` hard-depends on `vulkan-radeon`, so
+whether the 64-bit half arrives before pacman must choose a provider for
+`steam`'s separate 64-bit `vulkan-driver` depends on the order the resolver
+reaches them. In the isolated two-package transaction it does not
+(`nvidia-utils` is chosen anyway); in the full ISO target set it does. **Both
+are pinned in `deck-install.packages`** so the outcome stops depending on that.
+
+**2. `linux-firmware-nvidia` is already in every target install**, and always
+was — the `linux-firmware` meta-package pulls it. So "zero NVIDIA packages"
+was never literally achievable and a check written that way would have been red
+on day one for an unrelated reason. It is the guard's single documented
+exception, and the guard fails if it ever stops matching, so the hole cannot
+quietly widen.
+
+**3. The offline mirror deliberately carries the whole NVIDIA stack** —
+`nvidia-dkms`, `nvidia-open-dkms`, `nvidia-utils`, `lib32-nvidia-utils`,
+`egl-wayland`, `libva-nvidia-driver` are all listed in upstream's
+`omarchy-other.packages` as hardware alternatives. §3.8 complains about "unused
+NVIDIA driver in an uncompressed mirror" and *that* part is a **size** question
+for T5g, not a resolution bug: it is upstream's decision and pruning it means
+editing the runtime's own list. The guard is therefore scoped to **what gets
+installed**, which is the half §3.8 correctly diagnosed.
+
+#### The seams, as built
+
+| Seam | Where it landed | Note |
+|---|---|---|
+| **S2** | `deck-valve-repos.patch` appends `[jupiter-staging]` + `[holo-staging]` to `configs/pacman-online-edge.conf`, **last** | `SigLevel = Never`, shaped exactly like `[arch-mact2]` per `docs/findings/R1-10.1.md`. Order asserted by a unit test: 101 names overlap and Valve's is older in 50 (§5.13) |
+| **S1** | `deck-packages.patch` merges `deck-install.packages` into `base_pkg_lists[0]` **before** the shipped copy is made, and adds `deck-mirror.packages` to `all_packages` | §3's S1 works as described. The merged list is written to `/tmp` and the array repointed — `base_pkg_lists[0]` is a read-only bind mount under `--local-source` |
+
+**A third list §3 did not anticipate: `deck-fetch.packages`.** §4.1 decided
+`steamdeck-dsp` and `steam` are fetched, not bundled — so they are in no
+install list and no mirror list, and a guard that ignored them would be asking
+its question with the one package that causes the failure left out. They are
+listed so the dry run can include them and nothing else.
+
+**And a constraint §3 did not state: `deck-install.packages` may not contain a
+repo-qualified name.** Entries there are resolved twice against
+`pacman-offline.conf`, which declares one repo — by `resolve_expected_packages`
+and by pacstrap. `jupiter-staging/gamescope` aborts both. That is why the
+gamescope qualification §5.13 requires lives in the mirror-only list, and why
+the guard refuses a `/` in the install list.
+
+#### Measured numbers
+
+| | Before | After |
+|---|---|---|
+| Offline mirror package files | 1241 + 3 local = **1244** | **1283** (+42, **+544 MiB** compressed) |
+| Packages drawn from Valve's repos | 0 | **4** — `gamescope`, `linux-neptune-611`, `-headers`, `linux-firmware-neptune`. Nothing else leaks in |
+| Target install closure | 934 | ≈ **987** (+53, measured online as 917 → 970) |
+| NVIDIA driver packages in the target closure | 0 | **0**, and now asserted |
+
+`linux-firmware-neptune` alone is 350 MiB of that 544. The mirror is stored
+**uncompressed** inside the squashfs (`profiledef.sh`), so this is ~1:1 on ISO
+size. **T5g's size gate starts from these numbers.**
+
+⚠️ The reconstruction that produced them resolved upstream's exact
+`all_packages` union offline-free and got **1241 + 3 = 1244**, matching
+Appendix A's measured mirror exactly — which is why the +42 is trustworthy
+without a build.
+
+#### What the NVIDIA guard is, and why it is not in `bin/build`
+
+`iso/overlay/configs/deck/deck-nvidia-dry-run.sh`, called from the patched
+`build-iso.sh` **before** the ~6 GB `-Syw`, so a wrong package set costs
+seconds. It cannot live in `bin/build` (or in T5b's guard 6.4b): the question
+is *"which provider would pacman choose for the virtual `vulkan-driver`"*, and
+answering it needs the repo databases and the resolver, which exist only inside
+the container with the Valve repos configured. A built `.pkg.tar.zst` cannot
+answer it, and the dev machine's own `pacman.conf` would answer it wrongly.
+
+It is a **shape** assertion — never a count, never a version — because
+`iso/PKGS` pins only three packages' sources and the other ~1241 still roll
+with `edge`.
+
+🔴 **It carries a negative control, and that is the point.** The identical
+resolve runs a second time with the pins removed and the matcher is *required*
+to fire; if it does not, the build stops rather than shipping a guard whose
+green is indistinguishable from not having run (§5.30c's class).
+
+#### What replaced the empty-overlay assertion
+
+`test/unit/test-iso-build.sh` no longer asserts `iso/overlay/` is empty. In its
+place, and in the same commit: the overlay **has** content (with a count, so it
+cannot regress to a vacuous pass over nothing); the **patch budget is ≤ 4**; no
+patch is simultaneously staged in `src/iso-patches/` and promoted; and **every
+promoted patch applies to the pinned upstream**, the patched `build-iso.sh`
+still parses, Valve's repos are still declared after `core`/`extra`/`multilib`,
+and `build-iso.sh`'s `awk '/^\[omarchy\]/,/^$/'` stanza extraction still yields
+exactly one repo. That last one is a live trap: a stanza appended without a
+blank line before it leaks into the container's `/etc/pacman.conf`.
+
+#### Still owed
+
+- 🔴 **A real build.** Nothing here has been executed by `iso/bin/build`. The
+  patches apply and the patched builder parses; that the container run succeeds
+  is **(INFERRED)**.
+- `src/iso-patches/README.md` still says parity is unproven and that
+  `test-iso-build.sh` enforces an empty overlay. Both are now false. It was not
+  edited because another agent owns that path.
+- The two staged patches (`omarchy-install-dashboard.patch`,
+  `configure-deck-phase.patch`) were left staged, per T5a/T5d ownership.
+
 ---
 
 ## 8. The single riskiest unknown that remains

@@ -1,0 +1,65 @@
+# Steam Deck packages INSTALLED ON EVERY TARGET.
+#
+# T5-fork-plan.md §3 seam S1: this list is merged into the runtime's own
+# omarchy-base.packages *before* build-iso.sh copies it to
+# airootfs/usr/share/omarchy-iso/, so one edit reaches all three consumers at
+# once -- the offline mirror's `pacman -Syw`, the target install's
+# `_runtime_package_list`, and the `expected-packages` denominator the install
+# dashboard draws its progress bar from. Appending anywhere later desyncs them.
+#
+# ⚠️ NO REPO-QUALIFIED NAMES IN THIS FILE. Entries here are resolved twice
+# against the OFFLINE mirror, whose pacman.conf declares exactly one repo
+# ([offline], configs/pacman-offline.conf) -- once by build-iso.sh's
+# resolve_expected_packages and once by pacstrap at install time. A
+# `jupiter-staging/foo` entry aborts both. Repo-qualified names belong in
+# deck-mirror.packages, which is only ever resolved against the online repos.
+# deck-nvidia-dry-run.sh refuses the build if one appears here.
+#
+# Keep this list SHORT. Anything that only needs to be *available* belongs in
+# deck-mirror.packages and is installed by the omarchy-deck package (seam S4);
+# anything that touches the boot chain is T1/T5f's, not this file's.
+#
+# ---------------------------------------------------------------------------
+# The two vulkan-driver pins -- docs/PROGRESS.md §3.8
+# ---------------------------------------------------------------------------
+#
+# `steam` depends on the VIRTUAL packages `vulkan-driver` and
+# `lib32-vulkan-driver`. With no AMD provider selected, pacman picks the NVIDIA
+# stack on its own and nothing errors: several hundred MB of driver that cannot
+# run on this hardware.
+#
+# 🔴 §3.8's list of what appears is incomplete, MEASURED 2026-08-12 against the
+# live repos: it names nvidia-utils, egl-wayland, egl-gbm and egl-x11, and the
+# actual set is six -- `lib32-nvidia-utils` and `egl-wayland2` as well.
+#
+#   pacman -S steam                        -> egl-gbm egl-wayland egl-wayland2
+#                                             egl-x11 lib32-nvidia-utils
+#                                             nvidia-utils     (6)
+#   pacman -S steam lib32-vulkan-radeon    -> egl-gbm egl-wayland egl-wayland2
+#                                             egl-x11 nvidia-utils   (5)
+#   pacman -S steam vulkan-radeon lib32-vulkan-radeon         -> none  (0)
+#
+# ⚠️ And §3.8's "naming lib32-vulkan-radeon explicitly drops them to zero" is
+# TRUE ONLY BY ACCIDENT OF RESOLUTION ORDER -- do not lean on it. The 32-bit
+# package hard-depends on the 64-bit one, so `lib32-vulkan-radeon` alone does
+# eventually put `vulkan-radeon` in the transaction. Whether that happens
+# BEFORE pacman has to pick a provider for steam's separate 64-bit
+# `vulkan-driver` dependency depends on the order the resolver reaches them:
+# in the isolated two-package transaction above it does not (nvidia-utils is
+# chosen anyway, middle row), and in the full ISO target set it does. Naming
+# both is what makes the outcome independent of that order.
+#
+# Consequence for anyone mutation-testing this file: deleting the
+# `lib32-vulkan-radeon` line makes deck-nvidia-dry-run.sh fail the build, but
+# deleting `vulkan-radeon` currently does NOT, because the full-set ordering
+# happens to save it. That is a behaviour-preserving mutation, not a hole in
+# the guard -- the line is here for determinism, and the guard is what notices
+# if the ordering ever stops being kind.
+#
+# Both resolve to ARCH's build, not Valve's, because the Valve repos are
+# appended last -- deliberate, on measured evidence (docs/PROGRESS.md §5.13,
+# docs/findings/P16-repo-overlap-audit.md: 101 names overlap and Valve's is
+# older in 50 of them, the whole mesa/vulkan stack included). The test Deck
+# runs Arch's vulkan-radeon with Gaming Mode working.
+vulkan-radeon
+lib32-vulkan-radeon

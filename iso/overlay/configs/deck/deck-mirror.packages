@@ -1,0 +1,61 @@
+# Steam Deck packages CARRIED IN THE OFFLINE MIRROR, but not installed by
+# pacstrap.
+#
+# These are added to build-iso.sh's `all_packages`, so `pacman -Syw` downloads
+# them into var/cache/omarchy/mirror/offline/ and prune-offline-mirror.sh keeps
+# them -- but they are NOT merged into the shipped omarchy-base.packages, so
+# nothing installs them at pacstrap time. The omarchy-deck package (T5-fork-plan
+# §3 seam S4) declares them and pulls them out of the mirror during
+# `configure_deck`.
+#
+# Why the split exists, rather than putting everything in deck-install.packages:
+#
+#  * `linux-neptune-*` is a KERNEL. Pacstrapping it makes limine-mkinitcpio-hook
+#    build a second UKI and gives limine-entry-tool a boot order to choose --
+#    that is boot-chain work, it is T1/T5f's, it is Opus-routed, and CLAUDE.md
+#    says do not touch the boot chain casually. Carrying it in the mirror costs
+#    nothing and is a hard prerequisite either way: the machine has to boot
+#    before it can fetch anything (§4.1).
+#  * Repo-qualified names are legal here and illegal in deck-install.packages --
+#    this list is only ever resolved against the online repos.
+#
+# ⚠️ Measured cost, 2026-08-12: adding this file plus deck-install.packages takes
+# the mirror from 1241 to 1283 package files, +544 MiB compressed. The offline
+# mirror is stored UNCOMPRESSED inside the squashfs on purpose
+# (configs/profiledef.sh's `uncompressed@subpathname(...)`), so that is ~1:1 on
+# ISO size. `linux-firmware-neptune` alone is 350 MiB. T5g owns the size gate;
+# this is the number it starts from.
+
+# --- kernel and firmware (jupiter-staging; Valve-only, no name overlap) ------
+#
+# 611 matches src/omarchy-deck-kernel.sh's NEPTUNE_SERIES_DEFAULT. That file
+# explains why it is not simply "the newest": nothing newer has been validated
+# on hardware, and CLAUDE.md does not ship untested hardware claims. If the
+# series moves, move it in both places.
+linux-neptune-611
+linux-neptune-611-headers
+linux-firmware-neptune
+
+# --- Gaming Mode --------------------------------------------------------------
+#
+# 🔴 REPO-QUALIFIED DELIBERATELY. `gamescope` exists in both extra (3.16.25-1)
+# and jupiter-staging (3.16.25-3), pacman resolves `-S <name>` by REPO ORDER and
+# not by version, and the Valve repos are appended last -- so a bare `gamescope`
+# entry silently fetches Arch's bare compositor instead of Valve's build, which
+# is the one that ships the SteamOS session. docs/PROGRESS.md §5.13 measured
+# this and chose exactly this fix ("qualify the package, do not reorder repos")
+# over putting Valve's repos first, which would have downgraded 50 packages.
+#
+# Verified 2026-08-12: with the qualification, the resolved keep-set draws
+# exactly 4 packages from jupiter-staging -- this one and the three above --
+# and nothing else leaks in from Valve's mirror.
+jupiter-staging/gamescope
+
+# --- HUD ----------------------------------------------------------------------
+#
+# NOT qualified, deliberately: §5.13's follow-on found Arch's mangohud 0.8.4-1
+# is NEWER than Valve's 0.8.3-4 and already ships /usr/bin/mangoapp, verified on
+# the Deck. Arch wins here because the Valve repos are last, which is what we
+# want -- do not "fix" these into jupiter-staging/ to match the line above.
+mangohud
+lib32-mangohud

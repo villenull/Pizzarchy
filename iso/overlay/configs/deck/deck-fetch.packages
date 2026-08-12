@@ -1,0 +1,26 @@
+# Steam Deck packages that are NEVER BUNDLED -- fetched over the network at
+# install time by configure_deck (T5-fork-plan.md §4.1).
+#
+# Nothing in this file goes into the offline mirror or into any install list.
+# It exists so that ONE build-time check can still ask about them:
+# deck-nvidia-dry-run.sh resolves `<what the ISO installs> + <this file>`
+# against the online repos, because docs/PROGRESS.md §3.8's failure is a
+# property of that combined resolution and of nothing the ISO carries. Leaving
+# these out of the question would make the guard green for the wrong reason.
+#
+# ⚠️ Adding a package here does NOT make it available offline. If a package
+# needs to be installable without a network it belongs in
+# deck-mirror.packages -- and then its licence has to permit redistribution,
+# which is the whole reason these two are here instead.
+
+# Licenses: Proprietary, with no licence text shipped
+# (docs/findings/P16-redistribution-and-trademark.md §1). Bundling it into the
+# offline mirror would redistribute it; fetching it from Valve's own mirror at
+# install time does not. §4.1 decided fetch, not bundle.
+steamdeck-dsp
+
+# Steam Subscriber Agreement, and it is huge. Installers normally fetch it.
+# It is also the package that makes §3.8 fire at all: `steam` is what depends
+# on the virtual vulkan-driver / lib32-vulkan-driver that pacman would
+# otherwise satisfy with the NVIDIA stack.
+steam

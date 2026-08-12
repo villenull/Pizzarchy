@@ -1,0 +1,82 @@
+diff --git i/builder/build-iso.sh w/builder/build-iso.sh
+index 6f919d0..4cae5ea 100755
+--- i/builder/build-iso.sh
++++ w/builder/build-iso.sh
+@@ -163,6 +163,45 @@ else
+   setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
+ fi
+ 
++# --- Steam Deck (omarchy-deck overlay, T5-fork-plan.md §3 seam S1) ----------
++#
++# Merge the Deck's install list into the runtime's base list HERE, before the
++# shipped copy below is made, so one edit reaches all three consumers at once:
++# the offline mirror's `pacman -Syw`, the target install's
++# _runtime_package_list (which reads the shipped copy), and
++# resolve_expected_packages' denominator (which also reads the shipped copy).
++# Appending after this point desyncs them, and the denominator is the one that
++# would drift silently.
++#
++# base_pkg_lists[0] can be a read-only bind mount (/omarchy-source, under
++# --local-source), so the merged list is written to scratch and the array
++# repointed rather than edited in place.
++deck_list_dir=/configs/deck
++if [[ ! -d $deck_list_dir ]]; then
++  echo "ERROR: $deck_list_dir is missing from the ISO configs." >&2
++  echo "       The omarchy-deck overlay's package lists live there; without them" >&2
++  echo "       this build would quietly produce a stock Omarchy ISO instead." >&2
++  exit 1
++fi
++# Both lists are read inside command substitutions further down, where an empty
++# grep would abort a subshell mid-stream and silently truncate the package set.
++# Refuse now, out loud, instead.
++for deck_list in deck-install deck-mirror; do
++  if ! grep -qv '^#\|^$' "$deck_list_dir/$deck_list.packages"; then
++    echo "ERROR: $deck_list_dir/$deck_list.packages has no package entries" >&2
++    echo "       (missing, empty, or entirely comments)." >&2
++    exit 1
++  fi
++done
++deck_merged_base=/tmp/omarchy-deck-base.packages
++{
++  cat "${base_pkg_lists[0]}"
++  echo
++  echo "# --- Steam Deck (omarchy-deck overlay) ---"
++  grep -hv '^#\|^$' "$deck_list_dir/deck-install.packages"
++} >"$deck_merged_base"
++base_pkg_lists[0]=$deck_merged_base
++
+ mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
+ cp "${base_pkg_lists[0]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
+ cp "${base_pkg_lists[1]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-other.packages"
+@@ -186,12 +225,31 @@ if [[ ! -f $setup_form ]]; then
+ fi
+ cp "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"
+ 
++# --- Steam Deck (omarchy-deck overlay) --------------------------------------
++# docs/PROGRESS.md §3.8: with no AMD provider named, pacman satisfies steam's
++# virtual vulkan-driver/lib32-vulkan-driver with the NVIDIA stack and nothing
++# errors. Ask before the ~6 GB download below, so a wrong package set costs
++# seconds rather than a full mirror. The script documents how it proves it was
++# looking rather than merely exiting 0.
++bash "$deck_list_dir/deck-nvidia-dry-run.sh" \
++  "/configs/pacman-online-${OMARCHY_MIRROR}.conf" \
++  "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages" \
++  /builder/archinstall.packages \
++  "$deck_list_dir" \
++  "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"
++
+ # Collect every package we want available in the offline mirror.
+ declare -a all_packages
+ mapfile -t all_packages < <(
+   {
+     cat "$build_cache_dir/packages.x86_64"
+     grep -hv '^#\|^$' "${base_pkg_lists[@]}"
++    # Steam Deck packages carried in the offline mirror but NOT installed by
++    # pacstrap -- the omarchy-deck package pulls them out of the mirror at
++    # install time. Deliberately not merged into omarchy-base.packages above:
++    # entries here may be repo-qualified (jupiter-staging/gamescope), and that
++    # aborts the single-repo offline resolve both this build and pacstrap do.
++    grep -hv '^#\|^$' "$deck_list_dir/deck-mirror.packages"
+     grep -hv '^#\|^$' /builder/archinstall.packages
+     # Always include the selected Omarchy packages so the target install can
+     # find the runtime and companion packages in the offline mirror.

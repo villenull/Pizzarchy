@@ -1,0 +1,48 @@
+diff --git i/configs/pacman-online-edge.conf w/configs/pacman-online-edge.conf
+index 0ac18d8..24fe2ba 100644
+--- i/configs/pacman-online-edge.conf
++++ w/configs/pacman-online-edge.conf
+@@ -33,3 +33,43 @@ Server = https://pkgs.omarchy.org/edge/$arch
+ Server = https://mirror.funami.tech/arch-mact2/os/x86_64
+ Server = https://github.com/NoaHimesaka1873/arch-mact2-mirror/releases/download/release
+ SigLevel = Never
++
++# --- Steam Deck (omarchy-deck overlay, T5-fork-plan.md §3 seam S2) -----------
++#
++# Valve's SteamOS package repositories. linux-neptune-*, linux-firmware-neptune,
++# steamdeck-dsp and the gamescope build that ships the SteamOS session exist
++# nowhere else.
++#
++# SigLevel = Never is not a new capability here: the block above it
++# ([arch-mact2], upstream's own) is a community GitHub-releases repo consumed
++# exactly this way, and the offline mirror this build feeds is itself a single
++# SigLevel = Never repo whose integrity comes from the ISO signature
++# (configs/pacman-offline.conf). docs/findings/R1-10.1.md settled this: no
++# re-sign step is needed and one would verify nothing.
++#
++# 🔴 APPENDED LAST, AND THAT IS LOAD-BEARING. pacman resolves `-S <name>` by
++# REPO ORDER, not by version. Putting Valve first -- which is what SteamOS
++# does -- was measured and rejected: 101 package names overlap and Valve's
++# build is OLDER in 50 of them, including filesystem 2021.12.07 vs 2025.10.12,
++# linux-lts 5.15.74 vs 6.18.43, and the entire mesa/vulkan stack that the test
++# Deck already runs Arch's build of with Gaming Mode working
++# (docs/findings/P16-repo-overlap-audit.md, docs/PROGRESS.md §5.13).
++#
++# The cost of appending is that a bare `gamescope` resolves to Arch's compositor
++# rather than Valve's session. The fix is to qualify that one package at the
++# call site -- see `jupiter-staging/gamescope` in configs/deck/deck-mirror.packages
++# -- not to reorder these blocks. Measured 2026-08-12: with this ordering the
++# resolved offline keep-set draws exactly 4 packages from jupiter-staging, all
++# four Valve-only, and nothing else leaks in.
++[jupiter-staging]
++Server = https://steamdeck-packages.steamos.cloud/archlinux-mirror/$repo/os/$arch
++SigLevel = Never
++
++# holo-staging carries no package this build names, and is present because
++# Omarchy's own Deck hardware setup expects it to exist
++# (src/omarchy-deck-kernel.sh's VALVE_REPOS, docs/findings/R1-10.2.md). Keeping
++# the build-time and install-time repo sets identical is what stops a package
++# resolving differently in the two places.
++[holo-staging]
++Server = https://steamdeck-packages.steamos.cloud/archlinux-mirror/$repo/os/$arch
++SigLevel = Never
