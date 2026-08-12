@@ -336,3 +336,77 @@ instruction that a file of functions nothing calls is the defect to avoid,
 not a deliverable to produce anyway. No `src/deck-form.sh` edit (explicitly
 forbidden this session; the S8 relocation in §4 is flagged, not performed).
 No VM run, no ISO build, no Deck touched.
+
+---
+
+## 7. Implementation note (a later session, T4's own build slice)
+
+**Built, all three deliverables §5 asked for:** `src/deck-dashboard.sh`
+(installed to `/usr/share/omarchy-iso/deck-dashboard.sh` by whichever build
+step installs `deck-form.sh`, per its own header), `test/unit/
+test-deck-dashboard.sh`, and `iso/overlay/patches/
+omarchy-install-dashboard.patch` — §2's one hunk, verified byte-for-byte
+against the pinned tree (both `patch -p1` and `git apply --3way` apply it
+cleanly to a scratch copy; not touched in the real `iso/upstream` checkout,
+which stays a read-only submodule here). The patch is the third of the
+`docs/tasks/T5-fork-plan.md` §1 four-patch budget, as §2 above argued.
+
+**S6 and S7 built exactly as specified in §3** — the tips array and the
+`render_finish` override are what this file proposed, unchanged (the width/
+`Super` checks in `test/unit/test-deck-dashboard.sh` confirm both by
+construction, in bytes, not by eye alone this time).
+
+**S8 was ALSO built here, widening scope per this document's own §4 finding**
+(not a re-derivation: §4 already named the defect and pointed at where the
+fix belongs). One correction to §4's own suggestion: §4 proposed relocating
+`src/deck-form.sh`'s existing `deck_form_failure_menu_items`/
+`deck_form_failure_action_for`/`deck_form_failure_menu` into this file. That
+turned out to be the wrong shape once actually read against upstream's real
+`failure_menu` (omarchy-install-dashboard lines 609-661): `deck-form.sh`'s
+menu invents a "Retry install" row the real dashboard has no mechanism for
+(there is no retry loop anywhere in `omarchy-install-dashboard` — a failed
+install always `exit`s with `$failure_status` once `failure_menu` returns),
+and its four-row menu drops upstream's real "Upload log for support" row
+entirely. `src/deck-dashboard.sh`'s own `failure_menu` override instead
+reuses UPSTREAM'S OWN menu shape (the real rows: Upload log for support
+[when a `find_log_uploader` succeeds]/View full log/Reboot/Power off,
+reusing `find_log_uploader`/`upload_failure_log`/`view_failure_log`/
+`render_failure`/`interactive` as-is) and changes exactly the one thing
+§4 flags: "Drop to shell" is removed from the menu AND from the cancel
+fallback (`|| choice="Drop to shell"` becomes `|| choice=""`, whose case arm
+redraws instead of returning). `src/deck-form.sh`'s own dead
+`failure_menu`/`deck_form_failure_menu_items`/`deck_form_failure_action_for`/
+`deck_form_show_log` were left untouched (editing `src/deck-form.sh` was
+out of this session's file ownership too) — §5's last checklist item
+(retire or move that dead code, with a note) is still open, now with this
+paragraph as the reason a straight relocation is not the right fix.
+
+**Mutation-tested, not just asserted green once.** 14 mutations run against
+`test/unit/test-deck-dashboard.sh`, by hand, one at a time, reverted after
+each: a `Super` reintroduced into a tip, a tip stretched past the width
+bound, the "Gaming Mode" line deleted from `render_finish`, that line
+reordered before the duration line, the full upstream "Drop to shell"
+defect reintroduced verbatim, a subtler version with no literal "Drop to
+shell" string anywhere (cancel silently `return 0`s), the Reboot/Power off
+case arms turned into no-ops, the uploader-branch condition inverted, both
+process short-circuits (`OMARCHY_UI_FAILURE_ACTION=exit`, `interactive`)
+deleted, `render_finish`/`tips` renamed to break the override-name contract,
+and the source line moved to before every function it needs to see (checked
+against the byte-identical placement check). **Zero survivors** — every one
+turned the suite red. (Contrast this document's own header note: "one agent
+found 4 survivors on its first pass" building `deck-form.sh`'s suite; none
+were found here, which is a claim about this one afternoon's mutation set,
+not a guarantee no others exist.)
+
+**What T5 still has to do to wire this in:** apply
+`iso/overlay/patches/omarchy-install-dashboard.patch` in the real
+`iso/upstream` checkout (this session verified it applies cleanly but did
+not touch the real submodule, per file-ownership boundaries); install
+`src/deck-dashboard.sh` to `/usr/share/omarchy-iso/deck-dashboard.sh`,
+mirroring however `deck-form.sh` gets installed to its own sibling path;
+and, per §5's own G1 bullet, wire a build-time guard asserting the patched
+`omarchy-install-dashboard` actually contains the source line and that
+`render_finish`/`failure_menu`/`tips=(` still resolve against it post-patch
+— `test/unit/test-deck-dashboard.sh` proves this against the PINNED tree at
+dev time; it cannot prove it against whatever upstream SHA a future rebase
+lands on.

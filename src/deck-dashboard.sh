@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# deck-dashboard.sh -- the Deck-specific install-progress/completion/failure
+# screens (T4a: S6 tips, S7 completion, S8 failure menu).
+#
+# INSTALL PATH: this file lives here, at src/deck-dashboard.sh, and T5's ISO
+# overlay build installs it to /usr/share/omarchy-iso/deck-dashboard.sh, the
+# sibling of src/deck-form.sh at the same path. This repo's location and the
+# shipped location are deliberately different -- same pattern as
+# src/deck-form.sh and src/deck-input-mapper.py. T5 owns the install step;
+# this file does not install itself anywhere.
+#
+# ===========================================================================
+# WHY THIS IS A SEPARATE FILE FROM deck-form.sh, NOT MORE FUNCTIONS IN IT
+# ===========================================================================
+# docs/tasks/T4a-dashboard-screens.md §0-§1 has the full argument, verified
+# against the pinned iso/upstream tree, not inferred: `.automated_script.sh`
+# runs `configurator` and `omarchy-install-dashboard` as TWO SEPARATE
+# PROCESSES, sequentially -- `configurator` exits before the dashboard binary
+# even starts. deck-form.sh is sourced into `configurator`'s process image
+# (via patch P1, docs/tasks/T4-screen-spec.md §1.2); it has no reach into a
+# process that does not exist yet when `configurator` runs. `tips`,
+# `render_finish` and `failure_menu` are upstream names that live entirely
+# inside `omarchy-install-dashboard`
+# (configs/airootfs/usr/local/bin/omarchy-install-dashboard in the pinned
+# iso/upstream tree) -- confirmed by grep, not assumed: that file sources
+# nothing (`grep -n '^source\|^\. \|source /' ...` returns zero lines), so
+# there is no seam inside it for an ADDITIVE file the way deck-form.sh is
+# additive to `configurator`. The seam here is therefore a one-line PATCH,
+# not a source statement inside `configurator`:
+#
+#     source /usr/share/omarchy-iso/deck-dashboard.sh
+#
+# added by iso/overlay/patches/omarchy-install-dashboard.patch immediately
+# after `launch_child` (the last function `omarchy-install-dashboard`
+# defines) and before that file's own main flow runs
+# (`[[ -e $TTY_PATH ]] || exit 2`). Bash keeps the LAST definition of a
+# name, so `tips`/`render_finish`/`failure_menu` defined below REPLACE
+# upstream's own; every name this file does not redefine keeps behaving
+# exactly as upstream shipped it -- the identical mechanism deck-form.sh
+# uses for `configurator`, just anchored to a different file's function
+# boundaries (see docs/tasks/T4a-dashboard-screens.md §1 for why THAT
+# placement, and only that placement, is valid). This file has no main() and
+# produces no output unless something else sources it and calls one of its
+# functions. Running it directly does nothing observable, on purpose (see
+# SOURCE-SAFETY below).
+#
+# ===========================================================================
+# SOURCE-SAFETY -- read before adding ANYTHING above a function definition
+# ===========================================================================
+# This file is `source`d into TWO processes this repo does not control the
+# internals of: upstream's `omarchy-install-dashboard` (via the patch above)
+# and test/unit/test-deck-dashboard.sh (this repo's own suite, no VM).
+# Everything below the constants block is therefore inside a function --
+# src/deck-form.sh carries the identical rule, for the identical reason: a
+# sourced file's top-level statements run at SOURCE time, in the SOURCING
+# shell's own process, before any screen exists to show a symptom on.
+#
+# WHY THIS FILE DOES NOT ITSELF CALL `set -e`/`exit`: unlike `configurator`,
+# `omarchy-install-dashboard` line 8 already runs the WHOLE script under
+# `set -euo pipefail`, in effect by the time this file's source line
+# executes (it is placed after line 8, not before it). This file must not
+# change that behaviour for the REST of a ~90-line flow it does not own --
+# the identical reasoning deck-form.sh's own header gives for `configurator`,
+# just against a script that already has `-e` rather than one that might not.
+# `-u`/`pipefail` are restated below anyway: harmless when `omarchy-install-
+# dashboard` already set them, and load-bearing when this file is sourced
+# standalone (e.g. by its own unit suite, which does not otherwise inherit
+# them). Loud-failure discipline (CLAUDE.md: never silently swallow a
+# failure) is enforced per FUNCTION instead, matching deck-form.sh's own
+# convention: every function that can fail returns non-zero and says why via
+# deck_dashboard_warn/deck_dashboard_die.
+# ===========================================================================
+#
+# ===========================================================================
+# WHAT UPSTREAM'S OWN MACHINERY IS REUSED, NOT REIMPLEMENTED
+# ===========================================================================
+# `center`, `blank_line`, `render_logo`, `install_duration`, `term_cols`,
+# `interactive`, `find_log_uploader`, `upload_failure_log`, `view_failure_log`,
+# `render_failure`, and the globals `CLEAR`/`SHOW_CURSOR`/`CONTENT_WIDTH`/
+# `TTY_PATH`/`LOGO_HEIGHT`/`LOGO_PATH`/`CSI`/`OMARCHY_UI_FAILURE_ACTION` are
+# all defined earlier in `omarchy-install-dashboard`, above this file's own
+# source line, so they are in scope by the time any function below runs --
+# and NONE of them are redefined here. This is the same "override only the
+# screen, not machinery upstream already got right" rule deck-form.sh's own
+# header states for S4 (`confirm_disk_overwrite` reuses `clear_logo`/`say`/
+# `gum` rather than reimplementing them).
+
+set -uo pipefail
+
+readonly DECK_DASHBOARD_PROG=deck-dashboard
+
+deck_dashboard_log()  { printf '[%s] %s\n' "$DECK_DASHBOARD_PROG" "$*" >&2; }
+deck_dashboard_warn() { printf '[%s] WARNING: %s\n' "$DECK_DASHBOARD_PROG" "$*" >&2; }
+# Never exits (see SOURCE-SAFETY above) -- logs and returns 1.
+deck_dashboard_die()  { printf '[%s] ERROR: %s\n' "$DECK_DASHBOARD_PROG" "$*" >&2; return 1; }
+
+# ===========================================================================
+# S6 -- Progress tips
+# ===========================================================================
+#
+# Overrides upstream's own 18-entry `tips` array (omarchy-install-dashboard
+# lines 56-75), every one of which names a keyboard shortcut ("Super + ...")
+# -- meaningless on a device with no keyboard. `tips` is DATA upstream reads
+# via `current_tip()` (`"${tips[...]}"`), not a function: there is nothing
+# to wrap, only to replace, so this is a plain array assignment --
+# last-definition-wins, exactly like a function override, because bash
+# resolves `tips` at the point `current_tip()` RUNS (after this file has
+# sourced), not at the point upstream's own array literal executed.
+#
+# T4-screen-spec.md §4 S6's own [U] check, both enforced by
+# test/unit/test-deck-dashboard.sh: no entry contains "Super"; no entry
+# exceeds CONTENT_WIDTH (omarchy-install-dashboard's own LOGO_WIDTH-derived
+# content column, ~81 cols against the real Deck logo -- see that file's
+# `logo_width()`). Checked by eye against 81 when this array was drafted
+# (docs/tasks/T4a-dashboard-screens.md §3); the unit suite checks it again,
+# in bytes, so a future edit cannot silently regrow past it.
+#
+# ⚠️ OPEN ITEM, NOT RESOLVED HERE (T4a §3's own flag, carried forward
+# unchanged): the STEAM+X / STEAM-button / QAM chords named below are a
+# src/deck-input-mapper.py / src/deck-session.sh question this file does not
+# own. If Desktop Mode's real chord set ends up different from what these
+# entries assume, they must be re-checked against whatever that layer
+# actually ships -- not left here on faith just because they read plausibly.
+# shellcheck disable=SC2034  # read by upstream's own current_tip(), not in this file
+tips=(
+  "Steam and Gaming Mode are always one button press away"
+  "The STEAM + X chord opens the on-screen keyboard in Desktop Mode"
+  "The STEAM button opens the Omarchy menu for apps, settings, and more"
+  "Use the QAM (... button) for quick settings and volume"
+  "Both trackpads act as a mouse in Desktop Mode -- R2 clicks, L2 right-clicks"
+  "A controller works everywhere in Desktop Mode, not just in games"
+  "Keep the system fresh with Update in the Omarchy menu"
+  "Switch themes from Style > Theme in the Omarchy menu"
+  "Press the STEAM button, then Power, to switch between Gaming and Desktop Mode"
+)
+
+# ===========================================================================
+# S7 -- Completion
+# ===========================================================================
+#
+# Overrides upstream's own `render_finish` (omarchy-install-dashboard lines
+# 451-480). T4-screen-spec.md §4 S7: "Add one line: 'Your Deck will start in
+# Gaming Mode.'" -- otherwise "good" per the spec, so this reuses upstream's
+# OWN structure and helpers rather than reimplementing any of them (see the
+# file header's "machinery reused" list above).
+#
+# `reboot_prompt` (omarchy-install-dashboard lines 482-501) needs NO
+# override: a single-button `gum confirm` already takes Enter (A in lizard
+# mode), matching T4-screen-spec.md §4 S7's own "Works as-is" row.
+render_finish() {
+  local duration effect_canvas_width
+  duration="$(install_duration || true)"
+  duration="${duration:-Complete}"
+  effect_canvas_width="$(term_cols)"
+  (( effect_canvas_width > 1 )) && effect_canvas_width=$((effect_canvas_width - 1))
+
+  {
+    printf '%s%s' "$SHOW_CURSOR" "$CLEAR"
+    blank_line
+    render_logo
+    blank_line
+    center "Installed Omarchy in ${duration}" "$CONTENT_WIDTH"
+    center "Your Deck will start in Gaming Mode." "$CONTENT_WIDTH"
+    blank_line
+  } >"$TTY_PATH"
+
+  # Unchanged from upstream's own laser-etch block (omarchy-install-dashboard
+  # lines 467-479) -- machinery this file has no opinion about, reused
+  # verbatim rather than re-derived, per this file's own header rule.
+  if command -v tte >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1 && [[ -f $LOGO_PATH ]]; then
+    printf '%s%d;1H\0337' "$CSI" "$((LOGO_HEIGHT + 2))" >"$TTY_PATH"
+    timeout 8s tte -i "$LOGO_PATH" \
+      --canvas-width "$effect_canvas_width" \
+      --anchor-text c \
+      --frame-rate 260 \
+      --reuse-canvas \
+      laseretch \
+      >"$TTY_PATH" 2>/dev/null || true
+    printf '%s%d;1H' "$CSI" "$((LOGO_HEIGHT + 8))" >"$TTY_PATH"
+  fi
+}
+
+# ===========================================================================
+# S8 -- Failure menu
+# ===========================================================================
+#
+# 🔴 THIS IS THE FIX FOR A REAL, LIVE DEFECT, not new scope invented here.
+# src/deck-form.sh already defines a function named `failure_menu` with a
+# tested pure decision layer behind it (`deck_form_failure_menu_items`/
+# `deck_form_failure_action_for`), but it is sourced into `configurator`'s
+# process, which never calls anything by that name -- dead code on a real
+# ISO today, found by grep against both files, not assumed
+# (docs/tasks/T4a-dashboard-screens.md §4). That array also names a menu row
+# ("Retry install") the real dashboard has no mechanism for: there is no
+# retry loop anywhere in `omarchy-install-dashboard` -- a failed install
+# always `exit`s with `$failure_status` once `failure_menu` returns. Rather
+# than port deck-form.sh's speculative menu into the wrong-shaped process
+# a second time, this override reuses UPSTREAM'S OWN real menu shape
+# (omarchy-install-dashboard lines 609-661, read this session) and changes
+# exactly the one thing T4-screen-spec.md §4 S8 flags.
+#
+# THE DEFECT: upstream's own `failure_menu` maps a CANCELLED `gum choose`
+# -- including a plain Esc/B press, the ONLY way a controller-only Deck can
+# send that cancellation at all (there is no Ctrl-C) -- to
+# `choice="Drop to shell"`, whose case arm `return 0`s straight back to the
+# caller, which then unconditionally `exit`s the dashboard process. On this
+# hardware that is a keyboard-less handheld left at whatever a bare process
+# exit surfaces underneath it. "Drop to shell" is ALSO a literal, selectable
+# menu row upstream (not just the cancel fallback), so a stray press on that
+# row does the identical thing on purpose; this override removes both.
+#
+# THE FIX: never offer "Drop to shell" as a row, and map cancellation to a
+# REDRAW (show the menu again) instead of "act as if that row was chosen".
+# The only ways out of this menu are now Reboot and Power off -- the two
+# real machine-state transitions the pad can always reach without a
+# keyboard. No shell escape exists in this function at all, matching
+# deck-form.sh's own DECK_FAILURE_MENU_ITEMS design intent (no shell
+# escape, ever) even though that array's own contents are not reused
+# verbatim here (see above for why).
+failure_menu() {
+  local choice uploader
+
+  [[ ${OMARCHY_UI_FAILURE_ACTION:-} == "exit" ]] && return 0
+  # The failure screen and log tail have already rendered; exit with the
+  # installer's status instead of blocking on a menu nobody can answer --
+  # identical short-circuit to upstream's own, unchanged.
+  interactive || return 0
+
+  while true; do
+    uploader=""
+    uploader=$(find_log_uploader || true)
+    if [[ -n $uploader ]]; then
+      # shellcheck disable=SC2094  # stdin/stderr on the same tty, not a real
+      # read/write race -- copied unchanged from upstream's own failure_menu
+      # (omarchy-install-dashboard line 621), which uses the identical shape.
+      choice=$(gum choose \
+        --height 5 \
+        --header "What would you like to do?" \
+        "Upload log for support" \
+        "View full log" \
+        "Reboot" \
+        "Power off" \
+        <"$TTY_PATH" 2>"$TTY_PATH") || choice=""
+    else
+      # shellcheck disable=SC2094  # see the identical note above
+      choice=$(gum choose \
+        --height 4 \
+        --header "What would you like to do?" \
+        "View full log" \
+        "Reboot" \
+        "Power off" \
+        <"$TTY_PATH" 2>"$TTY_PATH") || choice=""
+    fi
+
+    case "$choice" in
+      "Upload log for support")
+        upload_failure_log
+        render_failure "${failure_status:-1}" "${failure_summary:-}" >"$TTY_PATH" 2>/dev/null || true
+        ;;
+      "View full log")
+        view_failure_log
+        render_failure "${failure_status:-1}" "${failure_summary:-}" >"$TTY_PATH" 2>/dev/null || true
+        ;;
+      "Reboot")
+        reboot 2>/dev/null || systemctl reboot 2>/dev/null || true
+        ;;
+      "Power off")
+        poweroff 2>/dev/null || systemctl poweroff 2>/dev/null || true
+        ;;
+      "")
+        # Cancelled (Esc/B, the ONLY cancellation this hardware can send) --
+        # redraw, never treat as a chosen action. This is the one branch the
+        # defect above lived in: upstream's own `|| choice="Drop to shell"`
+        # becomes `|| choice=""` above, and this arm is the no-op that lets
+        # the `while true` loop redraw the menu instead of falling into a
+        # `return 0` that exits the whole process. No other case arm is
+        # needed for "unrecognised" because gum choose only ever returns one
+        # of the four rows offered, or fails (handled by `|| choice=""`).
+        ;;
+    esac
+  done
+}

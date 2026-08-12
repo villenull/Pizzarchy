@@ -1,0 +1,15 @@
+--- a/configs/airootfs/usr/local/bin/omarchy-install-dashboard
++++ b/configs/airootfs/usr/local/bin/omarchy-install-dashboard
+@@ -686,6 +686,12 @@
+   child_pgid=$child_pid
+ }
+ 
++# Deck overlay: redefines `tips`, `render_finish` and `failure_menu` for a
++# device with no keyboard. Placed here deliberately -- after every function
++# this file defines, before any of them is called (see
++# docs/tasks/T4a-dashboard-screens.md §1 for why nowhere else works).
++source /usr/share/omarchy-iso/deck-dashboard.sh
++
+ [[ -e $TTY_PATH ]] || exit 2
+ printf '%s' "$HIDE_CURSOR" >"$TTY_PATH"
+ render_static >"$TTY_PATH"
