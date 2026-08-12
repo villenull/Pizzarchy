@@ -294,10 +294,19 @@ else:
     check("the hint badge actually paints non-key-colour pixels in shift's "
           "bottom-left corner",
           region_differs(surface, *badge_probe, wl.KEY_FACE), True)
+    # tx/ty/tw/th: tab has no hint, so no badge should be painted in that
+    # corner -- but T8 §9f also makes tab an ACTION key (`is_action_key`), so
+    # its own face is now KEY_FACE_DARK, not KEY_FACE. The probe has to be
+    # compared against tab's OWN plain background, or a correct darker fill
+    # would look like a false badge.
     tx, ty, tw, th = rects[("left", 4, 2)]
-    check("the SAME corner of an un-hinted key (tab) is left plain",
+    check("tab is drawn with the darker action-key fill, not the letter fill",
+          region_differs(surface, tx + tw / 2, ty + th / 2, 2, 2, wl.KEY_FACE),
+          True)
+    check("the SAME corner of an un-hinted key (tab) carries no badge, over "
+          "its own (darker) fill",
           region_differs(surface, tx + KEY_PAD + 4, ty + th - KEY_PAD - 14, 8, 8,
-                         wl.KEY_FACE),
+                         wl.KEY_FACE_DARK),
           False)
 
     # Digit "1" (row 0, col 0, left) carries a secondary legend; letter "q"
@@ -315,6 +324,82 @@ else:
           region_differs(surface, qx + qw - KEY_PAD - 12, qy + KEY_PAD + 4, 8, 8,
                          wl.KEY_FACE),
           False)
+
+    # --- T8 §9f: modifier/action keys are DARKER than letter/digit keys -----
+    #
+    # "completes without raising" cannot tell KEY_FACE from KEY_FACE_DARK --
+    # both are opaque fills. Read the raster instead: shift and space
+    # (`is_action_key` True) must NOT be filled with the letters' colour, and
+    # a letter/digit (`is_action_key` False) must NOT be filled with the
+    # darker one. Probed top-left-inset -- clear of the centred face label,
+    # the bottom-left hint badge, and the top-right secondary legend, so the
+    # only thing the probe can be seeing is the key's own fill.
+    def plain_fill_probe(x, y, w, h):
+        return (x + 10, y + 10, 2, 2)
+
+    check("shift (an action key) is filled darker than a letter key",
+          region_differs(surface, *plain_fill_probe(sx, sy, sw, sh), wl.KEY_FACE),
+          True)
+    check("...and it matches the action-key colour exactly",
+          region_differs(surface, *plain_fill_probe(sx, sy, sw, sh), wl.KEY_FACE_DARK),
+          False)
+    check("a letter key (q) is filled with the LETTER colour, not the darker "
+          "action-key one",
+          region_differs(surface, *plain_fill_probe(qx, qy, qw, qh), wl.KEY_FACE_DARK),
+          True)
+    check("...and matches the letter colour exactly",
+          region_differs(surface, *plain_fill_probe(qx, qy, qw, qh), wl.KEY_FACE),
+          False)
+    check("a digit key (1) is also the letter colour -- it prints two faces "
+          "like a letter does, and is_action_key excludes it",
+          region_differs(surface, *plain_fill_probe(dx, dy, dw, dh), wl.KEY_FACE_DARK),
+          True)
+
+    # --- T8 §9f: badge SHAPE is semantic -- circle (face buttons) vs rounded
+    # rectangle (triggers/stick-clicks). "A badge was painted" (already
+    # checked above, for shift) cannot tell the two shapes apart -- both fill
+    # their centre. What differs is the BOUNDING-BOX CORNER: a circle of
+    # radius r does not reach the corner of its own r*2 bounding square
+    # (corner distance is r*sqrt(2) > r), while a rounded rectangle with a
+    # small corner radius very nearly does. Probing that corner is what a
+    # mutation swapping the shapes would actually be caught by -- "something
+    # was drawn" alone survives that mutation, as `region_differs` sees
+    # ANY badge-coloured paint and cannot tell one shape from the other.
+    space_key = kb_hint.layer.right[4][0]
+    check("the key under test really is space", space_key.label, "space")
+    spx, spy, spw, sph = rects[("right", 4, 0)]
+    anchor_x, anchor_y = spx + KEY_PAD + 2, spy + sph - KEY_PAD - 2
+    badge_size = max(9.0, sph * 0.22)
+    cr.select_font_face("monospace")
+    cr.set_font_size(badge_size)
+    y_extents = cr.text_extents("Y")
+    circle_radius = max(y_extents.width, y_extents.height) / 2 + max(3.0, 2.0)
+    ccx, ccy = anchor_x + circle_radius, anchor_y - circle_radius
+
+    check("the Y badge's centre is painted in the badge colour",
+          region_differs(surface, ccx - 2, ccy - 2, 4, 4, wl.KEY_FACE_DARK),
+          True)
+    corner_x = ccx + circle_radius * 0.9
+    corner_y = ccy - circle_radius * 0.9
+    check("the CIRCLE badge's own bounding-box corner is background, not "
+          "badge colour -- a rounded rectangle this size would reach it",
+          region_differs(surface, corner_x - 1, corner_y - 1, 2, 2, wl.KEY_FACE_DARK),
+          False)
+
+    # Contrast: shift's badge (RECT) DOES reach its own bounding-box corner,
+    # because its corner radius is capped at 4px regardless of badge size.
+    l2_extents = cr.text_extents(osk.HINT_LEFT)  # "L2", shift's own hint
+    rect_pad_x, rect_pad_y = 3.0, 2.0
+    rect_w = l2_extents.width + 2 * rect_pad_x
+    rect_h = badge_size + 2 * rect_pad_y
+    rect_x0 = sx + KEY_PAD + 2
+    rect_y1 = sy + sh - KEY_PAD - 2  # bottom edge of shift's own badge
+    rect_y0 = rect_y1 - rect_h
+    check("the RECT badge's own bounding-box corner IS badge colour -- "
+          "the opposite of the circle above, which is the point",
+          region_differs(surface, rect_x0 + rect_w - 2, rect_y0 + 2, 2, 2,
+                         wl.KEY_FACE_DARK),
+          True)
 
     # ⚠️ INVERTED 2026-08-11. This used to assert a divider line WAS stroked
     # down the gutter. The operator saw it on the panel beside the reference

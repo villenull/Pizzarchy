@@ -32,6 +32,15 @@ WHAT THIS MODULE DOES NOT DO
     where they go. The installer's TUI is drawing on the same console, so
     something has to keep them apart -- see `write_at()` and the note there.
 
+    It also does not, and cannot, draw COLOUR or SHAPE. T8 §9f asks for two
+    things this renderer has no primitive for: modifier/action keys visibly
+    darker than letter keys, and two badge shapes (a circle for face buttons,
+    a rounded rectangle for triggers/stick-clicks). A bare console has
+    neither a second shade nor a curve -- everything here is the SAME colour
+    and the SAME rectangle of characters. `deck_osk_wayland.draw()` renders
+    both; here they degrade to nothing rather than to a lie (see
+    `HINT_GLYPH`'s own note for how the badge SHAPE specifically degrades).
+
 WHO IT MAY SHARE A CONSOLE WITH -- A POLICY, AND IT IS MEASURED
     **Line-oriented prompts, and nothing else.** `gum input` and its siblings
     lay out in their top few rows and never reach the bottom, so the keyboard
@@ -119,9 +128,19 @@ def cell_text(label: str, width: int, highlighted: bool) -> str:
 # --- visual parity with SteamOS's keyboard (T8 §9, degraded honestly) --------
 #
 # ⛔ Not Valve's artwork -- one letter, ours, spelling out which of OUR OWN
-# "L2"/"R2" strings (`deck_osk_layout.HINT_LEFT/HINT_RIGHT`) a hinted key
-# carries. `docs/findings/P16-redistribution-and-trademark.md`.
-HINT_GLYPH: dict[str, str] = {osk.HINT_LEFT: "L", osk.HINT_RIGHT: "R"}
+# "L2"/"R2"/"Y" strings (`deck_osk_layout.HINT_LEFT/HINT_RIGHT/HINT_SPACE`) a
+# hinted key carries. `docs/findings/P16-redistribution-and-trademark.md`.
+#
+# ⚠️ T8 §9f's BADGE SHAPE is not representable here, and that is the honest
+# degrade rather than an oversight. The reference draws circles for face
+# buttons and rounded rectangles for triggers/stick-clicks -- a bare console
+# has neither shape nor colour, only characters. Every hint, whichever shape
+# it would be on Wayland, degrades to the SAME one-letter prefix already used
+# for HINT_LEFT/HINT_RIGHT ("Lshift", "Rback", and now "Yspace") -- one
+# uniform convention rather than two conventions a human would have to learn.
+HINT_GLYPH: dict[str, str] = {
+    osk.HINT_LEFT: "L", osk.HINT_RIGHT: "R", osk.HINT_SPACE: "Y",
+}
 
 
 def display_label(kb: osk.OnScreenKeyboard, key: osk.Key) -> str:

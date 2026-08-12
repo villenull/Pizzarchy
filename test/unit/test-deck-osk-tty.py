@@ -165,20 +165,25 @@ check("no key has both a shift_label and a hint", both, [])
 # Hints must name the trigger that ACTUALLY fires the key -- the half it is
 # drawn in, in every layer it appears in. A hint naming the wrong trigger
 # would be confidently wrong, which T8 §9's request singles out as worse than
-# no hint at all.
+# no hint at all. Scoped to hint_shape == RECT: HINT_SPACE (T8 §9f) is a
+# face-button shortcut, not a trigger, so it has no "half" to agree with.
 HINT_TO_HALF = {osk.HINT_LEFT: "left", osk.HINT_RIGHT: "right"}
 mislabelled_hints = []
 for layer in osk.LAYERS.values():
     for half in ("left", "right"):
         for row in layer.half(half):
             for key in row:
-                if key.hint and HINT_TO_HALF.get(key.hint) != half:
+                if (key.hint and key.hint_shape == osk.HINT_SHAPE_RECT
+                        and HINT_TO_HALF.get(key.hint) != half):
                     mislabelled_hints.append((layer.name, half, key.label, key.hint))
-check("every hint names the trigger for the half it is actually drawn in",
-      mislabelled_hints, [])
+check("every trigger hint names the trigger for the half it is actually "
+      "drawn in", mislabelled_hints, [])
 check("shift is hinted for the LEFT trigger", osk.SHIFT_KEY.hint, osk.HINT_LEFT)
 check("backspace is hinted for the RIGHT trigger", osk.BACKSPACE_KEY.hint, osk.HINT_RIGHT)
 check("enter is hinted for the RIGHT trigger", osk.ENTER_KEY.hint, osk.HINT_RIGHT)
+check("space is hinted with the Y face-button badge, not a trigger",
+      (osk.SPACE_KEY.hint, osk.SPACE_KEY.hint_shape),
+      (osk.HINT_SPACE, osk.HINT_SHAPE_CIRCLE))
 
 # --- display_label: exact composition ------------------------------------
 
@@ -194,6 +199,9 @@ check("backspace shows its trigger hint -- it fits EXACTLY (4 + 1 = 5)",
 check("enter shows NO hint -- 'Renter' is 6 characters and the highlighted "
       "budget is 5; 'enter' alone already fills it",
       tty.display_label(kb2, osk.ENTER_KEY), "enter")
+check("space shows its Y face-button hint (T8 §9f) -- 'Yspace' is 6 "
+      "characters and space's own highlighted budget (span 3) is 19",
+      tty.display_label(kb2, osk.SPACE_KEY), "Yspace")
 
 kb2.press_at("left", 0.1, 0.9)   # shift -> once
 check("the hint survives a shift-state change -- it names a button, not a face",
@@ -209,7 +217,8 @@ check("a plain key with no legend and no hint is unaffected",
 # or `rows_on_screen` cannot tell a moved highlight from a damaged row -- see
 # "the highlight having moved does not lose a row" below, and
 # `display_label`'s own docstring for the defect this reproduces directly.
-for probed in (digit_1, osk.SHIFT_KEY, osk.BACKSPACE_KEY, osk.ENTER_KEY, osk.TAB_KEY):
+for probed in (digit_1, osk.SHIFT_KEY, osk.BACKSPACE_KEY, osk.ENTER_KEY,
+               osk.SPACE_KEY, osk.TAB_KEY):
     text = tty.display_label(kb2, probed)
     width = probed.span * tty.KEY_CELL
     cold_face = tty.face_of(tty.cell_text(text, width, False))
@@ -251,8 +260,8 @@ check("the home row reads asdfg / hjkl + backspace, hinted",
       labels(plain.split("\n")[2]),
       ["a", "s", "d", "f", "g", "h", "j", "k", "l", "Rback"])
 check("the function row carries shift (hinted), the layer key, tab, "
-      "space and close",
-      labels(plain.split("\n")[4]), ["Lshift", "?#=", "tab", "space", "close"])
+      "space (Y-hinted, T8 §9f) and close",
+      labels(plain.split("\n")[4]), ["Lshift", "?#=", "tab", "Yspace", "close"])
 
 # Both halves must be present on every line, or one thumb has nothing to drive.
 check("every rendered line spans both halves",
