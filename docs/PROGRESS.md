@@ -2383,6 +2383,78 @@ mental model — get it wrong once and it is wrong in both.
 
 ---
 
+## 5.28 🔴 NEW — on a FRESH BOOT the mapper's children are born blind: no menus, and probably no keyboard
+
+**Found on hardware 2026-08-11, by the operator noticing STEAM and QAM did
+nothing after a reboot.** Every check said healthy. This is R-29's shape again,
+one layer up.
+
+**Symptom.** Boot to the desktop. `deck-input-mapper` is `active`, bound to
+`event7`, `lizard_mode` is `N`, and the startup report prints both bindings
+correctly. **STEAM and QAM do nothing.** `systemctl --user restart
+deck-input-mapper` fixes it completely — operator confirmed STEAM, QAM **and
+STEAM+X** all working immediately afterwards.
+
+**Cause — measured, not inferred.** The mapper's whole environment on a fresh
+boot is one variable:
+
+```
+XDG_RUNTIME_DIR=/run/user/1000
+```
+
+No `WAYLAND_DISPLAY`, no `OMARCHY_PATH`, no `HYPRLAND_INSTANCE_SIGNATURE`. The
+unit is `WantedBy=wayland-session@hyprland.desktop.target` with **no ordering**,
+so it wins the race against uwsm's environment import. The mapper itself does
+not care — it reads evdev and writes uinput. **Its children do.** Running
+`omarchy-menu toggle` under exactly that environment prints
+`OMARCHY_PATH is not set` and exits. After a restart the same process has all
+33 variables, because the manager's environment is populated by then
+(`systemctl --user show-environment` confirms it holds `WAYLAND_DISPLAY=wayland-1`,
+`OMARCHY_PATH`, `HYPRLAND_INSTANCE_SIGNATURE`).
+
+### Why the obvious fix is wrong, in the unit's own words
+
+`deck-input-mapper.service` carries this comment, and it is correct:
+
+> ⚠️ **DELIBERATELY NO `After=graphical-session.target`.** That looks obviously
+> right and creates an **ordering cycle** with the target this unit is
+> `WantedBy`… systemd resolves the cycle by **DELETING this unit's start job**,
+> so the service silently never runs. Measured on hardware. *The mapper needs no
+> ordering anyway: it reads evdev and writes uinput, and never talks to the
+> compositor.*
+
+🔴 **That final sentence is now false, and its expiry is the actual bug.** It was
+true when written. The mapper has since grown two compositor-dependent
+behaviours — the STEAM/QAM bindings that spawn `omarchy-menu` (§5.23), and the
+layer-shell OSK (`deck_osk_wayland.py`, T8 step 7). **A load-bearing justification
+became untrue and nothing failed loudly.**
+
+### Blast radius — one part measured, one part inferred
+
+- ✅ **Measured:** STEAM and QAM are dead on a fresh boot until the mapper is
+  restarted.
+- ⚠️ **Inferred, NOT yet measured:** **STEAM+X likely fails too.**
+  `deck_osk_wayland.py` needs `WAYLAND_DISPLAY` to bind a layer surface, and
+  squeekboard — the fallback — needs a Wayland connection as well. If so, **a
+  freshly booted Deck has no on-screen keyboard**, on a device whose entire
+  premise is having no physical one. The operator's "all three work" was
+  recorded **after** the restart, so it does not settle this.
+  ➡️ **One test settles it: reboot, and press STEAM+X before touching anything.**
+
+### The fix, not yet implemented
+
+**Stop relying on inheritance.** Resolve the environment at *spawn* time rather
+than at unit start — read `systemctl --user show-environment`, or launch children
+via `systemd-run --user`, either of which works even when the variables arrive
+late and neither of which reintroduces the ordering cycle. ⚠️ Whatever is
+written, **the test must boot the machine**, because a mapper restarted by hand
+always passes.
+
+⚠️ **T5 inherits this.** A built image has the same race, and a first-boot user
+gets a desktop with no menus and possibly no keyboard.
+
+---
+
 ## 6. Blocked on human
 
 - **`docs/ROADMAP.md` P1.4 — Ventoy on the test USB + the stock Omarchy 4.0 beta
