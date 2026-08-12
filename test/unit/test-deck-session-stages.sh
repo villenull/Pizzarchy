@@ -491,7 +491,10 @@ set -uo pipefail
 printf 'getent %s\n' "$*" >>"$CALLS_LOG"
 [[ ${FAKE_GETENT_RC:-0} -eq 0 ]] || exit "${FAKE_GETENT_RC}"
 if [[ ${1-} == passwd && -n ${2-} ]]; then
-  printf '%s:x:1000:1000:Deck test user:%s:/bin/bash\n' "$2" "${FAKE_HOME}"
+  # The uid is dialable because stage-desktop-settings derives the compositor's
+  # runtime directory from it. A junk uid must stop the stage rather than be
+  # pasted into a path.
+  printf '%s:x:%s:1000:Deck test user:%s:/bin/bash\n' "$2" "${FAKE_GETENT_UID:-1000}" "${FAKE_HOME}"
   exit 0
 fi
 exit 2
@@ -558,6 +561,73 @@ esac
 exit "${FAKE_TIMEDATECTL_RC:-0}"
 STUB_TIMEDATECTL
 
+# --- hyprctl ---------------------------------------------------------------
+#
+# 🔴 THE MOST DANGEROUS STUB IN THIS FILE, and the reason
+# verify_osk_kb_layout's runtime directory is a parameter rather than a
+# constant: the real hyprctl on this developer's machine would find a LIVE
+# compositor and `reload` it from a unit test. §6b never lets the stage near
+# /run/user, and this stub is the second line of defence -- it refuses to run
+# without the suite's own environment.
+#
+# Every answer is dialable, because each of the four failure shapes the
+# verifier distinguishes has to be reachable one at a time:
+#   FAKE_HYPRCTL_RELOAD_RC   the reload itself failing
+#   FAKE_HYPR_SENTINEL       the block not having run to its last line
+#   FAKE_HYPR_DEVICES        the device list, i.e. which keyboard reads what
+#   FAKE_HYPR_GLOBAL_LAYOUT  the session's own layout, which is what makes
+#                            "did this leak session-wide?" answerable at all
+cat >"$stub_bin/hyprctl" <<'STUB_HYPRCTL'
+#!/usr/bin/env bash
+set -uo pipefail
+[[ -n ${CALLS_LOG:-} ]] || { printf 'hyprctl stub: no CALLS_LOG, refusing to run\n' >&2; exit 99; }
+printf 'hyprctl %s\n' "$*" >>"$CALLS_LOG"
+
+# R-46, reproduced faithfully: the real hyprctl exits before doing anything
+# when the signature is unset. A stub that answered anyway would let a verifier
+# that forgot it pass.
+[[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] || {
+  printf 'HYPRLAND_INSTANCE_SIGNATURE not set! (is hyprland running?)\n' >&2
+  exit 1
+}
+
+args=()
+for a in "$@"; do [[ $a == -j ]] && continue; args+=("$a"); done
+
+case ${args[0]-} in
+  reload)
+    exit "${FAKE_HYPRCTL_RELOAD_RC:-0}"
+    ;;
+  eval)
+    # Not a Lua interpreter. It asserts the PROBE is the shape that can fail --
+    # a probe that stopped naming the sentinel, or stopped raising, would be a
+    # check that cannot fail, and this stub refuses to bless one.
+    code=${args[1]-}
+    [[ $code == *DECK_OSK_KB_LAYOUT* && $code == *error\(* ]] || {
+      printf 'hyprctl stub: eval probe does not assert the sentinel: %s\n' "$code" >&2
+      exit 98
+    }
+    if [[ ${FAKE_HYPR_SENTINEL:-us} != us ]]; then
+      # The real shape, measured on the Deck: 'error: ...' on stderr, exit 7.
+      printf 'error: [string "..."]:1: DECK_OSK_KB_LAYOUT is not "us"\n' >&2
+      exit 7
+    fi
+    printf 'ok\n'
+    exit 0
+    ;;
+  devices)
+    printf '%s\n' "${FAKE_HYPR_DEVICES?the suite must set a device list}"
+    exit 0
+    ;;
+  getoption)
+    printf '{"option": "input:kb_layout", "str": "%s", "set": true }\n' \
+      "${FAKE_HYPR_GLOBAL_LAYOUT:-latam}"
+    exit 0
+    ;;
+esac
+exit 0
+STUB_HYPRCTL
+
 # --- commands the stages only probe for, or only log through ---------------
 for stub in systemd-run findmnt loginctl logger; do
   cat >"$stub_bin/$stub" <<STUB_GENERIC
@@ -578,12 +648,12 @@ export FAKE_SYSTEMCTL_SHOW_TimeoutStopUSec="${SDDM_STOP_TIMEOUT}s"
 export FAKE_SYSTEMCTL_SHOW_RestartUSec=3s
 
 # --- GATE 2 ----------------------------------------------------------------
-for tool in sudo systemctl visudo dconf env getent timedatectl; do
+for tool in sudo systemctl visudo dconf env getent timedatectl hyprctl; do
   [[ $(command -v "$tool") == "$stub_bin/$tool" ]] ||
     fail_test "'${tool}' resolves to this suite's stub" \
       "got $(command -v "$tool"); the stub PATH is not in front, so this suite would drive the real system"
 done
-pass "sudo, systemctl, visudo, dconf, env, getent and timedatectl all resolve to stubs, not to the real binaries"
+pass "sudo, systemctl, visudo, dconf, env, getent, timedatectl and hyprctl all resolve to stubs, not to the real binaries"
 
 # --- GATE 3 ----------------------------------------------------------------
 rc=0
@@ -671,6 +741,36 @@ node_seam_check() {   # node_seam_check <function> <positional number>
 node_seam_check verify_lizard_helper  2
 node_seam_check stage_lizard_mode     2
 node_seam_check render_lizard_helper  1
+
+# --- GATE 4c ---------------------------------------------------------------
+#
+# The compositor seam, and it carries the same class of risk GATE 4b does, in
+# the other direction: verify_osk_kb_layout RELOADS a live Hyprland. With
+# /run/user/<uid> baked in, running this suite on any machine whose owner is
+# sitting in a Hyprland session -- which describes this project's own developer
+# machine -- would reload THEIR desktop from a unit test. Static, and first.
+osk_seam_body=$(declare -f verify_osk_kb_layout) ||
+  fail_test "verify_osk_kb_layout exists in deck-session.sh" \
+    "without it the layout rule ships unverified, and §6b cannot keep the check off a real compositor"
+# shellcheck disable=SC2016  # a grep PATTERN matching a literal ${3:-...} in
+# the function's own text; expanding it would search for this shell's $3.
+grep -q '\${3:-' <<<"$osk_seam_body" ||
+  fail_test "verify_osk_kb_layout takes the compositor runtime directory as \$3" \
+    "no '\${3:-...}' in its body, so this suite could not keep 'hyprctl reload' away from a real session"
+[[ $(grep -c '/run/user' <<<"$osk_seam_body") -eq 1 ]] ||
+  fail_test "verify_osk_kb_layout names /run/user exactly once, as \$3's default" \
+    "a second mention means some path ignores the argument:"$'\n'"${osk_seam_body}"
+pass "verify_osk_kb_layout takes the compositor runtime directory from \$3 and names /run/user only as its default"
+
+osk_stage_body=$(declare -f stage_desktop_settings)
+# shellcheck disable=SC2016  # same: the literal text, not this shell's $1.
+grep -q '\${1:-' <<<"$osk_stage_body" ||
+  fail_test "stage_desktop_settings passes a runtime-directory seam through" \
+    "without it §6 would drive the real compositor no matter what verify_osk_kb_layout accepts"
+! grep -q '/run/user' <<<"$osk_stage_body" ||
+  fail_test "stage_desktop_settings does not name /run/user itself" \
+    "the default belongs to the verifier; a copy here is a second path the argument cannot override"
+pass "stage_desktop_settings forwards a runtime-directory seam and names no /run/user path of its own"
 
 # ===========================================================================
 # THE STAGE RUNNER
@@ -1188,6 +1288,25 @@ if [[ -e /etc/dconf/profile/user ]]; then
   fi
 fi
 
+# The compositor runtime directory §6 hands the stage: it exists, it holds no
+# Hyprland socket, and it is inside $work. That pins every §6 run to the "no
+# live compositor" branch, so §6 stays about dconf and shell.json and never
+# touches a session. §6b drives the live branch on purpose, against the stub.
+hypr_dead="$work/hypr-runtime-empty"
+mkdir -p "$hypr_dead"
+
+# A Deck-shaped device list: one physical keyboard on the session layout, our
+# virtual one, and the POINTER half of our uinput device holding the -1 name --
+# which is the arrangement measured on the Deck 2026-08-12 and the reason the
+# rule names the suffixed aliases at all.
+read -r -d '' HYPR_DEVICES_GOOD <<'JSON' || true
+{"mice":[{"name":"valve-software-steam-controller"},
+         {"name":"deck-input-mapper-virtual-keyboard-1"}],
+ "keyboards":[{"name":"at-translated-set-2-keyboard","layout":"latam"},
+              {"name":"deck-input-mapper-virtual-keyboard","layout":"us"}]}
+JSON
+export FAKE_HYPR_DEVICES="$HYPR_DEVICES_GOOD"
+
 seed_shell_json() {
   mkdir -p "$FAKE_HOME/.config/omarchy"
   cat >"$FAKE_HOME/$OMARCHY_SHELL_JSON_REL" <<'JSON'
@@ -1205,7 +1324,7 @@ case $host_profile in
     # stage refuses to guess at merge order, which is the correct behaviour --
     # assert that, and skip the rest of this section.
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings
+    run_stage_body stage_desktop_settings "$hypr_dead"
     ok_failed "stage-desktop-settings refuses a dconf profile that does not list system-db:local"
     ok_in_err "merge it by hand" "the refusal says profile order is precedence and it will not guess"
     note "the rest of §6 needs a host without /etc/dconf/profile/user, or one that already lists system-db:local"
@@ -1213,7 +1332,7 @@ case $host_profile in
   *)
     [[ $host_profile != ok ]] || export FAKE_DCONF_HOST_PROFILE_OK=1
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings
+    run_stage_body stage_desktop_settings "$hypr_dead"
     ok_rc 0 "stage-desktop-settings completes against a fake root"
 
     if [[ $host_profile == absent ]]; then
@@ -1260,14 +1379,14 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     export FAKE_DCONF_USER_KEY="$OSK_KEY"
     export FAKE_DCONF_USER_VALUE=false
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings
+    run_stage_body stage_desktop_settings "$hypr_dead"
     ok_rc 0 "a user value shadowing the site default is a warning, not a failure"
     ok_in_err "is shadowing it" "the warning says a user-level value is shadowing the default, and how to reset it"
     unset FAKE_DCONF_USER_KEY FAKE_DCONF_USER_VALUE
 
     export FAKE_DCONF_UPDATE_RC=1
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings
+    run_stage_body stage_desktop_settings "$hypr_dead"
     ok_failed "a failed 'dconf update' stops the stage"
     ok_in_err "on disk but not compiled" "the failure distinguishes 'written' from 'compiled', which is the state that does nothing"
     unset FAKE_DCONF_UPDATE_RC
@@ -1278,7 +1397,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # against the expected value catches it.
     export FAKE_DCONF_STALE_VALUE=false
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings
+    run_stage_body stage_desktop_settings "$hypr_dead"
     ok_failed "a site database that answers with the OLD value fails the stage"
     ok_in_err "the OSK would never auto-show for a new user" \
       "the read-back compares against the expected value, not merely 'did dconf answer'"
@@ -1287,9 +1406,243 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # An unparseable shell.json must not be rewritten from scratch.
     reset_root; seed_shell_json
     printf 'not json at all\n' >"$FAKE_HOME/$OMARCHY_SHELL_JSON_REL"
-    run_stage_body stage_desktop_settings
+    run_stage_body stage_desktop_settings "$hypr_dead"
     ok_failed "a shell.json that is not JSON stops the stage rather than being replaced"
     ok_in_err "could not patch the idle policy" "the failure names the file it would not overwrite"
+
+    # --- the on-screen keyboard's XKB layout -----------------------------
+    #
+    # The defect: the OSK draws US and emits raw keycodes, the session is
+    # Latin American, so ';' types 'n-tilde'. Every assertion below is about a
+    # way the rule could be installed and do NOTHING.
+    reset_root; seed_shell_json
+    run_stage_body stage_desktop_settings "$hypr_dead"
+    ok_rc 0 "the stage still completes with the keyboard-layout rule in it"
+    osk_lua="${FAKE_HOME}/${HYPR_INPUT_LUA_REL}"
+    [[ -f $osk_lua ]] ||
+      fail_test "the stage writes ${HYPR_INPUT_LUA_REL}" "missing: ${osk_lua}"$'\n'"stderr: $(err)"
+    pass "the stage installs the layout rule into the desktop user's ${HYPR_INPUT_LUA_REL}"
+    for osk_marker in "$OSK_KB_RULE_BEGIN" "$OSK_KB_RULE_END"; do
+      grep -qxF -- "$osk_marker" "$osk_lua" ||
+        fail_test "the installed file carries the marker line '${osk_marker}'" \
+          "an unpaired marker is what makes a re-run refuse rather than splice"$'\n'"$(cat "$osk_lua")"
+    done
+    pass "the installed file carries both delimiters, which is what makes the block replaceable"
+    grep -qxF "${OSK_KB_SENTINEL} = \"${OSK_KB_LAYOUT}\"" "$osk_lua" ||
+      fail_test "the installed block ends with the sentinel assignment" \
+        "without it the live check has nothing that can fail"$'\n'"$(cat "$osk_lua")"
+    pass "the installed block sets ${OSK_KB_SENTINEL}, the global the live check asserts on"
+    ok_called "sudo -u ${SUDO_USER} install -D -m 0644" \
+      "the rule is written AS the desktop user. Written as root it would land in their ~/.config owned by root, where Omarchy's own tooling could no longer edit it -- and \$SUDO is empty exactly when this script is already root, so 'it happens to work here' is not evidence."
+
+    # 🔴 The whole point of a stage rather than a hand edit: it is re-runnable.
+    # An append-only implementation would grow a second block on every run and
+    # eventually be two rules disagreeing with each other.
+    run_stage_body stage_desktop_settings "$hypr_dead"
+    ok_rc 0 "the stage is re-runnable with the rule already installed"
+    [[ $(grep -cxF -- "$OSK_KB_RULE_BEGIN" "$osk_lua") -eq 1 ]] ||
+      fail_test "a second run replaces the block instead of appending another" \
+        "found $(grep -cxF -- "$OSK_KB_RULE_BEGIN" "$osk_lua") start markers"
+    pass "re-running replaces the block in place -- exactly one copy, however many times it runs"
+
+    # ⚠️ The file it patches is the SAME file that carries the OSK's
+    # `above_lock = 2` layer rule on the test Deck. Losing that makes the lock
+    # screen unanswerable on a device with no physical keyboard (5.24). A
+    # rewrite-from-scratch implementation would pass every assertion above.
+    reset_root; seed_shell_json
+    mkdir -p "$(dirname "$osk_lua")"
+    printf -- '-- the user'"'"'s own file\nhl.layer_rule({ match = { namespace = "deck-osk" }, above_lock = 2 })\n' >"$osk_lua"
+    run_stage_body stage_desktop_settings "$hypr_dead"
+    ok_rc 0 "the stage completes against an input.lua that already has user content"
+    grep -qF 'above_lock = 2' "$osk_lua" ||
+      fail_test "the user's existing input.lua content survives the patch" \
+        "the above_lock rule is what lets the on-screen keyboard render over the session lock; a device with no physical keyboard cannot answer a lock without it"$'\n'"$(cat "$osk_lua")"
+    pass "the user's own rules survive -- including the above_lock rule the lock screen depends on"
+
+    # A half-removed previous block cannot be spliced safely, and guessing
+    # would eat whatever followed it.
+    reset_root; seed_shell_json
+    mkdir -p "$(dirname "$osk_lua")"
+    printf '%s\nhl.device({ name = "x" })\n' "$OSK_KB_RULE_BEGIN" >"$osk_lua"
+    run_stage_body stage_desktop_settings "$hypr_dead"
+    ok_failed "a start marker with no end marker stops the stage"
+    ok_in_err "could not splice" "the failure names the splice rather than reporting a generic write error"
+
+    # No compositor: the rule is on disk and NOT observed working. Saying so is
+    # the requirement -- 5.30b's lesson is that a rule nobody has seen work is
+    # not a rule that works.
+    reset_root; seed_shell_json
+    run_stage_body stage_desktop_settings "$hypr_dead"
+    ok_in_err "has NOT been observed working" \
+      "with no live compositor the stage says the rule is unverified instead of reporting success"
+    ok_in_err "$OSK_HYPR_DEVICE" "the warning names the device to look for, so the operator can check it by hand"
+
+    # --- the live branch, against the stub compositor --------------------
+    #
+    # A directory with a real unix socket in it, which is how the stage
+    # decides a compositor is there at all.
+    hypr_live="$work/hypr-runtime-live"
+    rm -rf "$hypr_live"; mkdir -p "$hypr_live/hypr/deadbeef_1"
+    python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' \
+      "$hypr_live/hypr/deadbeef_1/.socket.sock" ||
+      fail_test "the suite can create a fake compositor socket" "python3 could not bind an AF_UNIX socket"
+
+    reset_root; seed_shell_json
+    run_stage_body stage_desktop_settings "$hypr_live"
+    ok_rc 0 "with a live compositor and a device on '${OSK_KB_LAYOUT}', the stage completes"
+    ok_in_out "the whole rule block executed" "the sentinel assertion is reported as a verification, not assumed"
+    ok_in_out "kept the session layout" "the check also confirms the OTHER keyboards did not change -- per-device, not session-wide"
+    ok_called "hyprctl reload config-only" "it reloads the config before reading it back, so the readback is not describing the previous run"
+    ok_before "hyprctl reload config-only" "hyprctl -j devices" "the reload happens BEFORE the device list is read"
+
+    # The sentinel is the block's last line, so its absence means the block did
+    # not run to the end -- hl.device raising on an unknown field looks exactly
+    # like this. It must be a failure, not a warning.
+    export FAKE_HYPR_SENTINEL=absent
+    reset_root; seed_shell_json
+    run_stage_body stage_desktop_settings "$hypr_live"
+    ok_failed "a compositor without the sentinel fails the stage"
+    ok_in_err "did not run to the end" "the failure says the BLOCK did not complete, which is what a raised hl.device looks like"
+    unset FAKE_HYPR_SENTINEL
+
+    # The sentinel present and the layout still wrong: the block loaded and did
+    # not attach to the device. That is the rename hazard, and it is the one
+    # failure a sentinel alone cannot see.
+    export FAKE_HYPR_DEVICES='{"mice":[],"keyboards":[{"name":"at-translated-set-2-keyboard","layout":"latam"},{"name":"deck-input-mapper-virtual-keyboard","layout":"latam"}]}'
+    reset_root; seed_shell_json
+    run_stage_body stage_desktop_settings "$hypr_live"
+    ok_failed "a device that loaded the rule and still reads the session layout fails the stage"
+    ok_in_err "reads layout 'latam'" "the failure reports what the device ACTUALLY says, not merely that it disagreed"
+    export FAKE_HYPR_DEVICES="$HYPR_DEVICES_GOOD"
+
+    # 🔴 The opposite failure, and the one the operator asked for by name: the
+    # rule must not become session-wide. Every keyboard reading 'us' while the
+    # session's own layout is not 'us' means the physical keyboards changed too.
+    export FAKE_HYPR_DEVICES='{"mice":[],"keyboards":[{"name":"at-translated-set-2-keyboard","layout":"us"},{"name":"deck-input-mapper-virtual-keyboard","layout":"us"}]}'
+    reset_root; seed_shell_json
+    run_stage_body stage_desktop_settings "$hypr_live"
+    ok_failed "a rule that changed every keyboard's layout fails the stage"
+    ok_in_err "went SESSION-WIDE" "the failure names the per-device requirement rather than reporting a generic mismatch"
+    export FAKE_HYPR_DEVICES="$HYPR_DEVICES_GOOD"
+
+    # 🔴 THE ORDERING HAZARD, driven end to end. Our uinput device declares
+    # keys AND relative axes, so Hyprland binds it twice and appends -1 to
+    # whichever copy loses the race for the bare name. Measured on the Deck the
+    # keyboard won -- but nothing promises that, and here the POINTER has the
+    # bare name while the keyboard carries -1. A rule that named only the bare
+    # form would be attached to a pointer, where kb_layout is inert, and this
+    # would read as "no such keyboard" rather than as a failure.
+    export FAKE_HYPR_DEVICES='{"mice":[{"name":"deck-input-mapper-virtual-keyboard"}],"keyboards":[{"name":"at-translated-set-2-keyboard","layout":"latam"},{"name":"deck-input-mapper-virtual-keyboard-1","layout":"us"}]}'
+    reset_root; seed_shell_json
+    run_stage_body stage_desktop_settings "$hypr_live"
+    ok_rc 0 "the rule still verifies when the keyboard holds the -1 name and the pointer holds the bare one"
+    ok_in_out "kept the session layout" \
+      "the check follows the suffixed aliases too; matching only the bare name would report the keyboard as simply not present"
+    export FAKE_HYPR_DEVICES="$HYPR_DEVICES_GOOD"
+
+    # No keyboards at all is not "our device is missing" -- it is a device list
+    # worth drawing no conclusion from. Reporting absence there would turn a
+    # broken query into a reassuring warning.
+    export FAKE_HYPR_DEVICES='{"mice":[],"keyboards":[]}'
+    reset_root; seed_shell_json
+    run_stage_body stage_desktop_settings "$hypr_live"
+    ok_failed "a compositor reporting no keyboards at all fails the stage"
+    ok_in_err "could not read the keyboard layouts back" \
+      "an empty device list is a check that could not run, not a device that is absent"
+    export FAKE_HYPR_DEVICES="$HYPR_DEVICES_GOOD"
+
+    # A crashed compositor leaves its instance DIRECTORY behind with no socket
+    # in it. Treating that as a live session means talking to nothing and
+    # believing the answer.
+    rm -rf "$work/hypr-runtime-stale"; mkdir -p "$work/hypr-runtime-stale/hypr/deadbeef_1"
+    reset_root; seed_shell_json
+    run_stage_body stage_desktop_settings "$work/hypr-runtime-stale"
+    ok_rc 0 "a stale instance directory with no socket is not treated as a live compositor"
+    ok_in_err "no live Hyprland instance" \
+      "the socket is what makes an instance live; a leftover directory would otherwise be 'verified' against a compositor that is not there"
+
+    # The mapper not running is NOT the rule being wrong: the device simply is
+    # not bound. Warn, do not fail -- and do not claim success either.
+    export FAKE_HYPR_DEVICES='{"mice":[],"keyboards":[{"name":"at-translated-set-2-keyboard","layout":"latam"}]}'
+    reset_root; seed_shell_json
+    run_stage_body stage_desktop_settings "$hypr_live"
+    ok_rc 0 "a stopped input mapper is a warning, not a failure -- the rule is correct and inert"
+    ok_in_err "could not be observed taking effect" "the warning distinguishes 'not bound' from 'not working'"
+    export FAKE_HYPR_DEVICES="$HYPR_DEVICES_GOOD"
+
+    # A reload that fails leaves the running session on the old config. The
+    # file is on disk and the session is not using it, which is the one state
+    # that must never be reported as success.
+    export FAKE_HYPRCTL_RELOAD_RC=1
+    reset_root; seed_shell_json
+    run_stage_body stage_desktop_settings "$hypr_live"
+    ok_failed "a failed 'hyprctl reload' stops the stage"
+    ok_in_err "has not picked it up" "the failure distinguishes 'written to disk' from 'loaded by the session'"
+    unset FAKE_HYPRCTL_RELOAD_RC
+
+    # A junk uid must not be pasted into a path. /run/user/<junk> simply would
+    # not exist, which is indistinguishable from "no compositor running" -- a
+    # verification that quietly downgrades itself to a warning.
+    export FAKE_GETENT_UID=not-a-number
+    reset_root; seed_shell_json
+    run_stage_body stage_desktop_settings "$hypr_dead"
+    ok_failed "a non-numeric uid stops the stage"
+    ok_in_err "non-numeric uid" "the failure names the uid rather than building a runtime path out of it"
+    unset FAKE_GETENT_UID
+
+    # A Lua syntax error is SILENT: Hyprland discards the file and falls back,
+    # taking the OSK's above_lock rule with it. Installing a file already known
+    # to be unparseable is the one thing this must never do.
+    if command -v luac >/dev/null 2>&1; then
+      reset_root; seed_shell_json
+      mkdir -p "$(dirname "$osk_lua")"
+      printf 'this is not lua at all ((\n' >"$osk_lua"
+      run_stage_body stage_desktop_settings "$hypr_dead"
+      ok_failed "an input.lua that does not parse as Lua stops the stage"
+      ok_in_err "not valid Lua" \
+        "Hyprland discards an unparseable config WITHOUT logging a reason, so installing one would silently drop the above_lock rule too"
+    else
+      note "luac is not installed, so the 'refuses to install unparseable Lua' assertion is skipped"
+    fi
+
+    # An `install` that exits 0 having written nothing. Not hypothetical: this
+    # whole stage exists because settings that were 'applied' turned out not to
+    # be there, and an exit code is not a file.
+    reset_root; seed_shell_json
+    cat >"$stub_bin/install" <<'STUB_INSTALL'
+#!/usr/bin/env bash
+printf 'install %s\n' "$*" >>"$CALLS_LOG"
+exit 0
+STUB_INSTALL
+    chmod +x "$stub_bin/install"
+    run_stage_body install_osk_kb_layout_rule "$SUDO_USER" "${FAKE_HOME}/.config/hypr/never-written.lua"
+    rm -f "$stub_bin/install"
+    ok_failed "an install that exits 0 without writing the file fails the stage"
+    ok_in_err "reported success and the file does not have the rule in it" \
+      "the stage re-reads what it wrote instead of trusting install's exit code"
+
+    # The device name is the ONLY thing tying this rule to the mapper's uinput
+    # device, and it is spelled twice: once as the mapper declares it, once
+    # normalised the way Hyprland matches it. Drifting one without the other
+    # produces a rule that parses, loads, and matches nothing.
+    osk_drift="$work/deck-session-drifted.sh"
+    sed 's/^readonly OSK_UINPUT_NAME=.*/readonly OSK_UINPUT_NAME="renamed virtual keyboard"/' \
+      "$REPO_ROOT/src/deck-session.sh" >"$osk_drift"
+    grep -q 'renamed virtual keyboard' "$osk_drift" ||
+      fail_test "the drift fixture actually changed OSK_UINPUT_NAME" "sed matched nothing; this case would pass vacuously"
+    # A separate bash PROCESS, not a subshell: every constant in this file is
+    # readonly and a subshell inherits them, so the drifted copy would be
+    # rejected line by line and never reach the check under test.
+    osk_drift_rc=0
+    bash -c 'set +e; . "$1"; SUDO="$4"; install_osk_kb_layout_rule "$2" "$3"' \
+      _ "$osk_drift" "$SUDO_USER" "${FAKE_HOME}/.config/hypr/drift.lua" "$FAKE_SUDO_BIN" \
+      >/dev/null 2>"$work/stage.err" || osk_drift_rc=$?
+    [[ $osk_drift_rc -ne 0 ]] ||
+      fail_test "a device name that no longer normalises to the matched name stops the stage" \
+        "it exited 0, so a mapper rename would ship a rule matching no device at all"
+    ok_in_err "matches no device and does nothing at all" \
+      "the refusal explains that the rule would be inert rather than wrong"
+    pass "a drifted OSK_UINPUT_NAME stops the stage instead of shipping a rule matched to nothing"
     ;;
 esac
 

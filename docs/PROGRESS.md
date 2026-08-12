@@ -1702,6 +1702,112 @@ virtual pad**, so one press would drive Steam's UI *and* inject a keystroke.
 **T3/T4 owe the mapper a "Steam is running" policy**; nothing currently stops it
 binding Steam's virtual pad.
 
+### 5.20a ✅ FIXED 2026-08-12 — the OSK typed the wrong characters, and the keycodes were right all along
+
+**Reported from the panel:** *"many of the keys don't type what they should
+(i think it's bc of the us keyboard layout of the osk vs the latin keyboard
+configured for the steam deck)."* The diagnosis was correct in every particular.
+
+**The chain, read rather than guessed.** `src/deck_osk_layout.py` binds the `;`
+key to `KEY_SEMICOLON`; `src/deck-input-mapper.py` emits that keycode through a
+uinput device named `deck-input-mapper virtual keyboard`. Which **character** a
+keycode becomes is decided entirely downstream, by the XKB keymap the compositor
+has bound to that device. `/etc/vconsole.conf` on the Deck carries
+`XKBLAYOUT=latam`, Omarchy's `default/hypr/input.lua` reads `kb_layout` straight
+out of that file, and `hyprctl devices -j` reports **every** keyboard —
+ours included — as `"layout": "latam"` / `"Spanish (Latin American)"`. AC10 is
+`ñ` there. **The OSK's keycodes are right; the translation is wrong.** Nothing
+in the mapper or the layout core needed to change.
+
+⚠️ **This is NOT the same thing as `org.gnome.desktop.input-sources`** above.
+That key exists so squeekboard has a layout to *draw*. This one decides what the
+compositor *types*. Two layers; both needed; fixing either does nothing for the
+other.
+
+✅ **The fix, per device — operator decision, and the constraint is the point.**
+`stage-desktop-settings` now splices a marker-delimited block into the desktop
+user's `~/.config/hypr/input.lua`:
+
+```lua
+hl.device({ name = "deck-input-mapper-virtual-keyboard",
+            kb_layout = "us", kb_variant = "", kb_model = "", kb_rules = "" })
+```
+
+Physical keyboards and the rest of the desktop keep Latin American. Nothing
+touches `vconsole`, `localectl`, or Omarchy's global `kb_layout`, and the suite
+**fails** if every keyboard ends up on `us` while the session layout is not —
+going session-wide is a defect here, not a simpler version of the fix.
+
+**The Lua shape is measured, not assumed** (§5.30b's lesson). `hl.device(spec)`
+with a required `name` is in `/usr/share/hypr/stubs/hl.meta.lua` and backed by
+`m_deviceConfigs` in `src/config/lua/ConfigManager.hpp`. Probed live:
+`hyprctl eval 'hl.device({ kb_layout = "us" })'` →
+*"hl.device: 'name' field is required and must be a string"*; `hl.device(7)` →
+*"argument must be a table"*. The binary also carries
+`"hl.device: unknown field '{}'"`, so a misspelt field **raises** rather than
+being ignored.
+
+🔴 **How it is prevented from being a silent no-op** — three independent traps,
+because this is exactly where §5.30b said rules go to die quietly:
+
+1. **A sentinel as the block's last statement.** `hl.device` raises on a bad
+   field and a raise skips the rest of the chunk, so `DECK_OSK_KB_LAYOUT` being
+   set in the live compositor proves the whole block executed.
+   ⚠️ **It is asserted, never read back.** Measured 2026-08-12:
+   `hyprctl eval 'return X'` prints `ok` and exits **0** for *any* expression
+   that does not raise — including a nil global — with a nonexistent name as the
+   negative control. Only a Lua `error()` surfaces: **exit 7**, with the
+   message. **The readback recipe written into the Deck's own `input.lua` for
+   the `above_lock` sentinel is therefore a no-op** and should be corrected the
+   same way.
+2. **The device name is cross-checked against the mapper.**
+   `test/unit/test-deck-session.sh` greps `src/deck-input-mapper.py` for the
+   exact `UInput(name=…)` string and asserts our matched name is its normalised
+   form. A rename there would otherwise leave a rule that parses, loads, and
+   matches nothing.
+3. **The stage reads the layout back out of `hyprctl -j devices`** after
+   `hyprctl reload config-only`, and fails when our device is not on `us`. No
+   live compositor is a **loud warning**, not a pass.
+
+⚠️ **The rule names the suffixed aliases too** (`…-1`, `…-2`, `…-3`). Our uinput
+device declares keys **and** relative axes, so Hyprland binds it twice —
+`getNameForNewDevice` appends a counter to whichever copy loses the race for the
+bare name. Measured: the **keyboard** holds the bare name and the **pointer**
+holds `-1`. Nothing promises that order, and `kb_layout` on a pointer is inert,
+so naming only the bare form would work until the day it silently did not.
+
+⚠️ **It patches the same file as the `above_lock = 2` layer rule** (§5.24). The
+splice is marker-delimited and preserves everything outside its own block, and
+the suite asserts the `above_lock` line survives — losing it makes the lock
+screen unanswerable on a device with no physical keyboard. It also refuses to
+install a file that does not pass `luac -p`, because Hyprland discards an
+unparseable config **without logging a reason** and would take both rules down
+together.
+
+⚠️ **It still lives in one user's dotfile.** T5 `§5.3` now carries the bake-in
+row. This is a fourth load-bearing session setting, not a fourth thing that
+exists only on the operator's machine.
+
+🟡 **THE INSTALLER TTY IS A SEPARATE PROBLEM AND IS ONLY HALF SAFE.** A bare
+console has no XKB at all — keycodes go through `loadkeys` and the kernel
+keymap — so nothing above applies there.
+
+- ✅ **The Wi-Fi passphrase is safe.** S1 runs at the tail of `greeter`,
+  **before** `keyboard_form`'s `loadkeys` (`src/deck-form.sh`, commit
+  `d49dbe4`), so it is typed under the ISO's boot default.
+- 🔴 **The account password is not.** Upstream's flow is
+  `keyboard_form` (which ends in `loadkeys "$keyboard"`, `configurator` line
+  225) → `user_form` (username **and password**, line 246) → disk. A user who
+  picks a non-`us` layout types their password through a console keymap the OSK
+  does not draw, and that same value is written into archinstall's
+  `"kb_layout"` — which is where this Deck's `latam` came from in the first
+  place.
+- The fix is `docs/tasks/T4-screen-spec.md` §3 deviation 2 (*"keyboard becomes
+  the constant `us`"*), which lives in `omarchy_prompt_keyboard`/`keyboard_form`
+  and is **not implemented**; `src/deck-form.sh` already flags it as out of its
+  own scope. **Not fixed here** — it is a different mechanism in a file this
+  change does not own.
+
 ---
 
 ## 5.21 🐞 NEW — `lizard_mode=N` persists nowhere, and a reboot silently takes STEAM+X and Space

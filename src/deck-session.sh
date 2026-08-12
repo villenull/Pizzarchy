@@ -177,6 +177,87 @@ readonly OSK_KEY=/org/gnome/desktop/a11y/applications/screen-keyboard-enabled
 # source. Empty by default on this Deck.
 readonly INPUT_SOURCES_KEY=/org/gnome/desktop/input-sources/sources
 
+# --- The on-screen keyboard's XKB layout (PROGRESS.md 5.20) ---------------
+#
+# THE DEFECT, reported from the panel 2026-08-12: "many of the keys don't type
+# what they should". They are not mistyped by us. The OSK draws a US layout and
+# emits raw KEYCODES through the mapper's uinput device (src/deck_osk_layout.py:
+# the ';' key is `KEY_SEMICOLON`); which CHARACTER that becomes is decided
+# entirely downstream, by the XKB keymap the compositor has bound to that
+# device. This Deck's session is Latin American -- /etc/vconsole.conf carries
+# XKBLAYOUT=latam and Omarchy's own default/hypr/input.lua reads kb_layout
+# straight out of that file -- so AC10 is 'n-tilde' and the OSK's ';' types it.
+# Measured, not inferred: `hyprctl devices -j` reports every keyboard on the
+# Deck, ours included, as layout=latam / "Spanish (Latin American)".
+#
+# ⚠️ The keycodes are RIGHT and the mapper needs no change. Only the
+# translation is wrong.
+#
+# ⚠️ PER DEVICE, NOT SESSION-WIDE -- operator decision 2026-08-12. Physical
+# keyboards and the rest of the desktop keep Latin American; only our virtual
+# keyboard is pinned. Nothing here touches vconsole, localectl, the dconf input
+# source, or Omarchy's global kb_layout.
+#
+# ⚠️ NOT the same thing as INPUT_SOURCES_KEY above. That one exists so
+# squeekboard has a layout to DRAW; this one decides what the compositor TYPES
+# for a keycode. They are different layers and both are needed.
+readonly OSK_KB_LAYOUT=us
+
+# The uinput device src/deck-input-mapper.py creates, verbatim (its
+# `UInput(..., name=...)`). Kept here so test/unit/test-deck-session.sh can
+# assert the mapper still declares exactly this -- a rename there would leave
+# the rule below matching nothing, which is the silent no-op this whole block
+# is written to avoid.
+readonly OSK_UINPUT_NAME="deck-input-mapper virtual keyboard"
+
+# What a Hyprland device rule has to match: Hyprland lowercases the device name
+# and turns spaces into dashes (`deviceNameToInternalString`). MEASURED on the
+# Deck 2026-08-12 with `hyprctl devices -j`, not derived from the header.
+readonly OSK_HYPR_DEVICE=deck-input-mapper-virtual-keyboard
+
+# 🔴 Why the rule is declared for suffixed names too, and why that is not
+# belt-and-braces padding.
+#
+# Our uinput device declares BOTH keys and REL axes, so Hyprland binds it
+# TWICE -- once as a keyboard, once as a pointer -- and
+# `InputManager::getNameForNewDevice` appends -1, -2 ... to whichever copy asks
+# for a name that is already taken. Measured on the Deck: the KEYBOARD holds
+# the bare name and the POINTER holds `-1`. Which half wins the bare name is
+# device-enumeration order and nothing in Hyprland promises it stays that way;
+# a mapper restart that flipped it would leave the rule attached to a pointer,
+# where kb_layout is inert, and the keyboard back on latam -- with no error
+# anywhere. `kb_layout` on a pointer costs nothing. Guessing wrong costs the
+# entire fix, silently.
+readonly OSK_HYPR_DEVICE_ALIASES=3
+
+# Hyprland's Lua config is a user dotfile: hyprland.lua does `require("hypr.input")`
+# and package.path resolves that to ~/.config/hypr/input.lua. There is no
+# system-wide drop-in for it, so this is patched into the desktop user's file
+# the same way the idle policy is patched into their shell.json -- and, like
+# that one, it is owed a T5 bake-in row (T5-fork-plan.md 5.3).
+readonly HYPR_INPUT_LUA_REL=.config/hypr/input.lua
+# Omarchy's shipped skeleton, used only to SEED an absent file. Not a fallback
+# we edit: `require("hypr.input")` errors outright when the user has no
+# input.lua, so creating one is strictly better than leaving it missing.
+readonly HYPR_INPUT_LUA_TEMPLATE=/usr/share/omarchy/config/hypr/input.lua
+
+# The block is delimited so a re-run replaces its own work instead of appending
+# a second copy, and so the user's own overrides above it are never touched.
+readonly OSK_KB_RULE_BEGIN="-- >>> deck-session.sh: on-screen keyboard XKB layout >>>"
+readonly OSK_KB_RULE_END="-- <<< deck-session.sh: on-screen keyboard XKB layout <<<"
+
+# A global assigned by the LAST line of the block, so its presence in a live
+# compositor proves the whole block executed.
+#
+# ⚠️ `hyprctl eval 'return X'` CANNOT read it back: on 0.56.2 eval prints "ok"
+# and exits 0 for every expression that does not raise, including
+# `return <nil global>` -- measured, with a nonexistent name as the negative
+# control. (The readback recipe written into the Deck's own input.lua for the
+# above_lock sentinel is therefore a no-op; see verify_osk_kb_layout.) What
+# eval DOES surface is a Lua error: exit 7, with the message. So the probe is
+# an assertion, not a read.
+readonly OSK_KB_SENTINEL=DECK_OSK_KB_LAYOUT
+
 # --- Omarchy idle policy (R-38) -------------------------------------------
 #
 # Omarchy ships screensaver=150s and lock=300s. The LOCK is the problem: it is a
@@ -2688,11 +2769,318 @@ sources=[('xkb','us')]
 EOF
 }
 
+# The Hyprland Lua that pins OUR virtual keyboard, and nothing else, to `us`.
+#
+# THE SHAPE IS MEASURED, not guessed. Hyprland 0.56.2 replaced the old
+# `device:<name> { ... }` config section with a Lua call, and the argument is a
+# FLAT table with a required `name` -- `hl.device(spec: HL.DeviceSpec)` in
+# /usr/share/hypr/stubs/hl.meta.lua, backed by `m_deviceConfigs` in
+# src/config/lua/ConfigManager.hpp. Probed live on the Deck:
+#
+#   hyprctl eval 'hl.device({ kb_layout = "us" })'
+#     -> error: hl.device: 'name' field is required and must be a string
+#   hyprctl eval 'hl.device(7)'
+#     -> error: hl.device: argument must be a table
+#
+# 🔴 THE ANTI-NO-OP DESIGN, which is the point of the sentinel on the last
+# line. `hl.device` VALIDATES: the binary carries
+# "hl.device: unknown field '{}'", so a misspelt field raises rather than being
+# ignored, and a raise aborts the rest of the chunk -- which means the sentinel
+# assignment below never runs. So "the rule silently did nothing" and "the
+# sentinel is absent" are the same observable, and verify_osk_kb_layout turns
+# that into a loud failure. A block that cannot be wrong quietly.
+#
+# kb_variant/kb_model/kb_rules are pinned EXPLICITLY rather than left to
+# inherit. Unset device fields fall back to the global option
+# (`getDeviceString(dev, field, fallback)`), and inheriting a variant chosen for
+# a different layout is how you get a keymap that fails to compile -- on this
+# Deck the global variant is empty, but the ISO installs whatever the user
+# picked and nothing here may depend on it being empty.
+render_osk_kb_layout_lua() {
+  local names="\"${OSK_HYPR_DEVICE}\"" i
+  for ((i = 1; i <= OSK_HYPR_DEVICE_ALIASES; i++)); do
+    names="${names}, \"${OSK_HYPR_DEVICE}-${i}\""
+  done
+
+  cat <<EOF
+${OSK_KB_RULE_BEGIN}
+${INSTALL_MARKER_LUA}
+--
+-- The on-screen keyboard draws a US layout and emits raw KEYCODES through
+-- ${MAPPER_BIN}'s uinput device. Which character a keycode becomes is decided
+-- by the XKB keymap bound to that device, so on a Latin American session the
+-- OSK's ';' key types 'n-tilde'. This pins OUR virtual keyboard, and only it,
+-- to '${OSK_KB_LAYOUT}'. Physical keyboards and the rest of the desktop keep the session
+-- layout -- do NOT "simplify" this into input.kb_layout, which would change
+-- every keyboard on the machine.
+--
+-- The suffixed names are not padding: this uinput device declares keys AND
+-- relative axes, so Hyprland binds it twice and appends -1/-2/... to whichever
+-- copy loses the race for the bare name. Attaching the rule to only one of them
+-- would work until the order flipped, and then fail with no error anywhere.
+for _, deck_osk_device in ipairs({ ${names} }) do
+  hl.device({
+    name = deck_osk_device,
+    kb_layout = "${OSK_KB_LAYOUT}",
+    kb_variant = "",
+    kb_model = "",
+    kb_rules = "",
+  })
+end
+
+-- Deliberately the LAST line: hl.device raises on an unknown field, and a raise
+-- skips everything after it. Its absence in a live compositor therefore means
+-- the rule above did not take. deck-session.sh asserts it with
+--   hyprctl eval 'if ${OSK_KB_SENTINEL} ~= "${OSK_KB_LAYOUT}" then error("...") end'
+-- because eval reports Lua errors and cannot report values.
+${OSK_KB_SENTINEL} = "${OSK_KB_LAYOUT}"
+${OSK_KB_RULE_END}
+EOF
+}
+
+# run_as_desktop_user <user> <cmd...>
+#
+# ⚠️ `$SUDO -u <user> …` is NOT enough on its own. stage_preconditions sets
+# SUDO="" when this script is ALREADY root, so under `sudo ./deck-session.sh`
+# that expansion degrades to running `-u` as a command -- "bash: -u: command not
+# found", i.e. a write that never happens. Dropping privilege needs sudo
+# precisely in the case where $SUDO is empty, which is the opposite of every
+# other use of it in this file.
+#
+# (The three `$SUDO -u` calls further down stage_desktop_settings predate this
+# and carry the same hazard. They are left alone deliberately -- changing them
+# is a separate change with its own tests -- but do not copy them.)
+run_as_desktop_user() {
+  local user=$1; shift
+  if [[ -n $SUDO ]]; then
+    "$SUDO" -u "$user" "$@"
+  elif [[ $EUID -eq 0 ]]; then
+    command -v sudo >/dev/null 2>&1 ||
+      fail "running as root and sudo is not available, so nothing can be written as ${user}. A root-owned file in their ~/.config would be worse than none."
+    sudo -u "$user" "$@"
+  else
+    fail "cannot run as ${user}: this process is neither root nor holding an escalation path (SUDO is empty and EUID is ${EUID}). stage-preconditions sets that up; running a stage without it would write the wrong file as the wrong user."
+  fi
+}
+
+# install_osk_kb_layout_rule <desktop-user> <path to input.lua> [template]
+#
+# Splices the block above into the user's Hyprland input config, replacing any
+# previous copy of itself. Everything outside the markers is preserved
+# byte-for-byte, which matters more here than anywhere else in this file: on the
+# test Deck that same file carries the `above_lock = 2` layer rule, and losing it
+# makes the lock screen unanswerable on a device with no physical keyboard.
+install_osk_kb_layout_rule() {
+  local user=$1
+  local target=$2
+  local template=${3:-$HYPR_INPUT_LUA_TEMPLATE}
+
+  # The two names must stay in step: OSK_UINPUT_NAME is what the mapper
+  # declares, OSK_HYPR_DEVICE is what a rule matches. Deriving one and comparing
+  # it to the other means a mapper rename tracked in only one of them stops the
+  # stage instead of shipping a rule that matches no device.
+  local derived=${OSK_UINPUT_NAME,,}
+  derived=${derived// /-}
+  [[ $derived == "$OSK_HYPR_DEVICE" ]] ||
+    fail "the uinput device name '${OSK_UINPUT_NAME}' normalises to '${derived}', but the rule matches '${OSK_HYPR_DEVICE}'. Hyprland lowercases the name and turns spaces into dashes; a rule naming anything else matches no device and does nothing at all."
+
+  local block tmp
+  block=$(mktemp) || fail "mktemp failed"
+  render_osk_kb_layout_lua >"$block" ||
+    fail "could not render the on-screen keyboard's layout rule"
+
+  tmp=$(mktemp) || { rm -f "$block"; fail "mktemp failed"; }
+
+  # Not sed/awk: the markers have to be matched as whole lines and an
+  # unterminated previous block has to be refused rather than half-deleted.
+  python3 - "$target" "$block" "$template" "$OSK_KB_RULE_BEGIN" "$OSK_KB_RULE_END" >"$tmp" <<'PY' || {
+import pathlib, sys
+target, block, template = (pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]),
+                           pathlib.Path(sys.argv[3]))
+begin, end = sys.argv[4], sys.argv[5]
+
+if target.exists():
+    body, source = target.read_text(), "existing"
+elif template.exists():
+    body, source = template.read_text(), "template"
+else:
+    body, source = "", "empty"
+
+kept, skipping = [], False
+for line in body.splitlines():
+    if line.strip() == begin:
+        skipping = True
+        continue
+    if skipping:
+        if line.strip() == end:
+            skipping = False
+        continue
+    kept.append(line)
+if skipping:
+    sys.exit(f"{target} has our start marker and no end marker. Refusing to guess "
+             "where the old block ended -- remove it by hand and re-run.")
+
+text = "\n".join(kept).rstrip("\n")
+sys.stdout.write((text + "\n\n") if text else "")
+sys.stdout.write(block.read_text())
+sys.stderr.write(f"seeded-from: {source}\n")
+PY
+    rm -f "$block" "$tmp"
+    fail "could not splice the keyboard-layout rule into ${target}"
+  }
+  rm -f "$block"
+
+  # A Lua syntax error does not fail loudly: Hyprland discards the file and
+  # falls back, which here means losing the user's whole input.lua -- the
+  # above_lock rule included. This is the same trap stage-greeter-rotation was
+  # written after, with a worse blast radius.
+  if command -v luac >/dev/null 2>&1; then
+    local luaerr
+    if ! luaerr=$(luac -p "$tmp" 2>&1); then
+      rm -f "$tmp"
+      fail "the patched ${target} is not valid Lua: ${luaerr}. Refusing to install it -- Hyprland discards a config it cannot parse WITHOUT logging a reason, so this would silently take the on-screen keyboard's above_lock rule down with it."
+    fi
+    log "verified: the patched ${target} parses as Lua"
+  else
+    warn "luac not found, so the patched ${target} was NOT syntax-checked. A Lua syntax error there is silent: Hyprland discards the whole file, which would drop the OSK's above_lock rule as well as this one. Install the 'lua' package to enable this check."
+  fi
+
+  chmod 0644 "$tmp" || { rm -f "$tmp"; fail "could not make the staged ${target} readable by ${user}"; }
+  log "installing the on-screen keyboard's layout rule: ${target}"
+  run_as_desktop_user "$user" install -D -m 0644 "$tmp" "$target" || {
+    rm -f "$tmp"
+    fail "could not install ${target} as ${user}"
+  }
+  rm -f "$tmp"
+
+  grep -qxF -- "$OSK_KB_RULE_END" "$target" ||
+    fail "${target} does not carry '${OSK_KB_RULE_END}' after being installed. The write reported success and the file does not have the rule in it."
+}
+
+# verify_osk_kb_layout <desktop-user> <uid> [runtime-dir]
+#
+# 🔴 The runtime directory is a PARAMETER, and that is a safety property rather
+# than a testing convenience: with the constant baked in, running the unit suite
+# on any developer machine that happens to run Hyprland would reload THAT
+# person's live desktop. See "THE VERIFICATION SEAM" above verify_update_stub.
+#
+# Three outcomes, and only one of them is silence-free by accident:
+#   - no live compositor  -> WARN, loudly, with the command to run later. The
+#                            rule is on disk and applies to the next session;
+#                            claiming it works would be the lie.
+#   - live, sentinel gone -> FAIL. The block did not execute.
+#   - live, wrong layout  -> FAIL, naming what the device actually reads.
+verify_osk_kb_layout() {
+  local user=$1 uid=$2
+  local runtime_dir=${3:-/run/user/${uid}}
+
+  local manual="hyprctl -j devices"
+
+  local sig="" d
+  for d in "$runtime_dir"/hypr/*/; do
+    [[ -S "${d}.socket.sock" ]] || continue
+    d=${d%/}
+    sig=${d##*/}
+  done
+
+  if [[ -z $sig ]]; then
+    warn "no live Hyprland instance under ${runtime_dir}/hypr, so the keyboard-layout rule is installed but has NOT been observed working. It applies to ${user}'s next session. Check it there with: ${manual} -- the '${OSK_HYPR_DEVICE}' keyboard must read layout '${OSK_KB_LAYOUT}' while every other keyboard keeps the session layout."
+    return 0
+  fi
+
+  command -v hyprctl >/dev/null 2>&1 ||
+    fail "a Hyprland instance is live (${sig}) but hyprctl is not on PATH, so the rule this stage just installed cannot be checked at all. Refusing to report success for a keyboard nobody has seen type."
+
+  # ⚠️ HYPRLAND_INSTANCE_SIGNATURE is not optional. Without it hyprctl exits
+  # before doing anything (R-46), and a check that never ran reads exactly like
+  # a check that passed.
+  local -a hy=(env "XDG_RUNTIME_DIR=${runtime_dir}" "HYPRLAND_INSTANCE_SIGNATURE=${sig}" hyprctl)
+
+  # `config-only` so this does not churn the monitors on a live desktop. The
+  # reload is what makes the readback below mean anything: without it we would
+  # be reading whatever was loaded before this stage wrote the file.
+  "${hy[@]}" reload config-only >/dev/null 2>&1 ||
+    fail "'hyprctl reload config-only' failed against instance ${sig}. The rule is written to disk but the running session has not picked it up, and this stage will not call that success."
+
+  # The sentinel. eval cannot RETURN a value on 0.56.2 -- it prints 'ok' and
+  # exits 0 for `return <anything>`, nil included -- but it does surface a Lua
+  # error as exit 7. So assert, do not read.
+  local evalout
+  if ! evalout=$("${hy[@]}" eval "if ${OSK_KB_SENTINEL} ~= '${OSK_KB_LAYOUT}' then error('${OSK_KB_SENTINEL} is not \"${OSK_KB_LAYOUT}\"') end" 2>&1); then
+    fail "the running compositor does not have ${OSK_KB_SENTINEL} set to '${OSK_KB_LAYOUT}' (${evalout}). That global is the LAST line of the block this stage installed, so its absence means the block did not run to the end -- either Hyprland discarded the file, or hl.device raised on it. The keyboard is still typing the session layout."
+  fi
+  log "verified: ${OSK_KB_SENTINEL} is set in the live compositor, so the whole rule block executed"
+
+  local devices global
+  devices=$("${hy[@]}" -j devices 2>&1) ||
+    fail "could not read 'hyprctl -j devices' from instance ${sig}: ${devices}"
+  global=$("${hy[@]}" -j getoption input:kb_layout 2>&1) ||
+    fail "could not read 'hyprctl -j getoption input:kb_layout' from instance ${sig}: ${global}"
+
+  # ⚠️ The "did it stay per-device?" half is not decoration. A rule that leaked
+  # into the global input config would look PERFECT from our own device's row
+  # and would have changed every physical keyboard on the machine.
+  local verdict
+  verdict=$(python3 - "$OSK_HYPR_DEVICE" "$OSK_HYPR_DEVICE_ALIASES" "$OSK_KB_LAYOUT" "$devices" "$global" <<'PY'
+import json, sys
+
+base, aliases, want, devices_json, global_json = sys.argv[1:6]
+names = {base} | {"%s-%d" % (base, i) for i in range(1, int(aliases) + 1)}
+try:
+    keyboards = json.loads(devices_json).get("keyboards", [])
+    global_layout = json.loads(global_json).get("str", "")
+except ValueError as exc:
+    sys.exit("hyprctl did not return JSON: %s" % exc)
+
+# No keyboards at all is not "our device is missing" -- it is a device list
+# worth drawing no conclusion from, so say so instead of reporting absence.
+if not keyboards:
+    sys.exit("hyprctl reported no keyboards at all")
+
+ours = [k for k in keyboards if k.get("name") in names]
+others = [k for k in keyboards if k.get("name") not in names]
+if not ours:
+    print("absent")
+elif [k for k in ours if k.get("layout") != want]:
+    print("wrong %s" % [k for k in ours if k.get("layout") != want][0].get("layout"))
+elif global_layout != want and [k for k in others if k.get("layout") == want]:
+    print("sessionwide %s" % [k for k in others if k.get("layout") == want][0].get("name"))
+else:
+    print("ok %d" % len(others))
+PY
+) || fail "could not read the keyboard layouts back out of hyprctl's device list"
+
+  case $verdict in
+    absent*)
+      warn "no keyboard named '${OSK_HYPR_DEVICE}' is bound right now, so the rule could not be observed taking effect. That is what a stopped deck-input-mapper.service looks like -- the rule is correct and inert until the mapper runs. Start it and re-check with: ${manual}"
+      ;;
+    wrong\ *)
+      fail "the keyboard '${OSK_HYPR_DEVICE}' reads layout '${verdict#wrong }', not '${OSK_KB_LAYOUT}'. The rule loaded (the sentinel is set) and did not attach to this device -- most likely the name it matches has changed. Compare ${OSK_HYPR_DEVICE} against '${manual}'."
+      ;;
+    sessionwide\ *)
+      fail "the keyboard '${verdict#sessionwide }' also reads '${OSK_KB_LAYOUT}' while the session's own input:kb_layout does not. This rule went SESSION-WIDE instead of per-device, which is exactly what it must not do: every physical keyboard on the machine just changed layout."
+      ;;
+    ok*)
+      log "verified: '${OSK_HYPR_DEVICE}' reads layout '${OSK_KB_LAYOUT}' and ${verdict#ok } other keyboard(s) kept the session layout"
+      ;;
+    *)
+      fail "unexpected verdict '${verdict}' from the device-list check; refusing to guess whether the keyboard works"
+      ;;
+  esac
+}
+
 stage_desktop_settings() {
-  # Installs the three settings that decide whether the on-screen keyboard
-  # works and whether an idle Deck can lock itself out. See the constants above
-  # for why each one exists; all three were discovered by something failing on a
-  # screen, and none of them fails a test today.
+  # Installs the settings that decide whether the on-screen keyboard works, what
+  # it TYPES, and whether an idle Deck can lock itself out. See the constants
+  # above for why each one exists; every one of them was discovered by something
+  # failing on a screen, and none of them fails a test today.
+  #
+  # THE ONE PARAMETER IS A SEAM, not an option a Deck ever passes: the XKB rule's
+  # verification talks to a LIVE compositor, and hardcoding /run/user/<uid> would
+  # make the unit suite reload the desktop of whoever ran it. Production passes
+  # nothing. See "THE VERIFICATION SEAM" above verify_update_stub.
+  local hypr_runtime=${1:-}
+
   command -v dconf >/dev/null 2>&1 ||
     fail "dconf not found; the on-screen keyboard's defaults cannot be installed"
   command -v python3 >/dev/null 2>&1 ||
@@ -2824,10 +3212,27 @@ PY
     fail "${shell_json} now has only ${check##* } top-level key(s); the rest of the config was lost, which would strip the bar"
   log "verified: ${shell_json} carries the idle policy and kept ${check##* } top-level keys"
 
+  # --- 4. what the on-screen keyboard actually TYPES ---
+  #
+  # Separate from the dconf input source above, and not a duplicate of it: that
+  # one gives squeekboard a layout to DRAW, this one tells the compositor which
+  # character our uinput device's keycodes mean.
+  local uid
+  uid=$(getent passwd "$invoking_user" | cut -d: -f3) ||
+    fail "could not resolve ${invoking_user}'s uid"
+  [[ $uid =~ ^[0-9]+$ ]] ||
+    fail "getent reported a non-numeric uid ('${uid}') for ${invoking_user}; the compositor's runtime directory cannot be located from it"
+
+  install_osk_kb_layout_rule "$invoking_user" "${home}/${HYPR_INPUT_LUA_REL}"
+  verify_osk_kb_layout "$invoking_user" "$uid" ${hypr_runtime:+"$hypr_runtime"}
+
   log "stage-desktop-settings: ok"
   log "NOTE: Omarchy re-reads shell.json live (FileView watchChanges), but the"
   log "      dconf defaults apply to sessions started AFTER this, and any"
   log "      user-level value keeps shadowing them until it is reset."
+  log "NOTE: the keyboard layout rule is PER DEVICE. Physical keyboards and the"
+  log "      rest of the desktop keep the session layout; only"
+  log "      '${OSK_HYPR_DEVICE}' is pinned to '${OSK_KB_LAYOUT}'."
 }
 
 # ---------------------------------------------------------------------------

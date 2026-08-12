@@ -926,6 +926,143 @@ pass "IDLE_LOCK_SECONDS is under the ~24.8-day QML int32 timer ceiling"
   fail_test "the screensaver must still fire, and before the lock" "it is the OLED burn-in protection; only the LOCK is the thing no on-screen keyboard can reach"
 pass "the screensaver still fires (${IDLE_SCREENSAVER_SECONDS}s) and precedes the lock (${IDLE_LOCK_SECONDS}s)"
 
+# ---------------------------------------------------------------------------
+# 6b. the on-screen keyboard's XKB layout -- what it TYPES, not what it draws
+#
+# Reported from the panel 2026-08-12: "many of the keys don't type what they
+# should". The OSK emits raw KEYCODES through the mapper's uinput device and the
+# compositor decides which character each one means; on a latam session
+# KEY_SEMICOLON is 'n-tilde'. The rule pins OUR device, and only ours, to `us`.
+#
+# 🔴 EVERY assertion here is about a way this rule could do NOTHING and say
+# nothing -- match a device name that does not exist, get discarded as bad Lua,
+# or quietly become session-wide.
+
+osk_lua="$work/osk-kb-layout.lua"
+render_osk_kb_layout_lua >"$osk_lua"
+
+grep -qF -- "$INSTALL_MARKER_LUA" "$osk_lua" ||
+  fail_test "the rendered layout rule carries the '--'-commented marker" "expected: $INSTALL_MARKER_LUA"
+pass "the rendered layout rule carries '${INSTALL_MARKER_LUA}'"
+
+# Both delimiters go into a file a HUMAN edits -- the same one that carries the
+# OSK's above_lock rule. A marker that does not say who wrote it is an
+# unexplained line in somebody's dotfile, and a generic one ("-- end") is a line
+# their own content could plausibly contain.
+for osk_marker in "$OSK_KB_RULE_BEGIN" "$OSK_KB_RULE_END"; do
+  [[ $osk_marker == *deck-session.sh* && $osk_marker == *"on-screen keyboard"* ]] ||
+    fail_test "the block delimiter '${osk_marker}' identifies itself" \
+      "it is spliced into a user's own input.lua; a delimiter that does not name its writer is an unexplained line, and a generic one could collide with the user's own content"
+  grep -qxF -- "$osk_marker" "$osk_lua" ||
+    fail_test "the rendered block contains the delimiter line '${osk_marker}'" "without both, a re-run cannot replace its own work"
+done
+pass "both delimiters name deck-session.sh and appear verbatim in the rendered block"
+
+# THE cross-file guard. The rule matches a NAME. If deck-input-mapper.py ever
+# renames its uinput device, the rule keeps parsing, keeps loading, and matches
+# nothing -- the exact silent no-op PROGRESS.md 5.30b is about. Nothing else in
+# this repo connects the two strings.
+mapper_py="$REPO_ROOT/src/deck-input-mapper.py"
+[[ -f $mapper_py ]] ||
+  fail_test "src/deck-input-mapper.py exists" "the layout rule is keyed on the device name that file declares; without it this check is vacuous"
+grep -qF -- "\"${OSK_UINPUT_NAME}\"" "$mapper_py" ||
+  fail_test "deck-input-mapper.py still declares the uinput device name the rule matches" \
+    "OSK_UINPUT_NAME is '${OSK_UINPUT_NAME}' and src/deck-input-mapper.py does not contain it. A renamed device leaves the Hyprland rule matching nothing: it parses, it loads, and the keyboard keeps typing the session layout with no error anywhere."
+pass "src/deck-input-mapper.py declares '${OSK_UINPUT_NAME}', the name the rule is keyed on"
+
+# Hyprland matches the NORMALISED name (lowercase, spaces to dashes). Measured
+# on the Deck with `hyprctl devices -j`; asserted here so the two constants
+# cannot drift apart in a commit that only touches one of them.
+osk_derived=${OSK_UINPUT_NAME,,}
+osk_derived=${osk_derived// /-}
+[[ $osk_derived == "$OSK_HYPR_DEVICE" ]] ||
+  fail_test "OSK_HYPR_DEVICE is the Hyprland-normalised form of OSK_UINPUT_NAME" \
+    "'${OSK_UINPUT_NAME}' normalises to '${osk_derived}', but the rule matches '${OSK_HYPR_DEVICE}'"
+pass "OSK_HYPR_DEVICE ('${OSK_HYPR_DEVICE}') is the normalised form of the mapper's device name"
+
+grep -q "name = deck_osk_device" "$osk_lua" ||
+  fail_test "the rule sets hl.device's required 'name' field" "hl.device raises \"'name' field is required and must be a string\" without it, and a raise discards the rest of the file"
+grep -q "kb_layout = \"${OSK_KB_LAYOUT}\"" "$osk_lua" ||
+  fail_test "the rule sets kb_layout to '${OSK_KB_LAYOUT}'" "that is the whole fix"
+pass "the rule calls hl.device with a name and kb_layout=${OSK_KB_LAYOUT}"
+
+# The dedup hazard. Our uinput device declares keys AND relative axes, so
+# Hyprland binds it twice and appends -1/-2/... to whichever copy loses the race
+# for the bare name. Measured on the Deck: keyboard bare, pointer -1. Nothing
+# promises that order, and kb_layout on a pointer is inert -- so a rule naming
+# only the bare form works until the day it does not.
+grep -q "\"${OSK_HYPR_DEVICE}\"" "$osk_lua" ||
+  fail_test "the rule names the bare device name" "that is the name the keyboard holds today"
+grep -q "\"${OSK_HYPR_DEVICE}-1\"" "$osk_lua" ||
+  fail_test "the rule also names the -1 suffixed device" \
+    "Hyprland appends -1 to whichever of the keyboard/pointer pair loses the race for the bare name. Naming only the bare form leaves the fix dependent on device-enumeration order, and it fails silently when it flips."
+pass "the rule names the bare device AND its suffixed aliases, so enumeration order cannot silently defeat it"
+
+# Explicit, not inherited: an unset device field falls back to the GLOBAL
+# option, and a variant chosen for latam combined with layout 'us' is a keymap
+# that may not compile at all.
+for osk_field in kb_variant kb_model kb_rules; do
+  grep -q "${osk_field} = \"\"" "$osk_lua" ||
+    fail_test "the rule pins ${osk_field} explicitly" \
+      "an unset device field inherits the global value (getDeviceString's fallback), so '${OSK_KB_LAYOUT}' would be combined with whatever variant the installer picked for the session layout"
+done
+pass "kb_variant, kb_model and kb_rules are pinned explicitly rather than inherited from the session"
+
+# 🔴 The rule must NEVER become session-wide. `input = { kb_layout = ... }` is
+# one careless simplification away and would change every physical keyboard on
+# the machine -- the operator asked for the opposite, explicitly.
+! grep -qE '^[^-]*\binput[[:space:]]*=' "$osk_lua" ||
+  fail_test "the rule must not write a session-wide input block" \
+    "hl.config{ input = { kb_layout = ... } } changes EVERY keyboard. The operator's requirement is per-device: physical keyboards keep Latin American."
+pass "the rule touches no session-wide input config -- it is hl.device only"
+
+# The sentinel has to be the LAST statement. That is what makes the whole thing
+# falsifiable: hl.device raises on an unknown field, a raise skips everything
+# after it, so a sentinel BEFORE the calls would be set by a block that failed.
+osk_last=$(grep -vE '^[[:space:]]*(--|$)' "$osk_lua" | tail -1)
+[[ $osk_last == "${OSK_KB_SENTINEL} = \"${OSK_KB_LAYOUT}\"" ]] ||
+  fail_test "${OSK_KB_SENTINEL} is the last statement in the rendered block" \
+    "got '${osk_last}'. hl.device RAISES on a bad field and a raise skips the rest of the chunk, so a sentinel set before the hl.device calls would be present in a compositor where the rule did nothing -- a check that passes for the wrong reason."
+pass "${OSK_KB_SENTINEL} is the block's last statement, so its presence proves the hl.device calls ran"
+
+# And the sentinel must be checked by ASSERTION, not by reading it back.
+# Measured on the Deck 2026-08-12: `hyprctl eval 'return X'` prints "ok" and
+# exits 0 for every expression that does not raise -- including a nil global.
+# Only a Lua error surfaces (exit 7, with the message).
+osk_verify_body=$(declare -f verify_osk_kb_layout)
+grep -q "error(" <<<"$osk_verify_body" ||
+  fail_test "verify_osk_kb_layout asserts the sentinel with a Lua error()" \
+    "hyprctl eval cannot RETURN a value on 0.56.2: 'return <nil>' prints ok and exits 0, so a readback would pass whether the rule loaded or not. The probe has to raise."
+! grep -qE "eval \"return " <<<"$osk_verify_body" ||
+  fail_test "verify_osk_kb_layout does not try to read the sentinel back with 'eval return'" \
+    "that form exits 0 for a nil global, which is a check that cannot fail"
+pass "the sentinel is asserted with error(), not read back -- 'eval return' exits 0 for a nil global"
+
+# It must reload before reading. Without it the readback describes the config
+# that was loaded BEFORE this stage wrote the file -- including, on a re-run, a
+# previous run's rule, which would make a broken new one look fine.
+grep -q "reload config-only" <<<"$osk_verify_body" ||
+  fail_test "verify_osk_kb_layout reloads the compositor config before reading it back" \
+    "without a reload it reads whatever was loaded before this stage wrote the file, so a re-run would confirm the PREVIOUS run's rule"
+pass "verify_osk_kb_layout reloads config-only before reading the device list back"
+
+# R-46, and PROGRESS.md 5.30b's other half: hyprctl exits before doing anything
+# when HYPRLAND_INSTANCE_SIGNATURE is unset, and a command that never ran reads
+# exactly like a check that passed.
+grep -q "HYPRLAND_INSTANCE_SIGNATURE=" <<<"$osk_verify_body" ||
+  fail_test "verify_osk_kb_layout sets HYPRLAND_INSTANCE_SIGNATURE for every hyprctl call" \
+    "R-46: without it hyprctl exits before running, and a check that never ran is indistinguishable from one that passed"
+pass "verify_osk_kb_layout sets HYPRLAND_INSTANCE_SIGNATURE (R-46) rather than inheriting one that may not exist"
+
+# PROGRESS.md 5.30b: `hyprctl dispatch`'s string form is a SYNTAX ERROR on
+# 0.56.2 and `hyprctl keyword` refuses to work with the non-legacy parser. This
+# rule is config, and the only two supported ways to apply config are a Lua file
+# and `eval`.
+! grep -qE 'hyprctl[^|]*(dispatch|keyword)' <<<"$osk_verify_body" ||
+  fail_test "verify_osk_kb_layout uses neither 'hyprctl dispatch' nor 'hyprctl keyword'" \
+    "5.30b: dispatch's old syntax is a parse error on 0.56.2 and keyword answers \"keyword can't work with non-legacy parsers. Use eval.\""
+pass "the live check uses queries and eval only -- not dispatch, not keyword (5.30b)"
+
 # ===========================================================================
 # 8. deck-lizard-mode -- the helper that can cost the operator their input
 # ===========================================================================

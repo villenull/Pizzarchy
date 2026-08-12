@@ -323,6 +323,41 @@ Opus-routed work.
 | `org.gnome.desktop.a11y.applications screen-keyboard-enabled` | `true` | `/etc/dconf/db/local.d/50-deck-desktop` **+ `/etc/dconf/profile/user` containing `user-db:user` and `system-db:local`** — without the profile the site db is never read at all and every default is inert (`src/deck-session.sh:1911-1932`) **+ `dconf update`** to compile it |
 | `org.gnome.desktop.input-sources sources` | `[('xkb','us')]` | same file |
 | Omarchy idle | `{"screensaver": 150, "lock": 86400}` in `.config/omarchy/shell.json` | `/etc/skel/.config/omarchy/shell.json` **and** the created user's copy, **seeded from `/usr/share/omarchy/config/omarchy/shell.json` and patched as JSON** — a user `shell.json` *replaces* Omarchy's defaults rather than merging, so an idle-only file silently strips the bar (`src/deck-session.sh:1991-2001`) |
+| **The OSK's XKB layout** — `hl.device({ name = "deck-input-mapper-virtual-keyboard", kb_layout = "us", … })` | per-device `us` | the created user's `~/.config/hypr/input.lua`, spliced between `-- >>> deck-session.sh: on-screen keyboard XKB layout >>>` markers by `install_osk_kb_layout_rule` |
+
+🆕 **The fourth setting, added 2026-08-12 (`docs/PROGRESS.md` §5.20).** The OSK
+draws a US layout and emits raw **keycodes** through the mapper's uinput device;
+which *character* that becomes is decided by the XKB keymap the compositor has
+bound to that device. The installer writes the user's chosen layout into
+`/etc/vconsole.conf`, Omarchy's `default/hypr/input.lua` reads `kb_layout`
+straight out of it, and on the test Deck (`XKBLAYOUT=latam`) the OSK's `;` key
+types `ñ`. **Any install where the user picks a non-`us` keyboard reproduces
+this**, so it is a bake-in item and not a test-Deck artefact.
+
+⚠️ **PER DEVICE. Not `input.kb_layout`.** Operator decision 2026-08-12:
+physical keyboards and the rest of the desktop keep the chosen layout; only our
+virtual keyboard is pinned. A session-wide fix is explicitly rejected.
+
+⚠️ **The rule is declared for the suffixed aliases too** (`…-1`, `…-2`, `…-3`).
+Our uinput device declares keys *and* relative axes, so Hyprland binds it twice
+and appends a counter to whichever copy loses the race for the bare name —
+measured: keyboard bare, pointer `-1`, and nothing promises that order.
+
+⚠️ **This is the same file that carries the OSK's `above_lock = 2` layer rule**
+(5.6). Both live in one user's `~/.config/hypr/input.lua`, both are absent from
+a built image, and whatever bakes one in must not clobber the other. The splice
+is marker-delimited and preserves everything outside its own block precisely
+because of that.
+
+**Verified by:**
+- **[V]** after a QEMU install, `~/.config/hypr/input.lua` on the target
+  contains the block and still parses (`luac -p`).
+- **[H]** T6, and it is the only tier that can settle it: with the mapper
+  running, `hyprctl -j devices` must show `deck-input-mapper-virtual-keyboard`
+  at `"layout": "us"` **while every other keyboard keeps the session layout** —
+  the second half is what distinguishes the fix from the thing the operator
+  refused. `stage-desktop-settings` asserts both automatically when it runs
+  against a live compositor.
 
 ⚠️ **`lock: 0` locks INSTANTLY.** There is no off sentinel. Disabling means a
 large value, and past ~24.8 days it overflows a QML int32 timer. `86400` is the
