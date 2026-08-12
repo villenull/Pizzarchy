@@ -1645,6 +1645,107 @@ def menu_binding_report(lizard: str | None) -> list[str]:
     return [f"deck-input-mapper: {line}" for line in lines]
 
 
+# --- the tty keyboard's console geometry (T8 §9g) ----------------------------
+#
+# 🔴 READ AT RUNTIME, ON BOTH AXES, NEVER ASSUMED. `docs/PROGRESS.md` §7 measured
+# the two consoles this ships to and they are NOT the same size: the live ISO's
+# is 50x160 and the installed TTY's is 25x80, on the same panel. And R-49
+# measured that neither number is even stable for the life of the process --
+# `TIOCSWINSZ` (`stty rows`/`stty cols`) does not merely change what a Linux VT
+# REPORTS, it resizes the console itself -- so a geometry read once at startup
+# can be wrong by the time anything is drawn with it.
+#
+# ⚠️ WIDTH IS NOT THE COSMETIC AXIS. A row too tall is clipped; a row too WIDE is
+# wrapped by the VT, which turns each keyboard row into two, pushes the rows
+# below it down, and scrolls the bottom of the keyboard off the screen -- R-49's
+# defect arriving sideways. Since §9g the 16-cell grid at `KEY_CELL = 5` is
+# EXACTLY 80 columns, so on the installed TTY there is no slack at all: one
+# column of error is a corrupted keyboard, on the only keyboard the installer
+# has.
+
+# What to assume when the size cannot be read at all. The INSTALLED TTY's
+# measured geometry -- deliberately the SMALLER of the two consoles above, so a
+# wrong assumption makes the width guard refuse to draw rather than let it draw
+# off the edge of a console that turned out to be narrow.
+CONSOLE_ROWS_DEFAULT = 25
+CONSOLE_COLS_DEFAULT = 80
+
+
+def console_geometry(fd: int) -> tuple[int, int]:
+    """`(rows, columns)` of the console behind `fd`, RIGHT NOW.
+
+    ⚠️ A FAILED READ FALLS BACK; IT DOES NOT RAISE. Same contract as everything
+    else on the drawing path: a console that will not answer must not take the
+    input layer down with it (see `osk_draw`, and `docs/PROGRESS.md` §5.9 --
+    with `lizard_mode=N` this process is the only input path on the device).
+    Falling back is not swallowing: the caller still checks the geometry it got
+    against the keyboard it wants to draw, and refuses loudly if they disagree.
+
+    Not cached, by contract -- see the section header. Callers re-ask on every
+    draw and the cost is one `TIOCGWINSZ`.
+    """
+    try:
+        size = os.get_terminal_size(fd)
+    except OSError:
+        return CONSOLE_ROWS_DEFAULT, CONSOLE_COLS_DEFAULT
+    return size.lines, size.columns
+
+
+def narrow_console_notice(needed: int, cols: int) -> list[list[tuple[str, bool]]]:
+    """The one line drawn INSTEAD of a keyboard too wide for the console.
+
+    🔴 WHY A NOTICE AND NOT `osk_fall_back()`. On the `tty` backend the fallback
+    is terminal: there is no squeekboard and no session bus in the installer, so
+    it disables the keyboard for the rest of the session. Doing that on a width
+    reading would be wrong twice over -- the reading is not necessarily
+    permanent (`stty cols` resizes a VT mid-run, R-49, which is the same reason
+    the geometry is re-read every draw), and the outcome it produces is the
+    worst one available: no way to type a Wi-Fi passphrase on a device with no
+    keyboard attached. So this is REFUSE AND RETRY, not refuse and give up:
+    nothing is drawn wider than the console, the next draw re-measures, and a
+    console widened back gets its keyboard back with no restart.
+
+    ⚠️ AND IT IS SAID ON THE SCREEN, not only to stderr. The failure mode this
+    replaces -- wrapped rows -- looks to a user like a garbled keyboard with no
+    explanation, and in the installer stderr goes to a journal nobody is
+    reading. A line that says the two numbers is the difference between "this is
+    broken" and "widen the console".
+
+    The text degrades down a ladder rather than being truncated at an arbitrary
+    point, because the numbers are the whole payload; the last rung keeps the
+    marker even when nothing else fits. Returned already shaped as
+    `deck_osk_tty` rows (one highlighted segment -- reverse video, because on a
+    console that is the only emphasis there is) so the caller hands it to the
+    same `write_at`, under the same guards, as the keyboard it replaces.
+    """
+    for text in (f"KEYBOARD NEEDS {needed} COLUMNS, CONSOLE HAS {cols}",
+                 f"KEYBOARD NEEDS {needed} COLS, HAS {cols}",
+                 f"OSK {needed}>{cols}",
+                 "OSK !"):
+        if len(text) <= cols:
+            return [[(text, True)]]
+    return [[("OSK !"[:max(cols, 0)], True)]]
+
+
+def rows_for_console(keyboard: list, needed: int, cols: int) -> tuple[list, bool]:
+    """What to draw on a console `cols` wide, and whether it is the keyboard.
+
+    ⚠️ THE BOUNDARY LIVES HERE, in a function a test can enter, rather than as a
+    comparison buried in a closure inside `main()` that no unit test can reach.
+    One column of drift in either direction is a real defect -- too tight and
+    the installed TTY never gets a keyboard at all, too loose and it gets a
+    wrapped one -- and neither is visible until a Deck is in front of someone.
+
+    `>` and not `>=`: a row that EXACTLY fills the console is safe, which is the
+    whole reason 80-in-80 is usable rather than merely arithmetic. `write_at`'s
+    docstring has the mechanism -- the VT defers its wrap until the next
+    character, and the next thing written is always an absolute cursor move.
+    """
+    if needed > cols:
+        return narrow_console_notice(needed, cols), False
+    return keyboard, True
+
+
 # --- device plumbing ---------------------------------------------------------
 
 # Steam takes the controller over via hidraw and re-presents it as a virtual
@@ -1898,6 +1999,12 @@ def main() -> None:
     osk_tty = None
     osk_stream = None
     osk_layer_proc = None
+    # The console width we last complained about being too narrow, or None while
+    # the keyboard fits. NOT a cache of the width -- that is re-read every draw
+    # (`_console_cols`). It exists so the complaint is made once per distinct
+    # width rather than several times a second for as long as a thumb is moving
+    # a cursor, and so a console widened and re-narrowed complains again.
+    osk_narrow_at = None
     # MUTABLE: degrades to "dbus" if our own keyboard fails at runtime. See
     # osk_fall_back -- this is what makes step 7 safe to ship.
     osk_backend = args.osk_backend
@@ -1974,18 +2081,52 @@ def main() -> None:
         Measured every draw, not cached: `stty rows` resizes a Linux VT (R-49),
         so a height read at startup can be wrong by the time we draw.
         """
-        try:
-            return os.get_terminal_size(osk_stream.fileno()).lines
-        except OSError:
-            return 25  # the console default when the size is unknowable
+        return console_geometry(osk_stream.fileno())[0]
+
+    def _console_cols() -> int:
+        """The console's WIDTH right now -- the twin of `_console_rows`.
+
+        Measured every draw and for the same reason: `stty cols` resizes a VT
+        exactly as `stty rows` does (R-49), and the two consoles this ships to
+        are 160 and 80 columns wide (`docs/PROGRESS.md` §7). Since §9g the
+        keyboard is exactly 80 columns, so on the narrower of the two there is
+        no slack whatsoever -- and an unread width is not a cosmetic risk but a
+        wrapped row, which pushes every row below it down and corrupts the whole
+        drawing. An unreadable console falls back rather than raising; see
+        `console_geometry`.
+        """
+        return console_geometry(osk_stream.fileno())[1]
 
     def _osk_draw() -> None:
+        nonlocal osk_narrow_at
         rows = osk_tty.render(mapper.osk, mapper.cursors)
         height = _console_rows()
+        cols = _console_cols()
+        needed = osk_tty.width(rows)
         top = args.osk_top_row
         if top <= 0:
             top = max(1, height - len(rows) + 1)
-        osk_tty.write_at(osk_stream, rows, top, console_rows=height)
+        draw, fits = rows_for_console(rows, needed, cols)
+        if fits:
+            osk_narrow_at = None
+        else:
+            # Too narrow to draw. Refuse and retry -- never fall back, never
+            # crash, never put a single column past the edge. The reasoning is
+            # on `narrow_console_notice`; the region is cleared first so a
+            # keyboard drawn at a wider size a moment ago does not survive
+            # underneath the notice and read as half a keyboard.
+            if osk_narrow_at != cols:
+                osk_narrow_at = cols
+                print(f"deck-input-mapper: the keyboard needs {needed} columns "
+                      f"but {args.osk_tty} has {cols}; drawing it would wrap "
+                      "every row and push the keyboard off the bottom, so a "
+                      "notice is drawn instead. Widen the console "
+                      f"(`stty cols {needed}`) and it comes back on the next "
+                      "draw -- nothing is disabled",
+                      file=sys.stderr, flush=True)
+            osk_tty.clear_at(osk_stream, rows, top)
+        osk_tty.write_at(osk_stream, draw, top, console_rows=height,
+                         console_cols=cols)
 
     def _osk_erase() -> None:
         rows = osk_tty.render(mapper.osk, mapper.cursors)

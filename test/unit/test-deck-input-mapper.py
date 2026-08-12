@@ -1918,5 +1918,272 @@ mapper_calls = [node for node in ast.walk(main_def)
 check("main() resets the OSK's state on BOTH show paths (tty and layer)",
       sum(node.func.attr == "reset_osk_state" for node in mapper_calls), 2)
 
+# --- the console's WIDTH, read at runtime (T8 §9g) ---------------------------
+#
+# 🔴 THE AXIS THAT CORRUPTS RATHER THAN CLIPS. A keyboard row taller than the
+# console is clipped; a row WIDER than it is wrapped by the VT, which turns one
+# row into two, pushes every row below it down, and scrolls the bottom of the
+# keyboard away -- R-49's defect on the other axis. `docs/PROGRESS.md` §7
+# measured 50x160 in the live ISO and 25x80 on the installed TTY, ON THE SAME
+# PANEL, so neither number may be assumed; and since §9g the keyboard is exactly
+# 80 columns, so on the narrow one the slack is ZERO.
+
+import fcntl       # noqa: E402 -- local to this block, like the imports above
+import pty         # noqa: E402
+import struct      # noqa: E402
+import termios     # noqa: E402
+
+
+def pty_sized(rows, cols):
+    """A pty fd whose window size really is `rows`x`cols`."""
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    return master, slave
+
+
+master, slave = pty_sized(25, 80)
+check("console_geometry reads a real console's size",
+      m.console_geometry(slave), (25, 80))
+
+# The ORDER matters and is the cheapest possible mistake: `.lines` where
+# `.columns` was meant reads 25 as a width and refuses to draw an 80-column
+# keyboard forever. A non-square console is the only thing that can see it.
+fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 160, 0, 0))
+check("...as (rows, columns), in that order -- not transposed",
+      m.console_geometry(slave), (50, 160))
+
+# 🔴 NOT CACHED, ON EITHER AXIS. This is R-49's whole point: `stty rows`/`stty
+# cols` do not merely change what a VT reports, they RESIZE it, so a geometry
+# read once is a geometry that can be wrong by the time it is drawn with.
+fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 25, 40, 0, 0))
+check("...and re-read every call, so a console resized mid-run is seen",
+      m.console_geometry(slave), (25, 40))
+os.close(master)
+os.close(slave)
+
+# The fallback. A pipe is not a console, so TIOCGWINSZ fails -- exactly what a
+# VT that has been switched away or reconfigured does. It must ANSWER, not
+# raise: this runs on the drawing path, and a console write that fails must not
+# take the only input path on the device down with it (§5.9).
+r_fd, w_fd = os.pipe()
+check("a size that cannot be read falls back instead of raising",
+      m.console_geometry(r_fd), (m.CONSOLE_ROWS_DEFAULT, m.CONSOLE_COLS_DEFAULT))
+check("...to the INSTALLED tty's measured geometry -- the smaller console",
+      (m.CONSOLE_ROWS_DEFAULT, m.CONSOLE_COLS_DEFAULT), (25, 80))
+os.close(r_fd)
+os.close(w_fd)
+
+# A closed fd raises OSError too (EBADF), and it is the shape a stream that went
+# away actually takes. Same answer.
+c_fd = os.dup(1)
+os.close(c_fd)
+check("...and a dead fd is the same, not an exception",
+      m.console_geometry(c_fd), (25, 80))
+
+# --- what the too-narrow console gets instead of a corrupted keyboard --------
+#
+# Refuse and RETRY, deliberately -- never `osk_fall_back`, which on the tty
+# backend is terminal (no squeekboard, no session bus in the installer) and
+# would answer a width reading with "no keyboard for the rest of the session".
+
+notice_80 = m.narrow_console_notice(80, 40)
+check("a notice is one row", len(notice_80), 1)
+check("...of one segment, highlighted -- reverse video is the console's only "
+      "emphasis", [hot for _, hot in notice_80[0]], [True])
+check("...and it carries BOTH numbers, which are the whole payload",
+      all(n in notice_80[0][0][0] for n in ("80", "40")), True)
+
+# Each rung pinned at the width that selects it, so none of them is dead copy
+# saying the same thing as the rung above. 41 is where the longest form fits
+# EXACTLY -- the same "exactly full is fine" rule the keyboard itself lives by.
+check("the full form is used where it exactly fits",
+      m.narrow_console_notice(80, 41)[0][0][0],
+      "KEYBOARD NEEDS 80 COLUMNS, CONSOLE HAS 41")
+check("...one column less and it drops to the short form, still both numbers",
+      m.narrow_console_notice(80, 40)[0][0][0], "KEYBOARD NEEDS 80 COLS, HAS 40")
+
+# ⚠️ THE ONE THING IT MAY NEVER DO IS THE THING IT EXISTS TO PREVENT. A notice
+# wider than the console wraps, which is the corruption it was drawn instead of.
+too_wide = sorted(cols for cols in range(0, 121)
+                  if len(m.narrow_console_notice(80, cols)[0][0][0]) > cols)
+check("NO width of console gets a notice wider than itself", too_wide, [])
+
+check("it degrades rather than truncating the numbers away",
+      m.narrow_console_notice(80, 20)[0][0][0], "OSK 80>20")
+check("...and keeps a marker when even that will not fit",
+      m.narrow_console_notice(80, 5)[0][0][0], "OSK !")
+check("...and answers at all for a console with no columns to speak of",
+      m.narrow_console_notice(80, 0)[0][0][0], "")
+
+# --- the boundary itself, which is one column wide ---------------------------
+#
+# ⚠️ `>` AND NOT `>=`: a row that exactly fills the console is safe (write_at's
+# docstring has the mechanism), and that is the ONLY reason 80-in-80 works. One
+# column of drift either way is invisible until a Deck is in front of someone --
+# too tight and the installed tty never gets a keyboard, too loose and it gets a
+# wrapped one.
+KB = [[("x" * 80, False)]]
+check("a keyboard that exactly fills the console is drawn",
+      m.rows_for_console(KB, 80, 80), (KB, True))
+check("...one column narrower and it is refused",
+      m.rows_for_console(KB, 80, 79)[1], False)
+check("...one column wider and it is still drawn",
+      m.rows_for_console(KB, 80, 81), (KB, True))
+check("the refusal hands back the notice, not the keyboard",
+      m.rows_for_console(KB, 80, 79)[0], m.narrow_console_notice(80, 79))
+check("and the boundary is exactly where the width is, at every width",
+      [cols for cols in range(0, 200)
+       if m.rows_for_console(KB, 80, cols)[1] != (cols >= 80)], [])
+
+# --- the zero-slack 80-column fit, measured rather than asserted -------------
+
+tty_mod = m._load_module("deck_osk_tty")
+osk_mod = m._load_osk_layout()
+if tty_mod is None or osk_mod is None:
+    check("the OSK modules load for the width check", False, True)
+else:
+    kb_rows = tty_mod.render(osk_mod.OnScreenKeyboard(), osk_mod.Cursors())
+    kb_width = tty_mod.width(kb_rows)
+    check("the rendered keyboard is exactly the installed tty's width",
+          kb_width, 80)
+
+    def drew(cols, rows_arg=None):
+        """Did write_at draw, given a console `cols` wide? (None = it refused.)"""
+        sink = io.StringIO()
+        try:
+            tty_mod.write_at(sink, kb_rows if rows_arg is None else rows_arg, 1,
+                             console_rows=25, console_cols=cols)
+        except ValueError:
+            return None
+        return sink.getvalue()
+
+    check("80 columns is enough -- the zero-slack fit really does hold",
+          drew(80) is not None, True)
+    check("...and 79 is not, loudly", drew(79), None)
+    # The notice is what runs in that second case, and it must survive the very
+    # guard that rejected the keyboard -- otherwise the too-narrow path raises
+    # into osk_fall_back and disables the keyboard after all.
+    narrow_ok = sorted(cols for cols in range(1, 80)
+                       if drew(cols, m.narrow_console_notice(80, cols)) is None)
+    check("the notice passes the same guard at EVERY width the keyboard fails",
+          narrow_ok, [])
+
+# --- the wiring, enforced against the SOURCE ---------------------------------
+#
+# `_osk_draw` lives inside main(), which is 400 lines around a live device that
+# no unit test can enter. Every check above tests a helper the drawing path
+# CALLS; none of them can see the path stopping calling it. Deleting the width
+# read would leave a keyboard that wraps on a narrow console and this whole
+# suite green -- which is the exact defect class §5.28 was.
+
+nested = {node.name: node for node in ast.walk(main_def)
+          if isinstance(node, ast.FunctionDef)}
+check("main() reads the console's WIDTH, not only its height",
+      sorted(n for n in ("_console_rows", "_console_cols") if n in nested),
+      ["_console_cols", "_console_rows"])
+
+# Both axes share ONE fallback, so the documented behaviour on an unreadable
+# console cannot drift apart between them.
+for name, half in (("_console_rows", 0), ("_console_cols", 1)):
+    check(f"{name} delegates to console_geometry",
+          any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+              and node.func.id == "console_geometry"
+              for node in ast.walk(nested[name])), True)
+    # ...and takes the right half of the pair. Swapping these reads 25 as a
+    # width, which refuses to draw an 80-column keyboard on every console
+    # forever -- and reads 80 as a height, which is R-49's collapse.
+    check(f"...and {name} takes half {half} of it",
+          [node.slice.value for node in ast.walk(nested[name])
+           if isinstance(node, ast.Subscript)
+           and isinstance(node.slice, ast.Constant)], [half])
+
+draw_def = nested.get("_osk_draw")
+check("_osk_draw exists to be pinned", draw_def is not None, True)
+draw_names = [node.id for node in ast.walk(draw_def)
+              if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)]
+check("the width is read INSIDE the draw -- per draw, like the height",
+      sorted({n for n in ("_console_rows", "_console_cols") if n in draw_names}),
+      ["_console_cols", "_console_rows"])
+
+# ...and read NOWHERE ELSE, which is what "not cached" means structurally: a
+# width hoisted to main()'s body would be read once at startup and be wrong the
+# moment `stty cols` ran (R-49).
+per_draw = {nested[n].lineno: nested[n].end_lineno
+            for n in ("_osk_draw", "_osk_erase") if n in nested}
+geometry_calls = [node for node in ast.walk(main_def)
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                  and node.func.id in ("_console_rows", "_console_cols")]
+# ...and every per-draw function really does the read, rather than a literal
+# standing in for it. A hardcoded 25 here puts the keyboard's top row in the
+# wrong place on the 50-row live console, and leaves the erase clearing rows the
+# keyboard is not on.
+for name in ("_osk_draw", "_osk_erase"):
+    reads = {node.func.id for node in ast.walk(nested[name])
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+    check(f"{name} measures the console's height rather than assuming it",
+          "_console_rows" in reads, True)
+
+check("every geometry read sits in a per-draw function -- none is hoisted",
+      sorted(node.lineno for node in geometry_calls
+             if not any(lo <= node.lineno <= hi for lo, hi in per_draw.items())),
+      [])
+
+writes = [node for node in ast.walk(main_def)
+          if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+          and node.func.attr == "write_at"]
+check("the tty backend has exactly one write_at, so no path escapes the guards",
+      len(writes), 1)
+check("EVERY write_at names both console guards",
+      sorted(node.lineno for node in writes
+             if {"console_rows", "console_cols"} -
+             {kw.arg for kw in node.keywords}), [])
+# A literal here would be the assumption §7 forbids -- 80 is a measurement of
+# one console, not a property of all of them.
+check("...and the width it names is a read value, never a literal",
+      sorted(node.lineno for node in writes for kw in node.keywords
+             if kw.arg == "console_cols" and not isinstance(kw.value, ast.Name)),
+      [])
+
+draw_calls = {node.func.id for node in ast.walk(draw_def)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+draw_attrs = {node.func.attr for node in ast.walk(draw_def)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
+check("the draw asks rows_for_console what to draw, so the boundary is the "
+      "tested one",
+      "rows_for_console" in draw_calls, True)
+
+# 🔴 AND IT DRAWS WHAT IT WAS TOLD. Asking and then writing the keyboard anyway
+# is the single mutation that reinstates the wrapped-row corruption in full
+# while leaving every behavioural test above green.
+chosen = next(node for node in ast.walk(draw_def)
+              if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+              and isinstance(node.value.func, ast.Name)
+              and node.value.func.id == "rows_for_console")
+chosen_rows = chosen.targets[0].elts[0].id
+check("...and writes what it chose, not the keyboard regardless",
+      [node.args[1].id for node in writes if isinstance(node.args[1], ast.Name)],
+      [chosen_rows])
+
+# The complaint is per DISTINCT width, not once per process and not once per
+# draw: a thumb on a pad redraws several times a second, and a console that
+# narrows, widens and narrows again has failed twice.
+guard = next(node for node in ast.walk(draw_def)
+             if isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+             and isinstance(node.test.left, ast.Name)
+             and node.test.left.id == "osk_narrow_at")
+check("the too-narrow complaint is keyed on the width, not on having said it once",
+      [c.id for c in guard.test.comparators if isinstance(c, ast.Name)], ["cols"])
+check("...and the state is re-armed when the console fits again",
+      sum(1 for node in ast.walk(draw_def) if isinstance(node, ast.Name)
+          and node.id == "osk_narrow_at" and isinstance(node.ctx, ast.Store)), 2)
+check("...over a cleared region, so half a keyboard does not survive under it",
+      "clear_at" in draw_attrs, True)
+check("...decided by measuring the render against the console, not by guessing",
+      "width" in draw_attrs, True)
+# 🔴 The decision this file makes, pinned so it cannot be quietly reversed: a
+# width reading must not disable the installer's only keyboard for the session.
+check("...and NEVER by falling back -- that would be terminal on the tty backend",
+      "osk_fall_back" in draw_calls, False)
+
 print(f"\n{'PASS' if FAILURES == 0 else 'FAILED'} — {FAILURES} failure(s)")
 sys.exit(1 if FAILURES else 0)
