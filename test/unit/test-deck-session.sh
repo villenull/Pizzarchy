@@ -1991,6 +1991,9 @@ rm -f "$rasdu_err"
 # helper, not the raw form -- grepped on the SOURCE, so a future edit that
 # reintroduces '$SUDO -u' anywhere in the file is caught before it ships,
 # without needing root to exercise it.
+# shellcheck disable=SC2016  # the single quotes are intentional: this is a
+# grep pattern that must match the LITERAL text `$SUDO -u` in the source, not
+# expand it. Expanding it would defeat the whole point of the guard.
 raw_sudo_u_sites=$(grep -n '\$SUDO -u ' "$REPO_ROOT/src/deck-session.sh" | grep -v '^[0-9]*:#' || true)
 [[ -z $raw_sudo_u_sites ]] ||
   fail_test "no call site uses the unguarded '\$SUDO -u' form -- every one must go through run_as_desktop_user" \
