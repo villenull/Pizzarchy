@@ -131,8 +131,14 @@ def build_package() -> pathlib.Path:
     # The REAL ui.py from the pinned upstream tree, not a stub: if upstream
     # renames info/error this suite goes red, which is the cheap drift signal.
     shutil.copyfile(UPSTREAM_ORCH / "ui.py", pkg / "ui.py")
-    for name in ("deck_configure.py", "deck_wifi.py", "deck_patches.py"):
-        shutil.copyfile(OVERLAY_ORCH / name, pkg / name)
+    # Every deck_* module in the overlay, DERIVED rather than listed:
+    # `deck_steps()` imports each registered step module lazily, so a slice that
+    # adds one would otherwise break this suite's harness rather than its
+    # subject. The coupling is still real -- a step registered without its module
+    # landing in the overlay fails here, loudly -- it just does not need a list
+    # kept in step by hand.
+    for module in sorted(OVERLAY_ORCH.glob("deck_*.py")):
+        shutil.copyfile(module, pkg / module.name)
     (pkg / "phases_impl.py").write_text(PHASES_IMPL_STUB)
     return root
 
@@ -146,8 +152,12 @@ print(f"# modules loaded from {PKG_ROOT}")
 
 
 class FakeCtx:
-    def __init__(self, target):
+    def __init__(self, target, username="deck", defer_provisioning=False):
         self.target = pathlib.Path(target)
+        # T5e's steps read these. Present here so this suite exercises the real
+        # registry rather than a registry with one step stubbed out.
+        self.username = username
+        self.defer_provisioning = defer_provisioning
 
 
 def tmpdir(name: str) -> pathlib.Path:
@@ -518,8 +528,21 @@ check(
 
 # configure_deck must survive the step end-to-end on a target with no applier —
 # today's real case — and must NOT raise, because critical=False.
+#
+# ⚠️ The target below is bare of everything the PATCHES step needs and carries
+# only what the one CRITICAL step (T5e's autologin) needs to succeed: an account
+# in /etc/passwd and a session .desktop for it to log into. That is deliberate.
+# Handing this a genuinely empty directory would make the whole registry raise
+# for a reason that has nothing to do with T12, and the assertion would then be
+# passing — or failing — for the wrong step. T5e's own suite owns the autologin
+# branches; this suite only needs it not to be the thing under test.
 target = tmpdir("cd-real") / "mnt"
 target.mkdir(parents=True, exist_ok=True)
+(target / "etc").mkdir(parents=True, exist_ok=True)
+(target / "etc/passwd").write_text("root:x:0:0::/root:/bin/bash\ndeck:x:1000:1000::/home/deck:/bin/bash\n")
+(target / "home/deck").mkdir(parents=True, exist_ok=True)
+(target / "usr/share/wayland-sessions").mkdir(parents=True, exist_ok=True)
+(target / "usr/share/wayland-sessions/gamescope-wayland.desktop").write_text("[Desktop Entry]\n")
 buf = io.StringIO()
 raised = None
 try:
@@ -531,6 +554,11 @@ check("🔴 a whole configure_deck run against a bare target does not raise", ra
 doc = json.loads((target / deck_configure.DECK_INSTALL_LOG_REL).read_text())
 check("…and it recorded the patches step", doc["patches"]["status"], "absent")
 check("…alongside the wifi step, in the one document", "wifi" in doc, True)
+check(
+    "…and T5e's steps, so this really was the whole registry",
+    sorted(k for k in doc if k in ("autologin", "session_dconf", "idle_policy")),
+    ["autologin", "idle_policy", "session_dconf"],
+)
 
 
 print()

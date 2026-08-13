@@ -164,13 +164,14 @@ def build_package(main_py: pathlib.Path | None = None) -> pathlib.Path:
     pkg.mkdir()
     (pkg / "__init__.py").write_text("")
     shutil.copyfile(UPSTREAM_ORCH / "ui.py", pkg / "ui.py")
-    shutil.copyfile(OVERLAY_ORCH / "deck_configure.py", pkg / "deck_configure.py")
-    shutil.copyfile(OVERLAY_ORCH / "deck_wifi.py", pkg / "deck_wifi.py")
     # deck_steps() imports every registered step module lazily, so the whole
     # registry has to be assemblable here even though this suite is about the
     # wifi step. That coupling is the point: a step added without its module
     # landing in the overlay fails here, loudly, rather than at install time.
-    shutil.copyfile(OVERLAY_ORCH / "deck_patches.py", pkg / "deck_patches.py")
+    # DERIVED from the overlay rather than listed, so the coupling survives a
+    # slice adding a module without this list being remembered.
+    for module in sorted(OVERLAY_ORCH.glob("deck_*.py")):
+        shutil.copyfile(module, pkg / module.name)
     (pkg / "phases_impl.py").write_text(PHASES_IMPL_STUB)
     (pkg / "context.py").write_text(CONTEXT_STUB)
     (pkg / "phases.py").write_text(PHASES_STUB)
@@ -715,26 +716,59 @@ check_raises(
     lambda: deck_configure.DeckStep("x", lambda ctx: None),
     TypeError,
 )
-check("the wifi step is registered", [s.name for s in deck_configure.deck_steps()], ["wifi", "patches"])
+step_names = [s.name for s in deck_configure.deck_steps()]
+check("the wifi step is registered, first", step_names[0], "wifi")
 check("…and is non-critical: an offline install must still finish", deck_configure.deck_steps()[0].critical, False)
 check("…and points at carry_wifi_step", deck_configure.deck_steps()[0].fn, deck_wifi.carry_wifi_step)
+check("every step name is distinct (they are the install log's keys)", len(set(step_names)), len(step_names))
 
 # T12's step, asserted from here as well as from its own suite: this is the file
 # that owns the registry, and "the step is registered at all" is a fact about
 # the registry rather than about the applier.
 from orchestrator import deck_patches  # noqa: E402
 
-check("🔴 the T12 patches step is registered", deck_configure.deck_steps()[1].name, "patches")
-check("…and points at apply_patches_step", deck_configure.deck_steps()[1].fn, deck_patches.apply_patches_step)
+check("🔴 the T12 patches step is registered", "patches" in step_names, True)
 check(
-    "…and is non-critical (deck_patches.py decision 2: a stale patch degrades, it does not brick)",
-    deck_configure.deck_steps()[1].critical,
-    False,
+    "…and points at apply_patches_step",
+    [s for s in deck_configure.deck_steps() if s.name == "patches"][0].fn,
+    deck_patches.apply_patches_step,
 )
 check(
-    "…and it runs after wifi, before finalize_limine_boot regenerates /boot from the template",
-    [s.name for s in deck_configure.deck_steps()].index("patches"),
-    1,
+    "…and is non-critical (deck_patches.py decision 2: a stale patch degrades, it does not brick)",
+    [s for s in deck_configure.deck_steps() if s.name == "patches"][0].critical,
+    False,
+)
+# 🔴 LAST, not "index 1". deck_patches.py claims it runs last for two stated
+# reasons (it is the slowest, via arch-chroot, and it is the one most likely to
+# be disturbed by anything else touching /usr/share/omarchy). A positional
+# assertion would have to be rewritten by every slice that appends a step, which
+# is how a claim quietly stops being checked.
+check(
+    "…and it runs LAST, which is what its own docstring claims",
+    step_names[-1],
+    "patches",
+)
+
+# T5e's three steps, asserted from the registry side for the same reason. The
+# detail lives in test-deck-autologin.py and test-deck-session-settings.py.
+check("🔴 T5e's autologin step is registered", "autologin" in step_names, True)
+check(
+    "🔴 …and it is the ONE critical step: a Deck at a greeter it cannot answer is "
+    "not a degradation, and no channel that reports one is readable from outside a login",
+    [s.critical for s in deck_configure.deck_steps() if s.name == "autologin"],
+    [True],
+)
+check("T5e's dconf site-defaults step is registered", "session_dconf" in step_names, True)
+check("T5e's idle-policy step is registered", "idle_policy" in step_names, True)
+check(
+    "…and both of 5.3's steps are non-critical (upstream-owned inputs drift; the Deck still boots)",
+    sorted(s.critical for s in deck_configure.deck_steps() if s.name in ("session_dconf", "idle_policy")),
+    [False, False],
+)
+check(
+    "🔴 exactly one step in the whole registry is critical",
+    [s.name for s in deck_configure.deck_steps() if s.critical],
+    ["autologin"],
 )
 
 

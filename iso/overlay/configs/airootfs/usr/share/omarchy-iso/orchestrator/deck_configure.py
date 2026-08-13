@@ -80,11 +80,25 @@ def deck_steps() -> list[DeckStep]:
     in the traceback, and so this module stays importable while later slices
     are mid-flight.
     """
-    from . import deck_patches, deck_wifi
+    from . import deck_autologin, deck_patches, deck_session_settings, deck_wifi
 
     return [
         DeckStep("wifi", deck_wifi.carry_wifi_step, critical=False),
-        # T5e: 5.1 autologin + 5.5 encryption-off (coupled -- do not split).
+        # T5e, 5.1. 🔴 THE ONLY critical=True STEP IN THE REGISTRY, and
+        # deck_autologin.py argues it at length: its failure is not a
+        # degradation but a Deck that cannot be logged into with a controller,
+        # and every channel this project normally relies on to report a
+        # degradation lives on the installed system, i.e. behind the login that
+        # failed. A visibly failed phase is the only report that reaches a human.
+        DeckStep("autologin", deck_autologin.autologin_step, critical=True),
+        # T5e, 5.3. Two steps, not one: site defaults and a per-user dotfile
+        # fail differently and are verified differently, and a single step would
+        # let one missing file take the other down with it. Both non-critical --
+        # both depend on upstream-owned files that drift, and both leave a Deck
+        # that boots and logs in. deck_session_settings.py states the
+        # counter-argument (the idle lock is not cosmetic) rather than hiding it.
+        DeckStep("session_dconf", deck_session_settings.session_dconf_step, critical=False),
+        DeckStep("idle_policy", deck_session_settings.idle_policy_step, critical=False),
         # T5f: 5.2 rotations, before finalize_limine_boot runs limine-update.
         #
         # T12. `critical=False` is argued at length in deck_patches.py's
