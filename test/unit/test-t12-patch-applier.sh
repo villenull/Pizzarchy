@@ -189,8 +189,8 @@ $out"
 if grep -qE '^    interval: 5000$' "$root/$QML_REL"; then
   fail "the old 5000 literal is gone" "still present"
 fi
-[[ $(grep -cE '^interface_rotation: 270$' "$root/$LIMINE_REL") -eq 1 ]] ||
-  fail "the limine template carries interface_rotation: 270 exactly once" "$(cat "$root/$LIMINE_REL")"
+[[ $(grep -cE '^interface_rotation: 90$' "$root/$LIMINE_REL") -eq 1 ]] ||
+  fail "the limine template carries interface_rotation: 90 exactly once" "$(cat "$root/$LIMINE_REL")"
 pass "both shipped patches apply cleanly to the real pinned upstream tree"
 
 # The patch must be surgical. 1 line changed in a 471-line file, 1 added in a
@@ -260,7 +260,7 @@ pass "upstream's real 3000 retune is caught: exit 3, status=drift, file untouche
 # leave the Limine template unpatched with no separate signal.
 [[ $(status_of 0020-limine-interface-rotation.patch) == ok ]] ||
   fail "an unrelated patch still runs after a drift" "$(cat "$state")"
-grep -qE '^interface_rotation: 270$' "$root/$LIMINE_REL" ||
+grep -qE '^interface_rotation: 90$' "$root/$LIMINE_REL" ||
   fail "the unrelated patch actually landed" "$(cat "$root/$LIMINE_REL")"
 pass "a drifted patch does not stop the remaining patches from being applied"
 
@@ -360,7 +360,7 @@ pass "an occurrence-count post-condition that does not hold fails the run (exit 
 # --- 6b. an assert_count regex containing alternation is not truncated ------
 #
 # The separator is `|`, and so is ERE alternation. Splitting on every `|` would
-# truncate `(270|0)` to `(270`, which grep rejects -- and if that error were
+# truncate `(90|0)` to `(90`, which grep rejects -- and if that error were
 # swallowed the assertion would silently evaluate to "0 matches" and the check
 # would pass for the wrong reason.
 
@@ -370,7 +370,7 @@ rm -f "$pd"/0010-*
   printf 'requirement: test fixture only\n'
   printf 'description: alternation in the expected pattern\n'
   printf 'target: %s\n' "$LIMINE_REL"
-  printf 'assert_count: %s|^interface_rotation: (270|0)$|1\n' "$LIMINE_REL"
+  printf 'assert_count: %s|^interface_rotation: (90|0)$|1\n' "$LIMINE_REL"
 } >"$pd/0020-limine-interface-rotation.meta"
 root=$(new_root)
 run_applier "$root" "$pd"

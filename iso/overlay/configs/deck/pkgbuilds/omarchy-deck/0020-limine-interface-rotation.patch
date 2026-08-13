@@ -4,7 +4,7 @@
  interface_branding_color: 9ece6a
  interface_help_color: 9ece6a
  interface_help_color_bright: 9ece6a
-+interface_rotation: 270
++interface_rotation: 90
  hash_mismatch_panic: no
  
  term_background: 1a1b26
