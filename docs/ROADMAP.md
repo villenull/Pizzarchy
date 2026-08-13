@@ -122,25 +122,43 @@ short, targeted Deck iterations over `tools/deck-sync.sh`.
 | P2.0d 🟡 | **§5.17** — *answered, not closed.* A narrower grant is **impossible** (the stages write to `/etc/sudoers.d/` itself), so the fix is to keep it off the image. `stage-audit-privileges` now gates it; **P2.7 must exclude it from the payload** | Deck + Dev | `docs/PROGRESS.md` §5.17 |
 | P2.0c ✅ | **Done 2026-08-10 (session 16).** §5.16's real cause found (the STOP times out) and fixed; **20/20 soak cycles clean**, zero start-limit-hit. Found and half-fixed §5.18 on the way | Deck | `docs/PROGRESS.md` §5.16, R-27 |
 | P2.0e ✅ | **Done 2026-08-10 (session 16).** §5.18 resolved — cause was `steam-launcher.service`'s 60s teardown (R-28). Autologin attempts across 20 switches: 600 → 283 → **20 (ideal)** | Deck | `docs/PROGRESS.md` §5.18, R-28 |
-| P2.1 🟡 | **Session 17 corrected this row.** Session 16's "verified on hardware" meant *service active and bound* — the mapper was in fact a **no-op**, because lizard mode keeps `event7` silent, and it hid two defects (d-pad emitted nothing; a resting stick cancelled held directions in ~10 ms). Both **fixed, deployed and verified by pressing buttons** (R-29…R-34). **OSK ✅ works on focus** — gated by one GSettings key that ships `false` (§5.20); T5 must bake it in. **Left:** decide lizard-mode policy for T4, and Gaming-Mode-side button mapping | Deck (short) | `docs/tasks/T3-gaming-mode.md` §4 |
-| P2.2 🟡 | Hardware parity batch 1 → `docs/findings/hardware-parity.md`. **Programmatic half done (session 16):** Wi-Fi, BT, audio, display, kernel all at parity. **Session 17 closed two human rows** — button-mapping correctness and trackpad→pointer, both verified on the desktop side — and **corrected the doc's claim that `event7` was available to the mapper** (enumerated, but silent). **Gaming Mode confirmed usable on screen by the operator** (R-38), closing P16's "never verified as usable" caveat. **Remaining rows still need a human:** audible sound, headphone jack, mic, haptics, gyro, BT pairing — in both sessions | Deck | `docs/tasks/T3-gaming-mode.md` §5 |
-| P2.3 | Hardware parity batch 2: TDP, fan, battery — **operator approval per item, every time** | Deck | `docs/tasks/T3-gaming-mode.md` §5 |
-| P2.4 🟡 | Shell integration on Quickshell. **Mechanism found (session 16):** the Omarchy menu is extensible via `~/.config/omarchy/extensions/omarchy-menu.jsonc`, taking a **Nerd Font glyph** (no Valve artwork needed). Also fixed a broken `Icon=steamicon` in the launcher entry. **Left:** add the row, and QAM/Power-menu placement | Deck (short) | `docs/tasks/T3-gaming-mode.md` §6 |
+| P2.1 ✅ | **Closed.** Mapper is the full input layer, verified by pressing buttons (R-29…R-34); OSK works on focus. **Gaming-Mode-side button mapping is the one item genuinely still open** — nothing in phase 2 covers it; scope it fresh if picked up | Deck (short) | `docs/tasks/T3-gaming-mode.md` §4 |
+| P2.2 ✅ | **Closed 2026-08-12 (session 21).** Hardware parity batch 1, 7/7 human rows measured — `docs/findings/hardware-parity.md` | Deck | `docs/tasks/T3-gaming-mode.md` §5 |
+| P2.3 ✅ | **Closed 2026-08-12 (session 21).** TDP, fan, battery — each measured with operator approval, each restored to baseline (fan 2500→**2568** RPM, TDP 15→**10**→15 W, charge limit 0→**80**→0) | Deck | `docs/tasks/T3-gaming-mode.md` §5 |
+| P2.4 ✅ | **Closed 2026-08-12 (session 22), on the panel.** `stage-menu-row` splices a "Gaming Mode" row into the Quickshell menu (verified: correct label, correct glyph, correct action, byte-identical under both UTF-8 and POSIX locales — a locale bug that 28 green suites missed was caught only by running it on hardware). It lands **last** in the root menu, not above System — Omarchy's own `mergeMenuSources` always appends new ids; moving it higher needs a T12 patch against the *default* menu, deliberately not done (a third runtime patch that would need to argue for itself). QAM/Power-menu placement was never separately scoped and is not blocking | Deck (short) | `docs/tasks/T3-gaming-mode.md` §6 |
 | P2.4b ✅ | **T8: the on-screen keyboard we draw ourselves** — split layout, **two cursors** (one per trackpad), one core with a TTY renderer for the installer and a layer-shell renderer for Desktop Mode. squeekboard cannot do dual-cursor selection in any configuration, and the live ISO has no compositor at all (T2 §4). **Steps 1–6 done (session 18):** the layout core with two absolute cursors, the mapper declaring every character keycode, **both renderers** — `deck_osk_tty.py` for the installer's bare console and `deck_osk_wayland.py` as a layer-shell overlay for Desktop Mode — and `--osk-backend {dbus,tty,layer,none}`. 352 unit assertions plus a 19-assertion end-to-end drive, **60/60 mutations caught**. The overlay is **verified on Hyprland**: a real layer surface that never takes focus, driven from a virtual pad. **Step 7 done and PROVEN ON HARDWARE** (R-43): unit rewritten to `--osk-backend=layer`, STEAM+X confirmed by the operator on the Deck, zero fallbacks. squeekboard stays installed as the automatic fallback. The pass also found and fixed a defect nothing here could see — the mapper died on every pad re-enumeration, 6 crashes a boot against a StartLimitBurst of 5 (R-44). ✅ **Both former debts closed (session 19):** the TTY keyboard and `gum` share one console (R-47), and the full-screen-TUI overdraw fork is resolved — T4's wrap decision means a curses TUI and the keyboard never coexist, so it is a policy plus a test, not a pty relay (R-52). Focus-triggered auto-show is **built but not shipped** — §5.27 names the two hand-offs that must land together | Dev + Deck | `docs/tasks/T8-onscreen-keyboard.md` |
 | P2.5 | T4: the 8 installer screens, per T2's finding; rotation handling per P1.5's recon | QEMU | `docs/tasks/T4-installer-ui.md` |
 | P2.6 | T4: full install flow in QEMU with virtual gamepad only, no keyboard | QEMU | `docs/tasks/T4-installer-ui.md` |
-| P2.7 | T5: fork `omarchy-iso`; Deck pacman package + `pre-refresh-pacman.d/` hook; Valve repos into the build; live-image firmware per §5.1's answer; `lib32-vulkan-radeon` pinned. **Also now: bake the desktop rotation into the image** (§5.11 — it currently lives in one user's `~/.config/hypr/monitors.lua`) | Dev | `docs/tasks/T5-iso-and-payload.md` |
-| P2.8 | T5: script-override loader wired; CI builds the ISO on tag; size recorded | Dev + CI | `docs/tasks/T5-iso-and-payload.md` |
+| P2.7 ✅ | **Closed 2026-08-12 (session 22), all four rotation surfaces.** Fork skeleton (T5a/b/c), `omarchy-deck` pacman package with T12's patch payload, Valve repos + `lib32-vulkan-radeon` pin, and the desktop rotation bake-in (`deck_monitors.py` — established mechanically that a user `monitors.lua` wins outright, via Lua `require()`'s `$HOME`-before-`$OMARCHY_PATH` search order, read out of the pinned runtime rather than assumed). 🔴 **One bug caught before it shipped**: the Limine rotation patch carried `interface_rotation: 270` — 180° wrong — found and fixed the same session, mutation-proven. **Still owed: `input.lua`** (OSK per-device XKB, the lock's `above_lock = 2` rule) — no writer exists yet; `deck_monitors.py` ships the sibling-file guard (`snapshot_siblings`/`assert_siblings_preserved`) whatever writes it must use | Dev | `docs/tasks/T5-iso-and-payload.md`, `docs/tasks/T5-fork-plan.md` |
+| P2.8 🟡 | **CI job is real (session 22)** — replaced a `TODO(T5) exit 1` stub with an actual tag-triggered build job and a size gate that reads `iso/bin/build`'s own printed size line. **Never executed**: a hosted runner has no `/dev/kvm`, so the QEMU install-test half is dispatch-only, with a self-hosted KVM runner named as its real home in the workflow's own header. Script-override loader: unchanged, not picked up this session | Dev + CI | `docs/tasks/T5-iso-and-payload.md` |
 
 ### Exit criteria
 
 - [ ] A complete controller-only install runs start to finish in QEMU from
-      our ISO — zero keyboard input
-- [ ] Every hardware-parity row has a recorded result on OLED (LCD rows
-      marked untested)
-- [ ] Both session-switch directions survive reboot, icon pinned on
-      Quickshell
-- [ ] CI publishes an ISO artifact; a dry run shows zero NVIDIA packages
+      our ISO — zero keyboard input. **Blocked on one thing: nobody has run
+      `iso/bin/build`.** Every ingredient exists (T5d/e/f, T12, the 5-patch
+      overlay, the `omarchy-deck` package) and is unit-tested, but a real
+      container build has never executed. Not runnable on the dev machine —
+      needs a supervised session or CI's self-hosted KVM runner (P2.8, below).
+- [x] ✅ **CLOSED 2026-08-12 (session 21).** Every hardware-parity row has a
+      recorded result on OLED. `docs/findings/hardware-parity.md` — 7/7 human
+      rows plus P2.3's fan/TDP/charge-limit batch, all measured with operator
+      approval per item.
+- [x] ✅ **CLOSED 2026-08-12 (session 22), on the panel.** Both session-switch
+      directions survive reboot: `stage-menu-row` (the Quickshell "Gaming
+      Mode" row) and `stage-boot-default-gaming` (reboot always re-asserts
+      Gaming Mode as default) both deployed and confirmed by the operator
+      pressing buttons, not just green suites. `docs/findings/T13-power-button-and-sleep.md`
+      §9.
+- [ ] CI publishes an ISO artifact; a dry run shows zero NVIDIA packages.
+      **The build job is real now** (was a `TODO(T5)` stub) but has **never
+      executed** — no `/dev/kvm` on a hosted runner, so the install-test half
+      is dispatch-only pending a self-hosted KVM runner. The NVIDIA dry-run
+      guard (`deck-nvidia-dry-run.sh`) is unit-proven but has never run inside
+      the real build either.
+
+**Net: 2 of 4 closed. The other 2 both reduce to "run a real container build
+at least once"** — nothing left is a code gap.
 
 ---
 

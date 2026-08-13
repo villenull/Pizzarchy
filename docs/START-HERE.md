@@ -3,10 +3,176 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
-> ## Where things stand (updated 2026-08-12, session 21)
+> ## Where things stand (updated 2026-08-12, session 22 — READ THIS FIRST)
 >
-> *(Sessions 19–21 ran across two calendar days. Older blocks are kept below and
-> are still broadly true — where they disagree with this one, this one wins.)*
+> *(This supersedes session 21's block below, which is kept for its own
+> evidence but is stale wherever it disagrees with this one. Verify every
+> "done" claim against the tree — `git log`, run the suite — before trusting
+> it; this project has been burned by stale ✅/🔴 marks in this exact file
+> more than once.)*
+>
+> ### Phase 2 exit criteria: 2 of 4 closed, the other 2 reduce to ONE thing
+>
+> | # | Criterion | State |
+> |---|---|---|
+> | 1 | Controller-only QEMU install from our ISO | ❌ every ingredient exists and is unit-tested; **`iso/bin/build` has never run** |
+> | 2 | Hardware parity on OLED | ✅ closed session 21 |
+> | 3 | Both switch directions survive reboot | ✅ **closed session 22, on the panel** — see below |
+> | 4 | CI publishes an ISO; dry run shows zero NVIDIA | 🟡 the build job is real, never executed — no `/dev/kvm` on a hosted runner |
+>
+> **Criteria 1 and 4 both come down to the same unperformed act: a real
+> container build.** Not a code gap — `iso/bin/build`'s guards (6.1, 6.3, 6.4a,
+> 6.4b, 6.5, 6.6), the 5-patch overlay, the `omarchy-deck` package and every
+> `configure_deck` step are unit- and mutation-tested against the *patched
+> tree*, never against a running container. `docs/ROADMAP.md`'s phase-2 table
+> is now current — read it, not this paragraph, for the file-by-file state.
+>
+> ### T13/T14: all four power-button reports closed, hardware-verified
+>
+> `docs/findings/T13-power-button-and-sleep.md` §9 is the full record. One
+> physical press produces **two** `KEY_POWER` events, on asymmetric nodes (a
+> real key at `event4`, a fire-and-forget ACPI notify at `event2` — found only
+> after two silent captures with no positive control proved nothing). Fix: a
+> udev rule drops the ACPI node from `power-switch`, a logind drop-in sets
+> `HandlePowerKey=suspend` explicitly (its **default is `poweroff`**, not
+> `suspend`). Deploy is reboot-gated (`stage-power-button`, opt-in, prints its
+> own undo). **Measured on the panel**: suspend/resume clean in Gaming AND
+> Desktop Mode, same `gamescope` PID across the cycle (the session survives),
+> deep/S3 confirmed **twice independently** — overturning the initial
+> research's s2idle guess; the kernel logs `PM: Steam Deck quirk - no s2idle
+> allowed!` at 0.27 s of boot. T14 (`docs/findings/T14-gaming-mode-power-button.md`):
+> Gaming Mode needed **no separate fix** — `logind`'s only gate on the key is
+> the `power-switch` tag, with no session check at all, and `gamescope` holds
+> no logind inhibitor anywhere in its tree.
+>
+> ### Four real bugs caught before they shipped, each only by RUNNING something
+>
+> 1. A menu-row glyph written as bash's `$'\U000F0297'` — **locale-dependent**:
+>    expands to the real character under UTF-8, emits **ten literal ASCII
+>    bytes** under the Deck's `LC_CTYPE=POSIX` SSH session. 28 green suites on
+>    a UTF-8 dev machine never caught it; the Deck did, and the stage **refused
+>    to write** the resulting invalid JSON rather than silently corrupting the
+>    menu. Fixed as a pure-ASCII JSON escape pair; new suite renders the block
+>    under both locales and requires byte-identical output.
+> 2. Our own shipped `0020-limine-interface-rotation.patch` carried
+>    `interface_rotation: 270` — **180° wrong** — and its own post-condition
+>    asserted 270, so it was internally consistent and externally upside down.
+>    Would have flipped the Limine menu on the next `omarchy refresh limine`.
+> 3. `deck_patches.py`'s composed-path dodge (hiding the applier's path from
+>    guard 6.4a's regex) had a docstring **example** that itself matched the
+>    regex, and would have demanded a provider for a binary literally named
+>    `omarchy-` on the very first real build.
+> 4. `$SUDO -u` breaking when `deck-session.sh` runs already-root
+>    (`sudo ./deck-session.sh`) — a comment had predicted this *exact* failure
+>    and left three call sites unfixed "a separate change with its own
+>    tests"; nobody had written that change, and 526 assertions never
+>    exercised the case. Found deploying `stage-desktop-settings` for real.
+>
+> **The generalisation, consistent with every prior session's version of it:**
+> a green suite on the dev machine is evidence, not proof. This session's four
+> catches all came from actually running the deploy, not from a better test.
+>
+> ### What's left in phase 2 — concretely
+>
+> - 🔴 **Run `iso/bin/build` at least once**, supervised. This is the one
+>   thing both remaining exit criteria need. Not runnable on the dev machine
+>   under this project's own constraints (Docker + ~6 GB downloads + ~40 min);
+>   needs either an explicit one-off session here or CI's self-hosted KVM
+>   runner (the workflow already names this as its real home).
+> - `~/.config/hypr/input.lua` still has no writer — the OSK's per-device XKB
+>   block and the lock's `above_lock = 2` rule. `deck_monitors.py` (which
+>   wrote the sibling file `monitors.lua` this session) already ships the
+>   guard whatever writes this owes it —
+>   `deck_monitors.snapshot_siblings`/`assert_siblings_preserved`.
+> - §5.24a's one remaining item: only the power button should wake the
+>   *blanked lock panel* (QAM currently does too) — a Quickshell-side gate,
+>   unrelated to T13's systemd suspend work. Do not conflate the two.
+> - The `Lid Switch` node question (T13 §8) — needs a physical trigger nobody
+>   has found a way to produce on a handheld with no lid. Likely stuck until
+>   someone thinks of one.
+> - T10's extest spike — a ~45 min Deck decision, unrelated to everything
+>   above, queued since session 20.
+> - `/etc/sudoers.d/asdcontrol` — found by the P22 sweep, grants all users
+>   passwordless root, package-shipped and not ours, invisible to our own
+>   build-side audit (which only inspects our payload). Worth a decision.
+>
+> **Git: everything through session 22 pushed to `main`.** Verify with
+> `git rev-list --left-right --count origin/main...main`, never by trusting
+> this line — every session says this and every session has been right to say
+> it.
+>
+> ---
+>
+> ## How to segment the rest of this across subagents
+>
+> *(Written 2026-08-12 for whoever picks this up with a fresh token budget.
+> Session 22 ran ~15 agents across one day with no lost work and no silent
+> corruption — this is what actually worked, not theory.)*
+>
+> **The shape that works: disjoint file ownership, verify independently, batch
+> commits by logical concern.** Concretely:
+>
+> 1. **Before dispatching, read the current state yourself** — `git log
+>    --oneline -20`, `git status`, and the relevant section of
+>    `docs/PROGRESS.md` §1's table (now current as of session 22). Do not
+>    dispatch an agent to redo something already done; three separate times
+>    this session an agent's brief cited a stale doc claim ("not started",
+>    "270 is correct") that a five-second `grep` would have caught.
+> 2. **One agent, one file set, stated explicitly in the prompt** — name every
+>    file it owns and every file it must NOT touch, including which other
+>    concurrent agents hold which files. The git index is shared across all
+>    of them; a bare `git add -A` in one sweeps up everyone's unstaged work.
+>    **Never let an agent run `git add`, `git commit`, `git stash`, or
+>    `git checkout --` as a mutation-restore** when a concurrent writer might
+>    be touching the same file — `git checkout --` restores to HEAD, which
+>    discards *anyone's* uncommitted work, not just the mutator's own. Back up
+>    to the scratchpad and restore with `cp` + `cmp` instead; this bit twice
+>    tonight and both times the agent caught itself and reported it rather
+>    than silently losing work.
+> 3. **Give every agent the full context it needs to make judgment calls**,
+>    not a narrow instruction — cite the exact measured values, the exact file
+>    paths, the exact prior findings, and the decisions already made (so it
+>    doesn't re-litigate them). The agents that produced the sharpest,
+>    hardest-to-see catches this session (the locale bug, the 270→90 patch
+>    error, the composed-path dodge, the `$SUDO -u` bug) were all given real
+>    evidence to reason from, not just a task title.
+> 4. **Require mutation-testing on every new assertion**, and require the
+>    report to say "N/N caught" with the specific faults named — not "tests
+>    pass". `docs/PROGRESS.md` §7's §5.30c catalogue exists because this
+>    project has repeatedly shipped checks that could not fail; the discipline
+>    that fixed it is asking for the negative proof every time.
+> 5. **Verify agent claims yourself before committing them** — re-run the
+>    suite it claims is green, spot-check the one or two most load-bearing
+>    assertions, and for anything touching the physical Deck, re-verify the
+>    live state with a read-only SSH check before trusting a report. This
+>    session found stale/wrong claims in agent reports at least twice by doing
+>    exactly this, and both times the correction was cheap because it was
+>    caught immediately rather than compounded.
+> 6. **Commit in scoped batches once suites are green**, `git add` naming
+>    exact files (never `-A` while other agents may be mid-flight), with a
+>    commit message that states what was found and why it matters, not just
+>    what changed — that is what makes `git log -S` and `git log --oneline`
+>    useful to the next session instead of noise.
+> 7. **Never run Docker, QEMU, makepkg, or a real ISO build on this machine**
+>    — every agent prompt this session said so explicitly, and every agent
+>    respected it. The one thing phase 2 still needs (`iso/bin/build`) is a
+>    supervised, deliberate exception, not something to slip into a routine
+>    dispatch.
+> 8. **Anything that writes to the physical Deck needs the operator's
+>    explicit go-ahead, batched and ordered by blast radius**, with the exact
+>    command sequence and an undo for each step stated up front. Read-only
+>    `ssh` checks (state probes, `journalctl`, `udevadm info`) do not need
+>    this and are cheap — use them liberally to convert INFERRED claims to
+>    MEASURED ones before proposing a write.
+>
+> **A concrete starting split for the next session**, following this shape:
+> one agent for `input.lua`'s bake-in (needs `deck_monitors.py`'s sibling
+> guard, cite it), one agent for the §5.24a #1 lock-wake-gate investigation
+> (read-only Quickshell/QML tracing, likely no Deck needed to *diagnose*), and
+> — separately, when the operator is available for a supervised session — the
+> `iso/bin/build` run itself, which is not an agent task at all.
+>
+> ---
 >
 > ### ✅ THE RELEASE BLOCKER IS CLOSED, AND SO IS ONE PHASE-2 EXIT CRITERION
 >
