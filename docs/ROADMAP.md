@@ -135,25 +135,32 @@ short, targeted Deck iterations over `tools/deck-sync.sh`.
 ### Exit criteria
 
 - [ ] A complete controller-only install runs start to finish in QEMU from
-      our ISO — zero keyboard input. **STALE as of session 23/24 — `iso/bin/build`
-      has run for real multiple times now** (most recently for commit
-      `e729699`, sha256 `d07bf6cbe...`), and a controller-only `[V]` run has
-      now been driven all the way past S5's "Ready to install?" gate into
-      `write_user_files` on a real, correctly-sized target disk
-      (`test/vm/vm-install-controller-test.sh`, session 24). **Still not
-      closed — reason changed entirely: `configurator` itself crashes right
-      after `write_user_files`** (`$1: unbound variable` under `set -u`, a
-      plain upstream bug in `configurator`'s own trailing dry-run check,
-      reached by every full-disk interactive install; not Deck-specific, not
-      seen before because no earlier run had pressed "Install" on a disk
-      sized to survive it) — so `omarchy-install-dashboard` (the real
-      partitioner/installer) never launches. One-line fix
-      (`$1` → `${1:-}`), not yet applied (`iso/overlay/patches/` territory,
-      out of session 24's scope). Full account:
-      `docs/findings/T4-controller-only-install-first-run.md` §13. Once
-      fixed, re-run the same harness — its disk-image assertions (partition
-      table, UKI, Limine config, package set) are already written and gated
-      on `install.outcome=success`, not yet exercised.
+      our ISO — zero keyboard input. **Still NOT closed, but two blockers
+      deep now, and each precisely diagnosed.** The `$1` crash that blocked
+      the previous session (`configurator`'s unguarded trailing `$1` under
+      `set -u`) is **FIXED** (session 25, Opus — hunk 3 of
+      `deck-form-invocation.patch`, `${1:-}`), the ISO rebuilt clean (sha256
+      `a27230ff498f8b7b4be45f455192d135fb5ab777b3204022802da19e34b6ea6a`), and
+      the controller-only `[V]` harness (`test/vm/vm-install-controller-test.sh`)
+      re-run: **the real installer now launches and runs the ENTIRE base
+      Omarchy setup to completion** — a genuine first. It then aborts in our
+      OWN `configure_deck` phase on a real bug in `orchestrator/deck_autologin.py`:
+      `DESKTOP_SESSION = "omarchy.desktop"` has `.desktop` appended a second
+      time by `find_session`, so the desktop-session fallback searches
+      `omarchy.desktop.desktop` (never exists) while the real `omarchy.desktop`
+      is right there on the target — `choose_session` returns `failed` and
+      `autologin` (the sole `critical=True` Deck step) halts the install.
+      Every other Deck step succeeds on the real install (measured off the
+      target disk's `@log/omarchy-deck-install.json`). Harness now **10/11**
+      (was 9/11), `install.outcome=failure` (was `timeout`); the disk-image
+      assertions (partition table, UKI, Limine config, package set) are STILL
+      correctly skipped (gated on `install.outcome=success`) and **have never
+      run**. **Next:** the one-line `deck_autologin.py` fix
+      (`DESKTOP_SESSION="omarchy"` + its unit fixture, likely sufficient to
+      let the install complete — to Desktop Mode, since `gamescope-wayland.desktop`
+      is also absent from the ISO's package set, a separate gap), then re-run.
+      Full account: `docs/findings/T4-controller-only-install-first-run.md`
+      §13 (the `$1` blocker) and §14 (the fix + the autologin blocker).
 - [x] ✅ **CLOSED 2026-08-12 (session 21).** Every hardware-parity row has a
       recorded result on OLED. `docs/findings/hardware-parity.md` — 7/7 human
       rows plus P2.3's fan/TDP/charge-limit batch, all measured with operator
@@ -172,11 +179,16 @@ short, targeted Deck iterations over `tools/deck-sync.sh`.
       the real build either.
 
 **Net: 2 of 4 closed.** Criterion 4 still reduces to "run a real container
-build on a self-hosted KVM runner." **Criterion 1 no longer does — session
-24 ran it, repeatedly, and found a real one-line code gap** (`configurator`'s
-unguarded `$1`, `docs/findings/T4-controller-only-install-first-run.md` §13)
-blocking every interactive full-disk install before the real installer ever
-starts.
+build on a self-hosted KVM runner." **Criterion 1 is now two fixes away, both
+one-liners, both diagnosed:** session 24 found `configurator`'s unguarded `$1`
+(fixed session 25); session 25's rebuilt-ISO run then got the real installer
+all the way through the base Omarchy setup and hit the second one —
+`deck_autologin.py`'s double-`.desktop` name bug aborting the sole critical
+Deck step (`docs/findings/T4-controller-only-install-first-run.md` §14). The
+harness's disk-image assertions still have never run (gated on a completed
+install). Fix the autologin bug, re-run, and either criterion 1 closes or the
+next real blocker surfaces — the pattern every layer of this harness has
+followed.
 
 ---
 

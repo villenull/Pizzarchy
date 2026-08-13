@@ -971,3 +971,240 @@ fixable, one-line-diff reason instead of an open question.
   (`serial.log`, the reconstructed `report.txt`, six streamed screen
   captures, `probe.sh`, and `live-check.png`/`.ppm` — the QMP screendump
   showing the `configurator` crash text directly).
+
+---
+
+## 14. 2026-08-13 (later session, Opus) — the `$1` crash is FIXED and the real
+    installer now runs end to end; criterion 1 is STILL NOT closed, blocked
+    one layer deeper by a real bug in our OWN `deck_autologin.py`
+
+**Task:** land §13.6 item 1's one-line fix (`configurator`'s unguarded `$1`),
+rebuild the ISO, and re-run `test/vm/vm-install-controller-test.sh` to finally
+exercise its disk-image assertions (§13.1, "never exercised yet"). Same
+discipline as every section above: if the fix reveals another real defect,
+leave it failing and diagnose it, do not weaken an assertion to force a pass.
+
+**Bottom line, upfront:** the `$1` fix is correct, necessary, and proven — it
+moved the install from *crashing before the real installer starts* (§13.4,
+`install.outcome=timeout`) to *the real installer running the entire base
+Omarchy setup to completion and then aborting in OUR OWN Deck-configuration
+phase*. Criterion 1 is **still not closed**, now blocked by a **second,
+independent, precisely-diagnosed bug** — this one is ours, not upstream's:
+`deck_autologin.py` searches for the desktop-session file under a
+double-`.desktop` name it can never find, so the sole `critical=True` Deck
+step fails and halts every install. The disk-image assertions still have not
+run (correctly skipped, gated on `install.outcome=success`, not force-passed).
+
+### 14.1 The fix (hunk 3 of `deck-form-invocation.patch`)
+
+`configurator`'s trailing `if [[ $1 == "dry" ]]; then` → `if [[ ${1:-} == "dry"
+]]; then`, matching the two already-correct sibling checks in the same file
+(lines 670 and 1030, READ, both `${1:-}`). Landed as a **third hunk in the
+existing `iso/overlay/patches/deck-form-invocation.patch`** (not a sixth patch
+file — the patch-count budget is argued in that file's own header, and this
+file already touches `configurator`; the header now carries the argument for
+hunk 3 too). Verified: applies cleanly via `git apply --3way` against the
+pinned `iso/upstream` tree, the fix lands at line 1245 of the patched file
+(exactly the crash line §13.4 measured), `test/unit/test-iso-build.sh` passes
+in full (82 checks incl. the patch-budget guard and guard 6.6), CI's own
+shellcheck command clean.
+
+### 14.2 The rebuild
+
+`iso/bin/build` against `~/.cache/omarchy-deck/iso-build-2` (warm cache).
+⚠️ **Two process-management lessons this session, recorded so the next agent
+does not repeat them:**
+
+1. **A `Monitor` that watches a log and then yields is NOT a substitute for
+   waiting.** A first rebuild attempt died mid-`pacstrap` on a corrupted
+   cached `omarchy-settings-dev-*.pkg.tar.zst` (the same infrastructure
+   failure class §13/session 23 hit — a stale scratch-dir artifact, not a
+   code problem) and the `Monitor`'s grep did not match `pacstrap`'s error
+   wording, so nothing woke the agent — the exact silent-agent pattern
+   `docs/START-HERE.md` warns about. **Fix for next time: block synchronously
+   in a real poll loop** (`until grep -qE '<terminal markers>' log || ! kill
+   -0 "$pid"; do sleep N; done` inside a `Bash` call with a large timeout,
+   chained across calls), never arm-and-yield.
+2. **`setsid nohup ./iso/bin/build &` makes `$!` the wrapper, not the build.**
+   The wrapper exits immediately, so a poll loop keyed on `$!` sees "process
+   gone" instantly and returns a false completion. Track the real child
+   (`pgrep -f 'bash ./iso/bin/build'`) or, for QEMU, the pidfile the harness
+   writes.
+
+The corrupted package was already gone from the pacman-cache (the failed
+transaction's own delete prompt removed it); the clean rebuild re-fetched it
+and succeeded. Output:
+`~/.cache/omarchy-deck/iso-build-2/release/omarchy-2026.08.13-x86_64-quattro.iso`,
+6867582976 bytes (6.39 GiB), sha256
+`a27230ff498f8b7b4be45f455192d135fb5ab777b3204022802da19e34b6ea6a`. All 8
+guards passed; all 5 overlay patches applied; the built
+`configurator`'s tail is `if [[ ${1:-} == "dry" ]]; then` (verified in the
+build's own `src/` before the squash).
+
+### 14.3 The real result: 10/11 checks, `install.outcome=failure` (was
+     `timeout`), aborted in `configure_deck`'s `autologin` step
+
+Run: `VM_KEEP_WORK=1 ./test/vm/vm-install-controller-test.sh <iso>
+/var/tmp/t4-install-controller-run-opus` (preserved). Steps 1–29 drove S0
+through S5's gate on the proven 6s cadence; **step 29 (`y` on
+`deck_final_summary`) crossed the gate and the real installer launched** — the
+`$1` crash is gone. The install then ran the **entire base Omarchy setup to
+completion** (the failure screen's own "Last target log lines" show
+`hardware/`, `login/sddm.sh`, `post-install/*` phases all `Completed`, then
+`=== Omarchy Setup Completed: 2026-08-13 17:51:17 ===`), and then:
+
+```
+Omarchy installation stopped
+Installer exited with status 1
+last installer phase: Configuring Steam Deck
+failed phase: Configuring Steam Deck: required Deck configuration steps failed: .
+```
+
+(The trailing `.` is the dashboard's own line-truncation glyph, the same one
+that clips the log paths above it — not an empty message.) `install.outcome`
+= **failure** (a genuine terminal state, reached in 48s), where §13.4 got
+`timeout`. Harness verdict: **10/11 checks passed** (up from §13.4's 9/11 —
+"the real install reached a terminal state" now passes too). The single FAIL
+is the correct one — `the real install SUCCEEDED = failure (expected success)`
+— **left failing, not weakened**. Disk-image assertions **correctly SKIPPED**
+(`disk_checks_run=0`, gated on success), so they remain unexercised; this
+session does NOT get to claim anything about the resulting disk's partition
+table / UKI / Limine config / package set, because no completed install was
+produced.
+
+### 14.4 Root cause, MEASURED off the resulting disk, not inferred: a
+     double-`.desktop` name bug in `deck_autologin.py`
+
+The install target was preserved as a real 16G disk. It has a valid GPT (ESP +
+x86-64 root, `sfdisk -d`), so archinstall's partitioning succeeded; the
+failure is entirely in our post-install `configure_deck` phase. Mounted
+rootless via the harness's own `disk_image::root_mount`, then remounted at the
+btrfs top-level (`udisksctl mount -o subvolid=5`) to reach the `@log`
+subvolume the install log lives in (a first mount of `@` alone shows an empty
+`/var/log` — the logs are in `@log`, a separate subvolume; noting it here so
+the next reader does not misread that emptiness as "nothing was written").
+
+`@log/omarchy-deck-install.json` records every step's outcome. **Only
+`autologin` failed** — `desktop_rotation: configured`, `idle_policy:
+configured`, `limine_rotation: configured`, `lock_wake_dpms: configured`,
+`menu_lock_row: overridden`, `patches: applied`, `session_dconf: configured`,
+`tty_rotation: configured`, `wifi: no-hardware`. So §12.2's identity/hostname/
+timezone fix and the whole rest of the Deck phase run correctly on a real
+install; the sole blocker is autologin. Its recorded error (truncated to 96
+chars by `configure_deck`'s summary-overwrite of `autologin_step`'s own
+detailed record — see §14.6 item 3):
+
+```
+DeckAutologinError: neither gamescope-wayland.desktop nor omarchy.desktop exists in /usr/local/s...
+```
+
+**But `omarchy.desktop` IS on the target** —
+`/usr/local/share/wayland-sessions/omarchy.desktop` (191-byte file, present).
+The bug, confirmed by construction against the source (READ,
+`deck_autologin.py`):
+
+- `find_session()` builds the filename as `f"{session}.desktop"` (line 185).
+- `GAMING_SESSION = "gamescope-wayland"` (line 136, a bare stem) → searches
+  `gamescope-wayland.desktop` — the **correct** form, but that file is
+  genuinely absent from this ISO's package set (only `hyprland.desktop`,
+  `hyprland-uwsm.desktop`, and `omarchy.desktop` exist on the target).
+- `DESKTOP_SESSION = "omarchy.desktop"` (line 137, **already carries
+  `.desktop`**) → searches `omarchy.desktop.desktop` — a name that does not
+  and will never exist. The two constants are **inconsistent**: one is a stem,
+  one is a full filename, and `find_session` appends `.desktop` to both.
+
+So `choose_session` finds neither, returns `status="failed"`,
+`configure_autologin` raises `DeckAutologinError`, and because `autologin` is
+the registry's **only `critical=True` step** (`deck_autologin.py`'s own
+docstring argues that at length — a Deck that can't autologin is a
+keyboard-less device with no way in), `configure_deck` re-raises and
+`phases.py` halts the install.
+
+**Two stacked defects, and the milder one matters for the fix:**
+
+1. **The double-`.desktop` bug (the fatal one).** `DESKTOP_SESSION` should be
+   the bare stem `"omarchy"` (so `find_session` yields `omarchy.desktop`), OR
+   `find_session`/`choose_session` should stop appending `.desktop` to a name
+   that already has it. Either way it is a one-line fix in `deck_autologin.py`.
+2. **`gamescope-wayland.desktop` is genuinely absent from the ISO** (a
+   separate, milder gap — the Gaming Mode session isn't in the package set).
+   This is why fixing defect 1 does not automatically give a Gaming-Mode Deck:
+   with defect 1 fixed, `choose_session` would resolve `omarchy.desktop`,
+   return `status="desktop"` — a **non-critical degradation** ("boots to
+   Desktop Mode, not Gaming Mode", explicitly a recorded-and-continue outcome,
+   not an abort) — and **the install would complete**. So the one-line fix to
+   defect 1 is very likely sufficient to let criterion 1's run finish and the
+   disk-image assertions finally run — but it would prove a Deck that boots to
+   *Desktop* Mode, and closing the "boots to Gaming Mode" half needs defect 2
+   (the missing session package) resolved separately.
+
+### 14.5 What this session does and does not claim
+
+**Proven:**
+- The `$1` fix is correct and load-bearing: with it, `configurator` no longer
+  crashes under `set -u` after `write_user_files`, and the real installer
+  (`omarchy-install-dashboard`) launches and runs the full base Omarchy setup
+  to completion for the first time in this project's history on a
+  controller-only, non-`cidata`, offline, real-disk install.
+- Every Deck-configuration step except `autologin` succeeds on a real install
+  (measured off the target's `@log/omarchy-deck-install.json`), including
+  §12.2's identity/hostname/timezone fix at the real artefact level again.
+- The remaining blocker is a single, one-line, pure-logic bug in our own
+  `deck_autologin.py` (no timing, no hardware, no randomness — it will
+  reproduce every run).
+
+**NOT proven, NOT claimed:**
+- That a full install completes and produces a bootable disk. It aborts in
+  `configure_deck`; the disk-image assertions never ran.
+- That fixing defect 1 is sufficient — it is *likely* (the analysis in §14.4),
+  but "likely" is not "measured", and there may be a further defect past it
+  (every layer of this harness has found one; §14 is itself the third such
+  layer). The only way to know is to fix defect 1, rebuild, and re-run.
+- Anything about Gaming-Mode autologin — the session package is absent (defect
+  2), so even a completed install would land in Desktop Mode.
+
+### 14.6 Follow-ups flagged
+
+1. 🔴 **Fix the double-`.desktop` bug in `deck_autologin.py`** (§14.4 defect 1)
+   — the actual unblock for criterion 1's completion. One line
+   (`DESKTOP_SESSION = "omarchy"`, or stop double-appending). ⚠️ Its unit suite
+   (`test/unit/test-deck-autologin*.py` if present) almost certainly encodes
+   the wrong fixture name (`omarchy.desktop.desktop`) — it passed while the
+   code was broken, this project's recurring "the test encodes the bug"
+   failure — so the fix must correct the fixture too, not just the constant.
+   Owner: whoever owns `orchestrator/deck_autologin.py` next.
+2. **`gamescope-wayland.desktop` is not in the ISO's package set** (§14.4
+   defect 2) — the Gaming Mode session file is absent from the target, so
+   autologin can at best reach Desktop Mode. Decide whether the ISO must carry
+   the Gaming session (payload-set question, `iso/bin/build`/`iso/PKGS`
+   territory) before "first boot lands in Gaming Mode" (ROADMAP P3.2) can hold.
+3. **`configure_deck` overwrites `autologin_step`'s own detailed record.**
+   `autologin_step` writes a 400-char-capped detailed record then re-raises;
+   `configure_deck`'s except handler then re-writes the same JSON key with a
+   96-char summary (`sanitize_text` default limit), *losing* the detail the
+   docstring at `deck_autologin.py:499` says it deliberately preserved. Minor
+   (the summary still names the cause), but it defeats a stated design intent
+   — either don't re-record a key the step already recorded, or raise the
+   summary's limit. Owner: `orchestrator/deck_configure.py`.
+4. Everything still-open from §13.6 (deck-input-mapper payload set, `[H]`
+   hardware install, `DECK_RESERVED_USERNAMES_VAR`) remains open, unrelated.
+
+### 14.7 Files
+
+- `iso/overlay/patches/deck-form-invocation.patch` — hunk 3 added (the
+  `${1:-}` fix), header updated to argue for the third hunk within the
+  existing patch-count budget. **This is the only code file this session
+  changed.** `deck_autologin.py` is deliberately NOT touched (§14.6 item 1 is
+  a separate module's bug with its own test suite; leaving it failing and
+  diagnosed is this project's discipline, not force-fixing past the assigned
+  scope).
+- Preserved work dir (`VM_KEEP_WORK=1`): `/var/tmp/t4-install-controller-run-opus/`
+  — `serial.log`, reconstructed `report.txt`, the streamed captures
+  (`x.00-greeter` … `x.29-post-install-start`, and the decoded
+  `30-failure` in the serial log), `probe.sh`, plus this session's saved
+  disk evidence `evidence-omarchy-deck-install.json` (the full per-step record
+  read off the target's `@log`) and `evidence-sessions.txt` (the target's
+  actual `wayland-sessions` listing proving `omarchy.desktop` is present while
+  the code searched for `omarchy.desktop.desktop`). The 16G `target.qcow2` is
+  kept; the intermediate `target.raw`/`root.raw` were deleted after the mount
+  to reclaim space.

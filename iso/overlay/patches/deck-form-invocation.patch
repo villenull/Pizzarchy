@@ -1,10 +1,12 @@
 Give the Deck's own installer screens a route onto the ISO, and settle
 encryption where it is decided.
 
-    Target: configs/airootfs/root/configurator   (2 hunks, one file)
+    Target: configs/airootfs/root/configurator   (3 hunks, one file)
     Pairs with: overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh
     Spec: docs/tasks/T4-screen-spec.md §1.2 (patch P1);
-          docs/tasks/T5-fork-plan.md §1 (the budget) and §5.5 (encryption)
+          docs/tasks/T5-fork-plan.md §1 (the budget) and §5.5 (encryption);
+          docs/findings/T4-controller-only-install-first-run.md §13.4/§13.6
+          item 1 (the $1 crash, hunk 3, added 2026-08-13)
 
 === WHY THIS IS THE FIFTH PATCH, AND THE ARGUMENT IT HAS TO MAKE ============
 
@@ -39,8 +41,16 @@ enough to be overruled:
      What actually pushed the count past four was T4a's dashboard patch,
      added later; the arithmetic changed, the design did not.
 
-  4. It carries two changes, not one. Both are edits to this same file, and
-     folding the second into this patch keeps the budget at 5 instead of 6.
+  4. It carries three changes, not one. All three are edits to this same
+     file, and folding each new one into this patch keeps the budget at 5
+     instead of climbing every time this one file needs another line fixed.
+     Hunk 3 (added 2026-08-13) is the clearest case yet for that policy: it
+     is a single-character fix to a pre-existing upstream bug, discovered
+     only because this project's own harness was the first ever to press
+     "Install" on a real, survivable disk
+     (`docs/findings/T4-controller-only-install-first-run.md` §13.4). A
+     sixth patch file for one `${1:-}` guard would be its own small
+     absurdity.
 
   If the operator disagrees: the fallback is not a smaller patch, it is
   shipping an installer whose Wi-Fi passphrase screen, disk screen and
@@ -88,6 +98,42 @@ correct a `true` -- it aborts and says why, because encryption here yields a
 Deck whose owner has no keyboard to unlock it, and because turning it off
 also deletes archinstall's autologin drop-in (§5.1's coupling box), which
 configure_deck must restore separately.
+
+=== HUNK 3 -- unguarded $1 at the very end of the file, under set -u =======
+
+Not a Deck-specific screen change -- a one-character fix to a pre-existing
+upstream bug, found by
+`docs/findings/T4-controller-only-install-first-run.md` §13.4: the FIRST
+time any harness in this project (or, as far as that finding's own §13.5
+records, apparently anyone) pressed "Install" on a real, correctly-sized,
+survivable disk and let `configurator` run all the way to its own last four
+lines.
+
+`.automated_script.sh` invokes `./configurator` with zero positional
+arguments on every real interactive (non-`cidata`) install
+(`iso/upstream/configs/airootfs/root/.automated_script.sh:101`, READ). Two
+places in this file guard the resulting unset `$1` correctly --
+`[[ "${1:-}" == "dry" ]]` at line 670, `[[ ${1:-} == "dry" ]]` at line 1030 --
+but the third, structurally identical check at the true end of the file
+(originally line 1194, the only one on the `full_disk` branch a Deck install
+can ever take, since `deck-form.sh`'s `requires_full_disk_install` -- hunk 1
+-- returns 0 unconditionally) does not: bare `$1`. `configurator` itself has
+no `set -u` at its own top, so this was always latent upstream; hunk 1's own
+`source /usr/share/omarchy-iso/deck-form.sh` is what turns it fatal, because
+`deck-form.sh` sets `set -uo pipefail` at its own top and, being `source`d
+into `configurator`'s own shell rather than run in a subshell, that `set -u`
+stays live for the rest of `configurator`'s execution, including this line,
+much later in the file. So the crash is downstream of hunk 1 (confirming
+this belongs in the same patch, not a new file), but the bug being fixed is
+plain upstream's, not this fork's -- matched to the two already-correct
+sibling checks in the same file, nothing invented.
+
+Measured effect before this fix, `docs/findings/T4-controller-only-install-
+first-run.md` §13.4: `write_user_files` runs and its artefacts land on disk,
+then `configurator` dies non-zero on this line under `.automated_script.sh`'s
+own `set -e` -- before `/usr/local/bin/omarchy-install-dashboard` (the real
+installer) is ever invoked, on every controller-only, non-`cidata` full-disk
+install, Deck-forked or not.
 
 diff --git i/configs/airootfs/root/configurator w/configs/airootfs/root/configurator
 index 44e428b..685b2fc 100644
@@ -158,3 +204,11 @@ index 44e428b..685b2fc 100644
  write_user_files
  
  if [[ $install_target == "free_space" ]]; then
+@@ -1191,6 +1242,6 @@ _EOF_
+ }
+ _EOF_
+ 
+-if [[ $1 == "dry" ]]; then
++if [[ ${1:-} == "dry" ]]; then
+   print_dry_run_files
+ fi
