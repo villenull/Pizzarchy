@@ -58,10 +58,22 @@ work without waiting for further instruction.**
 >   snapshots diff clean
 > - The `[V]` harness blamed upstream's wizard for a disagreement **its own
 >   CP437-in-UTF-8 grep had manufactured** (35/40 → **57/57**, no upstream defect)
-> - 🔴 **`vm-gamepad-spike-test.sh`'s in-guest probe has been a bash syntax error
->   since the day it was committed.** `bash -n` cannot see inside a quoted
->   heredoc. **The suite has never been runnable; the T2 result it is cited for
->   came from a version never committed.**
+> - 🔴 **`vm-gamepad-spike-test.sh`'s in-guest probe was a bash syntax error from
+>   the day it was committed.** `bash -n` cannot see inside a quoted heredoc.
+>   ✅ **FIXED in `b96eaac` — the same commit that found it. Verified 2026-08-12
+>   by extracting the probe at four refs**: broken at `861f922` and at
+>   `b96eaac^` (line 230, `syntax error near unexpected token 'fi'`), parses at
+>   `b96eaac` and at HEAD. *(This bullet said "has never been runnable" for a
+>   session after it had been repaired — a stale 🔴 is as misleading as a stale
+>   ✅.)* ⚠️ **Still true and still the point: the suite has never been RUN.**
+>   The T2 result it is cited for came from a version never committed, so its
+>   next run is a first run and its assertions are unverified.
+>   🆕 The scanner that was supposed to catch this only ever checked **8 of 19**
+>   guest payloads — it matched the literal delimiter `<<'PROBE'`, so every
+>   `<<'PAD'`, `<<'PY'`, `<<'TUI'` and `<<'UD'` block was invisible, **including
+>   this suite's own virtual gamepad**. Now every quoted heredoc in `test/vm/`
+>   and `test/lib/` is extracted and syntax-checked in its own language, with a
+>   positive control under a delimiter that appears nowhere in the repo.
 >
 > ➡️ **The generalisation, now recorded: a check that proves something is ABSENT
 > must also prove it was LOOKING.** New scanners carry positive *and* negative

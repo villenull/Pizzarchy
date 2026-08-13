@@ -1,0 +1,41 @@
+#
+# Boot-time verification of the Omarchy Deck patch set.
+#
+# WHY THIS UNIT EXISTS
+#
+# The Deck has no terminal in normal use, and a PostTransaction hook cannot
+# abort the transaction it runs in (AbortOnFail is a PreTransaction property).
+# So "the hook exited non-zero" is necessary and nowhere near sufficient: the
+# message scrolls past inside a pacman run nobody is watching. This unit is the
+# channel that survives a reboot -- a drifted patch leaves a FAILED UNIT, so
+# `systemctl --failed` is non-empty and the state is discoverable without
+# knowing to look for it.
+#
+# ⚠️ It runs --verify, so it REPORTS and never repairs. That is deliberate. A
+# unit that silently re-applied at every boot would hide the fact that the hook
+# is not doing its job, which is exactly the class of silent success this
+# project exists to eliminate.
+#
+# ⚠️ ExecStart has NO leading `-`. A `-` would tell systemd to ignore a
+# non-zero exit, the unit would go `active` on a drifted patch, and this file
+# would become an elaborate way of pretending everything is fine.
+#
+# T5f: enable this in configure_deck (`systemctl enable
+# omarchy-deck-patch-check.service`, or ship a multi-user.target.wants symlink
+# in the package). An installed-but-not-enabled unit is silent.
+#
+
+[Unit]
+Description=Verify Omarchy Deck patches against upstream-owned files
+ConditionPathExists=/usr/share/omarchy-deck/patches
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/omarchy-deck-apply-patches --verify --notify
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+--- a/default/limine/limine.conf
++++ b/default/limine/limine.conf
+@@ -5,6 +5,7 @@
+ interface_branding_color: 9ece6a
+ interface_help_color: 9ece6a
+ interface_help_color_bright: 9ece6a
++interface_rotation: 270
+ hash_mismatch_panic: no
+ 
+ term_background: 1a1b26

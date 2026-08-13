@@ -6,16 +6,27 @@
 # every target from deck-install.packages.
 #
 # ---------------------------------------------------------------------------
-# 🔴 THIS IS A SKELETON. Its job in T5d is to prove the PIPELINE, not to carry
-# behaviour: that the package builds inside builder/build-iso.sh's container,
-# lands in the offline mirror, survives prune-offline-mirror.sh, is selected by
-# the offline resolve, and installs at pacstrap time. The behaviour lands
-# later, in slices that already exist on the plan:
+# 🔴 IT IS NO LONGER A SKELETON. T5d proved the PIPELINE with a README-only
+# payload; this slice puts T12's upstream-patch seam inside it, which is the
+# first behaviour the package actually carries:
+#
+#   /usr/bin/omarchy-deck-apply-patches                 the applier (0755)
+#   /usr/share/libalpm/hooks/50-...-reapply-patches.hook re-apply after pacman
+#   /usr/lib/systemd/system/omarchy-deck-patch-check.service   boot-time alarm
+#   ...multi-user.target.wants/  -> that unit, i.e. ENABLED as shipped
+#   /usr/share/omarchy-deck/patches/*.patch + *.meta     what it applies
+#
+# Until this landed, `configure_deck`'s `patches` step recorded
+# status="absent" on EVERY install -- deliberately loudly
+# (iso/overlay/configs/airootfs/usr/share/omarchy-iso/orchestrator/deck_patches.py,
+# decision 3). The paths above are that module's contract, not a free choice:
+# it looks for the applier at APPLIER_DIR/APPLIER_NAME, treats a non-executable
+# one as absent, and reads back the state file the applier writes.
+#
+# Still landing later, in slices that already exist on the plan:
 #
 #   T5e  boot-to-Gaming-Mode, the encryption default, the lock producers
-#   T5f  the rotation surfaces and the ALPM re-apply hook
-#   T12  omarchy-deck-apply-patches (registered as a configure_deck step, not
-#        bolted onto an existing one -- T5-fork-plan.md §10 note 4)
+#   T5f  the rotation surfaces (the ALPM re-apply hook is HERE now)
 #
 # ---------------------------------------------------------------------------
 # Rules this file has to keep
@@ -25,18 +36,30 @@
 #    bind mount with no .git in it, and a version that moves per build breaks
 #    the "exactly one artifact per name" check in the patched build-iso.sh.
 #    Bump `pkgver` by hand, in a commit, like a decision.
-#  * ANY entry added to depends=() must ALSO exist in the offline mirror --
-#    i.e. be in deck-install.packages or deck-mirror.packages. The target
-#    install is offline; pacstrap fails on a dependency the mirror does not
-#    carry, ~1000 packages into the install.
-#  * No install= scriptlet, no systemd units, no sudoers drop-ins in this
-#    slice. tools/iso-payload-audit.sh reads inside this package's archive at
-#    build time and fails the build on a blanket passwordless sudoers grant.
+#  * ANY entry added to depends=() must ALSO be reachable in the offline
+#    mirror. The target install is offline; pacstrap fails on a dependency the
+#    mirror does not carry, ~1000 packages into the install. See the depends
+#    block below for how each current entry was checked.
+#  * No install= scriptlet and no sudoers drop-ins. tools/iso-payload-audit.sh
+#    reads inside this package's archive at build time and fails the build on a
+#    blanket passwordless sudoers grant. (Systemd units are no longer on that
+#    prohibition list -- this package ships one on purpose; see ENABLING THE
+#    UNIT below for why it still needs no scriptlet.)
+#  * NO SUBDIRECTORIES IN source=(). Measured by reading makepkg itself
+#    (/usr/share/makepkg/util/source.sh): `get_filename` reduces a non-URL
+#    entry to `${netfile##*/}`, its BASENAME, and `get_filepath` then looks for
+#    `$startdir/<basename>`. So `source=('patches/0010-x.patch')` makes makepkg
+#    abort with "was not found in the build directory" even though the file is
+#    right there. That is why the patch payload sits flat beside this file and
+#    is re-nested into patches/ by package(), rather than being kept in a
+#    patches/ directory here.
 
 pkgname=omarchy-deck
-pkgver=0.1.0
+# 0.1.0 was the skeleton. This is the first version that carries behaviour, so
+# the minor moves. Hand-set, in a commit, like a decision -- see the rule above.
+pkgver=0.2.0
 pkgrel=1
-pkgdesc="Steam Deck enablement layer for Omarchy (skeleton: seam S4 pipeline only)"
+pkgdesc="Steam Deck enablement layer for Omarchy (T12 upstream-patch seam)"
 arch=('any')
 url='https://github.com/villenull/Pizzarchy'
 
@@ -53,23 +76,88 @@ url='https://github.com/villenull/Pizzarchy'
 # objection pointed inward.
 license=('MIT')
 
-# Deliberately empty. See the rule above before adding anything here.
-depends=()
-
-# Local source, copied alongside this file into the build's work directory by
-# the patched builder/build-iso.sh. Listing it (rather than reaching into
-# $startdir) means makepkg itself fails loudly if it is missing.
+# ---------------------------------------------------------------------------
+# depends -- what omarchy-deck-apply-patches SHELLS OUT TO, and nothing else
+# ---------------------------------------------------------------------------
 #
-# ⚠️ LICENSE is a COPY of the repository root's LICENSE, and it has to be: the
-# container only ever sees this directory (`/configs/deck/pkgbuilds/omarchy-deck/`
-# is copied into the build's work dir), so a file outside it cannot reach
-# makepkg. MIT is not in `/usr/share/licenses/common` -- each MIT text carries
-# its own copyright line -- so a package under it must ship the text. The copy
-# is kept honest by `test/unit/test-omarchy-deck-package.sh`, which asserts it
-# is byte-identical to the root LICENSE; an edit to one and not the other goes
-# red in seconds rather than shipping two different grants.
-source=('README' 'LICENSE')
-sha256sums=('SKIP' 'SKIP')
+# The rule at the top of this file is why this list is short and argued rather
+# than generous: every name here must be satisfiable from the OFFLINE mirror at
+# pacstrap time, and a name that is not there fails the install ~1000 packages
+# in, on a device with no terminal.
+#
+# HOW EACH ONE WAS CHECKED (2026-08-12, no network, no container): against
+# `iso/upstream/manifests/fresh-4.json`, which is a package manifest captured
+# from a REAL fresh Omarchy 4 install -- i.e. the exact package set the offline
+# mirror is built to satisfy (`pacman -Syw` over the merged install list plus
+# its dependency closure, kept by prune-offline-mirror.sh). All six appear in
+# its `packages.all`; `git` is `explicit`, the rest arrive as dependencies of
+# things that are.
+#
+#   bash            5.3.9   the applier's interpreter (#!/usr/bin/env bash) and
+#                           it uses arrays, [[ ]], ${x//y/z} -- not POSIX sh
+#   coreutils       9.11    sha256sum, cut, wc, tr, mktemp, date, basename,
+#                           dirname, chmod, mv, mkdir, install
+#   gawk            5.4.0   awk '{print $3}' over `git apply --numstat`, which
+#                           is what makes the .meta/patch agreement check work
+#   grep            3.12    count_matches, the whole assert_count mechanism
+#   git             2.54.0  `git apply`. The applier refuses to start without
+#                           it (exit 4, EXIT_ENV) -- and `git apply` NEVER sed
+#                           is the one rule that file exists to enforce
+#   qt6-declarative 6.11.1  qmllint, at /usr/lib/qt6/bin/qmllint. NOT optional:
+#                           a qmllint the applier cannot find is a
+#                           postcondition_failed, not a skip (deliberate -- a
+#                           post-condition that did not run must never count as
+#                           one that passed). It arrives on a target anyway as
+#                           a dependency of quickshell; naming it here makes
+#                           that an enforced fact rather than a lucky one.
+#
+# NOT dependencies, because the applier guards both with `command -v` and
+# degrades in a defined way: `pacman` (state file records "unknown") and
+# `omarchy-notification-send`/libnotify (--notify warns and the failure stands).
+depends=('bash' 'coreutils' 'gawk' 'grep' 'git' 'qt6-declarative')
+
+# ---------------------------------------------------------------------------
+# source -- the payload, flat, and every file of it listed
+# ---------------------------------------------------------------------------
+#
+# Local sources, copied alongside this file into the build's work directory by
+# the patched builder/build-iso.sh (`cp -a`, so the whole directory arrives).
+# Listing them (rather than reaching into $startdir) means makepkg itself fails
+# loudly on a missing one, before package() is ever reached.
+#
+# ⚠️ THESE ARE COPIES, and they have to be: the container only ever sees this
+# directory, so a file outside it cannot reach makepkg.
+#
+#   LICENSE                    <- the repository root's LICENSE
+#   the applier, hook, unit    <- src/omarchy-deck-patches/
+#   the *.patch and *.meta     <- src/omarchy-deck-patches/patches/
+#
+# src/omarchy-deck-patches/ stays CANONICAL: test/unit/test-t12-patch-applier.sh
+# and test/unit/test-deck-configure-patches.py read the applier there,
+# test/t12-patch-seam-container-e2e.sh stages from there, and iso/bin/build's
+# guard 6.6 `git apply --check`s those patches against the pinned runtime
+# checkout. The copies here are kept honest the same way LICENSE is:
+# test/unit/test-omarchy-deck-package.sh asserts the two directories carry the
+# SAME SET of files and that every pair is byte-identical -- so a patch added
+# to one and not the other goes red in seconds instead of shipping a package
+# whose patches nothing ever build-checked (or build-checking patches the
+# package never ships).
+source=('README'
+  'LICENSE'
+  'omarchy-deck-apply-patches'
+  '50-omarchy-deck-reapply-patches.hook'
+  'omarchy-deck-patch-check.service'
+  '0010-lock-blank-timer-20s.patch'
+  '0010-lock-blank-timer-20s.meta'
+  '0020-limine-interface-rotation.patch'
+  '0020-limine-interface-rotation.meta')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+# The one place the patch payload's destination is written down. The applier's
+# own DEFAULT_PATCH_DIR is /usr/share/omarchy-deck/patches and deck_patches.py's
+# PATCH_DIR_REL is the same path relative to the target mount; all three must
+# agree or the applier exits 4 ("is omarchy-deck installed?") on every machine.
+_patchdir=usr/share/omarchy-deck/patches
 
 package() {
   # One real file, so this is not an empty package -- and so there is a cheap
@@ -77,4 +165,77 @@ package() {
   # target?" is `test -f /usr/share/omarchy-deck/README`.
   install -Dm644 "$srcdir/README" "$pkgdir/usr/share/omarchy-deck/README"
   install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+  # --- T12's patch seam ----------------------------------------------------
+  #
+  # The install lines below are the ones proven end to end against a real
+  # pacman in test/t12-patch-seam-container-e2e.sh (copied, not re-derived --
+  # docs/tasks/T12-upstream-patch-seam.md §5).
+  #
+  # 🔴 0755 ON THE APPLIER IS LOAD-BEARING. deck_patches.find_applier() checks
+  # the mode, not just existence: a 0644 applier is recorded as "absent" rather
+  # than run, because inside arch-chroot it would fail with "permission denied"
+  # and read like a broken machine instead of a broken package.
+  install -Dm755 "$srcdir/omarchy-deck-apply-patches" \
+    "$pkgdir/usr/bin/omarchy-deck-apply-patches"
+
+  # /usr/share/libalpm/hooks/, NOT /etc/pacman.d/hooks/ -- that is where
+  # upstream Omarchy's own hooks land from a package, and it leaves
+  # /etc/pacman.d/hooks/ free as the operator's override directory. The hook
+  # file's own header carries the three measured decisions behind its triggers.
+  install -Dm644 "$srcdir/50-omarchy-deck-reapply-patches.hook" \
+    "$pkgdir/usr/share/libalpm/hooks/50-omarchy-deck-reapply-patches.hook"
+
+  # --- ENABLING THE UNIT, without a scriptlet ------------------------------
+  #
+  # An installed-but-not-enabled unit is silent, and this unit IS the channel
+  # that survives a reboot: pacman exits 0 even when a PostTransaction hook
+  # fails (measured -- docs/tasks/T12-upstream-patch-seam.md §5, correction 2),
+  # so `--verify` leaving a FAILED UNIT at boot is the only drift signal a
+  # user without a terminal can find.
+  #
+  # It is enabled by SHIPPING THE .wants SYMLINK, not by an `install=`
+  # scriptlet running `systemctl enable`:
+  #
+  #  * systemd honours <target>.wants/ directories anywhere in its unit search
+  #    path, /usr/lib/systemd/system included. That is how dbus.service,
+  #    getty.target and plymouth-quit.service are enabled on a stock Arch box
+  #    (verified by listing /usr/lib/systemd/system/multi-user.target.wants/ on
+  #    this dev machine) -- it is the standard "statically enabled" pattern,
+  #    not a trick.
+  #  * A scriptlet would run inside pacstrap's chroot at install time, where
+  #    the orchestrator is separately driving `systemctl enable` through
+  #    arch-chroot for its own units. Two mechanisms enabling units in one
+  #    install is a second place for the same fact to disagree, and a scriptlet
+  #    that fails is easy to lose in pacstrap's output. The symlink is
+  #    declarative: it is in the archive, `pacman -Ql` shows it, and
+  #    test/unit/test-omarchy-deck-package.sh asserts it (and its link target)
+  #    by executing this function -- no systemd required to check it.
+  #  * Cost, stated rather than discovered: because the link is under /usr and
+  #    not /etc, `systemctl disable` cannot remove it. `systemctl mask
+  #    omarchy-deck-patch-check.service` is the supported way to silence it.
+  install -Dm644 "$srcdir/omarchy-deck-patch-check.service" \
+    "$pkgdir/usr/lib/systemd/system/omarchy-deck-patch-check.service"
+  install -d "$pkgdir/usr/lib/systemd/system/multi-user.target.wants"
+  # Relative, so it resolves the same inside a pacstrap target as on a running
+  # system. It matches the unit's own [Install] WantedBy=multi-user.target,
+  # which is what `systemctl enable` would have created.
+  ln -sf ../omarchy-deck-patch-check.service \
+    "$pkgdir/usr/lib/systemd/system/multi-user.target.wants/omarchy-deck-patch-check.service"
+
+  # --- the patches ---------------------------------------------------------
+  #
+  # Both halves of every patch: the .patch and its .meta. A patch without its
+  # .meta is not "one post-condition short", it is `bad_meta` and a non-zero
+  # exit -- the applier refuses to apply a patch that declares no target and no
+  # post-condition. Flat here (see the source=() rule at the top), nested there
+  # because $_patchdir is the applier's DEFAULT_PATCH_DIR.
+  install -Dm644 "$srcdir/0010-lock-blank-timer-20s.patch" \
+    "$pkgdir/$_patchdir/0010-lock-blank-timer-20s.patch"
+  install -Dm644 "$srcdir/0010-lock-blank-timer-20s.meta" \
+    "$pkgdir/$_patchdir/0010-lock-blank-timer-20s.meta"
+  install -Dm644 "$srcdir/0020-limine-interface-rotation.patch" \
+    "$pkgdir/$_patchdir/0020-limine-interface-rotation.patch"
+  install -Dm644 "$srcdir/0020-limine-interface-rotation.meta" \
+    "$pkgdir/$_patchdir/0020-limine-interface-rotation.meta"
 }

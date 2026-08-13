@@ -10,8 +10,8 @@
 # 2026-08-12, and each of which is invisible to every tool the repo already
 # runs.
 #
-# 1. AN IN-GUEST PROBE THAT DOES NOT PARSE.
-#    Every VM suite ships a bash script to the guest inside a quoted heredoc.
+# 1. A GUEST PAYLOAD THAT DOES NOT PARSE.
+#    Every VM suite ships code to the guest inside a QUOTED heredoc.
 #    `bash -n` on the SUITE cannot see into a quoted heredoc -- to bash it is
 #    an opaque string -- and shellcheck does not follow it either. So the outer
 #    file can be perfectly clean while the thing that actually runs in the VM
@@ -21,6 +21,18 @@
 #    `resync` that no longer existed, and a `$WITNESS_PID` that is never set.
 #    The suite could not have run for two days and nothing said so, because
 #    the only thing that would have said so is a ~15-minute VM boot.
+#
+#    ⚠️ THE FIRST VERSION OF THIS FILE ONLY LOOKED FOR `<<'PROBE'`, WHICH IS
+#    THE SAME MISTAKE ONE LEVEL UP. A delimiter spelled into the scanner is a
+#    filename list wearing a disguise: the eight `PROBE` bodies were checked
+#    and the ten OTHER guest payloads in the same directory -- `PAD`, `TUI`,
+#    `PY`, `UD` -- were not checked by anything, in this repo, ever. A suite
+#    that shipped a broken virtual pad, or a new suite that called its probe
+#    `<<'GUEST'`, would have sailed through a green run. Section A now DERIVES
+#    the delimiter set from the source, checks bash payloads with `bash -n` and
+#    Python payloads with `compile()`, and treats a payload it cannot classify
+#    as a failure unless it is declared -- because "the scanner did not
+#    recognise it" and "there is nothing wrong with it" must not look alike.
 #
 # 2. A GREP OVER CONSOLE BYTES THAT IS NOT BYTE-SAFE.
 #    T4's §6.4 lie #7: a bare `grep` over a /dev/vcsN capture silently returns
@@ -78,39 +90,98 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 # ---------------------------------------------------------------------------
-# The extractor, shared by section A and used nowhere else.
+# The payload scanner, shared by section A and used nowhere else.
 # ---------------------------------------------------------------------------
 
-# probe::extract <suite-file> <delimiter> -- prints the heredoc body.
-# The contract is exact and matches how the suites write it: a line containing
-# `<<'DELIM'` opens the body, a line that is exactly DELIM closes it.
-probe::extract() {
-  local file=$1 delim=$2
-  LC_ALL=C command awk -v d="$delim" '
-    index($0, "<<\047" d "\047") > 0 { grabbing = 1; next }
-    $0 == d { grabbing = 0 }
-    grabbing { print }
+# payload::openers <file> -- one record per QUOTED heredoc opener, in file
+# order:  <line>|<delimiter>|<nth occurrence of that delimiter>|<opener text>
+#
+# ⚠️ THE DELIMITER SET IS DERIVED, NOT LISTED. Nothing here knows the word
+# "PROBE". A suite that ships its guest script as `<<'GUEST'` is discovered on
+# the same terms as the eight that use PROBE, which is the whole point: the
+# next broken payload will be in a file nobody has thought to name yet.
+#
+# Unquoted heredocs (`<<EOF`) are deliberately out of scope -- their bodies are
+# expanded by the outer shell, so they are not standalone programs and `$vars`
+# in them would parse as nothing in particular.
+payload::openers() {
+  LC_ALL=C command awk '
+    match($0, /<<-?\047[A-Za-z_][A-Za-z0-9_]*\047/) {
+      d = substr($0, RSTART, RLENGTH)
+      sub(/^<<-?\047/, "", d)
+      sub(/\047$/, "", d)
+      n[d]++
+      printf "%d|%s|%d|%s\n", FNR, d, n[d], $0
+    }' "$1"
+}
+
+# payload::extract <file> <delimiter> <nth> -- prints that heredoc's body.
+#
+# The occurrence index is load-bearing, not tidiness: vm-installer-screens-test.sh
+# and vm-iso-probe-feasibility.sh ship two and three separate `PY` programs.
+# Concatenating them and parsing the result is a different question from the one
+# being asked, and it can answer either way by luck -- two valid programs can
+# concatenate into an invalid one, and (with a trailing `\` or an open bracket)
+# two invalid ones into something that compiles.
+payload::extract() {
+  local file=$1 delim=$2 want=$3
+  LC_ALL=C command awk -v d="$delim" -v want="$want" '
+    !grab && match($0, "<<-?\047" d "\047") {
+      n++
+      if (n == want) { grab = 1; dash = (substr($0, RSTART + 2, 1) == "-") }
+      next
+    }
+    grab {
+      t = $0
+      if (dash) sub(/^\t+/, "", t)
+      if (t == d) exit
+      print
+    }
   ' "$file"
 }
 
-# probe::parses <text> -- true if the extracted probe body is valid bash.
-# Prints bash's own diagnosis on stderr-capture for the caller to report.
+# payload::lang <opener-line> <first-body-line> -- bash | python | unknown.
+# The shebang wins where there is one; otherwise the interpreter named on the
+# opener line decides (`python3 - <<'PY'` has no shebang and never will).
+payload::lang() {
+  local opener=$1 first=$2
+  case $first in
+    '#!'*python*) printf 'python\n'; return 0 ;;
+    '#!'*sh)      printf 'bash\n';   return 0 ;;
+  esac
+  case $opener in
+    *python3*|*python\ *) printf 'python\n'; return 0 ;;
+  esac
+  printf 'unknown\n'
+}
+
+# payload::parses_bash / payload::parses_python <text> -- true if the extracted
+# body is a valid program. Each prints the interpreter's own diagnosis for the
+# caller to report.
 #
-# ⚠️ THIS IS A FUNCTION, AND THAT IS THE POINT. It was a bare `bash -n` inlined
-# twice -- once in the positive control, once in the loop over the real tree --
-# and mutation testing found the hole immediately: replacing the LOOP's copy
-# with `true` left the control passing and every suite reported as parsing.
-# A control that exercises a different code path from the thing it certifies
-# certifies nothing. Both callers now go through here.
-probe::parses() {
+# ⚠️ THESE ARE FUNCTIONS, AND THAT IS THE POINT. The bash one was a bare
+# `bash -n` inlined twice -- once in the positive control, once in the loop over
+# the real tree -- and mutation testing found the hole immediately: replacing
+# the LOOP's copy with `true` left the control passing and every suite reported
+# as parsing. A control that exercises a different code path from the thing it
+# certifies certifies nothing. Every caller goes through here.
+payload::parses_bash() {
   bash -n <<<"$1" 2>&1
+}
+payload::parses_python() {
+  python3 -c 'import sys; compile(sys.stdin.read(), "<payload>", "exec")' <<<"$1" 2>&1
 }
 
 # ---------------------------------------------------------------------------
 # SECTION A -- every in-guest probe is syntactically valid bash
 # ---------------------------------------------------------------------------
 
-printf '# --- A. in-guest probes parse ---\n'
+printf '# --- A. guest payloads parse ---\n'
+
+# The Python half of this section is worth nothing without an interpreter, and
+# "python3 is missing" must not read as "no Python payload is broken".
+command -v python3 >/dev/null ||
+  { printf 'not ok - python3 is required to check Python guest payloads\n' >&2; exit 1; }
 
 # Negative control: a valid heredoc must extract and parse.
 cat >"$work/ctl-good.sh" <<'OUTER'
@@ -122,11 +193,11 @@ fi
 PROBE
 echo "after the heredoc"
 OUTER
-ctl_good=$(probe::extract "$work/ctl-good.sh" PROBE)
-if [[ -n $ctl_good ]] && probe::parses "$ctl_good" >/dev/null 2>&1; then
-  pass "control (negative): a valid in-guest probe extracts and parses"
+ctl_good=$(payload::extract "$work/ctl-good.sh" PROBE 1)
+if [[ -n $ctl_good ]] && payload::parses_bash "$ctl_good" >/dev/null 2>&1; then
+  pass "control (negative): a valid bash payload extracts and parses"
 else
-  fail "control (negative): a valid in-guest probe extracts and parses" \
+  fail "control (negative): a valid bash payload extracts and parses" \
     "the extractor or the parse check is broken; every result below is meaningless"
 fi
 
@@ -150,12 +221,74 @@ fi
 fi
 PROBE
 OUTER
-ctl_bad=$(probe::extract "$work/ctl-bad.sh" PROBE)
-if [[ -n $ctl_bad ]] && ! probe::parses "$ctl_bad" >/dev/null 2>&1; then
-  pass "control (positive): an unmatched 'fi' inside a probe IS caught"
+ctl_bad=$(payload::extract "$work/ctl-bad.sh" PROBE 1)
+if [[ -n $ctl_bad ]] && ! payload::parses_bash "$ctl_bad" >/dev/null 2>&1; then
+  pass "control (positive): an unmatched 'fi' inside a bash payload IS caught"
 else
-  fail "control (positive): an unmatched 'fi' inside a probe IS caught" \
+  fail "control (positive): an unmatched 'fi' inside a bash payload IS caught" \
     "the scanner cannot see the defect it exists for -- it would report the tree clean forever"
+fi
+
+# Python controls. `bash -n` is happy with almost any Python file, so a Python
+# payload run through the bash checker is a check that cannot fail; these prove
+# the Python path is a different, working code path and not decoration.
+cat >"$work/ctl-py.sh" <<'OUTER'
+python3 - <<'PY' 2>/dev/null
+import sys
+if sys.argv:
+    print("ok")
+PY
+python3 - <<'PY'
+def broken(:
+    pass
+PY
+OUTER
+ctl_py_good=$(payload::extract "$work/ctl-py.sh" PY 1)
+ctl_py_bad=$(payload::extract "$work/ctl-py.sh" PY 2)
+if [[ -n $ctl_py_good ]] && payload::parses_python "$ctl_py_good" >/dev/null 2>&1; then
+  pass "control (negative): a valid Python payload extracts and compiles"
+else
+  fail "control (negative): a valid Python payload extracts and compiles" \
+    "the Python path is broken, so every Python payload below is reported wrong"
+fi
+if [[ -n $ctl_py_bad ]] && ! payload::parses_python "$ctl_py_bad" >/dev/null 2>&1; then
+  pass "control (positive): a Python syntax error in a payload IS caught"
+else
+  fail "control (positive): a Python syntax error in a payload IS caught" \
+    "Python payloads are being waved through -- vm-spike-pad.py and friends would be unchecked"
+fi
+# ...and the two results above are only meaningful if each occurrence came back
+# on its own. Asserted on the text, not on a parse: a concatenation of the two
+# would ALSO fail to compile, so "the bad one is caught" cannot tell the
+# difference between splitting correctly and never splitting at all.
+if [[ $ctl_py_good == *'print("ok")'* && $ctl_py_good != *'def broken'* ]] &&
+   [[ $ctl_py_bad == *'def broken'* && $ctl_py_bad != *'print("ok")'* ]]; then
+  pass "control: same-delimiter payloads are extracted separately, by occurrence"
+else
+  fail "control: same-delimiter payloads are extracted separately, by occurrence" \
+    "the two PY bodies bled into each other; multi-PY suites are being asked the wrong question"
+fi
+
+# ⚠️ THE ANTI-HARD-CODING CONTROL. A payload under a delimiter that appears
+# NOWHERE in this repo must still be discovered and flagged. If someone
+# reintroduces a spelled-in delimiter list, this is what goes red -- and it goes
+# red before a real suite with a novel delimiter goes silently unchecked.
+cat >"$work/ctl-novel.sh" <<'OUTER'
+cat >"$guest_src" <<'GUESTPAYLOAD'
+#!/usr/bin/env bash
+while true; do
+  echo hi
+echo "no done"
+GUESTPAYLOAD
+OUTER
+novel_delims=$(payload::openers "$work/ctl-novel.sh" | cut -d'|' -f2)
+ctl_novel=$(payload::extract "$work/ctl-novel.sh" GUESTPAYLOAD 1)
+if [[ $novel_delims == GUESTPAYLOAD ]] && [[ -n $ctl_novel ]] &&
+   ! payload::parses_bash "$ctl_novel" >/dev/null 2>&1; then
+  pass "control (positive): a broken payload under an UNKNOWN delimiter is discovered and caught"
+else
+  fail "control (positive): a broken payload under an UNKNOWN delimiter is discovered and caught" \
+    "the delimiter set is being assumed rather than derived; a new suite could ship anything"
 fi
 
 # Now the real tree.
@@ -179,30 +312,104 @@ if (( ${#suites[@]} == 0 )); then
   exit 1
 fi
 
-probes_found=0
-for suite in "${suites[@]}"; do
-  name=${suite##*/}
-  # Only files that actually ship a probe are in scope.
-  LC_ALL=C command grep -qaF "<<'PROBE'" "$suite" || continue
-  probes_found=$((probes_found + 1))
-  body=$(probe::extract "$suite" PROBE)
-  if [[ -z $body ]]; then
-    fail "$name: the PROBE heredoc extracts to something" \
-      "the delimiter convention changed; this scanner is now checking nothing for this file"
-    continue
-  fi
-  if err=$(probe::parses "$body"); then
-    pass "$name: its in-guest probe parses"
+# test/lib is in scope too: vm-installer-screens.sh is sourced INTO the probes,
+# so its heredocs run in the guest exactly like the suites' own.
+subjects=("${suites[@]}" "$REPO_ROOT"/test/lib/*.sh)
+
+# ⚠️ A PAYLOAD THIS SCANNER CANNOT CLASSIFY IS A FAILURE, NOT A SKIP -- unless
+# it is declared here, and every declaration is asserted to still match
+# something real (the section-B deferral idiom, for the section-B reason). The
+# alternative is an `else: continue` that silently absorbs the next language
+# somebody ships to a guest.
+#   entry: <basename>|<delimiter>|<why it is not a program>
+not_a_program=(
+  "vm-iso-probe-feasibility.sh|UD|cloud-init user-data: YAML data read by cloud-init, not an executable payload"
+)
+
+bash_payloads=0
+python_payloads=0
+unknown_payloads=()
+for f in "${subjects[@]}"; do
+  name=${f##*/}
+  while IFS='|' read -r lineno delim nth opener; do
+    [[ -n ${delim:-} ]] || continue
+    body=$(payload::extract "$f" "$delim" "$nth")
+    if [[ -z $body ]]; then
+      fail "$name:$lineno: the <<'$delim' payload extracts to something" \
+        "it was found by the opener scan and then extracted to nothing -- the two halves of this scanner disagree, and this payload is being checked by neither"
+      continue
+    fi
+    lang=$(payload::lang "$opener" "${body%%$'\n'*}")
+    case $lang in
+      bash)
+        bash_payloads=$((bash_payloads + 1))
+        if err=$(payload::parses_bash "$body"); then
+          pass "$name:$lineno: its <<'$delim' bash payload parses"
+        else
+          fail "$name:$lineno: its <<'$delim' bash payload parses" "$err"
+        fi
+        ;;
+      python)
+        python_payloads=$((python_payloads + 1))
+        if err=$(payload::parses_python "$body"); then
+          pass "$name:$lineno: its <<'$delim' Python payload compiles"
+        else
+          fail "$name:$lineno: its <<'$delim' Python payload compiles" "$err"
+        fi
+        ;;
+      *)
+        unknown_payloads+=("$name|$delim|$lineno")
+        ;;
+    esac
+  done < <(payload::openers "$f")
+done
+
+# Every unclassified payload must be declared.
+for u in ${unknown_payloads[@]+"${unknown_payloads[@]}"}; do
+  uname=${u%%|*}; rest=${u#*|}; udelim=${rest%%|*}; uline=${rest#*|}
+  declared=0
+  for d in "${not_a_program[@]}"; do
+    [[ ${d%%|*} == "$uname" && ${d#*|} == "$udelim|"* ]] && declared=1
+  done
+  if (( declared )); then
+    pass "$uname:$uline: <<'$udelim' is declared not-a-program"
   else
-    fail "$name: its in-guest probe parses" "$err"
+    fail "$uname:$uline: <<'$udelim' is a guest payload this scanner cannot classify" \
+      "add a language to payload::lang, or declare it in not_a_program with a reason -- an unrecognised payload must never look like a checked one"
   fi
 done
 
-if (( probes_found >= 8 )); then
-  pass "$probes_found in-guest probes were actually parsed"
+# ...and every declaration must still correspond to a real unclassified payload,
+# so the list cannot rot into a permanent allowlist.
+for d in "${not_a_program[@]}"; do
+  dfile=${d%%|*}; drest=${d#*|}; ddelim=${drest%%|*}
+  if printf '%s\n' ${unknown_payloads[@]+"${unknown_payloads[@]}"} |
+     LC_ALL=C command grep -qaF -- "$dfile|$ddelim|"; then
+    pass "not_a_program entry still applies: $dfile <<'$ddelim'"
+  else
+    fail "not_a_program entry is STALE: $dfile <<'$ddelim'" \
+      "that payload is gone or is now classified -- delete the entry, or the next unclassifiable payload in that file is silently excused"
+  fi
+done
+
+# Non-vacuity. Counted per language, because one number can hide the other
+# going to zero: this section's whole history is a scanner that checked eight
+# bash probes and believed it had checked everything shipped to a guest.
+if (( bash_payloads >= 8 )); then
+  pass "$bash_payloads bash guest payloads were actually parsed"
 else
-  fail "$probes_found in-guest probes were actually parsed" \
-    "expected at least 8; if the heredoc delimiter is renamed this loop skips every file and reports success"
+  fail "$bash_payloads bash guest payloads were actually parsed" \
+    "expected at least 8; if the extraction stops matching, this loop checks nothing and reports success"
+fi
+if (( python_payloads >= 8 )); then
+  pass "$python_payloads Python guest payloads were actually compiled"
+else
+  fail "$python_payloads Python guest payloads were actually compiled" \
+    "expected at least 8; the virtual pads, the fullscreen TUI and the kdmode probes are all Python, and none of them was checked by anything before 2026-08-12"
+fi
+if (( bash_payloads + python_payloads == 0 )); then
+  printf 'not ok - zero guest payloads were checked; the extractor has gone stale\n' >&2
+  exit 1
 fi
 
 # ---------------------------------------------------------------------------

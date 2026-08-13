@@ -179,8 +179,11 @@ probe_src="$WORK/omarchy-deck-spike-probe.sh"
 # was always clean while the thing it ships to the guest could not be parsed at
 # all. The suite was committed broken (861f922, 2026-08-10) and has never been
 # runnable since; the T2 result it is cited for came from a version that was
-# never committed. test/unit/test-vm-probe-integrity.sh now extracts every
-# in-guest probe in test/vm/ and `bash -n`s it, so this class cannot come back.
+# never committed. test/unit/test-vm-probe-integrity.sh now DERIVES every quoted
+# heredoc in test/vm/ and test/lib/ -- this one, the `PAD` Python above it, and
+# every `PY`/`TUI` payload in the sibling suites -- extracts each occurrence
+# separately and parses it with `bash -n` or Python's `compile()`, so this class
+# cannot come back, and cannot hide under a delimiter nobody spelled in.
 cat >"$probe_src" <<'PROBE'
 #!/usr/bin/env bash
 # In-guest probe. NOT `set -e`: a failure of the thing under test is a result

@@ -45,15 +45,45 @@ pkgbuilds/ directory itself. A desync between any two of them is silent until
 pacstrap fails on the target.
 
 
+What is in here now -- T12, the upstream-patch seam
+---------------------------------------------------
+
+  /usr/bin/omarchy-deck-apply-patches
+      Re-applies the Deck's patch set to files that UPSTREAM packages own
+      (/usr/share/omarchy/**). omarchy-dev declares no backup=(), so a hand
+      edit in there is reverted by the next upgrade silently -- no .pacnew, no
+      warning, pacman exit 0. This applies the patches with `git apply` and
+      SHOUTS when one no longer fits.
+
+  /usr/share/omarchy-deck/patches/*.patch + *.meta
+      What it applies, and the post-conditions each patch has to satisfy
+      afterwards. Read the .meta files: they name the requirement each patch
+      exists for.
+
+  /usr/share/libalpm/hooks/50-omarchy-deck-reapply-patches.hook
+      Re-runs the applier after any pacman transaction touching omarchy,
+      omarchy-dev or omarchy-settings*. That is what keeps the patches applied.
+
+  /usr/lib/systemd/system/omarchy-deck-patch-check.service   (enabled)
+      Runs the applier in --verify mode at boot. A PostTransaction hook cannot
+      abort its transaction and pacman exits 0 even when the hook fails, so a
+      FAILED UNIT here is the drift signal that survives a reboot and is
+      findable without a terminal. Enabled by the multi-user.target.wants
+      symlink this package ships; `systemctl mask` is how to silence it.
+
+  /var/lib/omarchy-deck/patch-state.json                     (written, not shipped)
+      What happened, per patch, machine-readably. The installer copies a
+      summary of it into /var/log/omarchy-deck-install.json.
+
+
 What is NOT here yet
 --------------------
 
-This is a skeleton: it proves the pipeline, it carries no behaviour. Landing
-inside it later:
+Landing inside this package later:
 
   T5e   boot-to-Gaming-Mode, the encryption default, the lock producers
-  T5f   the rotation surfaces, and the ALPM hook that re-applies them
-  T12   omarchy-deck-apply-patches, registered as its own configure_deck step
+  T5f   the rotation surfaces beyond the Limine template patch above
 
-Until those land, the only thing this package asserts about a machine is that
-the ISO that installed it was built by the Omarchy Deck overlay.
+Until those land, what this package asserts about a machine is that the ISO
+that installed it was built by the Omarchy Deck overlay, and that the Deck's
+patch set was applied to upstream's files -- or that it was not, loudly.
