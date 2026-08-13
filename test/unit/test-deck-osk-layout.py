@@ -649,20 +649,50 @@ check("several held modifiers nest: pressed in order, released in reverse",
        (e.KEY_V, 1), (e.KEY_V, 0),
        (e.KEY_LEFTALT, 0), (e.KEY_LEFTCTRL, 0)])
 
-# Two keys no renderer implements yet. They are in the reference, so they are
-# in the layout; the core records the request and invents no behaviour.
+# Emoji: no renderer implements it yet. It is in the reference, so it is in
+# the layout; the core records the request and invents no behaviour.
 kb = osk.OnScreenKeyboard()
 check("the emoji key emits no keystroke", kb.press_at("left", CX[0], CY[4]), [])
 check("...it records a request instead", kb.request, "emoji")
+check("the emoji key does not close the keyboard", kb.closed, False)
+
+# Move: repurposed to collapse the keyboard (operator decision, 2026-08-12).
+# Valve's Move repositions a floating window; ours has no floating window, so
+# it is rebound to dismiss instead, through the exact same `closed` flag the
+# close action uses -- the signal `deck-input-mapper.py` already reads at 4
+# call sites to actually hide the overlay.
+kb = osk.OnScreenKeyboard()
 check("the Move key emits no keystroke", kb.press_at("right", CX[7], CY[4]), [])
-check("...and records its own request", kb.request, "move")
-check("neither of them closed the keyboard", kb.closed, False)
+check("...and it collapses the keyboard, exactly like the close action",
+      kb.closed, True)
+check("Move does NOT also set a renderer request -- nothing reads it, so it "
+      "would be dead state (see the module's MOVE_KEY comment)",
+      kb.request, "")
+
+# The emoji key's request-recording and Move's close-collapsing must not leak
+# into each other or into a fresh instance -- closed and request are per-
+# keyboard state, not module-level.
+kb_emoji = osk.OnScreenKeyboard()
+kb_emoji.press_at("left", CX[0], CY[4])  # emoji
+check("pressing emoji on one keyboard leaves it open", kb_emoji.closed, False)
+kb_move = osk.OnScreenKeyboard()
+kb_move.press_at("right", CX[7], CY[4])  # Move
+check("pressing Move on a SEPARATE keyboard instance does not close the "
+      "first one too", kb_emoji.closed, False)
+check("...and a brand new instance still starts open, unaffected by either",
+      osk.OnScreenKeyboard().closed, False)
 
 # The `layer` and `close` actions survive with no key using them, so a future
 # layer needs no new mechanism. Driven directly, since nothing in the grid does.
 kb = osk.OnScreenKeyboard()
 check("the close action still sets the closed flag",
       (kb.press(osk.act("close", "x")), kb.closed), ([], True))
+# Move driven directly through the live MOVE_KEY object, not just by
+# coordinates -- proves the action code path itself, independent of where the
+# key happens to sit in the grid.
+kb = osk.OnScreenKeyboard()
+check("pressing MOVE_KEY itself sets closed, same as the close action",
+      (kb.press(osk.MOVE_KEY), kb.closed), ([], True))
 kb = osk.OnScreenKeyboard()
 check("the layer action still switches layer",
       (kb.press(osk.act("layer", "x", target="letters")), kb.layer_name),

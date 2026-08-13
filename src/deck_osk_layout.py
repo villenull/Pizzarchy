@@ -555,16 +555,36 @@ SPACE_KEY = act("", "space", span=8, units=UNITS_SPACE, code=e.KEY_SPACE,
 PASTE_KEY = act("", "Paste", span=2, units=UNITS_ROW5, code=e.KEY_INSERT,
                 modifiers=(e.KEY_LEFTSHIFT,))
 
-# ⚠️ TWO KEYS THAT NO RENDERER IMPLEMENTS YET, and they are here on purpose.
-# §9g's keyboard has them and the operator asked for "identical"; leaving a
-# visible hole in the bottom row would be the bigger divergence. `press()`
-# records the request in `OnScreenKeyboard.request` and does NOTHING else --
-# opening an emoji panel and repositioning an overlay are both renderer work,
-# and inventing behaviour for them here would be worse than recording the ask.
+# ⚠️ EMOJI IS THE ONE KEY LEFT THAT NO RENDERER IMPLEMENTS. §9g's keyboard has
+# it and the operator asked for "identical"; leaving a visible hole in the
+# bottom row would be the bigger divergence. `press()` records the request in
+# `OnScreenKeyboard.request` and does NOTHING else -- opening an emoji panel is
+# renderer work, and inventing behaviour for it here would be worse than
+# recording the ask.
 #
-# ⚠️ And these two land on OPPOSITE SIDES of the black/grey split, which is the
-# clearest evidence that it is not a rule: ☺ is black, Move is grey, and they
-# are the same width and the same kind of key (metrics §2, measured twice).
+# ⚠️ MOVE IS REPURPOSED, NOT UNIMPLEMENTED (operator decision, 2026-08-12,
+# made after using the physical keyboard). On Valve's reference this key
+# repositions a FLOATING keyboard window; ours is a fixed layer-shell overlay
+# with no window to move, so that behaviour was never something a renderer
+# could implement here. Rather than leave it dead, Move now collapses the
+# keyboard: `press()` routes `action == "move"` through the exact same
+# `self.closed = True` as `action == "close"`, which `deck-input-mapper.py`
+# already reads at four call sites to hide the overlay -- see that module's
+# `osk.closed` reads for the working consumer this reuses.
+#
+# `self.request` is deliberately NOT set for Move any more. It used to be, but
+# nothing anywhere reads `OnScreenKeyboard.request` for "move" -- not this
+# module, not the mapper, only this file's own tests, and those are updated
+# below to match. `closed` is a complete, already-tested signal on its own, so
+# setting `request = "move"` as well would be dead state left for a renderer
+# that does not exist, which is exactly what CLAUDE.md says not to leave
+# without saying so -- so it is dropped rather than kept "just in case".
+#
+# ⚠️ Emoji and Move still land on OPPOSITE SIDES of the black/grey split, which
+# remains the clearest evidence that split is not a rule: ☺ is black, Move is
+# grey, they are the same width and the same kind of key (metrics §2, measured
+# twice), and that classification has nothing to do with what either key's
+# action does.
 EMOJI_KEY = act("emoji", "☺", units=UNITS_ROW5)
 MOVE_KEY = act("move", "Move", span=3, units=UNITS_ROW5, is_action=False)
 
@@ -777,8 +797,10 @@ class OnScreenKeyboard:
         self.shift = "off"  # "off" | "once" | "locked"
         self.caps = False   # a SEPARATE modifier -- letters only, see the header
         self.closed = False
-        # The last renderer-owned request a press made ("emoji" | "move"), for
-        # a renderer to pick up and clear. "" once handled.
+        # The last renderer-owned request a press made ("emoji"), for a
+        # renderer to pick up and clear. "" once handled. Move used to land
+        # here too; it now goes through `closed` instead (see MOVE_KEY), so
+        # this only ever holds "emoji" or "".
         self.request = ""
         # Which pads currently have a thumb on them, for §9g's per-pad badge
         # gating. ⚠️ THE OVERLAY CANNOT COMPUTE THIS ITSELF: pad contact is an
@@ -888,10 +910,17 @@ class OnScreenKeyboard:
                                  f"{key.target!r}")
             self.layer_name = key.target
             return []
-        if key.action == "close":
+        if key.action in ("close", "move"):
+            # Move collapses the keyboard exactly like close (operator
+            # decision, 2026-08-12): Valve's Move repositions a floating
+            # window, ours has no floating window to move, so it is
+            # repurposed to dismiss instead. `self.request` is deliberately
+            # NOT set here -- nothing reads it (see MOVE_KEY's comment
+            # above), and `closed` is the one signal `deck-input-mapper.py`
+            # already consumes to hide the overlay.
             self.closed = True
             return []
-        if key.action in ("emoji", "move"):
+        if key.action == "emoji":
             self.request = key.action
             return []
         if key.action:
