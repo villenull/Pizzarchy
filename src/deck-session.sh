@@ -527,10 +527,16 @@ readonly REAL_UPDATE_HINT='sudo pacman -Syu'
 # --- Display rotation (PROGRESS.md 5.11) ----------------------------------
 #
 # The Deck's panel scans out 800x1280 PORTRAIT and is mounted rotated, so every
-# surface that does not rotate itself renders sideways. fbcon/rotate is 0 on
-# both stock Arch and Neptune, so no kernel this project ships corrects it and
-# the fix is per-surface, in userspace. Gaming Mode is exempt: gamescope
-# applies its own transform.
+# surface that does not rotate itself renders sideways. No kernel DEFAULT
+# corrects it -- fbcon/rotate is 0 out of the box on both stock Arch and
+# Neptune -- but the TTY is no longer left that way: this project sets
+# fbcon=rotate:1 on the kernel cmdline via the drop-in
+# /etc/limine-entry-tool.d/50-deck-fbcon-rotation.conf (PROGRESS.md 5.11;
+# measured live in /proc/cmdline and in every limine.conf entry 2026-08-12,
+# docs/findings/P22-deck-conformance-sweep.md 6). That fixes the text console
+# ONLY -- fbcon does not touch what a compositor draws -- so the greeter and
+# the desktop still need a per-surface userspace transform, which is what the
+# values below are. Gaming Mode is exempt: gamescope applies its own transform.
 #
 # transform 3 (270 deg) and NOT 1: both were applied on this hardware and
 # looked at, and 1 renders upside down. R-19 recorded transform,1 by inference.
@@ -1870,11 +1876,13 @@ stage_greeter_rotation() {
   # so the greeter reads a Hyprland Lua config and hl.monitor() applies there
   # exactly as it does in the user's session.
   #
-  # NOT fixed here, and not fixable this way:
-  #   - the Limine boot menu, which renders before any compositor exists. It is
-  #     the first thing a user sees and still has no known fix (R-19).
-  #   - the console/TTY, which needs fbcon=rotate:1 on the kernel cmdline. That
-  #     touches the boot chain and is held for separate operator approval.
+  # NOT fixed here, and not fixable this way -- both render before any
+  # compositor exists, and both are now fixed in the boot chain instead
+  # (operator-approved and seen on the panel 2026-08-11, PROGRESS.md 5.11):
+  #   - the Limine boot menu -- `interface_rotation: 90` in /boot/limine.conf.
+  #     R-19's recorded 270 was 180 degrees wrong.
+  #   - the console/TTY -- `fbcon=rotate:1` on the kernel cmdline, via
+  #     /etc/limine-entry-tool.d/50-deck-fbcon-rotation.conf.
   #
   # THE TWO SYSTEM PATHS THIS STAGE READS ARE PARAMETERS -- see "THE
   # VERIFICATION SEAM" above verify_update_stub. Production passes nothing and
