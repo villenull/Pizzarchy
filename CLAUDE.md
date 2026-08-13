@@ -35,9 +35,12 @@ partly superseded**; read the banner at its top before trusting any section.
 
 - **Limine only.** No GRUB, no systemd-boot paths. Deliberate, after real
   breakage with systemd-boot's UKI conventions (`docs/PLAN.md` §6.3).
-- **Target Omarchy 4.0, not 3.x.** The test Deck runs 3.8.4, so target and
-  test asset disagree — see `docs/PROGRESS.md` §2.3 before doing shell-integration
-  work.
+- **Target Omarchy 4.0, not 3.x.** ~~The test Deck runs 3.8.4, so target and
+  test asset disagree.~~ **Stale — corrected 2026-08-12 by reading the device:
+  the Deck runs `4.0.0.r1617.g6d7826d-1`, exactly `iso/RUNTIME`'s pin.** Target
+  and test asset agree. This line survived here for sessions after
+  `docs/PROGRESS.md` had corrected it, and it is auto-loaded every session —
+  the worst place for a stale fact.
 - **No keyboard or terminal for a standard install.** Every screen in
   `docs/PLAN.md` §6.1a must be reachable by Deck buttons/trackpads alone. This
   now includes typing a Wi-Fi password.

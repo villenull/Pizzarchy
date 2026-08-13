@@ -347,9 +347,41 @@ This is the finding that changes the design, and it inverts §4.0's table.
 
 ### 4.2 Suspend itself — s2idle, and the session is never torn down
 
+🔴 **THE FIRST ROW OF THIS TABLE IS WRONG, AND IT WAS MEASURED WRONG ON
+2026-08-12.** Read this before using anything below it.
+
+On the operator's Deck, `/sys/power/mem_sleep` reports **`s2idle [deep]`** — the
+brackets mark the *selected* mode, so this machine suspends to **deep / S3**,
+not s2idle. The cause is in the Valve kernel itself, logged at 0.27 s of boot:
+
+```
+[    0.269733] PM: Steam Deck quirk - no s2idle allowed!
+[    0.313295] ACPI: PM: (supports S0 S3 S4 S5)
+```
+*(`6.11.11-valve29-1-neptune-611`. MEASURED, twice, by two independent readers.)*
+
+**The kernel forbids s2idle on this hardware.** So the reasoning below — which
+inferred s2idle from the *absence* of any Valve config selecting a sleep mode —
+reached the wrong answer from correct evidence: nothing configures it because
+the kernel decides it, and it decides against s2idle.
+
+⚠️ **What does and does not follow.** S3 preserves RAM, so processes, the
+compositor and the session survive a suspend exactly as they would under s2idle;
+"the session is never torn down" still holds and was READ from gamescope-session
+directly, not derived from the sleep mode. What genuinely changes is **device
+re-initialisation on resume** — Wi-Fi, GPU, audio — which is where S3's real
+risk lives, and which nobody has exercised on this device. Do not over-correct
+this row into "everything above is void".
+
+⚠️ Also measured and **not** in the table: **`HandleLidSwitch=suspend` is live
+and unoverridden**, so logind ends the lid path in a *suspend* while §5.2 row D
+describes it ending in a *lock*. Two consumers, one of them undocumented.
+
+*(The original, now-superseded row follows.)*
+
 | Question | Answer | Tag |
 |---|---|---|
-| s2idle or deep (S3)? | **s2idle.** Nothing in Valve's shipped configs selects a sleep mode at all: no `mem_sleep_default` on the Deck's kernel cmdline (`jupiter-hw-support/etc/default/grub-steamos`, read in full), zero hits for `mem_sleep`/`s2idle`/`S0ix` across `owner:evlaV`, and no repo writes `/sys/power/mem_sleep`. The kernel config carries generic support plus `CONFIG_AMD_PMC=m` (the s2idle/LPS0 driver) | READ for the absence; **INFERRED** for the Deck specifically — no Valve file *names* s2idle. Corroborated on non-Deck SteamOS 3.8 by `ValveSoftware/SteamOS#2491`, where `/sys/power/mem_sleep` offers only `[s2idle]` |
+| s2idle or deep (S3)? | ~~**s2idle.**~~ **WRONG — see above.** Nothing in Valve's shipped configs selects a sleep mode at all: no `mem_sleep_default` on the Deck's kernel cmdline (`jupiter-hw-support/etc/default/grub-steamos`, read in full), zero hits for `mem_sleep`/`s2idle`/`S0ix` across `owner:evlaV`, and no repo writes `/sys/power/mem_sleep`. The kernel config carries generic support plus `CONFIG_AMD_PMC=m` (the s2idle/LPS0 driver) | READ for the absence; **INFERRED** for the Deck specifically — no Valve file *names* s2idle. Corroborated on non-Deck SteamOS 3.8 by `ValveSoftware/SteamOS#2491`, where `/sys/power/mem_sleep` offers only `[s2idle]` |
 | 🔴 Does the session survive suspend? | **Yes, untouched.** `gamescope-session` (268 lines) has **zero** matches for suspend/sleep/resume/inhibit/logind; its unit has no sleep-target dependencies; `ValveSoftware/gamescope` has no `PrepareForSleep` code; and `steamos-session-select` is invoked only for *mode switching*, **never on resume** | READ |
 | Then how does "resume to where you were" work? | It is **plain suspend/resume**. There is no restoration logic to copy, because SteamOS does not restore anything — it never leaves | READ |
 | Sleep hooks Valve ships | Two, in `steamos-customizations`: `modules-reload.sh`, which reloads the **ath11k** Wi-Fi driver across sleep but **only if `/home/deck/.force-ath11k-reload` exists** (opt-in; OLED-only, LCD is `rtw89`), and `hibernate-post.sh`, which is hibernate-only | READ |
