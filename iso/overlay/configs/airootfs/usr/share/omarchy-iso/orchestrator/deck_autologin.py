@@ -133,8 +133,21 @@ from .ui import error, info
 # upstream's configure_login writes. Two sources of one string is how this
 # project has been bitten before, so if a third appears it belongs in a
 # test/unit/test-duplicated-upstream-facts.sh row rather than in another module.
+# 🔴 BOTH are BARE basenames, WITHOUT the .desktop extension -- exactly what
+# src/deck-session.sh's own constants are ("the basename of the .desktop in a
+# wayland-sessions directory, without the extension", its lines 134-137), and
+# the format find_session() below requires because it appends `.desktop` itself.
+# DESKTOP_SESSION was briefly written as "omarchy.desktop" (WITH the extension),
+# which made find_session look for `omarchy.desktop.desktop` -- a file that never
+# exists -- so on a real target the desktop fallback resolved to "failed" and,
+# because autologin is critical=True, aborted the whole install right after the
+# base setup finished. The unit fixture hid it by building its own file from the
+# same `{DESKTOP_SESSION}.desktop` expression, so it tested a lookup against a
+# file it had named with the bug's own convention. Found by an actual install
+# (T4 finding §14); the bare form is asserted against deck-session.sh in
+# test-deck-autologin.py §2.
 GAMING_SESSION = "gamescope-wayland"
-DESKTOP_SESSION = "omarchy.desktop"
+DESKTOP_SESSION = "omarchy"
 
 # Where a .desktop has to exist for SDDM to resolve a Session=. Order and
 # contents mirror deck-session-select's own loop.
@@ -152,7 +165,7 @@ SDDM_DROPIN_MODE = 0o644
 
 # SDDM's own record of the last session/user. Not the switch -- [Autologin] is
 # the switch -- but the greeter pre-selects from it, so leaving it saying
-# 'omarchy.desktop' while [Autologin] says gamescope would make the two disagree
+# 'omarchy' while [Autologin] says gamescope would make the two disagree
 # the moment anything did show a greeter.
 SDDM_STATE_REL = "var/lib/sddm/state.conf"
 SDDM_STATE_MODE = 0o600
@@ -446,7 +459,7 @@ def configure_autologin(ctx) -> dict:
     if status == "failed":
         record["status"] = "failed"
         record["error"] = sanitize_text(
-            f"neither {GAMING_SESSION}.desktop nor {DESKTOP_SESSION} exists in "
+            f"neither {GAMING_SESSION}.desktop nor {DESKTOP_SESSION}.desktop exists in "
             f"{' or '.join('/' + d for d in SESSION_DIRS)} on the target, so there is no "
             "session to log in to. Refusing to write a Session= SDDM cannot resolve: under "
             "autologin that is a login loop with no session picker to escape with.",
@@ -480,7 +493,7 @@ def configure_autologin(ctx) -> dict:
         # session name: the machine boots and logs in, just not into Gaming Mode.
         record["error"] = sanitize_text(
             f"{GAMING_SESSION}.desktop is not installed on the target, so autologin was "
-            f"pointed at {DESKTOP_SESSION} instead. The Deck boots to Desktop Mode, not "
+            f"pointed at {DESKTOP_SESSION}.desktop instead. The Deck boots to Desktop Mode, not "
             "Gaming Mode. The ISO's package set is missing the Gaming Mode session.",
             limit=400,
         )

@@ -298,6 +298,36 @@ check(
 )
 check("…which is a zz- name, i.e. one that can sort last", deck_autologin.SDDM_DROPIN_NAME.startswith("zz-"), True)
 
+# 🔴 Both session constants MUST be bare basenames with NO .desktop extension:
+# find_session() appends `.desktop` itself, and deck-session.sh's authority is
+# explicit ("the basename ... without the extension"). A constant carrying the
+# extension makes find_session look for `<name>.desktop.desktop`, which never
+# exists -- the exact bug that shipped as DESKTOP_SESSION="omarchy.desktop" and
+# aborted a real install after the base setup finished (T4 finding §14). This is
+# NON-tautological on purpose: it checks the STRING, not a fixture the test itself
+# named with the same expression the code uses.
+check(
+    "🔴 GAMING_SESSION is a bare basename, no .desktop suffix (find_session appends it)",
+    deck_autologin.GAMING_SESSION.endswith(".desktop"),
+    False,
+)
+check(
+    "🔴 DESKTOP_SESSION is a bare basename, no .desktop suffix -- the omarchy.desktop.desktop bug",
+    deck_autologin.DESKTOP_SESSION.endswith(".desktop"),
+    False,
+)
+# And DESKTOP_SESSION is the desktop session deck-session.sh resolves FIRST
+# (its `for cand in omarchy hyprland-uwsm hyprland` loop), same as GAMING_SESSION
+# is pinned to deck-session.sh above -- so the image and the on-device tool name
+# the same desktop session, not just the same gaming one.
+desk = re.search(r"for cand in (\S+)", session_sh)
+check_true("scraped the desktop-session candidate list out of deck-session.sh", desk)
+check(
+    "🔴 DESKTOP_SESSION matches deck-session.sh's first desktop candidate",
+    deck_autologin.DESKTOP_SESSION,
+    desk.group(1) if desk else None,
+)
+
 
 print("\n## 3. deck_user — the account is READ off the target, never guessed")
 
