@@ -191,7 +191,10 @@ Two shapes of the same idea. `docs/tasks/T5-fork-plan.md` §2 already adopts
 **built by us from a pinned `basecamp/omarchy` checkout**; patching that
 checkout before the build is one line of plumbing — this is the **S7** seam
 `docs/findings/T9-lock-wake-and-blank-timing.md` §5.2 proposed
-(`iso/overlay-runtime/patches/`).
+(`iso/overlay-runtime/patches/`). ⚠️ **That path never existed.** The payload
+lives in `src/omarchy-deck-patches/` and ships flat beside the `omarchy-deck`
+PKGBUILD; the task doc §5 is authoritative and guard 6.6 (landed `0af792f`)
+reads the shipped copy.
 
 **Rejected as *the* mechanism, and this contradicts T9 §5.2 deliberately.**
 Three reasons, in order of weight:
@@ -390,7 +393,7 @@ redundant:
 ### Tests, by tier
 
 - **[B] Build-time — guard 6.6 (new).** `iso/bin/build` runs `git apply
-  --check` for every `iso/overlay-runtime/patches/*.patch` against the pinned
+  --check` for every runtime patch against the pinned
   `basecamp/omarchy` checkout that T5b already fetches for `--local-source`,
   and **fails the build** on a reject. This is the cheapest possible discovery
   of "the RUNTIME pin moved and our patch is stale" — before an ISO exists.

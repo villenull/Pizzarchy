@@ -11,7 +11,8 @@ applier (`omarchy-deck-apply-patches`), the ALPM re-apply hook
 (`omarchy-deck-patch-check.service`) and two patches with `.meta` files
 (`0010-lock-blank-timer-20s`, `0020-limine-interface-rotation`), plus
 `test/unit/test-t12-patch-applier.sh` at **38 passing assertions**.
-**Still owed:** `bin/build`'s guard 6.6, registering the applier as a
+**Still owed:** ~~`bin/build`'s guard 6.6~~ ✅ **landed 2026-08-12**;
+registering the applier as a
 `configure_deck` step, shipping the payload in the `omarchy-deck` package, and
 every `[V]`/`[H]` row in §2 — including the destruction test. Check §2's boxes
 against the tree before believing any of them.
@@ -225,7 +226,13 @@ assertion pass because the check never ran.
 
 ### Verification status against §2
 
-- **[B]** guard 6.6 — **not done**, belongs to T5b (see 4 above).
+- **[B]** guard 6.6 — ✅ **DONE 2026-08-12** (`0af792f`). `--check` only, every
+  failure collected, and each patch's consequence line derived from its own
+  `.meta` `requirement:`. **§5's open question is answered: it prefers the copy
+  the package SHIPS**, falling back to `src/omarchy-deck-patches/patches/`. ⚠️
+  And the shipped copy is **flat beside the PKGBUILD**, not under `patches/` —
+  makepkg's `source=()` cannot reach outside the recipe directory. §1 point 4
+  still names the `src/` path as the subject; that is now the fallback.
 - **[B]** the five applier unit tests — **done**, and superset: 38 assertions,
   every negative asserting exit code, diagnosis *and* that the target file is
   byte-identical afterwards. Mutation-tested: 34 mutations, **0 survivors**.
