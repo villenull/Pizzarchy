@@ -80,7 +80,15 @@ def deck_steps() -> list[DeckStep]:
     in the traceback, and so this module stays importable while later slices
     are mid-flight.
     """
-    from . import deck_autologin, deck_patches, deck_session_settings, deck_wifi
+    from . import (
+        deck_autologin,
+        deck_menu_lock,
+        deck_monitors,
+        deck_patches,
+        deck_rotation,
+        deck_session_settings,
+        deck_wifi,
+    )
 
     return [
         DeckStep("wifi", deck_wifi.carry_wifi_step, critical=False),
@@ -99,7 +107,50 @@ def deck_steps() -> list[DeckStep]:
         # counter-argument (the idle lock is not cosmetic) rather than hiding it.
         DeckStep("session_dconf", deck_session_settings.session_dconf_step, critical=False),
         DeckStep("idle_policy", deck_session_settings.idle_policy_step, critical=False),
-        # T5f: 5.2 rotations, before finalize_limine_boot runs limine-update.
+        # T5f, 5.2. Two steps, not one: the boot menu and the kernel console are
+        # different surfaces, written through different mechanisms, destroyed by
+        # different events, and verified against different parsers. Both
+        # non-critical -- deck_rotation.py argues it, and the short form is that
+        # the danger is in the WRITE, not in the skip: a step that writes nothing
+        # leaves the boot chain exactly as upstream produced it, while a sideways
+        # menu still boots, autologins and reaches Gaming Mode by controller.
+        #
+        # 🔴 Before `finalize_limine_boot`, which is what makes the placement
+        # load-bearing rather than tidy: that phase runs `limine-update`, which
+        # regenerates the entry blocks in the very file limine_rotation writes a
+        # global into. The header survives it (measured 2026-08-11); the step
+        # asserts the entry region it did not touch is byte-identical.
+        DeckStep("limine_rotation", deck_rotation.limine_rotation_step, critical=False),
+        DeckStep("tty_rotation", deck_rotation.tty_rotation_step, critical=False),
+        # T5f, 5.2's FOURTH surface -- the desktop's own `hl.monitor` transform
+        # and scale, in the per-user ~/.config/hypr/monitors.lua. A third step
+        # rather than a branch of the two above, because it is a different
+        # mechanism again: not a boot-chain file at all but a Lua dotfile that
+        # REPLACES Omarchy's shipped default wholesale, that has to be written
+        # into both /etc/skel and the created user's home (§3 trap (a)), and
+        # that Hyprland discards ENTIRELY on a syntax error while
+        # `hyprctl configerrors` stays clean.
+        #
+        # `critical=False`, argued in deck_monitors.py: the failure is a
+        # sideways, wrongly-scaled DESKTOP, and the Deck still boots, still
+        # autologins and still reaches Gaming Mode -- which gamescope rotates
+        # itself and which never reads this file. That is a degradation, not
+        # deck_autologin's no-way-in-at-all. The module states the honest
+        # weakness too: a sideways boot menu is on screen for three seconds and
+        # a sideways desktop is the whole of Desktop Mode.
+        #
+        # ⚠️ transform = 3 here and interface_rotation: 90 in the step above
+        # describe ONE physical panel. Limine and Hyprland use OPPOSITE sign
+        # conventions. Both were seen on the screen; do not reconcile them.
+        DeckStep("desktop_rotation", deck_monitors.desktop_rotation_step, critical=False),
+        # T5f, 5.6's third lock producer -- the `system.lock` row in Omarchy's
+        # own menu. `critical=False` is argued at length in deck_menu_lock.py,
+        # and it is the closest call in this registry: its failure leaves a
+        # handheld that can be put behind a password prompt it cannot answer.
+        # What keeps it non-critical is that the escape exists -- a ten-second
+        # power hold reboots into the autologin `deck_autologin` guarantees --
+        # whereas the greeter that step defends against has no escape at all.
+        DeckStep("menu_lock_row", deck_menu_lock.menu_lock_row_step, critical=False),
         #
         # T12. `critical=False` is argued at length in deck_patches.py's
         # docstring (decision 2) -- it deliberately overrules

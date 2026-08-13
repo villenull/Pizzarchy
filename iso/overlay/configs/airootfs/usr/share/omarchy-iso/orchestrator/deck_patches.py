@@ -130,29 +130,63 @@ recorded outcome rather than an early ``return`` with no trace:
 (and ``status="error"`` is what ``deck_configure``'s registry writes if this
 module raises something unforeseen -- four distinguishable states, no overlap.)
 
-🔴 A NOTE ON GUARD 6.4a, WHICH IS WHY THE PATH BELOW IS COMPOSED
-================================================================
+🔴 GUARD 6.4a, AND WHY THE PATH BELOW IS A LITERAL AGAIN
+========================================================
 
 ``iso/bin/build``'s guard 6.4a greps this whole directory for
 ``/usr/bin/omarchy-[A-Za-z0-9._-]+`` and **fails the build** unless every match
-exists in the pinned ``basecamp/omarchy`` checkout's ``bin/``. Its premise is
-"the orchestrator only shells out to runtime binaries", and this step is the
-first thing that breaks that premise: ``omarchy-deck-apply-patches`` comes from
-**our** package, not from the runtime, so a literal absolute path here would
-fail an otherwise correct build with a wrong diagnosis.
+is shipped by a provider it knows about. Its original premise was "the
+orchestrator only ever shells out to the pinned runtime's binaries", and this
+step is the first thing that broke it: the applier comes from **our**
+``omarchy-deck`` package, which the pinned ``basecamp/omarchy`` checkout will
+never ship. Against that single provider a literal path here failed an
+otherwise correct build with a *wrong* diagnosis -- "the pins have drifted"
+sends the reader off to compare two commits that are both fine.
 
-The path is therefore assembled from ``APPLIER_DIR`` + ``APPLIER_NAME``. That
-is a dodge, so it is written down rather than left to be discovered: guard 6.4a
-needs to learn about binaries the ``omarchy-deck`` package ships (a second
-source list, the way 6.4b checks the real artifact), and until it does, this
-composition is load-bearing.
+**The dodge that lived here, and is now gone.** For a day this constant was
+deliberately not written down: it was assembled from ``APPLIER_DIR`` +
+``APPLIER_NAME`` purely so that grep could not see it, and this docstring was
+written so as never to spell the path out even in prose. It worked and it was
+fragile -- the next person to write the obvious literal got the wrong
+diagnosis, six gigabytes into a build. What retired it is that **both halves of
+the guard now understand our package as a provider**:
 
-⚠️ That grep reads the whole file, docstrings and comments included, so the
-absolute path must not appear even in prose -- which is why this paragraph
-never spells it out. ``test/unit/test-deck-configure-patches.py`` runs guard
-6.4a's own expression over this file and asserts zero matches, and separately
-asserts that ``APPLIER_ABS`` still composes to the exact path the package
-installs -- so neither the path nor the reason can drift silently.
+* **6.4a** derives a second provider set from
+  ``configs/deck/pkgbuilds/omarchy-deck/PKGBUILD``'s explicit
+  ``$pkgdir/usr/bin/<name>`` targets and takes the union with the runtime's
+  ``bin/``. It refuses to run at all if that derivation comes up empty against
+  a PKGBUILD that does write into ``/usr/bin`` -- under-deriving would report a
+  binary we ship perfectly well as shipped by nobody.
+* **6.4b** asks the same question of the **built** artifact: it reads our
+  ``omarchy-deck`` package out of the offline mirror and adds its ``usr/bin/*``
+  members to the union. A name no provider ships is rejected, a package of ours
+  that this build owed and the mirror does not have is rejected, and one whose
+  version disagrees with the recipe is rejected. ``test/unit/test-iso-build.sh``
+  §22 covers that half.
+
+So the literal below now passes, and it is not a bypass: a name **neither**
+provider ships is still a hard build failure, and 6.4a's message spells out the
+two different bugs that wear that shape (drifted pins vs. a package() body that
+does not install it).
+
+⚠️ **If you put a path here that our package does not ship, this is where the
+answer is.** The build fails at guard 6.4a, before Docker, naming the binary and
+both provider sets; if the recipe lists it but the archive turns out not to
+contain it, 6.4b catches it after the build. The cheap local signal is
+``test/unit/test-deck-configure-patches.py`` §3, which runs guard 6.4a's own
+expression over this file and asserts that every name it finds is one the
+``omarchy-deck`` PKGBUILD installs into ``/usr/bin`` -- both sides derived, so
+they cannot drift apart quietly. That assertion used to assert the opposite
+(zero matches, the dodge); it was inverted when the guards were fixed.
+
+⚠️ That grep still reads the **whole file**, docstrings and comments included,
+and it cannot tell prose from code. So an ``omarchy-`` binary path written in
+this docstring as an *example of a failure* becomes a name the build demands a
+provider for -- which is why no such example appears above, and why the
+expression is quoted with its character class intact (``...omarchy-[A-Za-z...``
+does not match itself; an elided one, written with dots, does, and resolves to
+a binary called ``omarchy-`` that nobody ships). This is not hypothetical: the
+suite's §3 caught exactly that mistake in the first draft of this paragraph.
 """
 
 from __future__ import annotations
@@ -166,12 +200,19 @@ from .ui import error, info
 
 # --- what the omarchy-deck package puts on the target ----------------------
 #
-# See the guard 6.4a note in the module docstring before joining these two into
-# a literal.
-APPLIER_DIR = "/usr/bin"
-APPLIER_NAME = "omarchy-deck-apply-patches"
-APPLIER_ABS = f"{APPLIER_DIR}/{APPLIER_NAME}"
-APPLIER_REL = f"usr/bin/{APPLIER_NAME}"
+# 🔴 A LITERAL, on purpose, and the one place this path is written down. It used
+# to be composed out of two halves to hide it from a grep -- see "GUARD 6.4a,
+# AND WHY THE PATH BELOW IS A LITERAL AGAIN" in the module docstring before
+# changing the name, because the build now checks this string against what our
+# package actually installs.
+#
+# The other two are derived from it rather than repeated: APPLIER_NAME is what
+# the package's file is called (asserted against the real file in
+# src/omarchy-deck-patches/) and APPLIER_REL is the same path under the target
+# mount. One source of truth, so a rename cannot half-happen.
+APPLIER_ABS = "/usr/bin/omarchy-deck-apply-patches"
+APPLIER_NAME = APPLIER_ABS.rsplit("/", 1)[-1]
+APPLIER_REL = APPLIER_ABS.removeprefix("/")
 
 # The applier's own defaults, as relative paths so this module can look at them
 # through the target mount. They are NOT passed to it as flags -- see decision 1

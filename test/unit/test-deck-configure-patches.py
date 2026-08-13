@@ -258,31 +258,112 @@ check("…nor pass --verify, which would report without applying anything", "--v
 check("the target is stringified, so a Path argument works", deck_patches.chroot_command(pathlib.Path("/mnt"))[1], "/mnt")
 
 
-print("\n## 3. 🔴 guard 6.4a — the applier path is COMPOSED, not a literal")
+print("\n## 3. 🔴 guard 6.4a — the applier path is a LITERAL, and it RESOLVES")
 
 # iso/bin/build's guard 6.4a greps this directory for /usr/bin/omarchy-* and
-# fails the build unless every match exists in the pinned basecamp/omarchy
-# checkout's bin/. Ours comes from the omarchy-deck package instead. The
-# composition below is therefore load-bearing, and both halves are asserted so
-# that neither the path nor the reason can drift silently.
+# fails the build unless every match is shipped by a provider it knows about.
+# Ours comes from the omarchy-deck package rather than from the pinned runtime,
+# and for one day that was DODGED: deck_patches.py composed the path out of two
+# halves so the grep could not see it, and this section asserted ZERO matches.
+#
+# 🔴 THAT ASSERTION IS INVERTED HERE, because the guard was fixed on both
+# halves: 6.4a now derives a second provider set from the omarchy-deck
+# PKGBUILD's explicit $pkgdir/usr/bin/<name> targets, and 6.4b re-asks the same
+# question of the package the build actually produced (test-iso-build.sh §22).
+# So the literal is required to be present — and, the part that makes this
+# worth anything, it is required to RESOLVE: every name the orchestrator calls
+# here has to be one our PKGBUILD installs into /usr/bin.
+#
+# BOTH SIDES ARE DERIVED. The names come out of deck_patches.py through guard
+# 6.4a's own expression; the provider set comes out of the PKGBUILD through the
+# guard's own second expression; and both expressions are read out of
+# iso/bin/build rather than copied, so this suite cannot go on testing a guard
+# the build no longer runs. Nothing below names the binary, so the two cannot
+# pass while drifting apart.
+BUILD_SCRIPT = REPO_ROOT / "iso" / "bin" / "build"
+DECK_PKGBUILD = (
+    REPO_ROOT / "iso" / "overlay" / "configs" / "deck" / "pkgbuilds" / "omarchy-deck" / "PKGBUILD"
+)
 patches_text = (OVERLAY_ORCH / "deck_patches.py").read_text()
-# Guard 6.4a's own expression, over the WHOLE file — it greps, so a docstring
-# or a comment mentioning the path trips it exactly as code would.
-GUARD_64A_RE = r"/usr/bin/omarchy-[A-Za-z0-9._-]+"
-check(
-    "🔴 no bare /usr/bin/omarchy-* literal survives anywhere in deck_patches.py "
-    "(guard 6.4a greps the whole file and would fail the build with a wrong diagnosis)",
-    re.findall(GUARD_64A_RE, patches_text),
-    [],
+build_text = BUILD_SCRIPT.read_text()
+pkgbuild_text = DECK_PKGBUILD.read_text()
+
+
+def guard_expression(what: str, pattern: str, fallback: str) -> str:
+    """Pull one of guard 6.4a's greps out of iso/bin/build.
+
+    A fallback is returned so the rest of the section still runs, but failing to
+    find the expression is itself a FAILURE: a suite that quietly substitutes
+    its own idea of the guard is asserting against a guard that may no longer
+    exist.
+    """
+    found = re.search(pattern, build_text)
+    check_true(f"guard 6.4a's {what} expression is readable out of iso/bin/build", found)
+    return found.group(1) if found else fallback
+
+
+# The orchestrator side: what the guard considers a call to a target binary.
+GUARD_64A_RE = guard_expression(
+    "orchestrator-grep",
+    r"grep -rhoE '([^']+)' \"\$ORCHESTRATOR_DIR\"",
+    r"/usr/bin/omarchy-[A-Za-z0-9._-]+",
+)
+# The provider side: what the guard considers our package to ship.
+GUARD_64A_PKGBUILD_RE = guard_expression(
+    "PKGBUILD-provider",
+    r"grep -oE '([^']+)' \"\$DECK_PKGBUILD\"",
+    r"[$][{]?pkgdir[}]?/usr/bin/[A-Za-z0-9._-]+",
+)
+
+
+def called_bins(text: str) -> list[str]:
+    """Names guard 6.4a would demand a provider for, from a file's whole text.
+
+    The trailing-dot strip is the guard's own (`sed -E 's/\\.+$//'`): a name at
+    the end of a sentence in a comment must not be reported as a binary called
+    'omarchy-foo.'.
+    """
+    return sorted({re.sub(r"\.+$", "", m.split("/usr/bin/", 1)[1]) for m in re.findall(GUARD_64A_RE, text)})
+
+
+def pkgbuild_bins(text: str) -> list[str]:
+    """Names the PKGBUILD's package() body installs into /usr/bin."""
+    return sorted({m.split("/usr/bin/", 1)[1] for m in re.findall(GUARD_64A_PKGBUILD_RE, text)})
+
+
+CALLED = called_bins(patches_text)
+PROVIDED = pkgbuild_bins(pkgbuild_text)
+
+check_true(
+    "🔴 the applier path is a LITERAL now: guard 6.4a's own expression finds a "
+    "/usr/bin/omarchy-* in deck_patches.py (the composed-path dodge is retired)",
+    CALLED,
 )
 check(
-    "…and the expression itself still finds one when there is one "
-    "(a guard with an empty subject is not a passing guard)",
-    bool(re.findall(GUARD_64A_RE, "x = '/usr/bin/omarchy-deck-apply-patches'")),
+    "…and the literal it finds is the constant this module actually calls",
+    deck_patches.APPLIER_NAME in CALLED,
     True,
 )
 check(
-    "…but the composed value is exactly the path the package installs",
+    "…the expression is not vacuous — it still finds one when there is one",
+    bool(re.findall(GUARD_64A_RE, "x = '/usr/bin/omarchy-deck-apply-patches'")),
+    True,
+)
+check_true(
+    "…and neither is the provider side: the omarchy-deck PKGBUILD names at "
+    "least one $pkgdir/usr/bin target (guard 6.4a build_fail's on an empty "
+    "derivation rather than reporting our own binaries as shipped by nobody)",
+    PROVIDED,
+)
+check(
+    "🔴 …so guard 6.4a RESOLVES it: every /usr/bin/omarchy-* deck_patches.py "
+    "names — code, comment or docstring, the guard greps them all — is one the "
+    "omarchy-deck PKGBUILD installs into /usr/bin",
+    sorted(set(CALLED) - set(PROVIDED)),
+    [],
+)
+check(
+    "…the value is exactly the path the package installs",
     deck_patches.APPLIER_ABS,
     "/usr/bin/omarchy-deck-apply-patches",
 )

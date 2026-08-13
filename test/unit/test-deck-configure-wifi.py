@@ -765,6 +765,28 @@ check(
     sorted(s.critical for s in deck_configure.deck_steps() if s.name in ("session_dconf", "idle_policy")),
     [False, False],
 )
+# T5f's three steps, asserted from the registry side for the same reason. The
+# detail lives in test-deck-rotation.py and test-deck-menu-lock.py.
+check("T5f's Limine menu rotation step is registered", "limine_rotation" in step_names, True)
+check("T5f's TTY rotation step is registered", "tty_rotation" in step_names, True)
+check("T5f's menu Lock-row step is registered", "menu_lock_row" in step_names, True)
+check(
+    "…and all three are non-critical (deck_rotation.py: the danger is in the "
+    "write, not in the skip; deck_menu_lock.py: a locked Deck still has the "
+    "power-hold escape a greeter does not)",
+    sorted(
+        s.critical
+        for s in deck_configure.deck_steps()
+        if s.name in ("limine_rotation", "tty_rotation", "menu_lock_row")
+    ),
+    [False, False, False],
+)
+check(
+    "🔴 …and the two rotation steps run BEFORE the T12 applier — the phase as a "
+    "whole has to precede finalize_limine_boot's limine-update",
+    step_names.index("tty_rotation") < step_names.index("patches"),
+    True,
+)
 check(
     "🔴 exactly one step in the whole registry is critical",
     [s.name for s in deck_configure.deck_steps() if s.critical],
