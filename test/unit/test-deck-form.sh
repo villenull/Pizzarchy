@@ -815,6 +815,92 @@ deck_form_passwords_match "hunter2" "hunter2" || fail "identical passwords must 
 if deck_form_passwords_match "hunter2" "hunter3"; then fail "different passwords must NOT match"; fi
 pass "deck_form_passwords_match"
 
+echo "--- T4 bug 2 regression: the username retry screen must not grow unboundedly ---"
+
+# docs/findings/T4-controller-only-install-first-run.md §5, MEASURED (twice,
+# bit-identical): rows=16/22/28/34 across four failed username submits --
+# growing by exactly 6 every attempt, never settling. Cause: every retry in
+# omarchy_prompt_username warned with a bare `deck_form_warn` on top of
+# `deck_form_text_prompt`'s OWN per-call warnings (mapper-not-found, the
+# console-keymap notice), and NOTHING ever cleared the screen between
+# attempts -- unlike upstream's own retry loop, whose every `notice()` call
+# starts with `clear_logo` (READ, configurator:180-185) before printing the
+# new message, so upstream's screen is always "logo + this attempt's one
+# message", never every attempt's messages stacked on top of each other.
+#
+# Reproduced here without a real console: this suite's `clear_logo` stub is
+# a silent no-op everywhere else (`:;`, line 104) -- here it needs to be
+# OBSERVABLE, so it is temporarily replaced with one that prints a marker.
+# The assertion is not "clear_logo gets called" alone (that would pass even
+# if warnings kept accumulating around it) -- it is that the chunk of output
+# BETWEEN two consecutive clears stays the SAME SIZE across repeated invalid
+# attempts. The bug printed a bounded amount too, on every single attempt;
+# what made it unbounded is that each attempt's output landed on top of
+# every prior one instead of replacing it.
+work_growth="$work/username-growth"
+mkdir -p "$work_growth"
+printf '<EMPTY>\n<EMPTY>\n<EMPTY>\n<EMPTY>\ndeck\n' >"$work_growth/queue"
+
+orig_clear_logo=$(declare -f clear_logo)
+# shellcheck disable=SC2329  # invoked indirectly, by name, from omarchy_prompt_username's retry loop
+clear_logo() { printf '\n===DECK-FORM-TEST-CLEAR===\n' >&2; }
+
+out=$(PATH="$work/bin-fakegum:$PATH" \
+      DECK_TEXT_PROMPT_LIZARD_SYSFS="$work_growth/no-lizard" \
+      DECK_TEXT_PROMPT_MAPPER_BIN="$work_growth/no-mapper" \
+      DECK_SETUP_FORM_SH_OVERRIDE="$work_growth/does-not-exist.sh" \
+      FAKE_GUM_INPUT_QUEUE="$work_growth/queue" \
+      omarchy_prompt_username 2>"$work_growth/err.log")
+eval "$orig_clear_logo"
+
+[[ $out == deck ]] ||
+  fail "the bug-2 regression harness is broken -- omarchy_prompt_username did not reach the valid 'deck' submission" "got: $out; log: $(cat "$work_growth/err.log")"
+
+# ⚠️ `grep -c` exits 1 (not just "prints 0") when the count is zero -- against
+# the PRE-FIX code (no clear_logo call at all) that would abort this suite's
+# own `set -e` right here, before the assertion below ever got to say why.
+# `|| true` keeps that a reported failure, not a crashed suite.
+clears=$(LC_ALL=C grep -c '===DECK-FORM-TEST-CLEAR===' "$work_growth/err.log" || true)
+((clears >= 4)) ||
+  fail "expected a screen clear on every one of the 4 invalid attempts -- clear_logo ran $clears times" "$(cat "$work_growth/err.log")"
+
+# Line counts of the segments BETWEEN consecutive clears -- what actually
+# stays on screen during each retry after that retry's own repaint. The bug
+# made these grow (16/22/28/34); the fix must make them equal.
+declare -a segment_sizes=()
+seg_count=0
+saw_first_clear=0
+while IFS= read -r line; do
+  if [[ $line == *"===DECK-FORM-TEST-CLEAR==="* ]]; then
+    # ⚠️ `((cond)) && stmt` as a bare statement (not an if/while condition,
+    # not guarded by `||`) trips this suite's own `set -e` the moment cond
+    # is false -- `&&`'s overall exit status is then the FALSE left side's,
+    # not 0. Plain `if` avoids it; found by running this exact loop, which
+    # silently killed the suite on the very first marker line.
+    if [[ $saw_first_clear -eq 1 ]]; then
+      segment_sizes+=("$seg_count")
+    fi
+    saw_first_clear=1
+    seg_count=0
+    continue
+  fi
+  if [[ $saw_first_clear -eq 1 ]]; then
+    seg_count=$((seg_count + 1))
+  fi
+done <"$work_growth/err.log"
+segment_sizes+=("$seg_count")
+
+[[ ${#segment_sizes[@]} -ge 3 ]] ||
+  fail "not enough clear-delimited segments to prove boundedness (need at least 3, got ${#segment_sizes[@]})" "${segment_sizes[*]:-none}"
+
+first_size=${segment_sizes[0]}
+for size in "${segment_sizes[@]}"; do
+  [[ $size -eq $first_size ]] ||
+    fail "T4 bug 2: the on-screen output between retries is NOT bounded -- segment sizes were ${segment_sizes[*]} (all should equal $first_size, the way upstream's own clear_logo-per-notice repaint keeps every retry the same size)" \
+         "$(cat "$work_growth/err.log")"
+done
+pass "four consecutive invalid username submissions produce a constant-size screen each time (${segment_sizes[*]} lines), not the growing 16/22/28/34 the real ISO measured"
+
 echo "--- S3 reserved-username list: sourced, never copied ---------------------"
 
 cat >"$work/setup-form-fixture.sh" <<'EOF'
@@ -849,6 +935,54 @@ out=$(DECK_SETUP_FORM_SH_OVERRIDE="$work/setup-form-no-array.sh" deck_form_load_
 LC_ALL=C grep -qF "defines no" <<<"$out" ||
   fail "load_reserved_usernames must explain WHY it failed when the array is missing" "got: $out"
 pass "load_reserved_usernames fails loudly (not silently-empty) when the vendored file exists but has the wrong shape"
+
+echo "--- T4 bug 1 regression: loading the reserved list must not clobber the overrides ---"
+
+# docs/findings/T4-controller-only-install-first-run.md §2/§12: the real ISO
+# ran UPSTREAM's own unmodified omarchy_prompt_identity/_hostname/_timezone
+# (gum's literal "Full name>" placeholder on screen) even though deck-form.sh
+# defines all three under the exact names upstream calls, sourced in the
+# right order. Root cause, found by instrumenting the actual post-build
+# `configurator` + this file outside a VM (bash's own name resolution, not a
+# hardware or timing question): `deck_form_load_reserved_usernames` used to
+# `source "$setup_form"` DIRECTLY -- and $setup_form's default,
+# /usr/share/omarchy-iso/setup-form.sh, is the EXACT file build-iso.sh
+# vendors upstream's own setup-form.sh to (READ,
+# iso/upstream/builder/build-iso.sh: `cp "$setup_form"
+# ".../usr/share/omarchy-iso/setup-form.sh"`) -- the same file that already
+# defines omarchy_prompt_identity/_hostname/_timezone/_username/_password.
+# `source` redefines a function in whatever shell actually runs it, so the
+# instant a user typed one PATTERN-VALID username (calling this function
+# from inside omarchy_prompt_username's own loop), that source silently
+# reinstalled upstream's own prompt bodies over deck-form.sh's, for the rest
+# of the install -- proven directly: sourcing the real vendored
+# setup-form.sh flipped `declare -f omarchy_prompt_identity` from
+# `deck_form_identity_body` to upstream's body, in one call, in a plain bash
+# process replaying the real configurator's own source order.
+#
+# So this fixture does what the REAL setup-form.sh does: define
+# RESERVED_USERNAMES *and* one of the override names, to prove the fix
+# (sourcing in a subshell, only the array crosses back out) actually holds
+# even when the sourced file collides on a name -- not just when it happens
+# not to.
+cat >"$work/setup-form-hostile.sh" <<'EOF'
+RESERVED_USERNAMES=(root bin daemon)
+omarchy_prompt_identity() { printf 'UPSTREAM-IDENTITY-RAN\n'; }
+omarchy_prompt_hostname() { printf 'UPSTREAM-HOSTNAME-RAN\n'; }
+EOF
+before_identity=$(declare -f omarchy_prompt_identity)
+before_hostname=$(declare -f omarchy_prompt_hostname)
+DECK_SETUP_FORM_SH_OVERRIDE="$work/setup-form-hostile.sh" deck_form_load_reserved_usernames ||
+  fail "load_reserved_usernames must still succeed (and load the array) against a fixture that ALSO defines an override name"
+after_identity=$(declare -f omarchy_prompt_identity)
+after_hostname=$(declare -f omarchy_prompt_hostname)
+[[ $before_identity == "$after_identity" ]] ||
+  fail "T4 bug 1: deck_form_load_reserved_usernames let the sourced setup-form.sh redefine omarchy_prompt_identity in THIS shell" "$after_identity"
+[[ $before_hostname == "$after_hostname" ]] ||
+  fail "T4 bug 1: deck_form_load_reserved_usernames let the sourced setup-form.sh redefine omarchy_prompt_hostname in THIS shell" "$after_hostname"
+deck_form_username_reserved root ||
+  fail "the array must still load correctly even though the fixture ALSO redefines a function -- the two are not supposed to trade off"
+pass "loading the reserved-username list never lets the sourced setup-form.sh redefine an override function in this shell (T4 bug 1's exact mechanism)"
 
 echo "--- S3 hostname/identity constants and overrides --------------------------"
 

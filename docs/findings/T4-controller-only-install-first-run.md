@@ -473,3 +473,180 @@ failure in §5 trustworthy as a real defect rather than a flaky capture.
   35/47), run 2 (migrated but with the wrong step-28 hypothesis, 50/59),
   run 3 (corrected, 59/62) — all under
   `/tmp/claude-1000/-home-huyke-Pizzarchy/69fa8f47-480f-4724-b93e-9fdecaf99299/scratchpad/`.
+
+---
+
+## 12. 2026-08-13 (later session) — both §10 bugs root-caused and fixed
+
+Owner of this section: whoever next touches `deck-form.sh` (per §10 items 1
+and 2's own routing). Both fixes are in
+`iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh`; the
+regression tests are in `test/unit/test-deck-form.sh`.
+
+### 12.1 Bug 2 (§5): the username-retry screen growth — FIXED
+
+**Cause, confirmed exactly as §5 already named it**: `omarchy_prompt_username`'s
+retry loop called bare `deck_form_warn` on an invalid/reserved candidate,
+stacked on top of `deck_form_text_prompt`'s own per-call warnings
+(mapper-not-found, the console-keymap notice) — and nothing ever cleared the
+console between attempts, unlike upstream's own retry loop (`setup-form.sh`'s
+`omarchy_prompt_username`/`_password`, READ), whose every invalid attempt goes
+through `configurator`'s `notice()`, whose FIRST line is `clear_logo`
+(READ, `iso/upstream/.../configurator:180-185`).
+
+**Fix**: a new `deck_form_account_notice() { clear_logo; deck_form_warn "$1"; }`
+helper, used in place of the bare `deck_form_warn` calls in both
+`omarchy_prompt_username` and `omarchy_prompt_password` (the latter had the
+identical defect, just not yet measured — same `deck_form_text_prompt`
+mechanism, same missing repaint). `clear_logo` is already a hard dependency
+of this file (`keyboard_form` already calls it, unconditionally, on every
+loop iteration), so this does not add a new collaborator.
+
+**Proof, MEASURED, not inferred**: `test/unit/test-deck-form.sh`'s new
+"T4 bug 2 regression" section drives `omarchy_prompt_username` end-to-end
+through four invalid (empty) submissions then a valid one, with `clear_logo`
+temporarily replaced by a marker-printing stand-in (the suite's normal stub
+is a silent no-op, `:;`, which can't prove a clear happened). The assertion
+is on the SIZE of the console output between consecutive clears, not just
+that a clear happened: against the pre-fix code the suite crashes the moment
+it checks `clear_logo` was called zero times (`not ok - expected a screen
+clear on every one of the 4 invalid attempts -- clear_logo ran 0 times`,
+confirmed by temporarily reverting just this fix and re-running); against
+the fix, all four segments are the same size (7 lines each, this run),
+never the growing 16/22/28/34 §5 measured on the real ISO.
+
+### 12.2 Bug 1 (§2): the identity/hostname/timezone overrides — ROOT-CAUSED and FIXED
+
+**This session ruled nothing back in from §2's "already ruled out" list —
+all five of those still hold.** The actual mechanism, found by literal
+instrumentation of the real post-build files (not a VM boot — the bug
+turned out to be a pure bash name-resolution question, answerable more
+precisely without hardware/timing noise in the way):
+
+1. `builder/build-iso.sh` (`iso/upstream`, READ, around its `setup_form`
+   handling) vendors upstream's `setup-form.sh` onto the LIVE ISO at
+   `/usr/share/omarchy-iso/setup-form.sh` — `cp "$setup_form"
+   "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"`. This is
+   a BUILD-TIME step, invisible from reading the `iso/upstream` repo tree at
+   rest (which is exactly what §2's "not a wrong-upstream-name bug" item
+   read) — the file does not exist in any checked-out repo, only on a real
+   built ISO. `DECK_SETUP_FORM_SH` in `deck-form.sh` already pointed at this
+   exact path by default, correctly, for a different reason (loading the
+   reserved-username list) — nobody had connected the two.
+2. `deck_form_load_reserved_usernames` (called from inside
+   `omarchy_prompt_username`'s own retry loop, once a PATTERN-VALID
+   candidate is submitted) used to `source "$setup_form"` **directly into
+   the calling shell** — and on the real ISO, the calling shell is
+   `configurator`'s own process, the SAME process `deck-form.sh` itself was
+   sourced into. `source` redefines a function in whatever shell actually
+   runs it, no matter how deep the call stack. The file it sources
+   (`/usr/share/omarchy-iso/setup-form.sh`) already defines
+   `omarchy_prompt_identity`/`_hostname`/`_timezone`/`_username`/`_password`/
+   `_keyboard` — the exact names `deck-form.sh` overrides. So the instant a
+   user typed one syntactically-valid username, this call silently
+   reinstalled upstream's own prompt bodies over every one of deck-form.sh's
+   overrides, for the rest of the install. `omarchy_prompt_username` and
+   `omarchy_prompt_password` were unaffected because their OWN
+   already-running invocations don't change when the function table changes
+   underneath them (a running bash function body is a fixed snapshot) — but
+   every subsequent call (identity, hostname, timezone, and a second run of
+   the keyboard picker on any "go back") resolved to upstream's freshly
+   re-sourced versions instead. The mapper-not-found warning §2 observed
+   during the "password" portion of the capture is consistent with this:
+   `deck_form_text_prompt`'s output for the LAST username attempt is what
+   bug 2 (§5, same session) left permanently on screen, uncleared, under
+   the password prompt drawn after it — not independent evidence that
+   `omarchy_prompt_password` itself was still deck-form.sh's version by
+   that point, which it might not have been depending on exactly when the
+   candidate passed validation. Bug 2's fix (§12.1) removes that ambiguity
+   for any future capture, since the screen is repainted each retry.
+
+**MEASURED directly** (no VM): the real post-build `configurator`
+(`~/.cache/omarchy-deck/iso-build-2/src/configs/airootfs/root/configurator`,
+confirmed byte-identical in its patched region to this repo's
+`iso/overlay/patches/deck-form-invocation.patch` applied) was truncated to
+just its preamble (everything through the `source
+/usr/share/omarchy-iso/deck-form.sh` line, before any screen runs), sourced
+in a plain bash process with `OMARCHY_PATH` pointed at the cached runtime
+checkout (for `setup-form.sh`'s real fallback path and `logo.txt`), and
+`declare -f omarchy_prompt_identity` was checked immediately after. Result:
+correctly `deck_form_identity_body` at that point — sourcing order alone was
+never the bug, confirming §2's own "not a sourcing timing/order bug"
+reasoning. Then `deck_form_load_reserved_usernames` was called directly
+(pointed at the REAL vendored `setup-form.sh` via
+`DECK_SETUP_FORM_SH_OVERRIDE`, from
+`~/.cache/omarchy-deck/iso-build/runtime-src/install/provisioning/setup-form.sh`)
+in that same shell: `declare -f omarchy_prompt_identity` flipped from
+`deck_form_identity_body` to upstream's own `gum input --prompt "Full
+name> "` body, in one call — the exact placeholder text §2's capture shows
+on screen.
+
+**Fix**: `deck_form_load_reserved_usernames` now runs `source "$setup_form"`
+inside a `$( ... )` command substitution (a genuine forked subshell) instead
+of the calling shell directly. The subshell starts with every function this
+file already defined (fork, not exec), but any redefinition IT makes is
+discarded the instant it exits; only the `RESERVED_USERNAMES` array crosses
+back out, as plain newline-delimited text on stdout, via `mapfile`. No
+`eval`, and no function name from `setup-form.sh` is ever defined in the
+real process again.
+
+**Also found in passing, NOT fixed here (separate, already-flagged gap,
+out of this session's two-bug scope)**: the real vendored `setup-form.sh`
+does not define a `RESERVED_USERNAMES` array at all — its actual reserved-
+name mechanism is `OMARCHY_RESERVED_USERNAMES`, an anchored regex STRING,
+not an array (`~/.cache/omarchy-deck/iso-build/runtime-src/install/
+provisioning/setup-form.sh:82`). `deck-form.sh`'s own header already flags
+`DECK_RESERVED_USERNAMES_VAR`'s value as "(INFERRED, NOT READ)" — this
+confirms the inference was wrong, and the reserved-username check has
+therefore always degraded (warns, validates nothing) on a real ISO, never
+silently, per that same block's own design. Left as its own follow-up
+(§10 gains item 6, below) rather than folded into this fix, since it is
+independent of the clobbering mechanism and was not part of either
+assigned bug.
+
+**Proof, MEASURED**: `test/unit/test-deck-form.sh`'s new "T4 bug 1
+regression" section sources a fixture that defines BOTH
+`RESERVED_USERNAMES` and (deliberately, to prove the fix under the exact
+collision that caused the bug) its own `omarchy_prompt_identity`/
+`_hostname`. Against the pre-fix code this fails
+(`not ok - T4 bug 1: deck_form_load_reserved_usernames let the sourced
+setup-form.sh redefine omarchy_prompt_identity in THIS shell`, confirmed by
+isolating the bug-1 fix out of a hybrid build — the bug-2 fix alone applied,
+bug-1's fix reverted — and re-running); against the fix,
+`declare -f omarchy_prompt_identity`/`_hostname` are byte-identical before
+and after the call, and the array still loads correctly.
+
+**Not done this session, and why**: a fresh `[V]`/`[H]` run against a
+REBUILT ISO, showing the Deck-branded S3 identity/hostname/timezone screens
+on a real QEMU boot, per this task's own preference. `unsquashfs`/
+`mksquashfs`/`xorriso` are not installed in this environment and there is no
+passwordless `sudo` to add them, which rules out patching the already-built
+session-23 ISO's squashfs directly as a shortcut. A full `iso/bin/build`
+was started in the background against the session-23 cache
+(`OMARCHY_DECK_ISO_BUILD_DIR=~/.cache/omarchy-deck/iso-build-2`, chosen so
+package downloads and the docker layer cache are reused rather than a cold
+build) to attempt this; see the session's own final report for whether it
+finished in time and what it showed. If it did not, this is the direct
+continuation of §10 item 1's follow-up, now with a known, fixed root cause
+instead of an open question — the remaining step is purely "prove it on a
+rebuilt ISO", not "find out why".
+
+### 12.3 §10 follow-up tracking, updated
+
+1. ~~Diagnose why `omarchy_prompt_identity`/`_hostname`/`_timezone` don't
+   override~~ — **root-caused and fixed, §12.2.** Re-open only if a rebuilt-ISO
+   `[V]`/`[H]` run still shows upstream's prompts.
+2. ~~Fix the username-retry screen growth~~ — **fixed, §12.1.**
+3. **Confirm whether `deck-input-mapper` should be present on this build**
+   (§8) — still open, still `iso/bin/build`'s payload-set territory, not
+   `deck-form.sh`'s.
+4. **A follow-up `[V]` run should press one more `y` on `deck_final_summary`**
+   — still open, unrelated to either fix in this section.
+5. **`[H]` full hardware install is still entirely unattempted** — still open.
+6. **NEW: `DECK_RESERVED_USERNAMES_VAR=RESERVED_USERNAMES` is confirmed
+   wrong** (§12.2) — the real vendored `setup-form.sh` calls it
+   `OMARCHY_RESERVED_USERNAMES` and it is a regex string, not an array.
+   `deck_form_load_reserved_usernames`/`deck_form_username_reserved` need a
+   rewrite to match (parse or reuse the regex, not `declare -p` an array
+   that is never there) before the reserved-username check does anything on
+   a real ISO. Owner: whoever next touches `deck-form.sh`'s S3 block.

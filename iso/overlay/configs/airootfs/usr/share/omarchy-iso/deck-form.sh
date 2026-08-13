@@ -751,6 +751,40 @@ declare -a DECK_LOADED_RESERVED_USERNAMES=()
 
 # deck_form_load_reserved_usernames
 # Overridable via DECK_SETUP_FORM_SH_OVERRIDE for the unit suite.
+#
+# 🔴 THE ROOT CAUSE OF T4's BUG 1 (docs/findings/T4-controller-only-install-
+# first-run.md §2, root-caused and fixed here). This function used to
+# `source "$setup_form"` DIRECTLY into the caller's shell -- which, on the
+# real ISO, is `configurator`'s own process, the SAME process deck-form.sh
+# was itself sourced into. `$setup_form` (DECK_SETUP_FORM_SH, below) is
+# `/usr/share/omarchy-iso/setup-form.sh` -- the EXACT file build-iso.sh
+# vendors upstream's own copy to (READ, builder/build-iso.sh: `cp
+# "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-
+# form.sh"`), and the exact file that ALREADY defines
+# omarchy_prompt_identity/_hostname/_timezone/_username/_password/_keyboard
+# -- the very names this file overrides. `source` redefines a function in
+# whatever shell actually runs it, no matter how deep the call stack: the
+# instant a user typed a single PATTERN-VALID username (so this function
+# got called from inside `omarchy_prompt_username`'s loop), that `source`
+# silently re-installed upstream's own prompt bodies over every one of
+# deck-form.sh's overrides, for the rest of the install -- which is exactly
+# why `omarchy_prompt_identity`/`_hostname`/`_timezone` (asked AFTER the
+# username step) ran as upstream's unmodified screens on the real ISO,
+# while `greeter` and `disk_form`/`confirm_disk_overwrite` (never downstream
+# of this call) did not. Measured directly, not inferred: sourcing the real
+# vendored setup-form.sh into a shell that had deck-form.sh's overrides
+# loaded flips `declare -f omarchy_prompt_identity` from
+# `deck_form_identity_body` to upstream's own body, in one call.
+#
+# THE FIX: never let `$setup_form` touch THIS shell's function table at all.
+# `source` runs inside a `$( ... )` COMMAND SUBSTITUTION instead -- that is a
+# genuine subshell (a forked copy of this process), so it starts with every
+# function this file already defined, but any redefinition IT makes (every
+# name setup-form.sh declares) is thrown away the instant the subshell exits.
+# The only thing that crosses back out to the real shell is plain text on
+# stdout: the reserved-username list, one name per line, captured with
+# `mapfile`. No `eval`, and no function name from setup-form.sh is ever
+# defined in this process again.
 deck_form_load_reserved_usernames() {
   local setup_form=${DECK_SETUP_FORM_SH_OVERRIDE:-$DECK_SETUP_FORM_SH}
   DECK_LOADED_RESERVED_USERNAMES=()
@@ -758,21 +792,19 @@ deck_form_load_reserved_usernames() {
     deck_form_warn "cannot read $setup_form -- the reserved-username list is UNAVAILABLE this run (pattern validation still applies)"
     return 1
   fi
-  # ⚠️ Unset before sourcing, deliberately. `source` runs in THIS shell, so
-  # a PRIOR successful load's array would otherwise still be sitting in
-  # scope -- and a later call whose file fails to redefine it (corrupted,
-  # replaced with something malformed) would then read that stale value
-  # and report success on a list that was never actually loaded THIS time.
-  # Found by running this exact suite twice in the same shell.
-  unset "$DECK_RESERVED_USERNAMES_VAR" 2>/dev/null || true
-  # shellcheck disable=SC1090  # a runtime/fixture path, not knowable at lint time
-  source "$setup_form"
-  if ! declare -p "$DECK_RESERVED_USERNAMES_VAR" >/dev/null 2>&1; then
+  local names_out rc=0
+  names_out=$(
+    # shellcheck disable=SC1090  # a runtime/fixture path, not knowable at lint time
+    source "$setup_form" >/dev/null 2>&1
+    declare -p "$DECK_RESERVED_USERNAMES_VAR" >/dev/null 2>&1 || exit 1
+    local -n src_array="$DECK_RESERVED_USERNAMES_VAR"
+    printf '%s\n' "${src_array[@]}"
+  ) || rc=$?
+  if ((rc != 0)); then
     deck_form_warn "sourced $setup_form but it defines no '$DECK_RESERVED_USERNAMES_VAR' array -- the reserved-username list is UNAVAILABLE this run"
     return 1
   fi
-  local -n src_array="$DECK_RESERVED_USERNAMES_VAR"
-  DECK_LOADED_RESERVED_USERNAMES=("${src_array[@]}")
+  [[ -n $names_out ]] && mapfile -t DECK_LOADED_RESERVED_USERNAMES <<<"$names_out"
   return 0
 }
 
@@ -800,17 +832,51 @@ deck_form_username_body() { gum input --placeholder "Username" --prompt "Usernam
 deck_form_password_body() { gum input --password --placeholder "Password" --prompt "Password> "; }
 deck_form_confirm_body()  { gum input --password --placeholder "Confirm" --prompt "Confirm> "; }
 
+# deck_form_account_notice <message>
+#
+# T4 bug 2 (docs/findings/T4-controller-only-install-first-run.md §5,
+# MEASURED: 16/22/28/34 console rows across four failed username submits,
+# growing by 6 every time, never settling). Root cause: every retry in
+# omarchy_prompt_username/_password warned with a bare `deck_form_warn`
+# (println to the console, never cleared) on top of `deck_form_text_prompt`'s
+# OWN per-call warnings (mapper-not-found / OSK-timeout / keymap-pin-failed),
+# so a user who mistyped a few times watched the screen grow without bound --
+# on real hardware, eventually off the visible console entirely.
+#
+# Upstream's OWN retry loops (setup-form.sh's omarchy_prompt_username/
+# _password, READ) never have this problem: every invalid attempt goes
+# through configurator's `notice()`, and `notice()`'s FIRST line is
+# `clear_logo` (READ, configurator:180-185) -- it wipes the screen before
+# showing the new message, every time, so the screen is always exactly
+# "logo + this attempt's one message", never "every attempt's messages
+# stacked". This helper is that same repaint, adapted to `deck_form_warn`'s
+# louder (CLAUDE.md-mandated, stderr, un-timed) style instead of upstream's
+# timed `gum spin` notice -- the loudness is kept, the accumulation is not.
+#
+# Deliberately clears the screen even on the FIRST invalid attempt, which
+# also wipes whatever header upstream's `user_form`/`step` drew before
+# calling into this file (e.g. "Let's setup your user account..."). That is
+# not a regression introduced here -- it is upstream's own behaviour:
+# `notice()` unconditionally clears on every call, first attempt included,
+# because upstream's own header is drawn by the SAME `step`/`clear_logo`
+# mechanism and is expected to be repainted, not preserved, once a retry
+# begins.
+deck_form_account_notice() {
+  clear_logo
+  deck_form_warn "$1"
+}
+
 omarchy_prompt_username() {
   local candidate
   while true; do
     candidate=$(deck_form_text_prompt deck_form_username_body) || return 1
     if ! deck_form_username_valid "$candidate"; then
-      deck_form_warn "'$candidate' is not a valid username (lowercase letters/digits/-/_, starting with a letter or _)"
+      deck_form_account_notice "'$candidate' is not a valid username (lowercase letters/digits/-/_, starting with a letter or _)"
       continue
     fi
     deck_form_load_reserved_usernames
     if deck_form_username_reserved "$candidate"; then
-      deck_form_warn "'$candidate' is a reserved name -- choose another"
+      deck_form_account_notice "'$candidate' is a reserved name -- choose another"
       continue
     fi
     # (INFERRED variable name, see this function's block comment above)
@@ -826,12 +892,12 @@ omarchy_prompt_password() {
   while true; do
     pw=$(deck_form_text_prompt deck_form_password_body) || return 1
     if ! deck_form_password_nonblank "$pw"; then
-      deck_form_warn "password cannot be blank"
+      deck_form_account_notice "password cannot be blank"
       continue
     fi
     confirm=$(deck_form_text_prompt deck_form_confirm_body) || return 1
     if ! deck_form_passwords_match "$pw" "$confirm"; then
-      deck_form_warn "passwords did not match -- try again"
+      deck_form_account_notice "passwords did not match -- try again"
       continue
     fi
     # 🔴 THE NAME IS `password`, AND IT IS MEASURED. Upstream's configurator
