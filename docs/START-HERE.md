@@ -15,17 +15,24 @@ work without waiting for further instruction.**
 >
 > | # | Criterion | State |
 > |---|---|---|
-> | 1 | Controller-only QEMU install from our ISO | ❌ every ingredient exists and is unit-tested; **`iso/bin/build` has never run** |
+> | 1 | Controller-only QEMU install from our ISO | 🟡 **the ISO now exists** (`iso/bin/build` ran clean 2026-08-12, session 23 — see below); the QEMU install run itself is next |
 > | 2 | Hardware parity on OLED | ✅ closed session 21 |
 > | 3 | Both switch directions survive reboot | ✅ **closed session 22, on the panel** — see below |
-> | 4 | CI publishes an ISO; dry run shows zero NVIDIA | 🟡 the build job is real, never executed — no `/dev/kvm` on a hosted runner |
+> | 4 | CI publishes an ISO; dry run shows zero NVIDIA | 🟡 the dev-machine build is proven; CI itself still has no `/dev/kvm` on a hosted runner, unaffected by this |
 >
-> **Criteria 1 and 4 both come down to the same unperformed act: a real
-> container build.** Not a code gap — `iso/bin/build`'s guards (6.1, 6.3, 6.4a,
-> 6.4b, 6.5, 6.6), the 5-patch overlay, the `omarchy-deck` package and every
-> `configure_deck` step are unit- and mutation-tested against the *patched
-> tree*, never against a running container. `docs/ROADMAP.md`'s phase-2 table
-> is now current — read it, not this paragraph, for the file-by-file state.
+> **🟢 Session 23: `iso/bin/build` ran for real and produced a working ISO.**
+> First attempt failed on a corrupted cached package left over in the old
+> scratch dir from earlier (pre-pin-fix) build attempts — not a code bug. A
+> fresh scratch dir (`~/.cache/omarchy-deck/iso-build-2`) built clean: all 8
+> guards passed, all 5 overlay patches applied (2 via git's 3-way-fallback
+> path on a shallow clone, hand-verified both landed anyway),
+> `omarchy-2026.08.13-x86_64-quattro.iso`, 6.39 GiB, sha256
+> `336f35715086604e75940d6baebc767d10b59c8714f845ca6640ae51f413f782`. Detail:
+> `docs/PROGRESS.md`'s T5 row. **The old `~/.cache/omarchy-deck/iso-build/`
+> scratch dir (and the ISOs in its `release/`) are stale — from before today's
+> commits — ignore them.** Criterion 1 is not closed yet: the ISO existing is
+> necessary, not sufficient — a controller-only QEMU install run against it is
+> the next concrete step, in progress this session.
 >
 > ### T13/T14: all four power-button reports closed, hardware-verified
 >
@@ -74,11 +81,9 @@ work without waiting for further instruction.**
 >
 > ### What's left in phase 2 — concretely
 >
-> - 🔴 **Run `iso/bin/build` at least once**, supervised. This is the one
->   thing both remaining exit criteria need. Not runnable on the dev machine
->   under this project's own constraints (Docker + ~6 GB downloads + ~40 min);
->   needs either an explicit one-off session here or CI's self-hosted KVM
->   runner (the workflow already names this as its real home).
+> - ✅ **`iso/bin/build` ran, supervised, 2026-08-12 (session 23) — see above.**
+>   🔴 **Next: the controller-only QEMU install run itself**, against the ISO
+>   this produced — this is what actually closes criterion 1, not the build.
 > - `~/.config/hypr/input.lua` still has no writer — the OSK's per-device XKB
 >   block and the lock's `above_lock = 2` rule. `deck_monitors.py` (which
 >   wrote the sibling file `monitors.lua` this session) already ships the
@@ -92,9 +97,10 @@ work without waiting for further instruction.**
 >   someone thinks of one.
 > - T10's extest spike — a ~45 min Deck decision, unrelated to everything
 >   above, queued since session 20.
-> - `/etc/sudoers.d/asdcontrol` — found by the P22 sweep, grants all users
->   passwordless root, package-shipped and not ours, invisible to our own
->   build-side audit (which only inspects our payload). Worth a decision.
+> - ✅ `/etc/sudoers.d/asdcontrol` — **decided 2026-08-12 (session 23): leave
+>   it.** Package-shipped (not ours), and this project doesn't override vendor
+>   packaging decisions (same reasoning as not auto-installing an AUR helper).
+>   Recorded in `docs/findings/P22-deck-conformance-sweep.md` §4.
 >
 > **Git: everything through session 22 pushed to `main`.** Verify with
 > `git rev-list --left-right --count origin/main...main`, never by trusting

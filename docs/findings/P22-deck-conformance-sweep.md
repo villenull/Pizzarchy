@@ -510,6 +510,14 @@ is **ours**, and it is **still there**. The `asdcontrol` package file granting
 ours to know about, and `tools/iso-payload-audit.sh` (build side) will never
 see it because it arrives with a package.
 
+**Operator decision, 2026-08-12 (session 23): leave it.** Consistent with this
+project's existing stance of not overriding upstream/vendor packaging
+decisions (the same reasoning that kept `CLAUDE.md` from auto-installing an
+AUR helper — §8.4 there). `asdcontrol` is not our payload, `iso-payload-audit.sh`
+is correctly scoped to what we ship, and this file is not getting a stage that
+edits a vendor package's own sudoers drop-in. Documented here so it stays a
+recorded, deliberate non-action rather than a gap nobody decided on.
+
 ---
 
 ## 5. Default session and boot state — MEASURED
