@@ -386,9 +386,32 @@ OSK_CHORD_PRESS = e.BTN_NORTH  # physical X
 # Nothing here adds a keycode, so EMITTED_KEYS is deliberately untouched: these
 # buttons spawn a process, they do not type.
 OMARCHY_MENU = "omarchy-menu"
+
+# The OSK's emoji key (EMOJI_KEY, deck_osk_layout.py) queues this the same way
+# QAM does -- see OnScreenKeyboard.press()'s "emoji" branch there, and
+# Mapper._consume_osk_request below, which is what turns that into an entry
+# here.
+#
+# ⚠️ NOT `[OMARCHY_MENU, "emoji"]`, even though that would follow the
+# menu-root/menu-apps pattern above. `omarchy-menu` (the script OMARCHY_MENU
+# names) is its own small dispatcher with a FIXED verb set --
+# toggle/summon/close/refresh/ping -- and "emoji" is none of them; that argv
+# would print "omarchy-menu: unknown verb 'emoji'." and exit 2. The emoji
+# picker is a SEPARATE script, `omarchy-menu-emoji`, which toggles Quickshell's
+# `omarchy.emojis` panel directly. Confirmed by reading, in the pinned
+# checkout (iso/RUNTIME, commit 6d7826d), both `omarchy-menu-emoji` itself and
+# the top-level `omarchy` dispatcher's `resolve_direct_route`: `omarchy menu
+# emoji` resolves the binary `omarchy-menu-emoji` and execs it with no
+# arguments -- the same script, the same effect, one fewer process and no
+# ~80-file metadata scan. That script's own header comment
+# (`omarchy:examples=omarchy menu emoji`) documents the indirect route; this
+# takes the direct one to the same place.
+EMOJI_MENU = "omarchy-menu-emoji"
+
 MENU_ACTIONS: dict[str, list[str]] = {
     "menu-apps": [OMARCHY_MENU, "toggle", "apps"],
     "menu-root": [OMARCHY_MENU, "toggle"],
+    "emoji": [EMOJI_MENU],
 }
 
 # ✅ MEASURED ON HARDWARE 2026-08-11: QAM is BTN_BASE (294), on the "Steam Deck"
@@ -1283,6 +1306,27 @@ class Mapper:
         self.pad_click_down = False
         return [(POINTER_CLICK_KEY, 0)]
 
+    def _consume_osk_request(
+            self, strokes: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        """Turn a renderer-owned OSK request into a queued action, once.
+
+        `OnScreenKeyboard.press()` sets `self.osk.request = "emoji"` for the
+        emoji key and does nothing else -- opening the panel is this process's
+        job (spawn a helper), not the layout core's. This is the one place
+        both press paths (`commit_at`'s trigger/pad-click, `press_key_index`'s
+        touch) funnel through, so the queue-and-clear only has to live once:
+        cleared IMMEDIATELY, so the same request cannot queue twice from a
+        later, unrelated press that leaves `request` untouched.
+
+        `strokes` passes through unchanged -- this only ever sees a request
+        alongside an EMPTY stroke list (the emoji key emits no keycode), but
+        it does not assume that; it is a side channel, not a substitute.
+        """
+        request, self.osk.request = self.osk.request, ""
+        if request:
+            self.pending_actions.append(request)
+        return strokes
+
     def commit_at(self, half: str) -> list[tuple[int, int]]:
         """Press the key under that side's cursor. THE one commit path.
 
@@ -1292,9 +1336,12 @@ class Mapper:
         `OnScreenKeyboard.press_at` with the metric filled in; `press_at` itself
         hard-codes the layout core's default, which is right for the TTY and
         wrong under the overlay.
+
+        Also drains any renderer-owned request that press queued (the emoji
+        key) into `pending_actions` -- see `_consume_osk_request`.
         """
-        return self.osk.press(
-            self.osk.key_at(half, *self.cursors.position(half), self.osk_metric))
+        return self._consume_osk_request(self.osk.press(
+            self.osk.key_at(half, *self.cursors.position(half), self.osk_metric)))
 
     def press_key_index(self, row: int, key_index: int) -> "list[tuple[int, int]] | None":
         """Commit the key at (row, key_index) -- what a TOUCH on the overlay asks for.
@@ -1317,13 +1364,16 @@ class Mapper:
         the overlay disagree about the layout, which is a defect and is said out
         loud by the caller. An EMPTY LIST is an ordinary answer: Shift and Caps
         are real keys that type nothing.
+
+        Also drains any renderer-owned request that press queued (the emoji
+        key) into `pending_actions` -- see `_consume_osk_request`.
         """
         if self.osk is None:
             return None
         rows = self.osk.layer.rows
         if not 0 <= row < len(rows) or not 0 <= key_index < len(rows[row]):
             return None
-        return self.osk.press(rows[row][key_index])
+        return self._consume_osk_request(self.osk.press(rows[row][key_index]))
 
     def translate(self, etype: int, code: int, value: int, now: float) -> list[tuple[int, int]]:
         if etype == e.EV_KEY:

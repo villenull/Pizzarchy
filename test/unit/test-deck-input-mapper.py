@@ -323,6 +323,9 @@ check("the apps menu is exactly upstream's command",
       m.MENU_ACTIONS["menu-apps"], ["omarchy-menu", "toggle", "apps"])
 check("the bar's own menu is the ROOT command, with no subcommand",
       m.MENU_ACTIONS["menu-root"], ["omarchy-menu", "toggle"])
+check("the emoji key runs omarchy-menu-emoji directly, NOT `omarchy-menu emoji` "
+      "-- that verb does not exist on omarchy-menu's own dispatcher",
+      m.MENU_ACTIONS["emoji"], ["omarchy-menu-emoji"])
 
 # Fire on RELEASE, not on press: firing on the press would open the apps menu
 # underneath every STEAM+X the operator makes, and STEAM+X is hardware-proven.
@@ -547,6 +550,18 @@ check("a successful spawn says nothing on stderr", _err, "")
 _result, _fake, _err = with_fake_subprocess(lambda: m.run_menu_action("menu-root"))
 check("the root menu spawns the bare `toggle`",
       [argv for argv, _kw in _fake.calls], [["omarchy-menu", "toggle"]])
+
+# The emoji action goes through the exact same run_menu_action/spawn_detached
+# path as the two menu buttons -- it just carries a different argv -- so it
+# gets the same DEVNULL/no-shell/never-waited guarantees for free.
+_result, _fake, _err = with_fake_subprocess(lambda: m.run_menu_action("emoji"))
+check("the emoji action spawns omarchy-menu-emoji with no arguments",
+      [argv for argv, _kw in _fake.calls], [["omarchy-menu-emoji"]])
+check("and reports that it started", _result, True)
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_menu_action("emoji", dry_run=True))
+check("--dry-run reports it instead of spawning, exactly like the menu buttons",
+      (_fake.calls, "omarchy-menu-emoji" in _err, _result), ([], True, True))
 
 # A missing binary is the likeliest failure of all -- the installer has no
 # `omarchy-menu`, and neither does a Deck mid-install.
@@ -2222,6 +2237,60 @@ check("...and negatives, which no hit test should ever produce",
       (mm.press_key_index(-1, 0), mm.press_key_index(0, -1)), (None, None))
 check("a mapper with no keyboard attached answers None rather than raising",
       m.Mapper().press_key_index(0, 0), None)
+
+# --- 🔴 THE EMOJI KEY: a renderer-owned request, queued and cleared once -----
+#
+# EMOJI_KEY (deck_osk_layout.py) is the one key on the board with no keycode
+# of its own: `OnScreenKeyboard.press()` records the ask in `self.osk.request`
+# and stops there -- opening the panel is this process's job, not the layout
+# core's. `Mapper._consume_osk_request` is what turns that into a queued
+# action for `run_pending` to spawn, and what clears `request` so a press
+# fires exactly once, not on every subsequent loop iteration -- see that
+# method's docstring, and the comment above MENU_ACTIONS for why the argv it
+# queues is `omarchy-menu-emoji`, not `omarchy-menu emoji`.
+
+mm = osk_mapper()
+rows = mm.osk.layer.rows
+emoji_index = next((r, k) for r, row in enumerate(rows)
+                   for k, key in enumerate(row) if key.action == "emoji")
+emoji_key = rows[emoji_index[0]][emoji_index[1]]
+check("pressing the emoji key by touch emits no keycode",
+      mm.press_key_index(*emoji_index), [])
+check("...and queues exactly the emoji action, once",
+      mm.pending_actions, ["emoji"])
+check("...and the request is cleared, so it does not linger for something "
+      "else to pick up twice", mm.osk.request, "")
+
+# A later, unrelated press must not re-queue anything -- `request` is only
+# ever non-empty right after an emoji press, but this pins that
+# `_consume_osk_request` does not somehow resurrect a stale value.
+letter = next((r, k) for r, row in enumerate(rows)
+              for k, key in enumerate(row) if key.is_letter)
+key = rows[letter[0]][letter[1]]
+mm.pending_actions.clear()
+check("a following, unrelated touch queues nothing more",
+      (mm.press_key_index(*letter), mm.pending_actions),
+      ([(key.code, 1), (key.code, 0)], []))
+
+# `commit_at` (the trigger/pad-click path) is the SAME emission path as touch
+# -- see press_key_index's own docstring -- so the emoji key has to behave
+# identically committed either way, not just through the overlay's index.
+mm = osk_mapper()
+touch(mm, "left", MINV, -1)
+emoji_pos = next(
+    ((x, y) for x in (i / 200 for i in range(201))
+     for y in (0.1, 0.3, 0.5, 0.7, 0.9)
+     if mm.osk.key_at("left", x, y, mm.osk_metric) is emoji_key),
+    None)
+check("a cursor position lands on the emoji key (or the checks below prove "
+      "nothing)", emoji_pos is not None, True)
+mm.cursors.pos["left"] = list(emoji_pos)
+check("committing the emoji key via a trigger emits no keycode either",
+      mm.commit_at("left"), [])
+check("...and queues the same action touch did",
+      mm.pending_actions, ["emoji"])
+check("...and clears the request the same way",
+      mm.osk.request, "")
 
 # --- X, Y and L3: unconditional shortcuts, exactly as Valve badges them ------
 #
