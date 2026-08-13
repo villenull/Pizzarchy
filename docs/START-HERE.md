@@ -3,6 +3,196 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
+> ## Where things stand (updated 2026-08-13, session 24 — READ THIS FIRST)
+>
+> *(This supersedes the session-23 block below, which is kept for its
+> evidence but is stale wherever it disagrees with this one. Same rule as
+> always: verify every "done"/✅ claim against the tree — `git log`, run the
+> suite — before trusting it. This file has shipped stale marks before.)*
+>
+> ### ⚠️ HANDOFF NOTE — a different model may be picking this up
+>
+> This session ended with the operator low on weekly token budget, expecting
+> to hand off to a **different model** (e.g. DeepSeek, Gemini) that will NOT
+> have the prior conversation's context. Everything you need is on disk and
+> in git; nothing load-bearing lives only in a chat log. Two conventions this
+> project relies on that you should not have to rediscover:
+>
+> - **Verify, don't trust.** Every doc here (including this one) can be stale.
+>   The tree is the source of truth: `git log --oneline -15`, `git status`,
+>   and actually running the suites. This project has been burned repeatedly
+>   by ✅ marks that a later measurement overturned — see the many "corrected
+>   a fact this session" notes throughout `docs/PROGRESS.md`.
+> - **CI's own lint command** (run before every commit — the narrower
+>   `shellcheck src/*.sh` is a known trap that misses untracked files):
+>   ```bash
+>   mapfile -t files < <(git ls-files --cached --others --exclude-standard '*.sh'); shellcheck -x "${files[@]}"
+>   ```
+>   Python suites are NOT in the `*.sh` glob — run `test/unit/test-*.py`
+>   separately. `test/osk-tty-e2e.py` is in neither glob and needs
+>   `/dev/uinput` (run by hand). Full suite inventory: session-23 block below.
+>
+> ### 🔴 Unpushed work — do this early
+>
+> As of this session's end, `main` is **2 commits ahead of `origin/main`**
+> and they are NOT pushed (`git rev-list --left-right --count origin/main...main`
+> → `0  2`). The two are `e729699` and `ae4b5bd` (both described below), plus
+> whatever the in-flight agent (next section) commits on top. **Confirm the
+> real count yourself and push when the tree is stable** — the operator did
+> not explicitly ask to push mid-session, so it was deliberately left for the
+> next actor to do once the in-flight run settles. Do not push a
+> half-finished patch.
+>
+> ### 🟡 An agent was still running when this session ended — CHECK IT FIRST
+>
+> A background agent was dispatched to fix the `configurator` `$1` bug (see
+> "the current blocker" below) and re-run the install harness. It had NOT
+> reported back when the session ended. **Before doing anything else:**
+> `git log --oneline -6` and `git status` — if there is a new commit past
+> `ae4b5bd` touching `iso/overlay/patches/deck-form-invocation.patch` and/or
+> `test/vm/vm-install-controller-test.sh`, that agent finished; read
+> `docs/findings/T4-controller-only-install-first-run.md`'s newest section for
+> its result. If `deck-form-invocation.patch` shows as *modified but
+> uncommitted* in `git status`, the agent was interrupted mid-edit — read the
+> patch, decide whether its half-done change is sound, and either finish it or
+> `git checkout` it; do NOT build on top of a half-applied patch. (This exact
+> "an agent went silent, recover its work from the tree, don't trust a report
+> that never came" situation already happened once — session 23's block below
+> documents it. Same playbook applies.)
+>
+> ### Session 24 in one paragraph
+>
+> Topics picked up: close phase-2 exit criteria (1) the controller-only QEMU
+> install, and (2) two real installer bugs the session-23 harness run had
+> found. **Both bugs (2) are fixed and committed** (`e729699`). **The install
+> (1) is closer than it has ever been but NOT closed**: a new harness
+> (`test/vm/vm-install-controller-test.sh`, committed `ae4b5bd`) pressed S5's
+> "Install" button for the first time in this project's history, `write_user_files`
+> succeeded, and then the install hit a **real, previously-invisible upstream
+> bug in `configurator`** (an unguarded `$1`, detailed below) that a
+> background agent was mid-fix on when the session ended. Along the way: one
+> genuine incident (two agents' ISO builds collided in a shared cache dir and
+> corrupted a running VM — lesson below), and a nice confirmation that (2)'s
+> hostname/timezone fix works on a real rebuilt ISO.
+>
+> ### Phase 2 exit criteria: still 2 of 4 closed
+>
+> | # | Criterion | State |
+> |---|---|---|
+> | 1 | Controller-only QEMU install from our ISO | 🟡 **the harness now presses "Install" and `write_user_files` succeeds** — further than ever before. Blocked on the `configurator $1` bug (being fixed by the in-flight agent). The disk-image assertions that would actually *prove* a bootable install exist in `test/vm/vm-install-controller-test.sh` but are gated on the install succeeding, so they have **never been exercised yet**. NOT closed until they pass. |
+> | 2 | Hardware parity on OLED | ✅ closed session 21 |
+> | 3 | Both switch directions survive reboot | ✅ closed session 22, on the panel |
+> | 4 | CI publishes an ISO; dry run shows zero NVIDIA | 🟡 the dev-machine build is proven end to end; CI itself still has no `/dev/kvm` on a hosted runner. Untouched this session. |
+>
+> ### ✅ Two installer bugs fixed and committed — `e729699` (topic 2)
+>
+> Both were found by session 23's first-ever harness run against the real ISO
+> (`docs/findings/T4-controller-only-install-first-run.md` §2, §5). Both are
+> in `iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh`:
+>
+> - **The username-retry screen grew without bound** (16→22→28→34 console rows
+>   across four failed attempts). Cause: the retry loop printed `[deck-form]
+>   WARNING:` lines on every attempt and never cleared them, unlike upstream's
+>   `notice()` whose first act is `clear_logo`. Fix: a new
+>   `deck_form_account_notice()` helper (`clear_logo` + `deck_form_warn`), used
+>   in both `omarchy_prompt_username` and `omarchy_prompt_password` (the latter
+>   had the identical latent defect, fixed pre-emptively).
+> - **`omarchy_prompt_identity`/`_hostname`/`_timezone` silently reverted to
+>   upstream's own screens** on the real ISO despite being correctly overridden
+>   in `deck-form.sh`. Root cause (proven without a VM, by replaying the real
+>   post-build `configurator` + vendored `setup-form.sh` in a plain bash
+>   process and watching `declare -f omarchy_prompt_identity` flip):
+>   `deck_form_load_reserved_usernames` did `source "$setup_form"` **directly
+>   into `configurator`'s own shell**, and the vendored `setup-form.sh` defines
+>   those same prompt-function names — so the source reinstalled upstream's
+>   bodies over deck-form.sh's, for the rest of the install. Fix: source inside
+>   a `$( … )` subshell so only the reserved-username data crosses back out and
+>   no function name is redefined in the live process. Both fixes have
+>   regression tests in `test/unit/test-deck-form.sh` (149/149 green,
+>   shellcheck clean), each confirmed to fail against its own pre-fix code.
+>   (Also flagged, not fixed: the vendored `setup-form.sh` has no
+>   `RESERVED_USERNAMES` array — the real name is `OMARCHY_RESERVED_USERNAMES`,
+>   a regex string — so deck-form.sh's own "(INFERRED, NOT READ)" flag on that
+>   was wrong. Follow-up in the T4 finding §10/§12.)
+>
+> ### 🟡 The install harness crossed S5 for the first time ever — `ae4b5bd` (topic 1)
+>
+> New harness `test/vm/vm-install-controller-test.sh` reuses the proven
+> S0→S5 key sequence, then adds step 29 (S5's "Install" hotkey), an unbounded
+> poll for the real install's outcome, and (gated on success) disk-image
+> assertions modeled on `vm-install-test.sh`. It got the real installer to run
+> `write_user_files` — which, as a bonus, **confirmed topic 2's hostname/
+> timezone fix works on a real rebuilt ISO**, not just in unit tests. The
+> harness itself also had one real bug found and fixed live: its injected
+> systemd probe was ordered `After=multi-user.target`, but booting with
+> `-nic none` (deliberate, to prove the install needs no network) means
+> `systemd-time-wait-sync.service` never completes so `multi-user.target`
+> never activates and the probe never fired — reordered to `After=basic.target`.
+>
+> ### 🔴 The current blocker on criterion 1: an unguarded `$1` in `configurator`
+>
+> After "Install" is pressed and `write_user_files` succeeds, `configurator`
+> crashes: **`line 1245: $1: unbound variable`**, and `omarchy-install-dashboard`
+> (the actual installer) never launches. Fully diagnosed:
+>
+> - In the pinned vendored copy `iso/upstream/configs/airootfs/root/configurator`
+>   the offending line is `if [[ $1 == "dry" ]]; then` (near the file's end,
+>   right after the heredoc that writes `user_configuration.json` — grep for
+>   `$1 == "dry"`; line number shifts once patches apply).
+> - The SAME file guards the identical pattern correctly in two other places
+>   (`[[ "${1:-}" == "dry" ]]` and `if [[ ${1:-} == "dry" ]]`). This one spot
+>   upstream missed.
+> - `.automated_script.sh` invokes `configurator` with **zero arguments** on a
+>   real interactive install, so `$1` is unset there.
+> - Why it only bites the Deck fork: `configurator` has no `set -u` of its own,
+>   but `iso/overlay/patches/deck-form-invocation.patch` sources `deck-form.sh`
+>   into `configurator`'s shell, and `deck-form.sh` sets `set -uo pipefail`,
+>   which stays in effect for the rest of `configurator` (source runs in the
+>   same shell). A latent upstream bug that the fork's own safety `set -u`
+>   turns fatal.
+> - **The fix** (what the in-flight agent was applying): change that one `$1`
+>   to `${1:-}` as a NEW HUNK in the existing `deck-form-invocation.patch` —
+>   **not a new patch file** (this project has a hard 5-patch budget its own
+>   docs argue about; `docs/tasks/T5-fork-plan.md §1`). Then rebuild the ISO
+>   and re-run `vm-install-controller-test.sh` to exercise the disk-image
+>   assertions that are already written and waiting. Expect the possibility of
+>   yet another bug past this one — every layer of this install path has
+>   surfaced a new invisible defect; leave any new one failing and documented,
+>   do not weaken assertions to force green (this project's standing rule).
+>
+> ### ⚠️ Incident + lesson: don't share the ISO build cache across concurrent runs
+>
+> `iso/bin/build` writes to `~/.cache/omarchy-deck/iso-build-2/` (and the
+> release ISO to its `release/`). This session, one agent booted a QEMU
+> install against that ISO while a *second* agent ran its own `iso/bin/build`
+> into the same directory — the build **overwrote the ISO file in place while
+> QEMU had it open**, wedging the running VM (frozen at the same UEFI line for
+> ~10 min). It was caught by checking the VM directly, the stalled QEMU was
+> killed, and the run restarted against the (now newer, bug-fixed) ISO. The
+> silver lining was real (the replacement ISO carried `e729699`'s fixes) but
+> the lesson stands: **before a long QEMU run or a build, confirm nothing else
+> is writing the same `iso-build*` cache dir** (`ps aux | grep -E
+> 'qemu-system|iso/bin/build'`), and give concurrent builds distinct cache
+> dirs (`OMARCHY_DECK_ISO_BUILD_DIR=…`). Also note: files under that cache dir
+> are root-owned with no passwordless local sudo, so cleaning a corrupted
+> cached package there needs a throwaway container, not `rm`.
+>
+> ### What's left in phase 2 after this session — concretely
+>
+> - **Close criterion 1 for real**: land the `configurator $1` fix (in flight),
+>   rebuild, and get `vm-install-controller-test.sh`'s disk-image assertions to
+>   actually pass against a completed, bootable install. That is the one thing
+>   standing between "presses Install" and "criterion 1 closed."
+> - **Criterion 4**: needs a self-hosted KVM runner for CI (no `/dev/kvm` on
+>   hosted runners) — untouched, its own body of work.
+> - Carried over from session 23 (all still open, none touched this session):
+>   `omarchy-sleep-lock.service` masking is missing from the live-ISO install
+>   path; hardware-verify the DPMS/`above_lock` lock-screen fix on the panel;
+>   T10's extest spike (~45 min Deck decision); the `Lid Switch` node question
+>   (likely stuck). Details in the session-23 block below.
+>
+> ---
+
 > ## Where things stand (updated 2026-08-12, session 23 — READ THIS FIRST)
 >
 > *(This supersedes session 22's block below, which is kept for its own
