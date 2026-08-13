@@ -371,14 +371,73 @@ readonly OSK_KB_SENTINEL=DECK_OSK_KB_LAYOUT
 # also ships `omarchy-sleep-lock.service`, a systemd-inhibit on logind's
 # PrepareForSleep that runs `omarchy-shell lock lock` -- so **the power button
 # locks this device**, no idle involved -- and a `system.lock` row in the same
-# menu our Desktop Mode row lives in. Nothing in this file touches either.
+# menu our Desktop Mode row lives in.
 # An earlier version of this comment claimed the settings below mean the
 # handheld "can never be shown an unanswerable password prompt". That was
 # false when it was written. The settings below are necessary, not sufficient.
+# The suspend producer is now covered by SLEEP_LOCK_GLOBAL_MASK below; the menu row is
+# deliberately left alone -- a lock the user ASKS for is not a lockout.
 readonly OMARCHY_SHELL_JSON_REL=.config/omarchy/shell.json
 readonly OMARCHY_SHELL_JSON_DEFAULTS=/usr/share/omarchy/config/omarchy/shell.json
 readonly IDLE_SCREENSAVER_SECONDS=150
 readonly IDLE_LOCK_SECONDS=86400
+
+# --- The suspend lock producer, and why we resume unlocked ----------------
+#
+# 🔴 THIS PROJECT SHIPS A HANDHELD THAT RESUMES FROM SLEEP UNLOCKED, ON
+# PURPOSE. That is a security trade-off, taken deliberately, and it is written
+# here rather than only in a findings document because the next person to read
+# this constant is the one who might "fix" it.
+#
+# Why a lock on resume is not a password prompt on this device -- it is a lost
+# session (docs/findings/T13-power-button-and-sleep.md §5.3, all measured):
+#
+#   * There is NO KEYBOARD. The only text input is our own on-screen keyboard,
+#     which reaches a lock surface at all only because of a Hyprland
+#     `above_lock = 2` layer rule -- a user config file one Lua syntax error
+#     away from being silently discarded (docs/PROGRESS.md §5.24).
+#   * There is NO UNLOCK IPC. Omarchy's shell exposes `lock`, `isLocked`,
+#     `status`, `preview` and `hidePreview`, and nothing that releases a lock
+#     (measured with `qs ipc show`, docs/PROGRESS.md §5.24).
+#   * docs/RECOVERY.md's documented escape does NOT work against a healthy
+#     lock: `clear_crashed_lockscreen` refuses one, measured against a real
+#     locked Deck 2026-08-11.
+#
+# So the failure mode of "lock on resume" is not "the user types a password".
+# It is "the user holds power for ten seconds and loses their work", every
+# time the OSK path is even slightly wrong. ⚠️ The trade-off is real and is
+# not free: a lost or stolen Deck is an open session. Full-disk encryption is
+# the separate axis that answers that (docs/tasks/T5-fork-plan.md §5.5), and
+# the user can still lock deliberately from the System menu.
+#
+# WHY /etc AND NOT $HOME. The operator's Deck was masked BY HAND on 2026-08-11
+# with `~/.config/systemd/user/omarchy-sleep-lock.service -> /dev/null`
+# (docs/findings/P22-deck-conformance-sweep.md §3.1, measured). That mask is
+# per-user state: a fresh install, a second user or a wiped home loses it, and
+# the unit's PRESET is `enabled`, so `systemctl --user preset-all` or simply a
+# new user re-arms it. The enablement symlink is still sitting under the mask
+# in that same home. An installer's artefact has to outlive all of that, so it
+# goes in /etc/systemd/user -- which is byte-for-byte what
+# `systemctl --global mask` writes, and is the reason that path exists.
+#
+# ⚠️ PRECEDENCE, because it is what makes this work: systemd resolves a user
+# unit BY NAME through ~/.config/systemd/user, then /etc/systemd/user, then
+# /usr/lib/systemd/user, and a symlink to /dev/null anywhere in that chain
+# masks it. A `.wants/` symlink from an enable/preset does not inject a
+# fragment path, so an enabled-but-masked unit stays masked -- which is
+# exactly the state measured on the Deck, one level up in $HOME. That the same
+# holds one level down in /etc is INFERRED from the search order, not yet
+# measured on hardware; verify with `systemctl --user is-enabled` returning
+# `masked` for a user whose home carries no mask of its own.
+#
+# ⚠️ NOT `systemctl --global mask`: the symlink has to be bakeable into an
+# image by a build that has no running systemd for the target (T5), and `ln`
+# needs none. The artefact is identical either way.
+readonly SLEEP_LOCK_UNIT=omarchy-sleep-lock.service
+readonly SLEEP_LOCK_GLOBAL_MASK="/etc/systemd/user/${SLEEP_LOCK_UNIT}"
+# Where a per-user mask would sit, relative to a home directory. Ours does not
+# go here -- this is only what gets checked for a user file SHADOWING /etc.
+readonly SLEEP_LOCK_USER_UNIT_REL=".config/systemd/user/${SLEEP_LOCK_UNIT}"
 
 # --- Desktop-mode input mapper (ROADMAP P2.1, T3 §4) ----------------------
 readonly MAPPER_SRC_NAME=deck-input-mapper.py
@@ -629,6 +688,146 @@ readonly INSTALL_MARKER_JSONC="// ${INSTALL_MARKER_TEXT}"
 # reasoned: DeckShift's own zz- drop-in was observed winning over
 # autologin.conf on this hardware.
 readonly SDDM_DROPIN=/etc/sddm.conf.d/zz-deck-session.conf
+
+# ---------------------------------------------------------------------------
+# THE POWER BUTTON  (stage-power-button -- OPT-IN, not in INSTALL_STAGES)
+# ---------------------------------------------------------------------------
+#
+# Today, on the operator's Deck: a press in Desktop Mode flashes Omarchy's
+# System menu and does nothing else; a press in Gaming Mode does nothing at
+# all. Neither is a bug in anything -- the key was simply never wired to sleep.
+# Omarchy ships /etc/systemd/logind.conf.d/10-ignore-power-button.conf
+# (HandlePowerKey=ignore, system-wide, package-owned) and binds XF86PowerOff to
+# `omarchy-menu toggle system` in Hyprland. Gaming Mode is Valve's stock
+# gamescope session, which has no such bind, and Valve's own handler
+# (steamos-powerbuttond) is in none of this project's package lists.
+#
+# All of that is READ, and the evidence is docs/findings/T13-power-button-and-
+# sleep.md §2 and §4. What follows is the part that was MEASURED, on the
+# operator's Deck (Valve Galileo, OLED), 2026-08-12, n=3 presses -- one tap and
+# two deliberate holds -- with python-evdev watching all 18 input nodes:
+#
+#   ONE physical press produces TWO KEY_POWER presses, on two nodes:
+#
+#     event4  "AT Translated Set 2 keyboard"  ID_PATH=platform-i8042-serio-0
+#             A REAL KEY. Down on press, up on release, tracking a 2.92 s hold
+#             exactly. This is the one worth keeping.
+#     event2  ACPI LNXPWRBN                   ID_PATH=acpi-LNXPWRBN:00
+#             A FIRE-AND-FORGET NOTIFY. One instantaneous press+release
+#             131-198 ms after the press, INDEPENDENT of hold length. It can
+#             never express a hold, so it can never satisfy a long-press.
+#     event0  ACPI PNP0C0C                    ID_PATH=acpi-PNP0C0C:00
+#             Silent across all three presses.
+#
+# and all three carry TAGS=:power-switch: (udevadm info, same session), because
+# /usr/lib/udev/rules.d/70-power-switch.rules tags every input node with
+# ID_INPUT_KEY=1. That tag is exactly what systemd-logind watches.
+#
+# 🔴 TWO TRAPS, and the whole shape of this stage is built out of them.
+#
+#   1. HandlePowerKey= DEFAULTS TO `poweroff`, not `suspend` (man logind.conf,
+#      systemd 261 -- the version the Deck runs). Merely deleting Omarchy's
+#      drop-in would hard-power-off the Deck on every tap: worse than the menu
+#      flash it replaces. The value is therefore written EXPLICITLY, and this
+#      stage re-reads it back out of the installed file rather than trusting a
+#      redirect.
+#
+#   2. TWO PRESSES PER PRESS MEANS TWO SUSPEND REQUESTS, the second landing at
+#      or just after resume -- an immediate re-suspend loop, on a device whose
+#      only other escape is a ten-second hardware hold. Indistinguishable from
+#      a Deck that will not wake. So the duplicate is removed FIRST, and the
+#      handler is enabled SECOND -- in the file layout, in the order this stage
+#      writes, and in the order the undo instructions it prints undo them.
+#
+# This independently reproduces Valve's own answer: on Jupiter and Galileo they
+# blacklist the ACPI power button by name (STEAMOS_POWER_BUTTON_IGNORE=1 in
+# steamos-power-button.hwdb) so their powerbuttond binds the real key instead.
+# Two routes, one conclusion (T13 §4.1).
+readonly POWER_UDEV_TAG=power-switch
+
+# The upstream rule that ADDS the tag. Ours must be read after it: "-=" removes
+# a value from a list, so a rule that runs first removes nothing at all and
+# leaves both sources live -- a silent no-op that ends in trap 2 above.
+readonly POWER_UDEV_TAGGER=70-power-switch.rules
+
+# udev reads *.rules from every rules directory as ONE filename-sorted
+# sequence, and systemd-logind reads logind.conf.d/*.conf the same way with
+# later files winning. Both names below are 'zz-' for the reason SDDM_DROPIN is
+# (see the BUG FIX note above it): a numeric prefix that was *documented* as
+# sorting last did not, and nobody checked. verify_power_button_ordering checks
+# these two against the files actually on disk rather than trusting this
+# comment -- which is the part that comment lacked.
+readonly POWER_UDEV_RULE=/etc/udev/rules.d/zz-deck-power-button.rules
+readonly POWER_LOGIND_DROPIN=/etc/systemd/logind.conf.d/zz-deck-power-button.conf
+
+# Searched for rivals, in the ordering check. Both tools merge every directory
+# into one sort by BASENAME, so a rival in any of them can win.
+readonly -a POWER_UDEV_DIRS=(/etc/udev/rules.d /run/udev/rules.d /usr/lib/udev/rules.d)
+readonly -a POWER_LOGIND_DIRS=(/etc/systemd/logind.conf.d /run/systemd/logind.conf.d /usr/lib/systemd/logind.conf.d)
+
+# BOTH ACPI nodes, not only the one measured firing. acpi-PNP0C0C:00 was silent
+# across all three presses -- but it advertises KEY_POWER and carries the tag,
+# so it is a second source waiting for a firmware or kernel change to wake it.
+# Untagging a node that emits nothing costs exactly nothing; leaving it costs
+# the suspend loop in trap 2 if it ever starts emitting. The costs are wildly
+# asymmetric, so both go.
+#
+# The Lid Switch (acpi-PNP0C0D:00, event1) is deliberately NOT here. The same
+# upstream rule tags it, logind's HandleLidSwitch= is a different question, and
+# nothing about the lid was measured. This stage changes the power key only.
+POWER_ACPI_ID_PATHS=(acpi-LNXPWRBN:00 acpi-PNP0C0C:00)
+readonly POWER_ACPI_ID_PATHS
+
+# The single source left standing. If this node is missing or untagged, then
+# untagging the ACPI ones leaves logind watching NOTHING and the power button
+# becomes dead rather than fixed -- so it is checked before anything is written.
+readonly POWER_KEEP_ID_PATH=platform-i8042-serio-0
+
+# HandlePowerKeyLongPress= is set EXPLICITLY to systemd's own default rather
+# than left to inherit, for the same reason HandlePowerKey= is: this file
+# should say what the Deck does, not depend on what else lands in the
+# directory. `ignore` and not `poweroff`, on three grounds:
+#
+#   - The threshold is UNKNOWN. systemd's LONG_PRESS_DURATION has never been
+#     read from source, and SteamOS's 1 s is powerbuttond's alarm(1) -- a
+#     different program (T13 §4.0, §4.1). No number appears anywhere in this
+#     stage on purpose; do not import one from the other.
+#   - A long-press power off would shadow the ten-second hardware hold that
+#     docs/RECOVERY.md documents as the escape of last resort, with an abrupt
+#     poweroff at an unknown, earlier moment.
+#   - It would fire for real here, unlike on most hardware: event4 does track
+#     holds. That makes it a live hazard rather than a dead setting.
+readonly POWER_KEY_ACTION=suspend
+readonly POWER_KEY_LONG_PRESS_ACTION=ignore
+
+# Only verified hardware. Every measurement above was taken on an OLED
+# (Galileo); an LCD (Jupiter) may enumerate its power button differently, and
+# CLAUDE.md forbids claiming LCD support that has not been tested. An ungated
+# rule that misfires on hardware nobody has measured is worse than no rule --
+# see verify_power_button_model for the argument in full.
+readonly POWER_MODEL=Galileo
+readonly POWER_DMI_PRODUCT=/sys/class/dmi/id/product_name
+
+# 🔴 The interaction that could strand the operator, and it is NOT this stage's
+# to fix: suspend on this Deck must resume UNLOCKED, deliberately, because the
+# device has no keyboard (T5 §5.6, T13 §5.3). That holds only while
+# omarchy-sleep-lock.service stays masked -- it is what locks the screen on
+# PrepareForSleep. Making the power button suspend while that unit is live
+# turns every press into an unanswerable password prompt (blast-radius R2 in
+# T13 §7), so the stage says so out loud before it finishes.
+#
+# ⚠️ THE UNIT AND ITS MASK PATH ARE DECLARED ONCE, WAY ABOVE, as SLEEP_LOCK_UNIT
+# and SLEEP_LOCK_GLOBAL_MASK -- read the WHY there. This block used to redeclare
+# both, and used to say the mask was "HAND-APPLIED on the test Deck and not
+# shipped from src/ at all". That expired: install_sleep_lock_mask ships it from
+# stage-desktop-settings. What has NOT changed is that this stage must still
+# check rather than assume -- the stages can be run one at a time, and a Deck
+# whose power button suspends before its mask is installed is the bad ordering.
+#
+# The search path, in systemd's own precedence order, for answering "is it
+# masked HERE" rather than "did we install ours". ~/.config/systemd/user comes
+# ahead of all three and is per-user, so it is not in this list.
+readonly -a SLEEP_LOCK_UNIT_DIRS=(/etc/systemd/user /usr/local/lib/systemd/user /usr/lib/systemd/user)
 
 readonly -a INSTALL_STAGES=(
   stage-preconditions
@@ -3184,17 +3383,75 @@ PY
   esac
 }
 
+# Mask omarchy-sleep-lock.service for every user of this image. Read the
+# SLEEP_LOCK_* constants above first -- the WHY is there, and it is a security
+# decision, not a tidy-up.
+#
+# THE DESTINATION IS A PARAMETER -- see "THE VERIFICATION SEAM" above
+# verify_update_stub. Production passes nothing and gets ${SLEEP_LOCK_GLOBAL_MASK};
+# the unit suite passes a path under its fake root, because the read-back below
+# resolves the symlink DIRECTLY rather than through $SUDO and would otherwise
+# be inspecting the developer's real /etc.
+install_sleep_lock_mask() {
+  local mask=${1:-$SLEEP_LOCK_GLOBAL_MASK}
+
+  # Idempotent, and it has to be: this stage is re-run by the SSH iterate loop
+  # and again by every image build. `ln -sfn` alone would be idempotent too,
+  # but it would also silently replace whatever else is there -- so look first.
+  if [[ -L $mask ]]; then
+    local existing
+    existing=$(readlink -- "$mask") ||
+      fail "${mask} is a symlink that cannot be read; refusing to guess what it points at"
+    if [[ $existing == /dev/null ]]; then
+      log "${SLEEP_LOCK_UNIT} is already masked at ${mask}"
+      return 0
+    fi
+    fail "${mask} is a symlink to '${existing}', not to /dev/null. Something else owns this path -- an alias or a drop-in, not a mask. Refusing to replace it; remove it by hand if it is stale, then re-run."
+  elif [[ -e $mask ]]; then
+    fail "${mask} exists and is not a symlink, so it is a real unit file overriding ${SLEEP_LOCK_UNIT} rather than masking it. Refusing to replace it; move it aside by hand, then re-run."
+  fi
+
+  log "masking ${SLEEP_LOCK_UNIT} for every user: ${mask} -> /dev/null"
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$mask")" ||
+    fail "could not create $(dirname "$mask")"
+  # -n matters: without it, an existing symlink-to-a-directory at $mask would
+  # make ln create the link INSIDE that directory, and the mask would land at a
+  # name systemd never looks up. The branches above already refuse that case;
+  # -n is the second line of defence, and costs nothing.
+  $SUDO ln -sfn /dev/null "$mask" ||
+    fail "could not create the mask symlink ${mask}"
+
+  # Read it back rather than trusting the write, for one specific reason:
+  # systemd treats ONLY a symlink to /dev/null as a mask. A regular empty file
+  # at the same path loads as a unit with no directives -- which is not masked,
+  # starts nothing, and looks identical in a directory listing. Anything that
+  # produced that instead would be a silent no-op, and the device would lock on
+  # resume with every file the installer promised present.
+  [[ -L $mask ]] ||
+    fail "${mask} is not a symlink after installing it; systemd masks a unit only via a symlink to /dev/null, so the sleep lock would still run"
+  local got
+  got=$(readlink -- "$mask") ||
+    fail "could not read back ${mask} after installing it"
+  [[ $got == /dev/null ]] ||
+    fail "${mask} points at '${got}', not /dev/null -- that is not a mask, and the Deck would lock on resume with no way to unlock it"
+  log "verified: ${mask} is a symlink to /dev/null, so ${SLEEP_LOCK_UNIT} is masked for every user, including ones this image has not created yet"
+}
+
 stage_desktop_settings() {
   # Installs the settings that decide whether the on-screen keyboard works, what
-  # it TYPES, and whether an idle Deck can lock itself out. See the constants
+  # it TYPES, and whether the Deck can lock itself out -- when idle, and when it
+  # is suspended, which are two separate producers. See the constants
   # above for why each one exists; every one of them was discovered by something
   # failing on a screen, and none of them fails a test today.
   #
-  # THE ONE PARAMETER IS A SEAM, not an option a Deck ever passes: the XKB rule's
+  # BOTH PARAMETERS ARE SEAMS, not options a Deck ever passes: the XKB rule's
   # verification talks to a LIVE compositor, and hardcoding /run/user/<uid> would
-  # make the unit suite reload the desktop of whoever ran it. Production passes
-  # nothing. See "THE VERIFICATION SEAM" above verify_update_stub.
+  # make the unit suite reload the desktop of whoever ran it; the sleep-lock mask
+  # is read back at an absolute path, which off-Deck is the developer's own /etc.
+  # Production passes nothing. See "THE VERIFICATION SEAM" above
+  # verify_update_stub.
   local hypr_runtime=${1:-}
+  local sleep_lock_mask=${2:-}
 
   command -v dconf >/dev/null 2>&1 ||
     fail "dconf not found; the on-screen keyboard's defaults cannot be installed"
@@ -3271,7 +3528,15 @@ stage_desktop_settings() {
   [[ $eff == "$dflt" ]] ||
     warn "${OSK_KEY} resolves to '${eff}' for this user but the site default is '${dflt}'. A user-level value is shadowing it, and the on-screen keyboard follows the user value -- 'dconf reset ${OSK_KEY}' to fall back to the default this stage installs."
 
-  # --- 3. Omarchy's idle policy ---
+  # --- 3. the two lock producers: suspend (B) and idle (A) ---
+  #
+  # They are INDEPENDENT and neither covers the other (T13 §5.2): the idle
+  # policy is a timer inside the Quickshell idle service, the sleep lock is a
+  # systemd unit holding a --mode=delay inhibitor on logind's PrepareForSleep
+  # that calls the same `omarchy-shell lock lock` IPC from outside that service
+  # entirely. Setting idle.lock has no effect on the sleep path and masking the
+  # unit has no effect on the idle path. They are adjacent here because a reader
+  # who fixes one and stops has fixed half a defect.
   local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
   [[ -n $invoking_user && $invoking_user != root ]] ||
     fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
@@ -3280,6 +3545,28 @@ stage_desktop_settings() {
     fail "could not resolve ${invoking_user}'s home directory"
   [[ -n $home ]] || fail "empty home directory for ${invoking_user}"
   local shell_json="${home}/${OMARCHY_SHELL_JSON_REL}"
+
+  # --- 3a. the SUSPEND producer, masked at image level ---
+  #
+  # First of the two, because it is the one whose failure is unrecoverable: an
+  # idle lock takes five minutes to arrive and the power button takes one press.
+  install_sleep_lock_mask ${sleep_lock_mask:+"$sleep_lock_mask"}
+
+  # A user unit file SHADOWS the /etc one -- ~/.config/systemd/user comes first
+  # in systemd's search path. Warn only when it actually DISAGREES, for the same
+  # reason the dconf check below does: the operator's own Deck carries a
+  # hand-made mask at exactly this path (P22 §3.1), and a warning that fires on
+  # a file which agrees with us teaches the operator to ignore the message.
+  local user_unit="${home}/${SLEEP_LOCK_USER_UNIT_REL}"
+  if [[ -e $user_unit || -L $user_unit ]]; then
+    if [[ -L $user_unit && $(readlink -- "$user_unit") == /dev/null ]]; then
+      log "${invoking_user} also has a per-user mask at ${user_unit}; it agrees with ours and is now redundant, not wrong"
+    else
+      warn "${user_unit} exists and is not a mask. ~/.config/systemd/user comes BEFORE /etc/systemd/user in systemd's search path, so this file shadows the mask this stage just installed and ${SLEEP_LOCK_UNIT} may still lock the Deck on resume. Remove it, or replace it with a symlink to /dev/null."
+    fi
+  fi
+
+  # --- 3b. the IDLE producer ---
 
   # A user shell.json REPLACES Omarchy's defaults rather than merging with them,
   # so writing a file containing only an idle block would silently strip the
@@ -3348,6 +3635,11 @@ PY
   log "NOTE: the keyboard layout rule is PER DEVICE. Physical keyboards and the"
   log "      rest of the desktop keep the session layout; only"
   log "      '${OSK_HYPR_DEVICE}' is pinned to '${OSK_KB_LAYOUT}'."
+  log "NOTE: ${SLEEP_LOCK_UNIT} is masked, so this Deck RESUMES FROM SLEEP"
+  log "      UNLOCKED, deliberately -- it has no keyboard and no unlock IPC."
+  log "      A lock the user asks for (System menu, SUPER+CTRL+L) still works."
+  log "      A unit already running in this session keeps running; the mask"
+  log "      applies from the next graphical session on."
 }
 
 # ---------------------------------------------------------------------------
@@ -4036,6 +4328,477 @@ stage_boot_default_gaming() {
 }
 
 # ---------------------------------------------------------------------------
+# stage-power-button -- one short press suspends the Deck
+# ---------------------------------------------------------------------------
+#
+# The constants block above carries the measurement and the two traps. This
+# section is the machinery. Read this first if you are about to change it:
+#
+# NOTHING HERE TAKES EFFECT UNTIL A REBOOT, and that is deliberate.
+# This stage writes two files and reloads nothing: no `udevadm control
+# --reload-rules`, no `udevadm trigger`, no `systemctl restart systemd-logind`.
+# Three reasons, in order of weight:
+#
+#   1. Removing a udev TAG does not reliably un-register a device logind has
+#      ALREADY enumerated -- the monitor is filtered ON that tag, so the change
+#      event announcing the removal is the very event the filter drops. A
+#      reload could therefore leave the handler armed with the duplicate still
+#      live inside logind, which is trap 2 exactly.
+#   2. At boot there is no such race: udev processes a device's rules before
+#      the uevent is released to listeners, so logind never sees the tag.
+#   3. Restarting logind on a machine the operator is sitting in front of is a
+#      far larger blast radius than rebooting on purpose.
+#
+# So the stage's own runtime effect is two files on disk, and the entire
+# behavioural change happens at a reboot the operator chooses. It says so.
+#
+# EVERY host access in this section goes through $SUDO -- including the reads.
+# That is not decoration: it is what lets test/unit/test-deck-session-stages.sh
+# run the whole stage against a fake root with no seams in src/ at all, the
+# property that suite's header calls "$SUDO, which needed nothing from src/".
+# `$SUDO find <dir>` and `$SUDO cat <file>` take their paths as arguments, so
+# the harness's shim rewrites them; a `sh -c 'ls /etc/...'` would not be
+# rewritten and would read the developer's real machine. Do not introduce one.
+
+# True when $1 sorts strictly after $2.
+#
+# LC_ALL=C, because a locale that ignores punctuation would answer a different
+# question than the one udev and systemd ask. Both actually sort with
+# strverscmp_improved rather than byte order; the two agree for every name in
+# play here (letters beat digits under both, which is the whole point of the
+# 'zz-' prefix), and C collation is the conservative reading -- a name that
+# wins under C and loses under strverscmp does not exist in this alphabet.
+power_sorts_after() {   # power_sorts_after <candidate> <rival>
+  [[ $1 != "$2" ]] || return 1
+  [[ $(printf '%s\n%s\n' "$1" "$2" | LC_ALL=C sort | tail -n1) == "$1" ]]
+}
+
+# Refuse to run on hardware nobody has measured.
+#
+# THE ARGUMENT, because this is a policy call and not an obvious one.
+# stage_preconditions deliberately does NOT refuse an LCD Deck, reasoning that
+# "refusing to run on an LCD is worse than running untested". That reasoning
+# does not survive contact with this stage, for one reason: every other stage
+# installs something whose failure mode is a feature not working, while this
+# one rewires a HARDWARE BUTTON on a device whose only fallback is a
+# ten-second hold. Its entire content is a claim about how one measured model
+# enumerates that button --  three ID_PATHs, read off a Galileo. On a Jupiter
+# those may differ, and the two failure modes are (a) our rule matches nothing
+# and the duplicate survives -> the suspend loop, or (b) it matches too much
+# and logind watches nothing -> a dead button. The status quo on an unmeasured
+# model is a menu flash: annoying, and working software.
+#
+# There is deliberately NO override flag. A flag is how "unverified" quietly
+# becomes "supported"; CLAUDE.md forbids claiming LCD support anywhere. The way
+# to run this on a Jupiter is to repeat T13 §2.2's capture on a Jupiter and add
+# what it measures -- which is a code change, reviewed, with evidence.
+verify_power_button_model() {
+  local product=""
+  $SUDO test -r "$POWER_DMI_PRODUCT" ||
+    fail "cannot read ${POWER_DMI_PRODUCT}, so the model is unknown. This stage rewires the power button using ID_PATHs measured on one specific model; it will not guess."
+  product=$($SUDO cat -- "$POWER_DMI_PRODUCT") ||
+    fail "reading ${POWER_DMI_PRODUCT} failed. Refusing to rewire the power button on an unidentified machine."
+  product=${product//$'\n'/}
+  [[ -n $product ]] ||
+    fail "${POWER_DMI_PRODUCT} is empty. Refusing to rewire the power button on an unidentified machine."
+
+  [[ ${product,,} == "${POWER_MODEL,,}" ]] ||
+    fail "this machine reports product_name='${product}', and every measurement behind this stage was taken on '${POWER_MODEL}' (the OLED Deck). 'Jupiter' is the LCD Deck and it has never been measured: it may enumerate its power button differently, in which case this rule either matches nothing (leaving the duplicate press, and a suspend loop) or matches too much (leaving logind nothing to watch, and a dead button). Today's behaviour on an unmeasured model -- the System menu flashing -- is at least working software. To support this model, repeat the capture in docs/findings/T13-power-button-and-sleep.md §2.2 on it and add what it measures to POWER_ACPI_ID_PATHS / POWER_KEEP_ID_PATH. There is no override flag on purpose."
+
+  log "model: ${product} -- the hardware every measurement behind this stage was taken on"
+}
+
+# Prove both files will actually WIN, against what is on this disk.
+#
+# 🔴 This is the check whose absence is a silent no-op in both directions. A
+# udev rule read BEFORE ${POWER_UDEV_TAGGER} removes a tag that has not been
+# added yet: it parses, it applies, it does nothing, and the duplicate press
+# survives into a machine whose handler is now armed. A logind drop-in that
+# sorts before Omarchy's 10-ignore-power-button.conf is overridden by it: the
+# file is on disk, the setting is correct, and HandlePowerKey is still
+# `ignore`. Neither leaves a trace anywhere.
+#
+# So: scan for the files that assign the same things, and assert ours sorts
+# after every one of them. This is the check the SDDM drop-in did not have when
+# its comment claimed an ordering that was false on every machine.
+verify_power_button_ordering() {
+  local ours_rule ours_conf d f base
+  ours_rule=${POWER_UDEV_RULE##*/}
+  ours_conf=${POWER_LOGIND_DROPIN##*/}
+
+  # --- udev: every file that ADDS the tag must be read before ours ---
+  local taggers=0
+  for d in "${POWER_UDEV_DIRS[@]}"; do
+    $SUDO test -d "$d" || continue
+    while IFS= read -r f; do
+      [[ -n $f ]] || continue
+      base=${f##*/}
+      [[ $base != "$ours_rule" ]] || continue
+      $SUDO grep -qF -- "TAG+=\"${POWER_UDEV_TAG}\"" "$f" || continue
+      taggers=$((taggers + 1))
+      power_sorts_after "$ours_rule" "$base" ||
+        fail "${ours_rule} sorts BEFORE ${base}, which is a udev rule that adds TAG+=\"${POWER_UDEV_TAG}\" (${f}). udev reads every rules directory as one filename-sorted sequence, so ours would run first and remove a tag that has not been added yet -- it parses, it applies, and it does nothing. Rename ${ours_rule} to something that sorts after ${base}."
+    done < <($SUDO find "$d" -maxdepth 1 -name '*.rules' -type f 2>/dev/null | sort)
+  done
+  [[ $taggers -gt 0 ]] ||
+    fail "found no udev rule anywhere in ${POWER_UDEV_DIRS[*]} that adds TAG+=\"${POWER_UDEV_TAG}\". This stage's whole premise is that ${POWER_UDEV_TAGGER} tags the power buttons and that ours then untags two of them; with nothing adding the tag, either logind is watching no power switch at all (so HandlePowerKey= would be dead) or something tags it by a mechanism this stage does not understand. Investigate before installing anything."
+  log "verified: ${ours_rule} is read after all ${taggers} udev rule(s) that add TAG+=\"${POWER_UDEV_TAG}\""
+
+  # --- logind: every drop-in that assigns HandlePowerKey= must lose to ours ---
+  local rivals=0
+  for d in "${POWER_LOGIND_DIRS[@]}"; do
+    $SUDO test -d "$d" || continue
+    while IFS= read -r f; do
+      [[ -n $f ]] || continue
+      base=${f##*/}
+      [[ $base != "$ours_conf" ]] || continue
+      $SUDO grep -qE '^[[:space:]]*HandlePowerKey[[:space:]]*=' "$f" || continue
+      rivals=$((rivals + 1))
+      power_sorts_after "$ours_conf" "$base" ||
+        fail "${ours_conf} sorts BEFORE ${base}, which also assigns HandlePowerKey= (${f}). systemd merges logind.conf.d from every directory into one basename-sorted sequence and the LAST assignment wins, so ${base} would override us: the file would be on disk, the setting would read correctly, and the power button would still do whatever ${base} says. Rename ${ours_conf} to something that sorts after ${base}."
+    done < <($SUDO find "$d" -maxdepth 1 -name '*.conf' -type f 2>/dev/null | sort)
+  done
+  # Zero rivals is legitimate -- it means nothing else claims the key -- but it
+  # is worth saying, because on this product the expected count is one
+  # (Omarchy's package-owned 10-ignore-power-button.conf) and a zero here means
+  # either that file moved or this is not the machine we think it is.
+  if [[ $rivals -eq 0 ]]; then
+    log "note: no other logind drop-in assigns HandlePowerKey= on this machine (expected one: Omarchy's 10-ignore-power-button.conf)"
+  else
+    log "verified: ${ours_conf} is read after all ${rivals} logind drop-in(s) that assign HandlePowerKey="
+  fi
+}
+
+# Prove the rule will match the devices it names, on THIS machine, BEFORE
+# writing anything.
+#
+# 🔴 Both halves matter and they fail in opposite directions:
+#
+#   - An ID_PATH that matches nothing means the duplicate press survives. The
+#     rule installs cleanly, udev applies it cleanly, and the next press
+#     suspends twice. That is the suspend loop, arrived at by a typo.
+#   - A missing or untagged keeper means untagging the ACPI nodes leaves logind
+#     with no power-switch device at all. HandlePowerKey= then has nothing to
+#     act on and the button becomes DEAD -- a different failure from the one
+#     the operator reported, introduced by the fix for it.
+#
+# Read-only: `udevadm info --query=property` and nothing else. No trigger, no
+# control, no settle.
+verify_power_button_premise() {
+  local dev line id tags found_keep="" f
+  local -a untag_found=() tagged=()
+
+  for f in "${POWER_ACPI_ID_PATHS[@]}"; do
+    [[ $f != "$POWER_KEEP_ID_PATH" ]] ||
+      fail "POWER_KEEP_ID_PATH (${POWER_KEEP_ID_PATH}) also appears in POWER_ACPI_ID_PATHS. That would untag the ONE node this design keeps, leaving logind watching nothing and the power button dead. Refusing to render a rule that disables its own single source."
+  done
+
+  while IFS= read -r dev; do
+    [[ -n $dev ]] || continue
+    id=""; tags=""
+    while IFS= read -r line; do
+      case $line in
+        ID_PATH=*) id=${line#ID_PATH=} ;;
+        TAGS=*)    tags=${line#TAGS=} ;;
+      esac
+    done < <($SUDO udevadm info --query=property --name "$dev" 2>/dev/null)
+    [[ -n $id ]] || continue
+    [[ $tags == *":${POWER_UDEV_TAG}:"* ]] || continue
+    tagged+=("${id} (${dev##*/})")
+    [[ $id != "$POWER_KEEP_ID_PATH" ]] || found_keep=$dev
+    for f in "${POWER_ACPI_ID_PATHS[@]}"; do
+      [[ $id != "$f" ]] || untag_found+=("$id")
+    done
+  done < <($SUDO find /dev/input -maxdepth 1 -name 'event*' 2>/dev/null | sort)
+
+  [[ ${#tagged[@]} -gt 0 ]] ||
+    fail "no input device under /dev/input carries TAGS=:${POWER_UDEV_TAG}: at all. Either udev has not processed these devices, or this machine does not enumerate its power button the way the measurement in docs/findings/T13-power-button-and-sleep.md §2.2 recorded. Nothing has been written."
+  log "power-switch devices udev reports on this machine: ${tagged[*]}"
+
+  [[ -n $found_keep ]] ||
+    fail "no device carries ID_PATH=${POWER_KEEP_ID_PATH} AND TAGS=:${POWER_UDEV_TAG}:. That node is the SINGLE SOURCE this design keeps -- the real key that tracks a hold. Untagging the ACPI buttons without it would leave systemd-logind watching no power switch at all, and the power button would go from flashing a menu to doing nothing whatsoever. Nothing has been written."
+
+  local want
+  for want in "${POWER_ACPI_ID_PATHS[@]}"; do
+    local hit=""
+    for f in "${untag_found[@]+"${untag_found[@]}"}"; do
+      [[ $f != "$want" ]] || hit=$f
+    done
+    [[ -n $hit ]] ||
+      fail "the rule would untag ID_PATH=${want}, and NO device on this machine matches that with TAGS=:${POWER_UDEV_TAG}:. A rule that matches nothing installs cleanly, applies cleanly and does nothing -- which here means the duplicate KEY_POWER press survives and the next press suspends twice, at or just after resume. Re-run the capture in docs/findings/T13-power-button-and-sleep.md §2.2 on this machine and correct POWER_ACPI_ID_PATHS. Nothing has been written."
+  done
+  log "verified: every ID_PATH this rule untags is present and currently tagged, and ${POWER_KEEP_ID_PATH} survives as the single source"
+}
+
+# 🔴 R2, said out loud rather than assumed away.
+#
+# A WARNING and not a failure, and the reason is that the answer is only half
+# readable from here. omarchy-sleep-lock.service is a USER unit; it can be
+# masked globally (a /dev/null symlink under /etc/systemd/user, which this can
+# see -- install_sleep_lock_mask is what ships ours) or per user (under
+# ~/.config/systemd/user, which it cannot see, and which is how it was masked
+# by hand on the test Deck). Failing on an unreadable half would block the fix
+# on a machine that is actually fine; saying nothing would ship a power button
+# whose every press might raise a password prompt on a device with no keyboard.
+# So: report exactly what is knowable, and print the one command that settles
+# the rest.
+#
+# ⚠️ CHECKS, rather than assuming stage-desktop-settings already ran. The stages
+# are individually invocable, and "power button suspends, mask not yet
+# installed" is precisely the bad ordering.
+warn_if_sleep_lock_live() {
+  local d unit=""
+  if $SUDO test -L "$SLEEP_LOCK_GLOBAL_MASK" &&
+     [[ $($SUDO readlink -- "$SLEEP_LOCK_GLOBAL_MASK" 2>/dev/null) == /dev/null ]]; then
+    log "verified: ${SLEEP_LOCK_UNIT} is masked for every user (${SLEEP_LOCK_GLOBAL_MASK} -> /dev/null), so a suspend cannot raise a lock screen"
+    return 0
+  fi
+
+  for d in "${SLEEP_LOCK_UNIT_DIRS[@]}"; do
+    if $SUDO test -f "$d/$SLEEP_LOCK_UNIT"; then unit="$d/$SLEEP_LOCK_UNIT"; break; fi
+  done
+
+  if [[ -z $unit ]]; then
+    log "note: ${SLEEP_LOCK_UNIT} is not installed on this machine, so nothing locks the screen on suspend"
+    return 0
+  fi
+
+  warn "${unit} exists and is NOT masked globally. If it is also unmasked for the desktop user, every suspend this stage enables will lock the screen -- and this Deck has no keyboard to answer the password prompt with (docs/findings/T13-power-button-and-sleep.md §5.3, blast radius R2). Check BEFORE the first press, as the desktop user:  systemctl --user is-enabled ${SLEEP_LOCK_UNIT}   -- it must say 'masked'. If it does not:  systemctl --user mask ${SLEEP_LOCK_UNIT}"
+}
+
+# The udev rule. Written to stdout so the unit suite can check its shape with
+# no Deck, no root and no VM -- the same move render_update_stub made.
+render_power_udev_rule() {
+  local p
+  cat <<EOF
+${INSTALL_MARKER}
+#
+# Drop the ACPI power-button nodes from udev's "${POWER_UDEV_TAG}" tag, so that
+# systemd-logind watches exactly ONE device for KEY_POWER on this machine.
+#
+# WHY -- MEASURED on the operator's Deck (Valve ${POWER_MODEL}, OLED),
+# 2026-08-12, n=3 presses: one tap and two deliberate holds. One physical press
+# produced TWO KEY_POWER presses:
+#
+#   ${POWER_KEEP_ID_PATH}
+#       "AT Translated Set 2 keyboard" -- a REAL key. Down on press, up on
+#       release, tracking a 2.92 s hold exactly. KEPT: it is the only node that
+#       can express a hold at all.
+#   acpi-LNXPWRBN:00
+#       a fire-and-forget notify -- one instantaneous press+release 131-198 ms
+#       after the press, INDEPENDENT of hold length. This is the duplicate.
+#   acpi-PNP0C0C:00
+#       silent across all three presses, but tagged and advertising KEY_POWER.
+#
+# Full trace: docs/findings/T13-power-button-and-sleep.md §2.2.
+#
+# 🔴 WITHOUT THIS FILE, HandlePowerKey=suspend GETS TWO SUSPEND REQUESTS PER
+# PRESS, ~198 ms apart -- the second landing at or just after resume. That is a
+# re-suspend loop on a device whose only other escape is a ten-second hardware
+# hold, i.e. indistinguishable from a Deck that will not wake. This rule must
+# be in place BEFORE anything sets HandlePowerKey= to a value that acts.
+#
+# Valve reached the same answer from their own measurements: on Jupiter and
+# Galileo they blacklist the ACPI power button by name
+# (STEAMOS_POWER_BUTTON_IGNORE=1, steamos-power-button.hwdb) so that their
+# powerbuttond binds the real key instead.
+#
+# BOTH ACPI nodes, not just the one that fires: a silent node that advertises
+# KEY_POWER and carries the tag is a second source waiting for a firmware or
+# kernel change. Untagging it costs nothing.
+#
+# The Lid Switch (acpi-PNP0C0D:00) is deliberately untouched -- same upstream
+# rule tags it, but nothing about the lid was measured and HandleLidSwitch= is
+# a separate question.
+#
+# ORDERING: this file must be read AFTER ${POWER_UDEV_TAGGER}, which is what
+# adds the tag. "-=" removes a value from a list (udev(7), "-=", since v217),
+# so a rule read first removes nothing and silently leaves both sources live.
+# udev reads every rules directory as one filename-sorted sequence, which is
+# what the 'zz-' prefix is for. deck-session.sh asserts that against the files
+# on disk before installing this -- it does not trust this paragraph.
+
+ACTION=="remove", GOTO="deck_power_button_end"
+SUBSYSTEM!="input", GOTO="deck_power_button_end"
+KERNEL!="event*", GOTO="deck_power_button_end"
+
+EOF
+  for p in "${POWER_ACPI_ID_PATHS[@]}"; do
+    printf 'ENV{ID_PATH}=="%s", TAG-="%s"\n' "$p" "$POWER_UDEV_TAG"
+  done
+  printf '\nLABEL="deck_power_button_end"\n'
+}
+
+# The logind drop-in. Stdout, same reason.
+render_power_logind_dropin() {
+  cat <<EOF
+${INSTALL_MARKER}
+#
+# One short press of the power button suspends the Deck.
+#
+# 🔴 THE VALUE IS WRITTEN OUT EXPLICITLY AND MUST STAY THAT WAY.
+# HandlePowerKey= defaults to **poweroff**, not suspend (man logind.conf,
+# systemd 261 -- the version this Deck runs). A version of this file that
+# merely removed Omarchy's drop-in, or that left the value blank, would
+# hard-power-off the Deck on every tap: strictly worse than the System menu
+# flash it replaces, and with data loss on every press.
+#
+# WHY A NEW FILE AND NOT AN EDIT. Omarchy ships
+# /etc/systemd/logind.conf.d/10-ignore-power-button.conf (HandlePowerKey=ignore)
+# and the omarchy package OWNS that path -- omarchy-upgrade-to-quattro passes
+# pacman --overwrite for it by name, so any edit or deletion comes back on the
+# next upgrade. systemd merges logind.conf.d from /etc, /run and /usr/lib into
+# one basename-sorted sequence in which the LAST assignment wins, so a 'zz-'
+# name beats a '10-' one without touching a file we do not own. deck-session.sh
+# checks that ordering against the files actually on disk before installing
+# this.
+#
+# 🔴 REQUIRES ${POWER_UDEV_RULE}, which must already be in place. One physical
+# press produces TWO KEY_POWER presses on this hardware (MEASURED -- T13 §2.2);
+# with both still tagged \`power-switch\`, this setting gets two suspend
+# requests ~198 ms apart and the second lands at or just after resume.
+#
+# HandlePowerKeyLongPress=${POWER_KEY_LONG_PRESS_ACTION} is systemd's own default, restated here rather
+# than inherited so this file says what the Deck does. Not \`poweroff\`: the
+# threshold is a number nobody has read (systemd's LONG_PRESS_DURATION is
+# unread; SteamOS's 1 s belongs to powerbuttond's alarm(1), a different
+# program), and a long-press poweroff would shadow the ten-second hardware hold
+# that docs/RECOVERY.md documents as the escape of last resort. NO duration
+# appears in this file on purpose.
+#
+# GAMING MODE. This is system-wide, not per-session, which is the point: Gaming
+# Mode is Valve's stock gamescope session, it binds nothing to this key, and
+# Valve's own handler (steamos-powerbuttond) is in none of this project's
+# package lists -- which is exactly why the button does nothing there today.
+# ⚠️ One unmeasured caveat: if anything in that session takes a logind
+# **low-level inhibitor** on handle-power-key, Handle*= is ignored for as long
+# as it is held (man logind.conf) and Gaming Mode stays dead. Unverified.
+# \`systemd-inhibit --list\` in Gaming Mode answers it in one read-only command.
+#
+# RESUMES UNLOCKED, ON PURPOSE. This Deck has no keyboard; a lock screen on
+# resume is an unanswerable password prompt, so ${SLEEP_LOCK_UNIT} stays
+# masked (T5 §5.6, T13 §5.3). That is a deliberate security trade-off, and it
+# is a DIFFERENT stage's artefact -- deck-session.sh checks it is in place
+# before it finishes here, rather than assuming the stages ran in order.
+#
+# Desktop Mode also still runs Omarchy's own XF86PowerOff bind
+# (\`omarchy-menu toggle system\`), which is a USER config concern and is not
+# changed here. With the duplicate press gone, one press opens that menu and
+# LEAVES IT OPEN behind the suspend. See deck-session.sh's stage-power-button
+# output for the one-line fix and why it belongs in ~/.config/hypr/bindings.lua.
+
+[Login]
+HandlePowerKey=${POWER_KEY_ACTION}
+HandlePowerKeyLongPress=${POWER_KEY_LONG_PRESS_ACTION}
+EOF
+}
+
+# NOT in INSTALL_STAGES, and for the same reason stage_default_session and
+# stage_boot_default_gaming are not: this changes what a HARDWARE BUTTON does
+# on a device the operator cannot rescue remotely. Getting it wrong does not
+# produce a feature that fails to work, it produces a Deck that suspends itself
+# on resume, or one whose power button is inert. A bare `./deck-session.sh`
+# must not arm that on a machine where nobody has yet pressed the button and
+# watched.
+#
+# ORDER OF WRITES IS THE SAFETY PROPERTY. The udev rule (remove the duplicate)
+# goes first, the logind drop-in (arm the handler) second. A run that dies
+# between them leaves a machine with one fewer redundant tag and today's
+# behaviour otherwise -- harmless. The reverse order would leave the handler
+# armed with the duplicate live, which is the one state this whole stage exists
+# to avoid.
+stage_power_button() {
+  local tool
+  for tool in find udevadm readlink; do
+    command -v "$tool" >/dev/null 2>&1 ||
+      fail "required tool '${tool}' not found; this stage verifies what it is about to write and will not install unverified"
+  done
+
+  verify_power_button_model
+  verify_power_button_ordering
+  verify_power_button_premise
+
+  assert_ours_or_absent "$POWER_UDEV_RULE" "another package's udev rule"
+  assert_ours_or_absent "$POWER_LOGIND_DROPIN" "another package's logind configuration"
+
+  # --- 1. remove the duplicate press ---------------------------------------
+  log "installing ${POWER_UDEV_RULE}"
+  local tmp p
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_power_udev_rule >"$tmp" || fail "could not render the udev rule"
+  $SUDO install -D -m 0644 -o root -g root "$tmp" "$POWER_UDEV_RULE" ||
+    fail "could not install ${POWER_UDEV_RULE}"
+  rm -f "$tmp"
+
+  # Re-read what landed rather than trusting the redirect -- deck-session-select
+  # greps its three keys back out of the SDDM drop-in for the same reason.
+  $SUDO grep -qF -- "TAG-=\"${POWER_UDEV_TAG}\"" "$POWER_UDEV_RULE" ||
+    fail "wrote ${POWER_UDEV_RULE} but no TAG-=\"${POWER_UDEV_TAG}\" is in it on re-read. A rule that does not REMOVE the tag leaves both KEY_POWER sources live, and the handler installed next would suspend twice per press."
+  for p in "${POWER_ACPI_ID_PATHS[@]}"; do
+    $SUDO grep -qF -- "ENV{ID_PATH}==\"${p}\", TAG-=\"${POWER_UDEV_TAG}\"" "$POWER_UDEV_RULE" ||
+      fail "wrote ${POWER_UDEV_RULE} but the line untagging ID_PATH=${p} is not there on re-read"
+  done
+  $SUDO grep -qF -- 'LABEL="deck_power_button_end"' "$POWER_UDEV_RULE" ||
+    fail "wrote ${POWER_UDEV_RULE} but its GOTO target LABEL is missing on re-read -- udev refuses to load a rules file whose GOTO has no matching LABEL, so the whole file would be dropped"
+  ! $SUDO grep -q -- "^ENV{ID_PATH}==\"${POWER_KEEP_ID_PATH}\"" "$POWER_UDEV_RULE" ||
+    fail "wrote ${POWER_UDEV_RULE} and it untags ${POWER_KEEP_ID_PATH}, the one node this design keeps. That would leave systemd-logind watching no power switch at all."
+  log "verified: ${POWER_UDEV_RULE} untags ${#POWER_ACPI_ID_PATHS[@]} ACPI node(s) and leaves ${POWER_KEEP_ID_PATH} alone"
+
+  # --- 2. and ONLY NOW arm the handler -------------------------------------
+  log "installing ${POWER_LOGIND_DROPIN}"
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_power_logind_dropin >"$tmp" || fail "could not render the logind drop-in"
+  $SUDO install -D -m 0644 -o root -g root "$tmp" "$POWER_LOGIND_DROPIN" ||
+    fail "could not install ${POWER_LOGIND_DROPIN}"
+  rm -f "$tmp"
+
+  $SUDO grep -qxF -- '[Login]' "$POWER_LOGIND_DROPIN" ||
+    fail "wrote ${POWER_LOGIND_DROPIN} but it has no [Login] section on re-read -- systemd would log 'Unknown section' and ignore every setting in it, and the power button would stay exactly as it is"
+  $SUDO grep -qxF -- "HandlePowerKey=${POWER_KEY_ACTION}" "$POWER_LOGIND_DROPIN" ||
+    fail "wrote ${POWER_LOGIND_DROPIN} but 'HandlePowerKey=${POWER_KEY_ACTION}' is not there on re-read. This value is never allowed to be implicit: HandlePowerKey= DEFAULTS TO poweroff, so a drop-in that overrides Omarchy's 'ignore' without naming a value hard-powers-off the Deck on every tap."
+  $SUDO grep -qxF -- "HandlePowerKeyLongPress=${POWER_KEY_LONG_PRESS_ACTION}" "$POWER_LOGIND_DROPIN" ||
+    fail "wrote ${POWER_LOGIND_DROPIN} but 'HandlePowerKeyLongPress=${POWER_KEY_LONG_PRESS_ACTION}' is not there on re-read"
+  log "verified: ${POWER_LOGIND_DROPIN} sets HandlePowerKey=${POWER_KEY_ACTION} explicitly"
+
+  warn_if_sleep_lock_live
+
+  log "stage-power-button: ok"
+  log ""
+  log "🔴 NOTHING HAS CHANGED YET. This stage reloaded no udev rules and"
+  log "   restarted no services, on purpose: removing a udev tag does not"
+  log "   reliably un-register a device logind has already enumerated, so a"
+  log "   live reload could arm the handler with the duplicate press still"
+  log "   inside logind -- the one state this is built to avoid. A REBOOT"
+  log "   applies both files in the right order, with no such race:"
+  log "     sudo reboot"
+  log ""
+  log "After that reboot, ONE short press of the power button suspends the Deck,"
+  log "in Desktop Mode and in Gaming Mode alike (the drop-in is system-wide)."
+  log "A long press does nothing: no threshold in this project has been read"
+  log "from source, and the ten-second hardware hold is unchanged."
+  log ""
+  log "⚠️ DESKTOP MODE WILL ALSO LEAVE THE SYSTEM MENU OPEN behind the suspend."
+  log "   Omarchy binds XF86PowerOff to 'omarchy-menu toggle system'. Today the"
+  log "   duplicate press toggles it open and shut again, which is the 'flash'"
+  log "   that was reported; with the duplicate gone, one press opens it and"
+  log "   leaves it open. That bind is a USER config file and is NOT changed by"
+  log "   this stage. The supported fix, as the desktop user, in"
+  log "   ~/.config/hypr/bindings.lua:"
+  log "     hl.unbind(\"XF86PowerOff\")"
+  log "   ⚠️ A Lua syntax error there makes Hyprland discard the WHOLE file"
+  log "   silently, with 'hyprctl configerrors' still clean. Check it with"
+  log "   'luac -p ~/.config/hypr/bindings.lua' before rebooting."
+  log ""
+  log "🔴 UNDO -- in this order, so the handler is never armed alone:"
+  log "     sudo rm -f ${POWER_LOGIND_DROPIN}    # first: disarm the handler"
+  log "     sudo rm -f ${POWER_UDEV_RULE}   # second: restore the tags"
+  log "     sudo reboot"
+  log "   Removing only the first restores today's behaviour exactly (Omarchy's"
+  log "   10-ignore-power-button.conf takes over again). Removing only the"
+  log "   second is the dangerous half and is why the order is written down."
+}
+
+# ---------------------------------------------------------------------------
 
 run_stage() {
   local stage=$1
@@ -4056,7 +4819,7 @@ main() {
       log "Test first:  ${STEAM_SHIM} gamescope     (switches now, ends this session)"
       log "Then, once proven: ./${PROG}.sh stage-default-session"
       ;;
-    list-stages) printf '%s\n' "${INSTALL_STAGES[@]}" stage-audit-privileges stage-default-session stage-boot-default-gaming ;;
+    list-stages) printf '%s\n' "${INSTALL_STAGES[@]}" stage-audit-privileges stage-default-session stage-boot-default-gaming stage-power-button ;;
     -h|--help|help)
       cat <<EOF
 ${PROG}.sh -- two-way Gaming Mode <-> Desktop session switching for a Deck
@@ -4078,6 +4841,20 @@ ${PROG}.sh -- two-way Gaming Mode <-> Desktop session switching for a Deck
                                     Escape hatch, no editor needed:
                                       sudo touch ${BOOT_DEFAULT_OVERRIDE}
                                       sudo systemctl disable ${BOOT_DEFAULT_UNIT_NAME}
+  ${PROG}.sh stage-power-button     make ONE SHORT PRESS of the power button
+                                    suspend the Deck, in both modes. Writes two
+                                    files and reloads nothing -- it takes effect
+                                    at the next reboot, on purpose. Opt-in for
+                                    the same reason the two above are: it
+                                    changes what a hardware button does on a
+                                    device whose only other escape is a
+                                    ten-second hold. ${POWER_MODEL} (OLED) only;
+                                    it refuses on any other model, because the
+                                    device paths it uses were measured on one.
+                                    Undo, in this order:
+                                      sudo rm -f ${POWER_LOGIND_DROPIN}
+                                      sudo rm -f ${POWER_UDEV_RULE}
+                                      sudo reboot
 
 After installing:
   steamos-session-select gamescope  switch to Gaming Mode now

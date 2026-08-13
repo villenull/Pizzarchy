@@ -204,6 +204,11 @@ export RESOLVED_LOG="$resolved"
 export BREACH_LOG="$breach"
 export FAKE_DCONF_COMPILED="$work/dconf-compiled"
 
+# What the udevadm stub answers `info --query=property` from: one file per
+# input node, named for the node, holding the KEY=value lines udev would
+# export. §14 writes it; nothing else reads it.
+export FAKE_UDEV_DB="$work/udev-db"
+
 # The timezone the fake timedatectl reports, held in a FILE rather than an
 # environment variable so `set-timezone` can actually change it. That matters:
 # verify_timezone_helper reads the zone, runs the helper, and re-reads -- a
@@ -347,6 +352,13 @@ drop_next=0
 for a in "$@"; do
   if [[ $drop_next -eq 1 ]]; then drop_next=0; continue; fi
   if [[ $cmd == install && ( $a == -o || $a == -g ) ]]; then drop_next=1; continue; fi
+  # /dev/null is the ONE absolute path that is not a destination: it is the null
+  # device, and `ln -sfn /dev/null <unit>` is how systemd masks a unit. Rewriting
+  # it to ${FAKE_ROOT}/dev/null would produce a dangling symlink whose target is
+  # not /dev/null -- i.e. NOT a mask -- so the mask assertions would be checking
+  # a shape the Deck never gets. Passed through verbatim, and nothing writes to
+  # it: the only thing any stage does with this path is point a symlink at it.
+  if [[ $a == /dev/null ]]; then argv+=("$a"); continue; fi
   if [[ $a == /* ]]; then
     if [[ $a != "$SANDBOX"/* ]]; then
       a="${FAKE_ROOT}${a}"
@@ -628,6 +640,46 @@ esac
 exit 0
 STUB_HYPRCTL
 
+# --- udevadm ---------------------------------------------------------------
+#
+# stage_power_button asks udev what it currently knows about each input node,
+# so that a rule naming an ID_PATH nothing matches is caught BEFORE it is
+# written rather than by a Deck that suspends twice per press.
+#
+# Only `info --query=property --name <node>` is answered, and the answer comes
+# from a fixture directory keyed by the node's basename. Two properties matter:
+# ID_PATH (what the rule matches on) and TAGS (what logind filters on).
+#
+# 🔴 THE STUB REFUSES ANY OTHER VERB, on purpose. `udevadm control
+# --reload-rules`, `udevadm trigger` and `udevadm settle` all MUTATE the
+# running system's device state, and on this developer's machine they would
+# mutate the developer's. The stage is designed to run none of them -- it
+# writes files and requires a reboot -- and §14 asserts that the call log
+# contains no such call. This refusal is the second line of defence: if the
+# stage ever grows one, the run dies here rather than reloading real udev.
+cat >"$stub_bin/udevadm" <<'STUB_UDEVADM'
+#!/usr/bin/env bash
+set -uo pipefail
+[[ -n ${CALLS_LOG:-} ]] || { printf 'udevadm stub: no CALLS_LOG, refusing to run\n' >&2; exit 99; }
+printf 'udevadm %s\n' "$*" >>"$CALLS_LOG"
+
+[[ ${1-} == info ]] || {
+  printf 'udevadm stub: refusing verb "%s" -- only read-only `info` is allowed here\n' "${1-}" >&2
+  exit 97
+}
+
+name="" want=0
+for a in "$@"; do
+  if [[ $want -eq 1 ]]; then name=$a; want=0; continue; fi
+  [[ $a == --name ]] && want=1
+done
+[[ -n $name ]] || { printf 'udevadm stub: no --name given\n' >&2; exit 1; }
+
+f="${FAKE_UDEV_DB:?the suite must set a udev property fixture directory}/${name##*/}"
+[[ -f $f ]] || exit 1
+cat "$f"
+STUB_UDEVADM
+
 # --- commands the stages only probe for, or only log through ---------------
 for stub in systemd-run findmnt loginctl logger; do
   cat >"$stub_bin/$stub" <<STUB_GENERIC
@@ -648,12 +700,12 @@ export FAKE_SYSTEMCTL_SHOW_TimeoutStopUSec="${SDDM_STOP_TIMEOUT}s"
 export FAKE_SYSTEMCTL_SHOW_RestartUSec=3s
 
 # --- GATE 2 ----------------------------------------------------------------
-for tool in sudo systemctl visudo dconf env getent timedatectl hyprctl; do
+for tool in sudo systemctl visudo dconf env getent timedatectl hyprctl udevadm; do
   [[ $(command -v "$tool") == "$stub_bin/$tool" ]] ||
     fail_test "'${tool}' resolves to this suite's stub" \
       "got $(command -v "$tool"); the stub PATH is not in front, so this suite would drive the real system"
 done
-pass "sudo, systemctl, visudo, dconf, env, getent, timedatectl and hyprctl all resolve to stubs, not to the real binaries"
+pass "sudo, systemctl, visudo, dconf, env, getent, timedatectl, hyprctl and udevadm all resolve to stubs, not to the real binaries"
 
 # --- GATE 3 ----------------------------------------------------------------
 rc=0
@@ -712,6 +764,12 @@ seam_check verify_priv_write_helper         PRIV_WRITE_HELPER
 seam_check verify_greeter_compositor_command SDDM_GREETER_DROPIN
 seam_check verify_lizard_helper             LIZARD_HELPER
 seam_check verify_lizard_grant              LIZARD_HELPER
+# The mask carries less execution risk than the others -- nothing here RUNS the
+# installed artefact -- but the same seam, for a different reason: it reads its
+# symlink back at an absolute path, and off-Deck that path is the developer's
+# own /etc/systemd/user. Without the seam §6c would be asserting against a
+# machine's real systemd configuration rather than the fake root.
+seam_check install_sleep_lock_mask          SLEEP_LOCK_GLOBAL_MASK
 
 # --- GATE 4b ---------------------------------------------------------------
 #
@@ -771,6 +829,29 @@ grep -q '\${1:-' <<<"$osk_stage_body" ||
   fail_test "stage_desktop_settings does not name /run/user itself" \
     "the default belongs to the verifier; a copy here is a second path the argument cannot override"
 pass "stage_desktop_settings forwards a runtime-directory seam and names no /run/user path of its own"
+
+# The stage's SECOND seam, the sleep-lock mask. Same two halves: it has to
+# accept $2, and it must not name /etc/systemd/user itself -- that default
+# belongs to the constant, and a copy here would be a path §6 could not steer.
+# shellcheck disable=SC2016  # the literal text ${2:-, not this shell's $2.
+grep -q '\${2:-' <<<"$osk_stage_body" ||
+  fail_test "stage_desktop_settings takes the sleep-lock mask path as \$2" \
+    "without it §6 would read back the developer's own /etc/systemd/user"
+# The FULL mask path, not the directory: the stage's shadow warning explains
+# that ~/.config/systemd/user is searched before /etc/systemd/user, and naming
+# the directory in a message is documentation, not a second code path. What
+# would be a second code path is the mask FILE, or the constant itself used
+# somewhere $2 cannot reach -- both of which are checked, and neither of which
+# any prose in this stage has a reason to contain.
+! grep -qF "/etc/systemd/user/${SLEEP_LOCK_UNIT}" <<<"$osk_stage_body" ||
+  fail_test "stage_desktop_settings does not spell out the mask path itself" \
+    "the default belongs to SLEEP_LOCK_GLOBAL_MASK; a literal copy here is a path the argument cannot override"
+# shellcheck disable=SC2016  # the literal text "$SLEEP_LOCK_GLOBAL_MASK" in the
+# function's source, not this shell's value of it.
+! grep -qE '"\$SLEEP_LOCK_GLOBAL_MASK"' <<<"$osk_stage_body" ||
+  fail_test "stage_desktop_settings does not use \$SLEEP_LOCK_GLOBAL_MASK directly" \
+    "it would install to the real path regardless of what \$2 says"
+pass "stage_desktop_settings forwards a sleep-lock-mask seam and spells out no mask path of its own"
 
 # ===========================================================================
 # THE STAGE RUNNER
@@ -1295,6 +1376,16 @@ fi
 hypr_dead="$work/hypr-runtime-empty"
 mkdir -p "$hypr_dead"
 
+# The stage's other seam: where the omarchy-sleep-lock mask lands. EVERY call
+# to stage_desktop_settings below passes it, and that is not optional tidiness
+# -- a call that omitted it would install the symlink under the fake root (that
+# much fake-sudo guarantees) and then read the result back from the developer's
+# REAL /etc/systemd/user, where it is absent, failing the stage for a reason
+# that has nothing to do with the case under test. §6c drives the mask's own
+# contracts; here it is pinned so the rest of §6 stays about dconf and
+# shell.json. /etc/systemd/user is a STOCK_DIR, so its existence is fixture.
+sleep_mask=$(sandboxed "$root/etc/systemd/user/$SLEEP_LOCK_UNIT")
+
 # A Deck-shaped device list: one physical keyboard on the session layout, our
 # virtual one, and the POINTER half of our uinput device holding the -1 name --
 # which is the arrangement measured on the Deck 2026-08-12 and the reason the
@@ -1324,7 +1415,7 @@ case $host_profile in
     # stage refuses to guess at merge order, which is the correct behaviour --
     # assert that, and skip the rest of this section.
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_dead"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
     ok_failed "stage-desktop-settings refuses a dconf profile that does not list system-db:local"
     ok_in_err "merge it by hand" "the refusal says profile order is precedence and it will not guess"
     note "the rest of §6 needs a host without /etc/dconf/profile/user, or one that already lists system-db:local"
@@ -1332,7 +1423,7 @@ case $host_profile in
   *)
     [[ $host_profile != ok ]] || export FAKE_DCONF_HOST_PROFILE_OK=1
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_dead"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
     ok_rc 0 "stage-desktop-settings completes against a fake root"
 
     if [[ $host_profile == absent ]]; then
@@ -1375,18 +1466,60 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     pass "shell.json gets screensaver=150s and lock=86400s"
     pass "the rest of shell.json survives the patch -- a rewrite would silently strip the bar"
 
+    # --- the OTHER lock producer, wired into the same stage --------------
+    #
+    # T13 §5.2 / P22 §3.1. The idle policy above and this mask are independent
+    # producers of the same artefact -- a password prompt on a device with no
+    # keyboard -- and neither covers the other. §6c drives the mask's own
+    # contracts; these three assertions are about the WIRING, i.e. that a plain
+    # run of this stage installs it at all. Without them the mask could be
+    # perfect and never called.
+    [[ -L $sleep_mask ]] ||
+      fail_test "stage-desktop-settings installs the ${SLEEP_LOCK_UNIT} mask" \
+        "no symlink at ${sleep_mask}; the idle producer would be neutered and the SUSPEND producer left live"$'\n'"stderr: $(err)"
+    [[ $(readlink -- "$sleep_mask") == /dev/null ]] ||
+      fail_test "the installed mask points at /dev/null" \
+        "it points at '$(readlink -- "$sleep_mask")'; systemd masks a unit ONLY via a symlink to /dev/null"
+    pass "stage-desktop-settings masks ${SLEEP_LOCK_UNIT} at ${SLEEP_LOCK_GLOBAL_MASK}, so a suspended Deck resumes unlocked"
+    ok_called "ln -sfn /dev/null" "the mask is created as a symlink, through \$SUDO"
+
+    # A per-user unit file SHADOWS /etc/systemd/user. The operator's own Deck
+    # carries a hand-made mask at exactly this path, so agreeing files must NOT
+    # warn -- a warning that fires on every run is one nobody reads.
+    reset_root; seed_shell_json
+    mkdir -p "$(dirname "${FAKE_HOME}/${SLEEP_LOCK_USER_UNIT_REL}")"
+    ln -sfn /dev/null "${FAKE_HOME}/${SLEEP_LOCK_USER_UNIT_REL}"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
+    ok_rc 0 "a per-user mask that agrees with ours is not an error"
+    ok_in_out "it agrees with ours and is now redundant" \
+      "an agreeing per-user mask is reported, not warned about -- this is the state the operator's Deck is in today"
+    ! grep -qF "shadows the mask" "$work/stage.err" ||
+      fail_test "an agreeing per-user mask produces no shadow warning" \
+        "it warned anyway, which trains the operator to ignore the message"$'\n'"stderr: $(err)"
+    pass "no shadow warning is emitted for a per-user file that is itself a mask"
+
+    reset_root; seed_shell_json
+    mkdir -p "$(dirname "${FAKE_HOME}/${SLEEP_LOCK_USER_UNIT_REL}")"
+    printf '[Unit]\nDescription=someone re-enabled this by hand\n' \
+      >"${FAKE_HOME}/${SLEEP_LOCK_USER_UNIT_REL}"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
+    ok_rc 0 "a per-user unit file shadowing the mask is a warning, not a failure"
+    ok_in_err "shadows the mask this stage just installed" \
+      "the warning says WHY it matters -- ~/.config/systemd/user comes before /etc/systemd/user, so the Deck could still lock on resume"
+    rm -rf "${FAKE_HOME:?}/.config/systemd"
+
     # A user-level value shadows the site default. Warn only when it DISAGREES.
     export FAKE_DCONF_USER_KEY="$OSK_KEY"
     export FAKE_DCONF_USER_VALUE=false
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_dead"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
     ok_rc 0 "a user value shadowing the site default is a warning, not a failure"
     ok_in_err "is shadowing it" "the warning says a user-level value is shadowing the default, and how to reset it"
     unset FAKE_DCONF_USER_KEY FAKE_DCONF_USER_VALUE
 
     export FAKE_DCONF_UPDATE_RC=1
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_dead"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
     ok_failed "a failed 'dconf update' stops the stage"
     ok_in_err "on disk but not compiled" "the failure distinguishes 'written' from 'compiled', which is the state that does nothing"
     unset FAKE_DCONF_UPDATE_RC
@@ -1397,7 +1530,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # against the expected value catches it.
     export FAKE_DCONF_STALE_VALUE=false
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_dead"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
     ok_failed "a site database that answers with the OLD value fails the stage"
     ok_in_err "the OSK would never auto-show for a new user" \
       "the read-back compares against the expected value, not merely 'did dconf answer'"
@@ -1406,7 +1539,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # An unparseable shell.json must not be rewritten from scratch.
     reset_root; seed_shell_json
     printf 'not json at all\n' >"$FAKE_HOME/$OMARCHY_SHELL_JSON_REL"
-    run_stage_body stage_desktop_settings "$hypr_dead"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
     ok_failed "a shell.json that is not JSON stops the stage rather than being replaced"
     ok_in_err "could not patch the idle policy" "the failure names the file it would not overwrite"
 
@@ -1416,7 +1549,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # Latin American, so ';' types 'n-tilde'. Every assertion below is about a
     # way the rule could be installed and do NOTHING.
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_dead"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
     ok_rc 0 "the stage still completes with the keyboard-layout rule in it"
     osk_lua="${FAKE_HOME}/${HYPR_INPUT_LUA_REL}"
     [[ -f $osk_lua ]] ||
@@ -1438,7 +1571,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # 🔴 The whole point of a stage rather than a hand edit: it is re-runnable.
     # An append-only implementation would grow a second block on every run and
     # eventually be two rules disagreeing with each other.
-    run_stage_body stage_desktop_settings "$hypr_dead"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
     ok_rc 0 "the stage is re-runnable with the rule already installed"
     [[ $(grep -cxF -- "$OSK_KB_RULE_BEGIN" "$osk_lua") -eq 1 ]] ||
       fail_test "a second run replaces the block instead of appending another" \
@@ -1452,7 +1585,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     reset_root; seed_shell_json
     mkdir -p "$(dirname "$osk_lua")"
     printf -- '-- the user'"'"'s own file\nhl.layer_rule({ match = { namespace = "deck-osk" }, above_lock = 2 })\n' >"$osk_lua"
-    run_stage_body stage_desktop_settings "$hypr_dead"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
     ok_rc 0 "the stage completes against an input.lua that already has user content"
     grep -qF 'above_lock = 2' "$osk_lua" ||
       fail_test "the user's existing input.lua content survives the patch" \
@@ -1464,7 +1597,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     reset_root; seed_shell_json
     mkdir -p "$(dirname "$osk_lua")"
     printf '%s\nhl.device({ name = "x" })\n' "$OSK_KB_RULE_BEGIN" >"$osk_lua"
-    run_stage_body stage_desktop_settings "$hypr_dead"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
     ok_failed "a start marker with no end marker stops the stage"
     ok_in_err "could not splice" "the failure names the splice rather than reporting a generic write error"
 
@@ -1472,7 +1605,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # the requirement -- 5.30b's lesson is that a rule nobody has seen work is
     # not a rule that works.
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_dead"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
     ok_in_err "has NOT been observed working" \
       "with no live compositor the stage says the rule is unverified instead of reporting success"
     ok_in_err "$OSK_HYPR_DEVICE" "the warning names the device to look for, so the operator can check it by hand"
@@ -1488,7 +1621,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
       fail_test "the suite can create a fake compositor socket" "python3 could not bind an AF_UNIX socket"
 
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_live"
+    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_mask"
     ok_rc 0 "with a live compositor and a device on '${OSK_KB_LAYOUT}', the stage completes"
     ok_in_out "the whole rule block executed" "the sentinel assertion is reported as a verification, not assumed"
     ok_in_out "kept the session layout" "the check also confirms the OTHER keyboards did not change -- per-device, not session-wide"
@@ -1500,7 +1633,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # like this. It must be a failure, not a warning.
     export FAKE_HYPR_SENTINEL=absent
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_live"
+    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_mask"
     ok_failed "a compositor without the sentinel fails the stage"
     ok_in_err "did not run to the end" "the failure says the BLOCK did not complete, which is what a raised hl.device looks like"
     unset FAKE_HYPR_SENTINEL
@@ -1510,7 +1643,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # failure a sentinel alone cannot see.
     export FAKE_HYPR_DEVICES='{"mice":[],"keyboards":[{"name":"at-translated-set-2-keyboard","layout":"latam"},{"name":"deck-input-mapper-virtual-keyboard","layout":"latam"}]}'
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_live"
+    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_mask"
     ok_failed "a device that loaded the rule and still reads the session layout fails the stage"
     ok_in_err "reads layout 'latam'" "the failure reports what the device ACTUALLY says, not merely that it disagreed"
     export FAKE_HYPR_DEVICES="$HYPR_DEVICES_GOOD"
@@ -1520,7 +1653,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # session's own layout is not 'us' means the physical keyboards changed too.
     export FAKE_HYPR_DEVICES='{"mice":[],"keyboards":[{"name":"at-translated-set-2-keyboard","layout":"us"},{"name":"deck-input-mapper-virtual-keyboard","layout":"us"}]}'
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_live"
+    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_mask"
     ok_failed "a rule that changed every keyboard's layout fails the stage"
     ok_in_err "went SESSION-WIDE" "the failure names the per-device requirement rather than reporting a generic mismatch"
     export FAKE_HYPR_DEVICES="$HYPR_DEVICES_GOOD"
@@ -1534,7 +1667,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # would read as "no such keyboard" rather than as a failure.
     export FAKE_HYPR_DEVICES='{"mice":[{"name":"deck-input-mapper-virtual-keyboard"}],"keyboards":[{"name":"at-translated-set-2-keyboard","layout":"latam"},{"name":"deck-input-mapper-virtual-keyboard-1","layout":"us"}]}'
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_live"
+    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_mask"
     ok_rc 0 "the rule still verifies when the keyboard holds the -1 name and the pointer holds the bare one"
     ok_in_out "kept the session layout" \
       "the check follows the suffixed aliases too; matching only the bare name would report the keyboard as simply not present"
@@ -1545,7 +1678,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # broken query into a reassuring warning.
     export FAKE_HYPR_DEVICES='{"mice":[],"keyboards":[]}'
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_live"
+    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_mask"
     ok_failed "a compositor reporting no keyboards at all fails the stage"
     ok_in_err "could not read the keyboard layouts back" \
       "an empty device list is a check that could not run, not a device that is absent"
@@ -1556,7 +1689,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # believing the answer.
     rm -rf "$work/hypr-runtime-stale"; mkdir -p "$work/hypr-runtime-stale/hypr/deadbeef_1"
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$work/hypr-runtime-stale"
+    run_stage_body stage_desktop_settings "$work/hypr-runtime-stale" "$sleep_mask"
     ok_rc 0 "a stale instance directory with no socket is not treated as a live compositor"
     ok_in_err "no live Hyprland instance" \
       "the socket is what makes an instance live; a leftover directory would otherwise be 'verified' against a compositor that is not there"
@@ -1565,7 +1698,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # not bound. Warn, do not fail -- and do not claim success either.
     export FAKE_HYPR_DEVICES='{"mice":[],"keyboards":[{"name":"at-translated-set-2-keyboard","layout":"latam"}]}'
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_live"
+    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_mask"
     ok_rc 0 "a stopped input mapper is a warning, not a failure -- the rule is correct and inert"
     ok_in_err "could not be observed taking effect" "the warning distinguishes 'not bound' from 'not working'"
     export FAKE_HYPR_DEVICES="$HYPR_DEVICES_GOOD"
@@ -1575,7 +1708,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # that must never be reported as success.
     export FAKE_HYPRCTL_RELOAD_RC=1
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_live"
+    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_mask"
     ok_failed "a failed 'hyprctl reload' stops the stage"
     ok_in_err "has not picked it up" "the failure distinguishes 'written to disk' from 'loaded by the session'"
     unset FAKE_HYPRCTL_RELOAD_RC
@@ -1585,7 +1718,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # verification that quietly downgrades itself to a warning.
     export FAKE_GETENT_UID=not-a-number
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_dead"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
     ok_failed "a non-numeric uid stops the stage"
     ok_in_err "non-numeric uid" "the failure names the uid rather than building a runtime path out of it"
     unset FAKE_GETENT_UID
@@ -1597,7 +1730,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
       reset_root; seed_shell_json
       mkdir -p "$(dirname "$osk_lua")"
       printf 'this is not lua at all ((\n' >"$osk_lua"
-      run_stage_body stage_desktop_settings "$hypr_dead"
+      run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
       ok_failed "an input.lua that does not parse as Lua stops the stage"
       ok_in_err "not valid Lua" \
         "Hyprland discards an unparseable config WITHOUT logging a reason, so installing one would silently drop the above_lock rule too"
@@ -1645,6 +1778,136 @@ STUB_INSTALL
     pass "a drifted OSK_UINPUT_NAME stops the stage instead of shipping a rule matched to nothing"
     ;;
 esac
+
+# ===========================================================================
+# 6c. install_sleep_lock_mask -- the artefact that makes a suspended Deck
+#     resume unlocked, and survive a wiped home
+# ===========================================================================
+#
+# docs/findings/T13-power-button-and-sleep.md §5.2 row B and
+# docs/findings/P22-deck-conformance-sweep.md §3.1. The defect this closes is
+# not a missing feature, it is state in the wrong place: the operator's Deck
+# was masked BY HAND at ~/.config/systemd/user, dated Aug 11 17:54, with the
+# unit's preset still `enabled` and its enablement symlink still sitting
+# underneath. A fresh install, a second user or a wiped home re-arms it, and
+# what it re-arms is a password prompt on a device with no keyboard and no
+# unlock IPC -- which is not "type your password", it is "hold power for ten
+# seconds and lose your work" (T13 §5.3).
+#
+# OUTSIDE the host_profile case above, deliberately: none of this depends on
+# the developer's dconf profile, and the mask is the load-bearing half of the
+# stage. §6 covers the WIRING (that a plain stage run installs it); this
+# covers the artefact's own contracts, through the seam GATE 4 already
+# verified, so nothing here touches the real /etc/systemd/user.
+#
+# THE SHAPE IS THE WHOLE POINT and is why every assertion reads the symlink
+# rather than the path: systemd masks a unit only via a symlink to /dev/null.
+# A regular empty file at the same path loads as a unit with no directives --
+# not masked, starting nothing, indistinguishable in `ls` -- so an
+# implementation that produced one would be a silent no-op that ships a Deck
+# locking itself out on the first suspend.
+mask_probe=$(sandboxed "$root/etc/systemd/user/$SLEEP_LOCK_UNIT")
+
+reset_root
+run_stage_body install_sleep_lock_mask "$mask_probe"
+ok_rc 0 "install_sleep_lock_mask completes against a fake root"
+[[ -L $mask_probe ]] ||
+  fail_test "it creates a symlink at ${SLEEP_LOCK_GLOBAL_MASK}" \
+    "nothing at ${mask_probe}"$'\n'"stderr: $(err)"
+[[ ! -f $mask_probe || -L $mask_probe ]] ||
+  fail_test "the artefact is a symlink, not a regular file" \
+    "a regular file there is a unit with no directives, which is not a mask"
+pass "the mask is a SYMLINK -- the only shape systemd treats as masked"
+[[ $(readlink -- "$mask_probe") == /dev/null ]] ||
+  fail_test "the symlink points at /dev/null" \
+    "it points at '$(readlink -- "$mask_probe")'"
+pass "the symlink points at /dev/null, which is byte-for-byte what 'systemctl --global mask' writes"
+ok_called "ln -sfn /dev/null" "the symlink is created through \$SUDO, so an unprivileged install fails loudly rather than half-working"
+ok_called "install -d -m 0755 -o root -g root" "the unit directory is created rather than assumed"
+
+# /etc, not $HOME. This is the entire durability claim: a home directory can be
+# wiped and a second user has none of the first user's state.
+[[ $mask_probe == "$root"/etc/systemd/user/* ]] ||
+  fail_test "the mask lands under /etc/systemd/user" "got ${mask_probe}"
+! grep -qF "$FAKE_HOME" "$calls" ||
+  fail_test "installing the mask writes nothing into a home directory" \
+    "a per-user path appeared in the call log, which is the fragility this replaces:"$'\n'"$(cat "$calls")"
+pass "the mask is image-level state under /etc/systemd/user and touches no home directory"
+
+# --- idempotent, which the SSH iterate loop and every image rebuild need ---
+run_stage_body install_sleep_lock_mask "$mask_probe"
+ok_rc 0 "a second run against an existing mask succeeds"
+ok_in_out "is already masked" "the re-run reports the existing mask rather than silently redoing the work"
+[[ $(readlink -- "$mask_probe") == /dev/null ]] ||
+  fail_test "the mask is unchanged after a re-run" "it now points at '$(readlink -- "$mask_probe")'"
+pass "a re-run leaves the same symlink to /dev/null"
+! grep -qF 'ln -sfn' "$calls" ||
+  fail_test "the re-run does not re-create the symlink" \
+    "it called ln again; the 'already masked' branch is not the one that ran, so the check above passed for the wrong reason"$'\n'"$(cat "$calls")"
+pass "the re-run takes the 'already masked' branch -- no ln call at all"
+
+# --- it refuses to clobber something that is not ours ----------------------
+#
+# A symlink at this path pointing somewhere else is an ALIAS or a drop-in
+# somebody installed on purpose. 'ln -sfn' alone would replace it without a
+# word, which is the silent-overwrite class this project forbids.
+reset_root
+ln -sfn /usr/lib/systemd/user/somebody-elses.service "$mask_probe"
+run_stage_body install_sleep_lock_mask "$mask_probe"
+ok_failed "a symlink pointing somewhere other than /dev/null stops the stage"
+ok_in_err "Refusing to replace it" "the refusal says it will not guess, and names what it found"
+[[ $(readlink -- "$mask_probe") == /usr/lib/systemd/user/somebody-elses.service ]] ||
+  fail_test "the foreign symlink is left exactly as it was" \
+    "it now points at '$(readlink -- "$mask_probe")' -- it was replaced before failing"
+pass "the foreign symlink is untouched"
+
+reset_root
+printf '[Unit]\nDescription=a real override, not a mask\n' >"$mask_probe"
+run_stage_body install_sleep_lock_mask "$mask_probe"
+ok_failed "a regular unit file at the mask path stops the stage"
+ok_in_err "is not a symlink" "the refusal distinguishes a real unit override from a mask"
+grep -qF 'a real override, not a mask' "$mask_probe" ||
+  fail_test "the existing unit file is left byte-for-byte alone" "its contents changed before the stage failed"
+pass "an existing unit file is not overwritten"
+
+# --- an `ln` that exits 0 having created nothing ---------------------------
+#
+# The read-back's whole reason for existing, and the same mutation §6 runs
+# against `install`: an exit code is not a symlink. Without the read-back this
+# ships a Deck that locks on resume with every log line claiming success.
+reset_root
+cat >"$stub_bin/ln" <<'STUB_LN'
+#!/usr/bin/env bash
+printf 'ln %s\n' "$*" >>"$CALLS_LOG"
+exit 0
+STUB_LN
+chmod +x "$stub_bin/ln"
+run_stage_body install_sleep_lock_mask "$mask_probe"
+rm -f "$stub_bin/ln"
+ok_failed "an ln that exits 0 without creating the symlink fails the stage"
+ok_in_err "is not a symlink after installing it" \
+  "the stage reads the symlink back instead of trusting ln's exit code"
+
+# --- and the shape that is a mask-looking no-op ---------------------------
+#
+# The most dangerous near-miss: a regular EMPTY file where the symlink should
+# be. It is what a `touch`-shaped implementation produces, it passes any
+# 'does the path exist' check, and it does not mask anything.
+reset_root
+cat >"$stub_bin/ln" <<'STUB_LN'
+#!/usr/bin/env bash
+printf 'ln %s\n' "$*" >>"$CALLS_LOG"
+: >"${@: -1}"
+exit 0
+STUB_LN
+chmod +x "$stub_bin/ln"
+run_stage_body install_sleep_lock_mask "$mask_probe"
+rm -f "$stub_bin/ln"
+ok_failed "an ln that leaves a regular empty file instead of a symlink fails the stage"
+ok_in_err "is not a symlink after installing it" \
+  "an empty regular unit file loads with no directives and masks NOTHING; the check rejects it by shape"
+
+reset_root
 
 # ===========================================================================
 # 7. stage-update-stub -- the exit codes Steam's first run depends on
@@ -2896,7 +3159,318 @@ ok_in_out "orders ${BOOT_DEFAULT_UNIT_NAME} before the display manager" \
 unset FAKE_SYSTEMCTL_SHOW_Before FAKE_SYSTEMCTL_SHOW_After
 
 # ===========================================================================
-# 14. The harness's own safety invariant
+# 14. stage-power-button -- one press suspends, and the ways that go wrong
+# ===========================================================================
+#
+# The stage writes two files: a udev rule that drops the ACPI power-button
+# nodes from the `power-switch` tag, and a logind drop-in that sets
+# HandlePowerKey=suspend. The generated TEXT of both is pinned in
+# test/unit/test-deck-session.sh §9d. This section runs the stage body: its
+# three verifiers, the order it writes in, its refusals, and what it prints.
+#
+# 🔴 EVERY FAILURE THIS SECTION PINS IS SILENT ON THE DEVICE. There is no
+# error message on a Deck for "the rule matched nothing", "the drop-in was
+# overridden", or "the handler was armed before the duplicate was removed" --
+# there is only a power button that suspends twice, or not at all, on a
+# handheld whose other escape is a ten-second hold. Exit codes alone do not
+# distinguish them, so every negative case below pins its message too.
+#
+# The whole stage is reachable through $SUDO and nothing else -- including its
+# READS, which is deliberate in src/ (see the section header there). That is
+# what lets this run with no seams, no root, no Deck, and no udev.
+
+# --- the fixture -----------------------------------------------------------
+
+# One input node, as udev would describe it.
+power_node() {   # power_node <node> <id-path> [tagged|untagged]
+  local n=$1 id=$2 tag=${3:-tagged}
+  : >"$root/dev/input/$n"
+  {
+    printf 'DEVNAME=/dev/input/%s\n' "$n"
+    printf 'ID_PATH=%s\n' "$id"
+    printf 'ID_INPUT_KEY=1\n'
+    if [[ $tag == tagged ]]; then
+      printf 'TAGS=:%s:seat:\n' "$POWER_UDEV_TAG"
+    else
+      printf 'TAGS=:seat:\n'
+    fi
+  } >"$FAKE_UDEV_DB/$n"
+}
+
+# The Deck as measured on 2026-08-12, reproduced under the fake root:
+# five tagged input nodes, upstream's tagger rule, Omarchy's package-owned
+# drop-in, a Galileo DMI, and omarchy-sleep-lock masked.
+#
+# NOTE what is deliberately NOT created: /etc/udev/rules.d. It is not in
+# STOCK_DIRS either, so the stage has to create it itself -- and if it ever
+# stops doing so, the install fails here rather than on the Deck.
+power_reset() {
+  reset_root
+  rm -rf "$FAKE_UDEV_DB"
+  mkdir -p "$FAKE_UDEV_DB" "$root/dev/input" "$root/sys/class/dmi/id" \
+           "$root/usr/lib/udev/rules.d" "$root/etc/systemd/logind.conf.d" \
+           "$root/usr/lib/systemd/user"
+
+  # Upstream's rule -- the one that ADDS the tag, and the one ours must be
+  # read after. Quoted from stock systemd's 70-power-switch.rules.
+  printf '%s\n' \
+    'SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEY}=="1", TAG+="power-switch"' \
+    >"$root/usr/lib/udev/rules.d/${POWER_UDEV_TAGGER}"
+
+  # Omarchy's, which ours must beat without editing: the omarchy package owns
+  # this path and pacman --overwrite restores it on every upgrade.
+  printf '[Login]\nHandlePowerKey=ignore\n' \
+    >"$root/etc/systemd/logind.conf.d/10-ignore-power-button.conf"
+
+  printf '%s\n' "$POWER_MODEL" >"$root/sys/class/dmi/id/product_name"
+
+  printf '[Unit]\nDescription=lock on sleep\n' >"$root/usr/lib/systemd/user/${SLEEP_LOCK_UNIT}"
+  ln -sfn /dev/null "$root$SLEEP_LOCK_GLOBAL_MASK"
+
+  power_node event0 acpi-PNP0C0C:00                # ACPI, silent, tagged
+  power_node event1 acpi-PNP0C0D:00                # the Lid Switch
+  power_node event2 acpi-LNXPWRBN:00               # the measured duplicate
+  power_node event4 platform-i8042-serio-0         # the real key -- KEPT
+  power_node event7 'usb-0000:04:00.3-3/input0'    # the controller
+}
+
+# `sudo install` of a particular destination, by line number in the call log.
+# The bare path is not enough: assert_ours_or_absent probes BOTH destinations
+# before either is written, in the same order, so an ok_before on the paths
+# alone would pass even with the two writes swapped -- which is the mutation
+# that matters most here.
+power_install_line() {   # power_install_line <destination>
+  grep -n '^sudo install ' "$calls" | grep -F -- "$1" | head -1 | cut -d: -f1
+}
+
+# --- the happy path --------------------------------------------------------
+
+power_reset
+run_stage_body stage_power_button
+ok_rc 0 "stage-power-button installs cleanly on a Deck that enumerates its power button the way the measurement recorded"
+
+ok_file "$POWER_UDEV_RULE" "the udev rule is installed"
+ok_mode "$POWER_UDEV_RULE" 644 "the udev rule is 0644 -- udev must be able to read it"
+ok_file "$POWER_LOGIND_DROPIN" "the logind drop-in is installed"
+ok_mode "$POWER_LOGIND_DROPIN" 644 "the logind drop-in is 0644"
+pass "/etc/udev/rules.d did not exist in the fixture, so the stage created it itself"
+
+ok_line "$POWER_UDEV_RULE" 'ENV{ID_PATH}=="acpi-LNXPWRBN:00", TAG-="power-switch"' \
+  "the installed rule untags the ACPI node that was MEASURED firing 131-198 ms after every press"
+ok_line "$POWER_UDEV_RULE" 'ENV{ID_PATH}=="acpi-PNP0C0C:00", TAG-="power-switch"' \
+  "and the silent one too -- it advertises KEY_POWER and carries the tag, so it is a second source waiting for a firmware change"
+ok_line "$POWER_LOGIND_DROPIN" "HandlePowerKey=suspend" \
+  "the installed drop-in sets HandlePowerKey=suspend as an exact line -- the setting DEFAULTS to poweroff, so it can never be left implicit"
+ok_line "$POWER_LOGIND_DROPIN" "HandlePowerKeyLongPress=ignore" \
+  "and pins the long press to 'ignore', because no threshold in this project has been read from source"
+
+# 🔴 THE ORDERING MUTATION. The udev rule (remove the duplicate) must be on
+# disk before the logind drop-in (arm the handler). A run that dies between
+# them then leaves a machine with one fewer redundant tag and today's
+# behaviour otherwise. The reverse order leaves the handler armed with the
+# duplicate live -- two suspend requests ~198 ms apart, the second landing at
+# or just after resume, on a device whose only other escape is a ten-second
+# hold.
+power_rule_at=$(power_install_line "$POWER_UDEV_RULE")
+power_conf_at=$(power_install_line "$POWER_LOGIND_DROPIN")
+[[ -n $power_rule_at && -n $power_conf_at ]] ||
+  fail_test "both files are installed with 'install'" \
+    "rule at ${power_rule_at:-none}, drop-in at ${power_conf_at:-none}"$'\n'"$(cat "$calls")"
+[[ $power_rule_at -lt $power_conf_at ]] ||
+  fail_test "the udev rule is written BEFORE the logind drop-in" \
+    "rule was install call ${power_rule_at}, drop-in was ${power_conf_at}. Arming HandlePowerKey=suspend while the duplicate KEY_POWER source is still tagged is the re-suspend loop this whole stage is shaped to avoid, and a run that dies between the two writes would leave exactly that."$'\n'"$(cat "$calls")"
+pass "the duplicate is removed BEFORE the handler is armed -- a half-finished run cannot leave a Deck that re-suspends on resume"
+
+# --- it changes nothing until a reboot, and must not try to ---------------
+#
+# Removing a udev tag does not reliably un-register a device logind has
+# already enumerated: the monitor is filtered ON that tag, so the change event
+# announcing the removal is the very event the filter drops. A live reload
+# could therefore arm the handler with the duplicate still inside logind.
+! grep -qE 'udevadm (control|trigger|settle)' "$calls" ||
+  fail_test "the stage reloads no udev rules and triggers no uevents" \
+    "a live reload can leave logind holding a device whose tag was removed, which is the one state this stage is built to avoid."$'\n'"$(cat "$calls")"
+pass "the stage runs no 'udevadm control', 'udevadm trigger' or 'udevadm settle' -- only read-only 'udevadm info'"
+
+! grep -q '^systemctl ' "$calls" ||
+  fail_test "the stage runs no systemctl at all" \
+    "restarting systemd-logind to apply this would end the operator's session from a stage they ran over SSH; the reboot is the applied step, and it is theirs to choose."$'\n'"$(cat "$calls")"
+pass "the stage runs no systemctl -- it writes two files and nothing else"
+
+ok_in_out "NOTHING HAS CHANGED YET" \
+  "the stage says out loud that its files are inert until a reboot, rather than letting the operator test a change that has not been applied"
+ok_in_out "sudo reboot" "and gives the command that applies them"
+
+# --- the undo, and its order ----------------------------------------------
+ok_in_out "sudo rm -f ${POWER_LOGIND_DROPIN}" "the stage prints how to undo the handler"
+ok_in_out "sudo rm -f ${POWER_UDEV_RULE}" "and how to undo the udev rule"
+power_undo_conf=$(grep -nF -- "rm -f ${POWER_LOGIND_DROPIN}" "$work/stage.out" | head -1 | cut -d: -f1)
+power_undo_rule=$(grep -nF -- "rm -f ${POWER_UDEV_RULE}" "$work/stage.out" | head -1 | cut -d: -f1)
+[[ $power_undo_conf -lt $power_undo_rule ]] ||
+  fail_test "the printed undo removes the handler BEFORE it restores the tags" \
+    "the reverse order puts the duplicate KEY_POWER press back underneath a live HandlePowerKey=suspend. Got the drop-in at output line ${power_undo_conf} and the rule at ${power_undo_rule}."$'\n'"$(out)"
+pass "the printed undo is ordered handler-first, which is the only order that is safe at every point in between"
+
+# --- the consequence nobody would predict ---------------------------------
+#
+# With the duplicate gone, Omarchy's XF86PowerOff bind fires ONCE, so the
+# System menu opens and STAYS open behind the suspend -- where today's two
+# presses toggle it open and shut, which is the "flash" that was reported.
+# That bind is a user config file and is not this stage's to change, so the
+# stage has to say so.
+ok_in_out 'hl.unbind("XF86PowerOff")' \
+  "the stage prints the one-line fix for Omarchy's power-key menu bind, which it deliberately does not touch"
+ok_in_out "leaves it open" \
+  "and explains why that gets WORSE rather than better once the duplicate press is gone"
+
+# --- idempotency -----------------------------------------------------------
+run_stage_body stage_power_button
+ok_rc 0 "a second run succeeds -- assert_ours_or_absent recognises both files as ours"
+ok_line "$POWER_LOGIND_DROPIN" "HandlePowerKey=suspend" "and the drop-in still reads correctly after the re-run"
+
+# --- somebody else's files ------------------------------------------------
+power_reset
+mkdir -p "$root/etc/udev/rules.d"
+printf 'ACTION=="add", TAG+="somebody-else"\n' >"$root$POWER_UDEV_RULE"
+run_stage_body stage_power_button
+ok_failed "a foreign udev rule at ${POWER_UDEV_RULE} stops the stage"
+grep -qF "somebody-else" "$root$POWER_UDEV_RULE" ||
+  fail_test "the foreign udev rule is left exactly as it was" "it was overwritten anyway"
+pass "the foreign udev rule is left byte-for-byte alone"
+ok_absent "$POWER_LOGIND_DROPIN" "and nothing else was written -- the refusal happens before any write"
+
+power_reset
+printf '[Login]\nHandlePowerKey=poweroff\n' >"$root$POWER_LOGIND_DROPIN"
+run_stage_body stage_power_button
+ok_failed "a foreign logind drop-in at ${POWER_LOGIND_DROPIN} stops the stage"
+ok_absent "$POWER_UDEV_RULE" \
+  "and the udev rule is NOT written first -- both ownership checks run before either write, so a refusal leaves no half-configured machine"
+
+# --- the model gate --------------------------------------------------------
+#
+# 🔴 Every ID_PATH in this stage was measured on ONE model. On an LCD Deck
+# (Jupiter) they may differ, and the two ways that fails are a rule that
+# matches nothing (the duplicate survives -> the suspend loop) or one that
+# matches too much (logind watches nothing -> a dead button). Today's
+# behaviour on an unmeasured model is a menu flash: annoying, and working
+# software. CLAUDE.md forbids claiming support for hardware nobody tested.
+power_reset
+printf 'Jupiter\n' >"$root/sys/class/dmi/id/product_name"
+run_stage_body stage_power_button
+ok_failed "stage-power-button refuses to run on a Jupiter (LCD) Deck"
+ok_in_err "Jupiter" "the refusal names the model it found"
+ok_in_err "$POWER_MODEL" "and the model every measurement behind the stage was taken on"
+ok_in_err "no override flag" \
+  "and says there is no flag -- a flag is how 'unverified' quietly becomes 'supported'"
+ok_absent "$POWER_UDEV_RULE" "nothing is written on a model that was never measured"
+ok_absent "$POWER_LOGIND_DROPIN" "neither file, on a model that was never measured"
+
+power_reset
+rm -f "$root/sys/class/dmi/id/product_name"
+run_stage_body stage_power_button
+ok_failed "an unreadable product_name stops the stage rather than being treated as a match"
+ok_in_err "model is unknown" "and says the model could not be determined, instead of guessing"
+
+# --- the premise: what the rule will actually match ------------------------
+#
+# 🔴 These two fail in OPPOSITE directions and are the reason the check exists
+# at all. Neither shows up in an install log.
+power_reset
+rm -f "$root/dev/input/event4" "$FAKE_UDEV_DB/event4"
+run_stage_body stage_power_button
+ok_failed "a machine with no ${POWER_KEEP_ID_PATH} node stops the stage"
+ok_in_err "SINGLE SOURCE" \
+  "the refusal explains that untagging the ACPI buttons without it leaves logind watching no power switch at all"
+ok_in_err "doing nothing whatsoever" \
+  "and names the resulting failure -- a DEAD button, introduced by the fix for a button that flashed a menu"
+ok_absent "$POWER_UDEV_RULE" "and nothing is written"
+
+power_reset
+power_node event4 platform-i8042-serio-0 untagged
+run_stage_body stage_power_button
+ok_failed "a ${POWER_KEEP_ID_PATH} node that is present but NOT tagged stops the stage too"
+ok_in_err "SINGLE SOURCE" \
+  "presence is not the property that matters -- logind only watches what carries the tag"
+
+# 🔴 THE TYPO CASE. A udev rule keying on an ID_PATH that matches nothing
+# installs cleanly, applies cleanly and does nothing: the duplicate KEY_POWER
+# press survives, and the drop-in written next suspends on both of them.
+power_reset
+rm -f "$root/dev/input/event2" "$FAKE_UDEV_DB/event2"
+run_stage_body stage_power_button
+ok_failed "an ID_PATH the rule untags that matches NO device on this machine stops the stage"
+ok_in_err "acpi-LNXPWRBN:00" "the refusal names the ID_PATH that matched nothing"
+ok_in_err "suspends twice" \
+  "and names the consequence -- a rule that matches nothing is a silent no-op, and the handler installed after it is not"
+ok_absent "$POWER_LOGIND_DROPIN" "and the handler is never armed on a machine whose duplicate would survive"
+
+power_reset
+rm -f "$root/dev/input"/event* "$FAKE_UDEV_DB"/event*
+run_stage_body stage_power_button
+ok_failed "a machine where udev reports no power-switch device at all stops the stage"
+ok_in_err "TAGS=:${POWER_UDEV_TAG}: at all" "and says the tag is absent everywhere, not that one node is missing"
+
+# --- the ordering: whether either file is READ ----------------------------
+#
+# 🔴 This is the check the SDDM drop-in did not have. Its comment asserted an
+# ordering that was false on every machine ('9' < 'a'), and nothing noticed
+# because the code path had never been exercised. Both directions below
+# produce a file that is on disk, parses correctly, and does nothing.
+power_reset
+printf '[Login]\nHandlePowerKey=ignore\n' \
+  >"$root/etc/systemd/logind.conf.d/zzzz-somebody-else.conf"
+run_stage_body stage_power_button
+ok_failed "a logind drop-in that sorts AFTER ours stops the stage"
+ok_in_err "zzzz-somebody-else.conf" "the refusal names the file that would override us"
+ok_in_err "sorts BEFORE" \
+  "and says ours loses -- the drop-in would be on disk, read correctly, and the button would still do whatever the other file says"
+ok_absent "$POWER_UDEV_RULE" "and nothing is written when the drop-in could not win"
+
+power_reset
+printf '%s\n' 'SUBSYSTEM=="input", TAG+="power-switch"' \
+  >"$root/usr/lib/udev/rules.d/zzzz-somebody-else.rules"
+run_stage_body stage_power_button
+ok_failed "a udev rule that ADDS the tag and sorts after ours stops the stage"
+ok_in_err "remove a tag that has not been added yet" \
+  "and explains the no-op: '-=' removes from a list, so read first it removes nothing"
+
+power_reset
+rm -f "$root/usr/lib/udev/rules.d/${POWER_UDEV_TAGGER}"
+run_stage_body stage_power_button
+ok_failed "a machine with nothing adding TAG+=\"${POWER_UDEV_TAG}\" stops the stage"
+ok_in_err "found no udev rule" \
+  "the premise is that upstream tags these devices and we untag two of them; with nothing tagging, HandlePowerKey= would be dead on arrival"
+
+# --- the lock that no keyboard can answer ---------------------------------
+#
+# 🔴 Blast radius R2. This Deck resumes from sleep UNLOCKED on purpose,
+# because it has no keyboard; that holds only while omarchy-sleep-lock stays
+# masked. A power button that suspends while that unit is live turns every
+# press into an unanswerable password prompt. The stage cannot see a per-user
+# mask from root, so it WARNS with the exact command that settles it rather
+# than failing on half an answer.
+power_reset
+rm -f "$root$SLEEP_LOCK_GLOBAL_MASK"
+run_stage_body stage_power_button
+ok_rc 0 "an unmasked ${SLEEP_LOCK_UNIT} does not stop the stage -- the other half of the answer is per-user and unreadable from here"
+ok_in_err "$SLEEP_LOCK_UNIT" "but it warns, naming the unit"
+ok_in_err "no keyboard" "and says why it matters on this device specifically"
+ok_in_err "systemctl --user is-enabled" "and prints the one command that settles it, to run before the first press"
+
+power_reset
+rm -f "$root$SLEEP_LOCK_GLOBAL_MASK" "$root/usr/lib/systemd/user/${SLEEP_LOCK_UNIT}"
+run_stage_body stage_power_button
+ok_rc 0 "a machine with no ${SLEEP_LOCK_UNIT} at all installs cleanly"
+ok_in_out "is not installed on this machine" "and says so, rather than warning about a unit that does not exist"
+
+power_reset
+run_stage_body stage_power_button
+ok_rc 0 "and the masked case is the one the fixture ships"
+ok_in_out "masked for every user" \
+  "the stage reports the mask it verified, so 'resumes unlocked' is a checked property rather than an assumption"
+
+# ===========================================================================
+# 15. The harness's own safety invariant
 # ===========================================================================
 #
 # Everything above is only trustworthy if none of it touched the real system.

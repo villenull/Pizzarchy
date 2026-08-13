@@ -1590,11 +1590,11 @@ pass "stage-menu-row is in INSTALL_STAGES, so a full install actually installs t
     "return-icon at ${icon_at}, menu-row at ${menu_at}; the menu stage asserts the two agree, and it should be the one that runs second"
 pass "stage-menu-row runs after stage-return-icon, so the agreement check runs with both halves rendered"
 
-for banned_stage in stage-boot-default-gaming stage-default-session; do
+for banned_stage in stage-boot-default-gaming stage-default-session stage-power-button; do
   for s in "${INSTALL_STAGES[@]}"; do
     [[ $s != "$banned_stage" ]] ||
       fail_test "${banned_stage} is NOT in INSTALL_STAGES" \
-        "a bare './deck-session.sh' would flip the default session on a machine whose Gaming Mode has never been proven to start, and with stage-boot-default-gaming it would do so at every boot. Both are opt-in on purpose."
+        "a bare './deck-session.sh' would flip the default session on a machine whose Gaming Mode has never been proven to start; with stage-boot-default-gaming it would do so at every boot; and with stage-power-button it would rewire a HARDWARE BUTTON on a device whose only other escape is a ten-second hold. All three are opt-in on purpose."
   done
   pass "${banned_stage} is not in INSTALL_STAGES -- a bare run cannot leave a Deck with no graphical way back"
 done
@@ -1610,7 +1610,7 @@ pass "stage-menu-row and stage-boot-default-gaming both resolve to the functions
 # list-stages arm prints and exits without touching the system.
 bash "$REPO_ROOT/src/deck-session.sh" list-stages >"$work/list-stages" 2>"$work/list-stages.err" ||
   fail_test "'deck-session.sh list-stages' exits 0" "$(cat "$work/list-stages.err")"
-for s in stage-menu-row stage-boot-default-gaming stage-default-session stage-audit-privileges; do
+for s in stage-menu-row stage-boot-default-gaming stage-default-session stage-audit-privileges stage-power-button; do
   grep -qx -- "$s" "$work/list-stages" ||
     fail_test "list-stages names ${s}" \
       "it is invocable and undiscoverable, which is how the opt-in stages get forgotten. Got:"$'\n'"$(cat "$work/list-stages")"
@@ -1636,6 +1636,28 @@ for needle in stage-boot-default-gaming stage-menu-row "$BOOT_DEFAULT_OVERRIDE" 
       "the boot-time re-assert has to be undoable by someone who cannot reach a desktop, and this is where they would look. Got:"$'\n'"$(cat "$work/help")"
 done
 pass "--help documents both new stages and both forms of the escape hatch"
+
+# stage-power-button's undo is the same class of thing and lives in the same
+# place: someone whose Deck now suspends when they did not want it to has to be
+# able to find both files, and the ORDER, without this repository in front of
+# them. The handler must come off first -- removing only the udev rule puts the
+# duplicate press back underneath a live HandlePowerKey=suspend.
+for needle in stage-power-button "rm -f ${POWER_LOGIND_DROPIN}" "rm -f ${POWER_UDEV_RULE}"; do
+  grep -qF -- "$needle" "$work/help" ||
+    fail_test "--help mentions '${needle}'" \
+      "the power-button stage rewires a hardware button on a device with no keyboard; its undo has to be discoverable here. Got:"$'\n'"$(cat "$work/help")"
+done
+help_conf_line=$(grep -nF -- "rm -f ${POWER_LOGIND_DROPIN}" "$work/help" | head -1 | cut -d: -f1)
+help_rule_line=$(grep -nF -- "rm -f ${POWER_UDEV_RULE}" "$work/help" | head -1 | cut -d: -f1)
+[[ $help_conf_line -lt $help_rule_line ]] ||
+  fail_test "--help lists the logind drop-in's removal BEFORE the udev rule's" \
+    "the order is the safety property: removing the udev rule first restores the duplicate KEY_POWER press underneath a handler that is still set to suspend, which is the re-suspend loop. Got the drop-in at line ${help_conf_line} and the rule at ${help_rule_line}."
+pass "--help documents stage-power-button's undo, with the handler removed before the tags are restored"
+
+grep -qF -- "$POWER_MODEL" "$work/help" ||
+  fail_test "--help says which hardware stage-power-button supports" \
+    "every device path it uses was measured on a ${POWER_MODEL}; CLAUDE.md forbids claiming support for a model nobody has tested, and the help text is where that claim is most visible. Got:"$'\n'"$(cat "$work/help")"
+pass "--help names ${POWER_MODEL} as the only model stage-power-button runs on"
 
 # ---------------------------------------------------------------------------
 # 9c. The boot unit -- ordering is the entire point of it
@@ -1709,5 +1731,178 @@ grep -qx 'RemainAfterExit=yes' "$boot_unit" ||
   fail_test "the boot unit is RemainAfterExit=yes" \
     "without it the unit returns to inactive and could be re-triggered mid-boot; with it, the re-assert happens once per boot, which is what makes Desktop Mode a one-shot session"
 pass "the boot unit is a Type=oneshot with RemainAfterExit=yes -- one re-assert per boot"
+
+# ---------------------------------------------------------------------------
+# 9d. stage-power-button -- the two files, and the two traps they are shaped by
+#
+# The stage BODY (its verifiers, its write order, its refusals) is covered in
+# test/unit/test-deck-session-stages.sh §14. What is here is what this suite is
+# for: the generated text, and the pure name comparison that decides whether
+# either file will be read at all.
+#
+# 🔴 BOTH TRAPS ARE INVISIBLE IN A PASSING INSTALL, which is why they are
+# pinned here rather than left to a hardware session:
+#
+#   1. HandlePowerKey= defaults to `poweroff`, not `suspend` (man logind.conf,
+#      systemd 261). A drop-in that overrides Omarchy's `ignore` without
+#      naming a value installs cleanly and hard-powers-off the Deck on every
+#      tap. So the value is asserted as an exact line, not as a substring.
+#   2. One physical press produces TWO KEY_POWER presses on this hardware
+#      (MEASURED, T13 §2.2). If the udev rule fails to remove the duplicate --
+#      because it names TAG+= instead of TAG-=, or because it is read before
+#      the rule that adds the tag -- then a correct-looking logind drop-in
+#      produces two suspend requests ~198 ms apart, the second landing at or
+#      just after resume. On a device whose only other escape is a ten-second
+#      hold, that is indistinguishable from a Deck that will not wake.
+
+power_rule="$work/zz-deck-power-button.rules"
+power_conf="$work/zz-deck-power-button.conf"
+render_power_udev_rule >"$power_rule"
+render_power_logind_dropin >"$power_conf"
+
+grep -qF -- "$INSTALL_MARKER" "$power_rule" ||
+  fail_test "the udev rule carries the '#'-commented marker" "expected: ${INSTALL_MARKER}"
+grep -qF -- "$INSTALL_MARKER" "$power_conf" ||
+  fail_test "the logind drop-in carries the '#'-commented marker" "expected: ${INSTALL_MARKER}"
+pass "both power-button files carry '${INSTALL_MARKER}', so a re-run recognises its own output"
+
+# --- the udev rule ---------------------------------------------------------
+
+# The RULE lines, as distinct from the (large) comment block: anything that is
+# not blank and does not start with '#'. Every assertion below that talks about
+# what udev will DO reads this list, so a device path mentioned only in prose
+# cannot satisfy one of them.
+mapfile -t power_rule_lines < <(grep -v '^[[:space:]]*#' "$power_rule" | grep -v '^[[:space:]]*$')
+
+for p in "${POWER_ACPI_ID_PATHS[@]}"; do
+  grep -qxF -- "ENV{ID_PATH}==\"${p}\", TAG-=\"${POWER_UDEV_TAG}\"" "$power_rule" ||
+    fail_test "the udev rule untags ID_PATH=${p}" \
+      "expected exactly 'ENV{ID_PATH}==\"${p}\", TAG-=\"${POWER_UDEV_TAG}\"'. A rule that names the node but not the tag removal is a no-op, and the duplicate KEY_POWER press survives into a machine whose handler is armed. File:"$'\n'"$(cat "$power_rule")"
+done
+pass "the udev rule untags every ACPI power-button node in POWER_ACPI_ID_PATHS (${POWER_ACPI_ID_PATHS[*]})"
+
+power_untag_count=$(printf '%s\n' "${power_rule_lines[@]}" | grep -c -- "TAG-=\"${POWER_UDEV_TAG}\"" || true)
+[[ $power_untag_count -eq ${#POWER_ACPI_ID_PATHS[@]} ]] ||
+  fail_test "the udev rule untags exactly ${#POWER_ACPI_ID_PATHS[@]} node(s)" \
+    "found ${power_untag_count} untag lines. Every extra one is a device logind stops watching, and the whole design depends on exactly one surviving."
+pass "the udev rule has exactly ${#POWER_ACPI_ID_PATHS[@]} untag lines -- no more devices are silently dropped than the ones measured"
+
+# 🔴 The mutation this pins: TAG+= where TAG-= belongs. It parses, it applies,
+# and it ADDS a tag that was already there -- so nothing changes, the duplicate
+# press survives, and the only symptom is a Deck that suspends twice.
+! printf '%s\n' "${power_rule_lines[@]}" | grep -qF -- 'TAG+=' ||
+  fail_test "no rule line ADDS a tag" \
+    "'TAG+=' in this file would leave both KEY_POWER sources tagged while the logind drop-in installed alongside it suspends on each of them. Only '-=' removes (udev(7)). File:"$'\n'"$(cat "$power_rule")"
+pass "no rule line uses TAG+= -- this file only ever removes the tag"
+
+! printf '%s\n' "${power_rule_lines[@]}" | grep -qF -- "$POWER_KEEP_ID_PATH" ||
+  fail_test "no rule line touches ${POWER_KEEP_ID_PATH}" \
+    "that node is the single source this design KEEPS -- the real key, the only one that tracks a hold. Untagging it would leave systemd-logind watching no power switch at all and the button would go from flashing a menu to doing nothing. File:"$'\n'"$(cat "$power_rule")"
+pass "no rule line touches ${POWER_KEEP_ID_PATH}, the one node that survives as logind's single source"
+
+for p in "${POWER_ACPI_ID_PATHS[@]}"; do
+  [[ $p != "$POWER_KEEP_ID_PATH" ]] ||
+    fail_test "POWER_KEEP_ID_PATH is not also in POWER_ACPI_ID_PATHS" \
+      "the constants contradict each other: the node the design keeps is also on the list it untags"
+done
+pass "the constants agree -- POWER_KEEP_ID_PATH is not on the untag list"
+
+# The lid switch carries the same tag from the same upstream rule and was never
+# measured. Touching it would change HandleLidSwitch= behaviour as a side
+# effect of a power-button fix.
+! printf '%s\n' "${power_rule_lines[@]}" | grep -qF -- 'PNP0C0D' ||
+  fail_test "the udev rule leaves the Lid Switch alone" \
+    "acpi-PNP0C0D:00 is tagged by the same upstream rule, but nothing about the lid was measured and HandleLidSwitch= is a separate question. File:"$'\n'"$(cat "$power_rule")"
+pass "the udev rule does not touch the Lid Switch -- only the power key changes"
+
+# udev refuses to load a rules FILE whose GOTO has no matching LABEL, so a
+# mismatch here silently drops every rule in it, including the untag lines.
+while IFS= read -r goto_target; do
+  grep -qxF -- "LABEL=\"${goto_target}\"" "$power_rule" ||
+    fail_test "every GOTO in the udev rule has a matching LABEL" \
+      "GOTO=\"${goto_target}\" has no LABEL. udev drops the whole FILE, so the untag lines never run and the duplicate press survives. File:"$'\n'"$(cat "$power_rule")"
+done < <(grep -o 'GOTO="[^"]*"' "$power_rule" | sed 's/GOTO="//; s/"$//' | sort -u)
+pass "every GOTO target in the udev rule has a matching LABEL, so udev will load the file"
+
+grep -qF -- 'SUBSYSTEM!="input"' "$power_rule" ||
+  fail_test "the udev rule leaves non-input devices immediately" \
+    "without the guard every uevent on the machine is compared against these rules. File:"$'\n'"$(cat "$power_rule")"
+pass "the udev rule guards on SUBSYSTEM and KERNEL before it matches anything"
+
+# --- the logind drop-in ----------------------------------------------------
+
+mapfile -t power_conf_lines < <(grep -v '^[[:space:]]*#' "$power_conf" | grep -v '^[[:space:]]*$')
+
+grep -qxF -- '[Login]' "$power_conf" ||
+  fail_test "the logind drop-in declares [Login]" \
+    "a setting outside its section is 'Unknown section, ignoring' -- the file loads, nothing complains, and the power button keeps doing what Omarchy's 10-ignore-power-button.conf says. File:"$'\n'"$(cat "$power_conf")"
+pass "the logind drop-in declares [Login], so its settings are not silently discarded"
+
+# 🔴 TRAP 1, pinned as an EXACT line and counted. A substring match would pass
+# with `HandlePowerKey=poweroff`; an absent line would pass anything that
+# merely mentions the setting in a comment.
+grep -qxF -- "HandlePowerKey=${POWER_KEY_ACTION}" "$power_conf" ||
+  fail_test "the logind drop-in sets HandlePowerKey=${POWER_KEY_ACTION} EXPLICITLY" \
+    "HandlePowerKey= DEFAULTS TO poweroff (man logind.conf, systemd 261 -- the version the Deck runs). A drop-in that overrides Omarchy's 'ignore' without naming a value hard-powers-off the Deck on every tap: data loss on every press, and an easy misread as 'sleep is broken'. File:"$'\n'"$(cat "$power_conf")"
+power_key_assignments=$(printf '%s\n' "${power_conf_lines[@]}" | grep -c '^HandlePowerKey=' || true)
+[[ $power_key_assignments -eq 1 ]] ||
+  fail_test "HandlePowerKey= is assigned exactly once" \
+    "found ${power_key_assignments} assignments; within one file the last wins, so a second one decides the behaviour and the first is decoration"
+pass "the logind drop-in sets HandlePowerKey=${POWER_KEY_ACTION} exactly once, as an explicit value"
+
+[[ $POWER_KEY_ACTION == suspend ]] ||
+  fail_test "POWER_KEY_ACTION is 'suspend'" \
+    "got '${POWER_KEY_ACTION}'. This is the whole defect being fixed: a short press must suspend, not power off and not ignore."
+pass "POWER_KEY_ACTION is 'suspend' -- what one short press does"
+
+grep -qxF -- "HandlePowerKeyLongPress=${POWER_KEY_LONG_PRESS_ACTION}" "$power_conf" ||
+  fail_test "the logind drop-in pins HandlePowerKeyLongPress=${POWER_KEY_LONG_PRESS_ACTION}" \
+    "systemd's own default is 'ignore', but it is restated here so the file says what the Deck does rather than inheriting it from whatever else lands in logind.conf.d. File:"$'\n'"$(cat "$power_conf")"
+[[ $POWER_KEY_LONG_PRESS_ACTION == ignore ]] ||
+  fail_test "POWER_KEY_LONG_PRESS_ACTION is 'ignore'" \
+    "got '${POWER_KEY_LONG_PRESS_ACTION}'. A long-press action would fire at a threshold NOBODY HAS READ -- systemd's LONG_PRESS_DURATION is unread, and SteamOS's 1 s belongs to powerbuttond's alarm(1), a different program (T13 §4.0/§4.1) -- and it would shadow the ten-second hardware hold docs/RECOVERY.md documents as the escape of last resort."
+pass "long press is explicitly 'ignore': no threshold this project has not read is relied on, and the ten-second hold keeps its meaning"
+
+! printf '%s\n' "${power_conf_lines[@]}" | grep -q '=poweroff' ||
+  fail_test "nothing in the logind drop-in assigns 'poweroff'" \
+    "the power button must never hard-power-off the Deck from a short OR a long press. File:"$'\n'"$(cat "$power_conf")"
+pass "no setting in the logind drop-in assigns 'poweroff'"
+
+# 🔴 The whole file, line by line. This is what keeps a duration -- or a
+# HandleLidSwitch=, or a HandleSuspendKey= -- from arriving unnoticed in a file
+# whose comment block is forty lines long. Anything logind acts on has to be
+# one of exactly these three lines.
+power_expected_conf=$'[Login]\nHandlePowerKey='"${POWER_KEY_ACTION}"$'\nHandlePowerKeyLongPress='"${POWER_KEY_LONG_PRESS_ACTION}"
+[[ $(printf '%s\n' "${power_conf_lines[@]}") == "$power_expected_conf" ]] ||
+  fail_test "the logind drop-in's settings are EXACTLY the three expected lines" \
+    "this drop-in is system-wide and changes what a hardware button does; every setting in it has to be one somebody argued for. Expected:"$'\n'"${power_expected_conf}"$'\n'"got:"$'\n'"$(printf '%s\n' "${power_conf_lines[@]}")"
+pass "the logind drop-in contains exactly three settings and no fourth -- no duration, no lid, no suspend key"
+
+# --- the names, which decide whether either file is read at all ------------
+#
+# 🔴 This is the check the SDDM drop-in did not have. Its comment claimed
+# '95-deck-session.conf' sorted after 'autologin.conf'; '9' < 'a', so it never
+# did, on any machine, and Gaming Mode had simply never been booted. The last
+# case below pins that exact historical mistake so the comparator itself cannot
+# regress into agreeing with the comment that was wrong.
+power_sorts_after "${POWER_UDEV_RULE##*/}" "$POWER_UDEV_TAGGER" ||
+  fail_test "${POWER_UDEV_RULE##*/} is read AFTER ${POWER_UDEV_TAGGER}" \
+    "udev merges every rules directory into one filename-sorted sequence. Read first, our file removes a tag that has not been added yet: it parses, it applies, and it does nothing -- leaving the duplicate KEY_POWER press underneath a handler that suspends on it."
+pass "${POWER_UDEV_RULE##*/} sorts after ${POWER_UDEV_TAGGER}, so the tag exists by the time it is removed"
+
+power_sorts_after "${POWER_LOGIND_DROPIN##*/}" 10-ignore-power-button.conf ||
+  fail_test "${POWER_LOGIND_DROPIN##*/} is read AFTER Omarchy's 10-ignore-power-button.conf" \
+    "systemd merges logind.conf.d from /etc, /run and /usr/lib into one basename-sorted sequence, and the LAST assignment wins. Sorted first, our file is overridden: it is on disk, it reads correctly, and HandlePowerKey is still 'ignore'. That package-owned file cannot simply be deleted -- pacman --overwrite restores it on the next Omarchy upgrade."
+pass "${POWER_LOGIND_DROPIN##*/} sorts after Omarchy's package-owned 10-ignore-power-button.conf, so it wins without editing a file we do not own"
+
+power_sorts_after zz-deck-power-button.conf zz-deck-power-button.conf &&
+  fail_test "power_sorts_after is strict -- a name does not sort after itself" \
+    "a comparator that answers 'yes' for equal names would bless a rival with our own basename in another directory"
+pass "power_sorts_after is strict: equal names do not satisfy it"
+
+power_sorts_after 95-deck-session.conf autologin.conf &&
+  fail_test "power_sorts_after reproduces the 95-/autologin bug rather than hiding it" \
+    "'9' < 'a', so 95-deck-session.conf sorted BEFORE autologin.conf and the SDDM drop-in silently never applied. A comparator that says otherwise agrees with the comment that was wrong."
+pass "power_sorts_after answers the historical 95-/autologin case correctly ('9' < 'a'), so it would have caught that bug"
 
 echo "all deck-session.sh tests passed"
