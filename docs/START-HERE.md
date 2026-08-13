@@ -126,7 +126,8 @@ work without waiting for further instruction.**
 >    construction. ⚠️ **Still open, and the same trap one file over:**
 >    `src/deck-form.sh` has **no route onto the ISO at all** — no overlay copy,
 >    no `configurator` patch — so the form it implements cannot run yet.
-> 4. **Deck-only:** P2.1's Gaming-Mode button mapping, §5.24a #1 and #3.
+> 4. **Deck-only:** P2.1's Gaming-Mode button mapping, §5.24a #1 (its #2 and
+>    #3 closed 2026-08-12 — see below, don't re-open).
 >
 > ⚠️ **Two things have never actually run:** a real build with T5c's overlay
 > (its patches apply and its guard fired against live repos, but the container
@@ -230,12 +231,23 @@ work without waiting for further instruction.**
 > line. Suites: **16** (run BOTH globs — `test/unit/test-*.sh` and `test-*.py`),
 > plus `test/osk-tty-e2e.py` and `test/xtest-*.py` by hand.
 >
-> ### The three operator requests still OPEN (§5.24a)
+> ### The three operator requests (§5.24a) — two closed 2026-08-12, one still open
 >
-> 1. Only the power button should wake the panel *(QAM currently does)*
-> 2. Display-on ~20 s, not ~2 s — **a one-line upstream QML change**, needs a T5
->    overlay-patch seam that **does not exist yet**
-> 3. OSK auto-hides after unlock — **implemented, not deployed**
+> 1. 🔴 **STILL OPEN.** Only the power button should wake the *blanked lock
+>    panel* (QAM currently does) — a Quickshell/Hyprland-side wake gate, not
+>    the systemd suspend work below. Untouched this session.
+> 2. ✅ **CLOSED.** Display-on ~20 s, not ~2 s. The overlay-patch seam this row
+>    said "does not exist yet" is T12's, and it now does:
+>    `0010-lock-blank-timer-20s.patch` was applied for real on the Deck and
+>    verified on disk — `idleBlankTimer.interval` reads `20000`, not `250`.
+> 3. ✅ **CLOSED.** OSK auto-hide after unlock — confirmed deployed and wired,
+>    not just present in the file: the installed mapper's checksum matches the
+>    source carrying `LockWatcher`, and all five of its call sites
+>    (`start`/`tick`/`stop`) are live in the main loop, not dead code.
+>
+> ⚠️ Do not conflate 2/3 (systemd-level suspend/resume, this session's main
+> event) with 1 (a lock-screen blank/wake timer inside Quickshell) — different
+> mechanisms, different files, only 1 remains.
 >
 > ### 🆕 LATE IN SESSION 20: the Steam option was closed, then REOPENED — T10 decides it
 >
