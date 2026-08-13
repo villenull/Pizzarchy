@@ -441,8 +441,27 @@ drop-in swaps an unanswerable LUKS prompt for an unanswerable SDDM prompt.
 it re-enter scope here.
 
 **Verified by:**
-- **[B]** grep the patched `configurator` for `mode="unencrypted"` at both sites
-  — cheap, and it catches a patch that applied to only one of them.
+- 🔴 ~~**[B]** grep the patched `configurator` for `mode="unencrypted"` at both
+  sites — cheap, and it catches a patch that applied to only one of them.~~
+  **RETIRED 2026-08-12. This check would have passed while asserting nothing
+  about the installed system**, which is the failure class this document
+  elsewhere warns about — so it is worth stating exactly how.
+
+  §5.5's two line numbers are **correct** (re-verified against `iso/upstream`:
+  601 in `run_partition_decide`, 895 in `confirm_disk_overwrite`). They are also
+  **both dead** the moment `deck-form.sh` loads: it replaces
+  `confirm_disk_overwrite` outright, and its `requires_full_disk_install()`
+  makes `select_installation` set `full_disk_only=true` and skip
+  `install_mode_form` — so "Free space install" is unreachable and
+  `run_partition_decide` is never called. Flipping those two strings changes no
+  behaviour at all, and a grep for them would go green either way.
+
+  **Replaced by an invariant at the point of effect**, in
+  `iso/overlay/patches/deck-form-invocation.patch`: `encrypt_installation` is
+  pinned to `false` immediately above the branch that writes `disk_encryption`
+  into `user_configuration.json`, with a tripwire that **aborts** rather than
+  silently correcting. `test/unit/test-iso-build.sh` asserts it against the
+  **patched tree**, and mutation-testing confirms flipping the pin goes red.
 - **[V]** an automated QEMU install driven through the *interactive* path (not a
   cidata autoinstall, which bypasses the default) produces a target with **no
   `/etc/crypttab` LUKS entry and no `cryptdevice=` on the cmdline**. Assert the
