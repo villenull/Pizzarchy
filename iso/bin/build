@@ -511,33 +511,276 @@ mapfile -t RUNTIME_BIN_NAMES < <(
 (( ${#RUNTIME_BIN_NAMES[@]} > 0 )) ||
   build_fail "guard 6.4a cannot run: $RUNTIME_SRC/bin contains no omarchy-* files. That is not a runtime checkout."
 
+# --- the SECOND provider set: binaries our OWN package ships ---------------
+#
+# 6.4a's original premise was "every /usr/bin/omarchy-* the orchestrator calls
+# comes from the pinned basecamp/omarchy checkout". That premise broke the
+# moment our own configure_deck phase started shelling out to
+# /usr/bin/omarchy-deck-apply-patches (T12): that binary comes from the
+# omarchy-deck package in THIS repo, and the pinned runtime will never ship it.
+# Against one provider the guard fails with a completely wrong diagnosis --
+# "the pins have drifted" sends the reader off to compare two commits that are
+# both fine.
+#
+# It was dodged rather than fixed for a day: deck_patches.py composes the path
+# from APPLIER_DIR + APPLIER_NAME so the grep above cannot see it, kept honest
+# by test/unit/test-deck-configure-patches.py running this guard's own regex
+# over that file. That works and it is fragile -- the next person writes the
+# literal and gets the wrong diagnosis. This is the fix; the dodge can go.
+#
+# DERIVED, never hand-kept, for exactly the reason the name list above is
+# derived (§6.4): an exemption list maintained by hand goes stale against our
+# own next edit, and it goes stale silently -- which is worse than not having
+# one, because it also buys false confidence. The authority for "what lands in
+# /usr/bin" is the package() body of our PKGBUILD, so that is what is read --
+# the same question 6.4b asks of the real .pkg.tar.zst, asked here of the
+# recipe, before Docker.
+#
+# Read from the OVERLAID tree, not from iso/overlay/, for the same reason the
+# orchestrator is: this is the copy build-iso.sh will be handed.
+DECK_PKGBUILD_DIR="$SCRATCH_SRC/configs/deck/pkgbuilds/omarchy-deck"
+DECK_PKGBUILD="$DECK_PKGBUILD_DIR/PKGBUILD"
+DECK_PROVIDED_BINS=()
+DECK_PROVIDER_NOTE=""
+
+if [[ -f $DECK_PKGBUILD ]]; then
+  mapfile -t DECK_PROVIDED_BINS < <(
+    grep -oE '[$][{]?pkgdir[}]?/usr/bin/[A-Za-z0-9._-]+' "$DECK_PKGBUILD" |
+      sed -E 's|.*/usr/bin/||' | sort -u
+  )
+  if (( ${#DECK_PROVIDED_BINS[@]} > 0 )); then
+    DECK_PROVIDER_NOTE="omarchy-deck's PKGBUILD installs ${#DECK_PROVIDED_BINS[@]} into /usr/bin: ${DECK_PROVIDED_BINS[*]}"
+  elif grep -qE '[$][{]?pkgdir[}]?/usr/bin' "$DECK_PKGBUILD"; then
+    # It writes into /usr/bin and this derivation could not name one thing it
+    # puts there -- `install -t "$pkgdir/usr/bin"`, or an `install -d` plus a
+    # cp, both of which name their targets somewhere this expression cannot
+    # see. Under-deriving is the one outcome that must never be quiet: it
+    # would turn into "our package does not ship this either" against a
+    # package that ships it perfectly well.
+    build_fail "guard 6.4a cannot run: $DECK_PKGBUILD installs into \$pkgdir/usr/bin, but this guard could not derive a single binary NAME from it.
+
+  The derivation looks for an explicit '\$pkgdir/usr/bin/<name>' target, which
+  is the form docs/tasks/T12-upstream-patch-seam.md §5 specifies and the form
+  test/t12-patch-seam-container-e2e.sh proved. A target-directory install
+  ('install -t \"\$pkgdir/usr/bin\" ...') names its files somewhere this
+  expression cannot see them.
+
+  Name the targets explicitly in package(), or teach this derivation the other
+  form -- but do not let it silently resolve to the empty set, because then
+  every binary our own package ships would be reported as shipped by nobody."
+  else
+    DECK_PROVIDER_NOTE="omarchy-deck's PKGBUILD installs nothing into /usr/bin"
+  fi
+else
+  DECK_PROVIDER_NOTE="there is no omarchy-deck PKGBUILD at ${DECK_PKGBUILD#"$SCRATCH_SRC"/} in the overlaid tree, so our package provides nothing"
+fi
+
+# The union of the two provider sets. It is a union, not a bypass: a name that
+# neither ships is still a hard failure, and the message below has to say WHICH
+# provider was supposed to have it, because they are different bugs with
+# different fixes.
 missing_bins=()
+deck_supplied_bins=()
 for want in "${REQUIRED_TARGET_BINS[@]}"; do
   found=0
   for have in "${RUNTIME_BIN_NAMES[@]}"; do
     [[ $want == "$have" ]] && { found=1; break; }
   done
+  if (( ! found )); then
+    for have in "${DECK_PROVIDED_BINS[@]}"; do
+      [[ $want == "$have" ]] && { found=1; deck_supplied_bins+=("$want"); break; }
+    done
+  fi
   (( found )) || missing_bins+=("$want")
 done
 
 if (( ${#missing_bins[@]} > 0 )); then
-  build_fail "guard 6.4a: the pinned ISO and the pinned runtime disagree.
+  build_fail "guard 6.4a: the orchestrator calls binaries that NO provider ships.
+
+  installer     $UPSTREAM_SLUG@$upstream_head (iso/UPSTREAM)
+  runtime       $RUNTIME_SLUG@$RUNTIME_HEAD (iso/RUNTIME, $RUNTIME_SRC)
+  our package   $DECK_PROVIDER_NOTE
+
+  Shelled out to, shipped by neither:
+$(printf '    /usr/bin/%s\n' "${missing_bins[@]}")
+  Two different bugs wear this shape, and the fix is not the same one:
+
+    * THE PINNED RUNTIME DOES NOT SHIP IT. That is T5-fork-plan.md §0: the git
+      ref and the package channel are two independent pins and they have
+      drifted apart -- a rename or a removal between them, not an empty
+      checkout (the runtime offers ${#RUNTIME_BIN_NAMES[@]} omarchy-* binaries in bin/). Move both
+      pins together, or neither.
+
+    * OUR PACKAGE DOES NOT SHIP IT EITHER. If the name is one of ours, nothing
+      is wrong with the pins at all: the omarchy-deck PKGBUILD's package() body
+      does not install it, so add it there. Its current /usr/bin list is on the
+      'our package' line above.
+
+  Left alone, either one fails at 'Configuring system', phase 5 of 14, AFTER
+  partitioning, LUKS, pacstrap and ~1200 packages."
+fi
+
+if (( ${#deck_supplied_bins[@]} > 0 )); then
+  build_log "guard 6.4a OK: all ${#REQUIRED_TARGET_BINS[@]} orchestrator-called binaries (${REQUIRED_TARGET_BINS[*]}) are shipped by a provider -- ${#deck_supplied_bins[@]} by our own omarchy-deck package (${deck_supplied_bins[*]}), the rest by $RUNTIME_SLUG@$RUNTIME_SHORT's bin/ (${#RUNTIME_BIN_NAMES[@]} candidates)"
+else
+  build_log "guard 6.4a OK: all ${#REQUIRED_TARGET_BINS[@]} orchestrator-called binaries (${REQUIRED_TARGET_BINS[*]}) exist in $RUNTIME_SLUG@$RUNTIME_SHORT's bin/ (${#RUNTIME_BIN_NAMES[@]} candidates); $DECK_PROVIDER_NOTE"
+fi
+
+# ---------------------------------------------------------------------------
+# Guard 6.6 -- every runtime patch still applies to the pinned runtime.
+#
+# docs/tasks/T12-upstream-patch-seam.md §1 point 4: "`git apply --check` every
+# patch in src/omarchy-deck-patches/patches/ against the pinned
+# basecamp/omarchy checkout, fail on a reject, name the patch and both SHAs."
+#
+# WHY THIS IS A BUILD GUARD AND NOT A TEST. These patches are not applied here.
+# They are applied on the TARGET, at pacman time, by
+# omarchy-deck-apply-patches, weeks after this ISO was written. So a patch that
+# upstream has moved out from under does not break anything visible: the applier
+# reports a reject into /var/lib/omarchy-deck/patch-state.json, and unless
+# somebody reads it the Deck simply, quietly, loses the customisation -- the
+# lock screen goes back to blanking the panel in ~2 s instead of ~20 s
+# (docs/PROGRESS.md §5.24). docs/findings/T12-upstream-patch-seam.md §4 is the
+# whole argument for this guard in one line: FAIL AT BUILD, NOT AT INSTALL.
+# This is the cheapest possible place to discover "the RUNTIME pin moved and
+# our patch is stale" -- before an ISO exists at all.
+#
+# 🔴 --check AND NOTHING ELSE. Not --3way, not fuzz, not a sed fallback. The
+# reject IS the product of this seam: the patches carry context lines
+# deliberately (the lock timer's literal was retuned three times in two months,
+# and a sed would have matched nothing, exited 0, and lost the fix in silence
+# -- 0010's .meta says so). Anything that makes a stale patch "apply anyway" is
+# the failure mode this mechanism exists to make loud.
+#
+# Nor --reverse --check as an "already applied, fine" escape hatch:
+# verify_checkout_at_pin above refuses a dirty runtime checkout, so "already
+# applied" is impossible here by construction, and treating it as a pass would
+# mean silently accepting a mutated checkout.
+#
+# Placed here -- after 6.4a, the last consumer of $RUNTIME_SRC, and before
+# Docker -- for 6.4a's reason: it costs a git apply --check per patch and it
+# refuses the build before six gigabytes of downloads.
+# ---------------------------------------------------------------------------
+
+# WHERE THE PATCHES LIVE. Searched, not hard-coded. They ship INSIDE the
+# omarchy-deck package (docs/tasks/T12-upstream-patch-seam.md §5: "the patches
+# ship in the package, so the package payload is one directory"), and that
+# directory was still moving out of src/ and into the package's pkgbuild dir
+# while this was being written.
+#
+# Candidates in preference order. The package's own pkgbuild directory comes
+# first, and the directory ITSELF before any subdirectory of it, because
+# makepkg's source=() cannot reach outside that directory -- so the payload is
+# flat beside the PKGBUILD, which is exactly where a `find -name patches` would
+# NOT have looked. Subdirectories are swept too, in case it is ever nested. The
+# repo-side src/ home is the last resort, and when both hold patches the run
+# says so rather than picking one quietly.
+runtime_patch_dirs=()
+if [[ -d $DECK_PKGBUILD_DIR ]]; then
+  runtime_patch_dirs+=("$DECK_PKGBUILD_DIR")
+  while IFS= read -r dir; do
+    runtime_patch_dirs+=("$dir")
+  done < <(find "$DECK_PKGBUILD_DIR" -mindepth 1 -type d | sort)
+fi
+if [[ -d "$REPO_ROOT/src/omarchy-deck-patches/patches" ]]; then
+  runtime_patch_dirs+=("$REPO_ROOT/src/omarchy-deck-patches/patches")
+fi
+
+# A guard with no subject is not a passing guard -- 6.4a's empty-match case,
+# inherited. "No patches anywhere" does not mean the seam went away; it means
+# the payload went missing, and a silent pass would ship a Deck that quietly
+# lost every customisation the seam exists to keep.
+(( ${#runtime_patch_dirs[@]} > 0 )) ||
+  build_fail "guard 6.6 cannot run: no runtime-patch directory found.
+
+  looked in
+    ${DECK_PKGBUILD_DIR#"$SCRATCH_SRC"/} and below   (inside the omarchy-deck package, as shipped)
+    src/omarchy-deck-patches/patches                 (the repo-side home)
+
+  These patches are the T12 upstream-patch seam (docs/tasks/T12-upstream-patch-seam.md).
+  Their absence is not 'nothing to check' -- it is the payload having gone
+  missing, which on the Deck looks like the lock screen blanking the panel in
+  ~2 s again with nothing anywhere saying why. If the seam was retired on
+  purpose, remove this guard on purpose."
+
+RUNTIME_PATCH_DIR=""
+runtime_patches=()
+runtime_patch_dupes=()
+for dir in "${runtime_patch_dirs[@]}"; do
+  shopt -s nullglob
+  dir_patches=("$dir"/*.patch)
+  shopt -u nullglob
+  (( ${#dir_patches[@]} > 0 )) || continue
+  if [[ -z $RUNTIME_PATCH_DIR ]]; then
+    RUNTIME_PATCH_DIR=$dir
+    runtime_patches=("${dir_patches[@]}")
+  else
+    runtime_patch_dupes+=("$dir")
+  fi
+done
+
+[[ -n $RUNTIME_PATCH_DIR ]] ||
+  build_fail "guard 6.6 cannot run: a runtime-patch directory exists but holds no *.patch files.
+
+  looked in
+$(printf '    %s\n' "${runtime_patch_dirs[@]}")
+  An empty patch directory is the same failure as a missing one, and it is the
+  likelier of the two: a move that took the directory and left the files, or a
+  payload copy step that globbed the wrong thing. Refusing to report a pass
+  over an empty set (docs/tasks/T5-fork-plan.md §5.4)."
+
+if (( ${#runtime_patch_dupes[@]} > 0 )); then
+  build_log "guard 6.6: checking $RUNTIME_PATCH_DIR (the copy the omarchy-deck package ships). Also present: ${runtime_patch_dupes[*]} -- two copies of one patch set is a drift waiting to happen, and only the shipped one is checked here."
+fi
+
+# Every failure is collected, not the first one: a RUNTIME pin that moves
+# usually breaks more than one patch at once, and rebasing them one build at a
+# time is three 40-minute round trips to learn what one run already knew.
+patch_rejects=()
+for p in "${runtime_patches[@]}"; do
+  patch_name=$(basename -- "$p")
+  if reject_detail=$(git -C "$RUNTIME_SRC" apply --check -p1 -- "$p" 2>&1); then
+    continue
+  fi
+  # The user-visible consequence comes from the patch's own .meta
+  # `requirement:` line -- derived, so it cannot describe a patch this repo no
+  # longer carries, and so a new patch gets a real consequence in this message
+  # without anybody remembering to add one here.
+  consequence=""
+  if [[ -f "${p%.patch}.meta" ]]; then
+    consequence=$(sed -nE 's/^requirement:[[:space:]]*//p' "${p%.patch}.meta" | head -n1)
+  fi
+  [[ -n $consequence ]] ||
+    consequence="(no 'requirement:' line in ${patch_name%.patch}.meta, so this patch does not say what it is for -- fix that too)"
+  patch_rejects+=("    $patch_name
+      what it is for: $consequence
+      git apply --check said:
+$(printf '%s\n' "$reject_detail" | sed 's/^/        /')")
+done
+
+if (( ${#patch_rejects[@]} > 0 )); then
+  build_fail "guard 6.6: ${#patch_rejects[@]} of ${#runtime_patches[@]} runtime patch(es) no longer apply to the pinned runtime.
 
   installer   $UPSTREAM_SLUG@$upstream_head (iso/UPSTREAM)
   runtime     $RUNTIME_SLUG@$RUNTIME_HEAD (iso/RUNTIME, $RUNTIME_SRC)
+  patches     $RUNTIME_PATCH_DIR
 
-  The orchestrator shells out to these, and the runtime does not ship them:
-$(printf '    /usr/bin/%s\n' "${missing_bins[@]}")
-  The runtime checkout offers ${#RUNTIME_BIN_NAMES[@]} omarchy-* binaries in bin/, so this is a
-  rename or a removal between the two pins, not an empty checkout.
+$(printf '%s\n' "${patch_rejects[@]}")
+  Upstream moved under these patches. Nothing here is broken yet -- which is
+  exactly why this must stop the build: the patches are applied on the TARGET at
+  pacman time, so a stale one costs you nothing today and silently drops the
+  customisation on every Deck this ISO installs. That is the trade
+  docs/findings/T12-upstream-patch-seam.md §4 names: fail at BUILD, not at
+  install.
 
-  This is T5-fork-plan.md §0: the git ref and the package channel are two
-  independent pins and they have drifted apart. Left alone it fails at
-  'Configuring system', phase 5 of 14, AFTER partitioning, LUKS, pacstrap and
-  ~1200 packages. Move both pins together, or neither."
+  🔴 Rebase the patch against $RUNTIME_SLUG@$RUNTIME_SHORT by hand, and update
+  its .meta post-conditions in the same commit. Do NOT reach for --3way, fuzz,
+  or a sed fallback to make it 'apply anyway': the reject is the PRODUCT of this
+  seam, not an obstacle to it. If upstream made the change deliberately and the
+  patch is now pointless, retire the patch and its .meta together."
 fi
 
-build_log "guard 6.4a OK: all ${#REQUIRED_TARGET_BINS[@]} orchestrator-called binaries (${REQUIRED_TARGET_BINS[*]}) exist in $RUNTIME_SLUG@$RUNTIME_SHORT's bin/ (${#RUNTIME_BIN_NAMES[@]} candidates)"
+build_log "guard 6.6 OK: all ${#runtime_patches[@]} runtime patch(es) in ${RUNTIME_PATCH_DIR#"$REPO_ROOT"/} still apply cleanly to $RUNTIME_SLUG@$RUNTIME_SHORT ($(printf '%s ' "${runtime_patches[@]##*/}"))"
 
 # ---------------------------------------------------------------------------
 # Guard 6.5 -- the payload audit (T5-fork-plan.md §6.5, specified in §5.4).
@@ -723,6 +966,17 @@ latest_iso=$(find "${built_isos[@]}" -maxdepth 0 -printf '%T@ %p\n' | sort -rn |
 # short sha means the offline mirror holds a channel build, not ours --
 # --local-source silently not having applied is precisely the failure this
 # slice exists to prevent, and it is invisible in a green build log.
+#
+# ⚠️ OWED: the second provider set 6.4a just grew is NOT here yet. 6.4a now
+# accepts a name that our own omarchy-deck package's PKGBUILD installs into
+# /usr/bin; this half still asks only omarchy-dev + omarchy-settings-dev. So
+# the day a literal /usr/bin/omarchy-deck-* appears in the orchestrator, 6.4a
+# passes and THIS guard fails -- after Docker, with the wrong diagnosis
+# ("check pkgbuilds/omarchy-dev's package() exclusion list"), which is the same
+# wrong-diagnosis bug 6.4a was just fixed for, moved six gigabytes later. The
+# fix is symmetric: read the built omarchy-deck package out of the offline
+# mirror and add its usr/bin members to PROVIDED_BINS. Deliberately left for
+# the slice that owns the built package, and it needs its own negative test.
 # ---------------------------------------------------------------------------
 
 OFFLINE_MIRROR_DIR="$OFFLINE_MIRROR_CACHE_DIR/mirror/offline"
