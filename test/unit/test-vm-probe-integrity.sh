@@ -486,13 +486,16 @@ fi
 # nobody looks at is the same defect class this whole file is about.
 #
 # entry: <basename>:<line-substring that identifies the offending grep>
-deferred=(
-  "vm-installer-screens-test.sh:command grep -qa 'Press Return to Start Install'"
-)
-# Found 2026-08-12. `-a` alone was NOT reproduced as insufficient for a `-q`
-# fixed-phrase search (see test/lib/vm-installer-screens.sh's header, point 2),
-# so this is the mildest form of the defect -- but that file's own library is
-# the reference for "LC_ALL=C and -a, always both", and it should match it.
+#
+# ✅ The one deferred entry this list used to carry (`vm-installer-screens-test.sh`'s
+# greeter-wait grep, found 2026-08-12) was fixed 2026-08-13 as part of migrating
+# that file to drive the real Deck-forked ISO (docs/findings/T4-controller-only-install-first-run.md):
+# the marker string itself changed (upstream's "Press Return to Start Install"
+# never appears on that ISO) AND `LC_ALL=C` was added at the same time, so
+# there is nothing left to defer. The array is empty on purpose -- see this
+# block's own header: an exemption list that rots into a list of things
+# nobody looks at is the same defect class this whole file is about.
+deferred=()
 
 deferred_still_needed=1
 for d in "${deferred[@]}"; do

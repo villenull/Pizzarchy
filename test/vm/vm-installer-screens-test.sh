@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # vm-installer-screens-test.sh -- T4's [V]-tier harness
-# (docs/tasks/T4-screen-spec.md §6.3), driving the REAL, unmodified Omarchy
-# ISO in QEMU. Not T4's screens -- those don't exist yet, are out of this
-# session's scope, and are gated on U6 (docs/tasks/T4-screen-spec.md §8).
-# This is the machinery that will drive them once they land, proven against
-# what the ISO actually contains today: upstream's own `configurator` wizard.
+# (docs/tasks/T4-screen-spec.md §6.3), driving the REAL Deck-forked Omarchy
+# ISO in QEMU.
 #
 # Usage: ./vm-installer-screens-test.sh [iso-path] [work-dir]
 #   default iso-path: ~/ISOs/omarchy-2026.08.10-x86_64-quattro.iso
+#   (that default is upstream's own unmodified build, kept only because it
+#   still boots and is harmless as a default; every real run of this suite
+#   passes the Deck-forked ISO explicitly as $1.)
 #
 # Env vars (all optional):
 #   VM_RUN_TIMEOUT_SEC   whole-run ceiling, default 900
@@ -16,62 +16,108 @@
 #   VM_KEEP_WORK=1       never delete the work dir, even on success
 #
 # ===========================================================================
-# WHY THIS DRIVES UPSTREAM'S WIZARD, NOT DECK SCREENS
+# MIGRATION HISTORY -- this suite used to drive upstream's UNMODIFIED wizard
 # ===========================================================================
 #
-# T4's screens (deck-form.sh, wrapping configurator per the spec's §1
-# decision) are another agent's deliverable this session, gated on U6, and
-# explicitly out of this task's scope ("Write no installer screens"). The ISO
-# this harness is told to drive -- the EXISTING, unmodified build at
-# ~/ISOs/omarchy-2026.08.10-x86_64-quattro.iso -- therefore contains none of
-# them. What it DOES contain is the exact wizard T4's screens will wrap:
-# same prompts, same artefact files, same failure paths. Every primitive and
-# every guard this suite proves (§6.2, §6.4) is proven against that same
-# machinery, because deck-form.sh redefines the prompt FUNCTIONS but changes
-# nothing about how a screen is driven or read -- the console is still tty1,
-# the artefacts are still user_configuration.json/user_credentials.json, and
-# a blocking screen still blocks the same way. When the Deck-forked ISO
-# exists, pointing $1 at it and swapping the marker strings in this file for
-# Deck-branded ones (§4's S0/S1/S3/S8 text) is the whole migration.
+# Until 2026-08-12 no Deck-forked ISO existed, so this suite drove upstream's
+# own `configurator` (marker strings unmodified, `deck_form_present` asserted
+# ABSENT) and said so loudly in its own header, per this file's original
+# comment: "When the Deck-forked ISO exists, pointing $1 at it and swapping
+# the marker strings in this file for Deck-branded ones ... is the whole
+# migration." `iso/bin/build` ran for real that day
+# (~/.cache/omarchy-deck/iso-build-2/release/omarchy-2026.08.13-x86_64-quattro.iso)
+# and this is that migration, done against the real artefact -- see
+# docs/findings/T4-controller-only-install-first-run.md for the full run.
 #
-# This run therefore explicitly reports (and asserts) that
-# /usr/share/omarchy-iso/deck-form.sh is ABSENT in the image under test --
-# so a reader can never mistake "this suite is green" for "S1's Wi-Fi/OSK
-# screen, or S8's Deck-branded failure menu, has been proven." They haven't.
-# Those need the forked ISO and are noted as unmet in this session's report.
+# ⚠️ THE MIGRATION WAS NOT "SWAP THE MARKERS AND DONE" -- MEASUREMENT FOUND A
+# REAL BUG THE SPEC DID NOT PREDICT. `deck-form.sh`'s own header claims S2
+# (timezone), and the identity/hostname halves of S3, are overridden
+# (`omarchy_prompt_timezone`, `omarchy_prompt_identity`, `omarchy_prompt_hostname`).
+# **Measured on the real ISO, they are not.** `/dev/vcs1` shows upstream's own
+# unmodified "Full name>", "Hostname>" and flat scrollable "Timezone" list --
+# byte-identical in shape to what this suite already expected from the
+# UNMODIFIED wizard, because that is genuinely what ran. Only `greeter` (S0),
+# `omarchy_prompt_username`/`omarchy_prompt_password` (S3's username/password
+# half), `disk_form` and `confirm_disk_overwrite` (S4) are confirmed
+# overridden -- their `deck-form.sh`-specific text and the
+# `[deck-form] WARNING: ...` lines from `deck_form_text_prompt` are on
+# screen. This is precisely the failure mode T4-screen-spec.md §7's guard G1
+# exists to catch ("An override that misspells a name is a screen that
+# silently reverts to upstream's -- the exact failure class this project
+# keeps hitting") and G1 either was not run against this build or did not
+# catch this. See the findings doc for the full evidence and a follow-up
+# flag. THE PRACTICAL CONSEQUENCE FOR THIS FILE: the marker strings for S2 and
+# the identity/hostname half of S3, below, are deliberately left as
+# upstream's own text -- not because this suite failed to migrate them, but
+# because migrating them to Deck-branded text would make this suite pass
+# while asserting something false about the real ISO.
+#
+# `deck_form_present` is now asserted **present** (1), not absent -- the one
+# part of the original migration note that *was* that simple.
 #
 # ===========================================================================
-# THE MEASURED FLOW (RUN, this session, four exploratory boots before this
-# script was written -- see docs/findings/T4-harness-build.md)
+# THE MEASURED FLOW, RE-MEASURED AGAINST THE DECK-FORKED ISO 2026-08-12
+# (docs/findings/T4-controller-only-install-first-run.md)
 # ===========================================================================
 #
-#   greeter --ret--> keyboard list (cursor: US)
+#   greeter (Deck disclosure text, "Press A to begin") --ret-->
+#           (S1 Wi-Fi runs HERE, inline, before any capture below: no wlan0
+#           in QEMU, so it self-resolves to "No Wi-Fi hardware found --
+#           continuing offline" with no keypress -- confirmed by the flow
+#           reaching the keyboard list on the very next capture, well inside
+#           one 6s step window)
+#           keyboard list (cursor: US, upstream's own picker, unoverridden)
 #           --down-> keyboard list (cursor: UK)
-#           --ret--> username (empty)
+#           --ret--> username (empty) -- deck-form.sh's OWN prompt: the
+#                    `[deck-form] WARNING: mapper not found ...` line is on
+#                    screen, proving this field IS the override, degraded
+#                    (as designed) because /usr/local/bin/deck-input-mapper
+#                    does not exist on this build (see findings doc)
 #           --ret x3 (BLOCKING NEGATIVE TEST: must NOT advance)
 #           --d,e,c,k--> "deck" (LIVE ECHO, guard 2)
-#           --ret--> password (empty, masked)
+#           --ret--> password (empty, masked) -- also deck-form.sh's prompt
 #           --p,a,s,s--> (masked; password fields never echo -- measured)
 #           --ret--> confirm (empty, masked)
 #           --p,a,s,s--> (masked)
-#           --ret--> full name (empty; "hit return to skip")
-#           --ret--> email address (skip)
-#           --ret--> hostname (skip -> default "omarchy")
-#           --ret--> timezone list (geo-guessed default pre-selected)
-#           --ret--> SUMMARY TABLE (Username/Password/Hostname/Timezone/Keyboard)
-#           --ret--> disk picker (single eligible disk auto-shown)
-#           --ret--> disk overwrite confirm ("Yes, install" is upstream's
-#                    OWN default cursor position -- confirms
-#                    T4-screen-spec.md §2.2 item 1's inference, by
-#                    measurement, that skipping encryption needs Ctrl+C)
-#           --ret--> STOP. write_user_files has now run (user_configuration.json
+#           --ret--> full name (empty; "hit return to skip") -- UPSTREAM'S
+#                    OWN, unoverridden (see MIGRATION HISTORY above)
+#           --ret--> email address (skip) -- upstream's own
+#           --ret--> hostname (skip -> default "omarchy") -- upstream's own
+#           --ret--> timezone list (flat, geo-guessed default pre-selected)
+#                    -- upstream's own, NOT deck-form.sh's two-level Area/City
+#           --ret--> SUMMARY TABLE (Username/Password/Hostname/Timezone/
+#                    Keyboard) -- upstream's own `user_step` recap, default
+#                    cursor "Yes"
+#           --ret--> disk_form auto-skips the picker (one eligible disk, the
+#                    result device) straight into confirm_disk_overwrite --
+#                    THIS ONE IS deck-form.sh's OWN: "Everything on ... will
+#                    be erased. There is no recovery." / "This install is not
+#                    encrypted, so the Deck can start without anyone typing a
+#                    passphrase." / "Yes, erase and install" · "No, go back"
+#           --ret--> 🔴 DOES NOT ADVANCE. Measured, not assumed:
+#                    `DECK_DISK_CONFIRM_DEFAULT=false` in deck-form.sh means
+#                    the cursor starts on "No, go back" -- the OPPOSITE of
+#                    upstream's own confirm (which defaults affirmative and
+#                    is why the ORIGINAL, pre-migration version of this file
+#                    could reach the failure menu with a bare `ret`). Sending
+#                    `ret` here declines, `disk_form` re-autoselects the same
+#                    sole disk, and the SAME confirm screen redraws --
+#                    verified byte-identical (sha256) across three
+#                    consecutive `ret`s in the run that found this. This is
+#                    the Deck-side safety flip T4-screen-spec.md §2.2 item 1
+#                    asked for, PROVEN rather than inferred.
+#           --y--> (the widget's own advertised hotkey, "y Yes, erase and
+#                    install", read directly off screen -- not guessed) STOP.
+#                    write_user_files has now run (user_configuration.json
 #                    and user_credentials.json exist and are read back and
 #                    checked, A2/A3) and a real (but deliberately tiny,
 #                    misaligned) partition attempt has failed fast, landing
-#                    on the failure menu. No further key is sent.
+#                    on the failure menu -- upstream's own, unoverridden (S8
+#                    is dead code in deck-form.sh today, see its own header).
+#                    No further key is sent.
 #
-# ⚠️ TWO FINDINGS FROM THAT MEASUREMENT, NEITHER IN THE SPEC, BOTH LOAD-BEARING
-# FOR THIS HARNESS'S OWN SAFETY:
+# ⚠️ TWO FINDINGS FROM THE ORIGINAL (pre-migration) MEASUREMENT, NEITHER IN
+# THE SPEC, BOTH STILL LOAD-BEARING FOR THIS HARNESS'S OWN SAFETY:
 #
 #   1. THE RESULT DEVICE GETS AUTO-SELECTED AS THE INSTALL DISK. This suite's
 #      only virtio-blk device -- the one used to get the report back out, the
@@ -323,17 +369,24 @@ emit "fbcon.rotate=$(cat /sys/class/graphics/fbcon/rotate 2>&1)"
 emit "hid_steam.loaded=$([[ -d /sys/module/hid_steam ]] && echo 1 || echo 0)"
 emit "hid_steam.sysfs_param=$([[ -f /sys/module/hid_steam/parameters/lizard_mode ]] && echo 1 || echo 0)"
 emit "tools=$(for t in gum jq openssl tzupdate iwctl loadkeys; do command -v "$t" >/dev/null && printf '%s,' "$t"; done)"
-# The honesty check this whole header talks about: this ISO is stock. If a
-# future run of this same script against a Deck-forked ISO ever reports 1
-# here, every marker string below needs revisiting for the Deck-branded text.
+# The honesty check this whole header talks about, now inverted post-
+# migration (see MIGRATION HISTORY): this is meant to be the Deck-forked ISO,
+# so a 0 here means $1 was pointed at the wrong image, or the overlay never
+# landed in this build -- every marker string below assumes Deck-branded S0
+# text and would be silently checking the wrong thing.
 emit "deck_form_present=$([[ -f /usr/share/omarchy-iso/deck-form.sh ]] && echo 1 || echo 0)"
 
 # --- wait for the greeter ----------------------------------------------------
+# ⚠️ MIGRATED marker: deck-form.sh's `greeter()` override replaces upstream's
+# "Press Return to Start Install" prompt line entirely with the Deck
+# disclosure text (DECK_S0_LINES) ending in "Press A to begin" -- MEASURED,
+# not the spec's guess: /dev/vcs1 on the real ISO never contains upstream's
+# string at all (docs/findings/T4-controller-only-install-first-run.md).
 waited=0
 found=0
 while (( waited < 300 )); do
   snap 00-greeter
-  if command grep -qa 'Press Return to Start Install' "$OUT/screen.00-greeter" 2>/dev/null; then
+  if LC_ALL=C command grep -qa 'Press A to begin' "$OUT/screen.00-greeter" 2>/dev/null; then
     found=1
     break
   fi
@@ -351,7 +404,7 @@ STEPS="01-kb-us:ret 02-kb-uk:down 03-username-empty:ret \
 11-password-empty:ret 12-password-1:p 13-password-2:a 14-password-3:s 15-password-4:s \
 16-confirm-empty:ret 17-confirm-1:p 18-confirm-2:a 19-confirm-3:s 20-confirm-4:s \
 21-fullname:ret 22-email:ret 23-hostname:ret 24-timezone-list:ret \
-25-summary:ret 26-disk-picker:ret 27-disk-confirm:ret 28-failure:ret"
+25-summary:ret 26-disk-confirm:ret 27-disk-confirm-holds:ret 28-deck-summary:y"
 
 i=0
 for step in $STEPS; do
@@ -381,6 +434,15 @@ if [[ -f /root/user_configuration.json ]]; then
 fi
 if [[ -f /root/user_credentials.json ]]; then
   emit "creds.content_b64=$(base64 -w0 /root/user_credentials.json)"
+fi
+# T4-screen-spec.md §4 S4's own [V] item: "/root/user_encrypt_installation.txt
+# is 'false'" -- a second, independent artefact for the same encryption-off
+# fact the JSON's missing disk_encryption block already argues, written by a
+# different upstream code path (write_user_files's own plain-text side
+# output, not the archinstall JSON).
+emit "encflag.exists=$([[ -f /root/user_encrypt_installation.txt ]] && echo 1 || echo 0)"
+if [[ -f /root/user_encrypt_installation.txt ]]; then
+  emit "encflag.content=$(cat /root/user_encrypt_installation.txt 2>/dev/null | tr -d '\n')"
 fi
 PROBE
 
@@ -448,13 +510,20 @@ sendkey() {
 # spelled the same way here (see this file's own header for what each step
 # proves). i is the WANT-KEY index the guest waits for; qcode is what the
 # host answers with.
+# ⚠️ Step 26's `ret` DECLINES the disk-confirm screen on purpose (deck-form.sh
+# flips its default to "No, go back" -- see the header's MEASURED FLOW) and
+# step 27 repeats `ret` to prove the decline holds (the screen must NOT
+# advance). Step 28 sends `y`, the widget's own advertised hotkey for "Yes,
+# erase and install", to actually cross the confirm gate. This is the ONLY
+# place in this file a qcode is a letter for a reason other than typing text
+# into a field -- it is a keyboard shortcut gum itself prints on screen.
 STEPS="01-kb-us:ret 02-kb-uk:down 03-username-empty:ret \
 04-username-empty-2:ret 05-username-empty-3:ret 06-username-empty-4:ret \
 07-username-d:d 08-username-de:e 09-username-dec:c 10-username-deck:k \
 11-password-empty:ret 12-password-1:p 13-password-2:a 14-password-3:s 15-password-4:s \
 16-confirm-empty:ret 17-confirm-1:p 18-confirm-2:a 19-confirm-3:s 20-confirm-4:s \
 21-fullname:ret 22-email:ret 23-hostname:ret 24-timezone-list:ret \
-25-summary:ret 26-disk-picker:ret 27-disk-confirm:ret 28-failure:ret"
+25-summary:ret 26-disk-confirm:ret 27-disk-confirm-holds:ret 28-deck-summary:y"
 
 nsteps=0
 for step in $STEPS; do nsteps=$((nsteps + 1)); done
@@ -532,15 +601,31 @@ log "--- environment invariants (A6) --------------------------------------"
 screens::check "the injected unit ran"        "$(screens::field "$result_txt" unit.ran)" 1
 screens::check "greeter appeared"             "$(screens::field "$result_txt" greeter.found)" 1
 screens::check "tty1 is in TEXT mode"         "$(screens::field "$result_txt" tty1.kdmode)" 0
-log "note deck_form_present=$(screens::field "$result_txt" deck_form_present) -- 0 is EXPECTED: this is the stock ISO. A 1 here would mean the marker strings below are stale."
+# ⚠️ MIGRATED assertion (was "expect 0, this is stock upstream"): this suite
+# now points at the Deck-forked ISO on purpose, so deck-form.sh must be
+# present. A 0 here means $1 is the wrong image and every marker below is
+# checking the wrong wizard.
+screens::check "deck-form.sh is present (this is the Deck-forked ISO)" "$(screens::field "$result_txt" deck_form_present)" 1
 log "note hid_steam.loaded=$(screens::field "$result_txt" hid_steam.loaded) hid_steam.sysfs_param=$(screens::field "$result_txt" hid_steam.sysfs_param) -- both expected 0 in QEMU (guard 5)"
 log "note fbcon.rotate=$(screens::field "$result_txt" fbcon.rotate) -- [H]-only assertion per T4-screen-spec.md §2.5/§6.2 A6; QEMU has no linux-t2 panel-orientation quirk"
 log "note scope: $(screens::capability_scope_label qmp-sendkey)"
 
+log "--- S0's own Deck-branded disclosure text (T4-screen-spec.md §4 S0 [V]) --"
+# ⚠️ MIGRATED markers: upstream's greeter has no such lines at all; these are
+# deck-form.sh's DECK_S0_LINES, asserted on the function's own output too in
+# test/unit/test-deck-form.sh -- this is the [V]-tier half of that same claim,
+# proven on /dev/vcs1 rather than on the shell function in isolation.
+assert "S0 discloses the erase warning" \
+  screens::marker_present "$(extract 00-greeter)" "This installs Omarchy on your Steam Deck and erases the internal drive."
+assert "S0 discloses the proprietary-firmware dependency" \
+  screens::marker_present "$(extract 00-greeter)" "It includes proprietary firmware from AMD and Valve"
+assert "S0 discloses that Steam/DSP firmware download during setup" \
+  screens::marker_present "$(extract 00-greeter)" "Steam and the audio DSP firmware are downloaded from Valve during setup."
+
 log "--- guard 1 (advance-and-vanish) at every transition ------------------"
 assert "S0->kb-list advance-and-vanish" \
   screens::advance_and_vanish "$(extract 00-greeter)" "$(extract 01-kb-us)" \
-  "Select keyboard layout" "Press Return to Start Install"
+  "Select keyboard layout" "Press A to begin"
 
 assert "kb-list cursor starts on English (US)" \
   screens::marker_present "$(extract 01-kb-us)" "> English (US)"
@@ -574,6 +659,21 @@ log "--- guard 4 (a guard nobody has seen fail): the blocking negative test -"
 #
 # If upstream ever stops dropping the intro line, attempt 1 fails loudly and
 # this comment is the thing to re-measure. It is a pin, not a tolerance.
+#
+# 🔴 MEASURED AGAINST THE DECK-FORKED ISO, 2026-08-12: this pin now FAILS,
+# and deliberately is NOT relaxed to make it pass -- the failure is real,
+# newly-discovered product behaviour, not a stale harness expectation this
+# time. `omarchy_prompt_username`'s deck-form.sh override calls
+# `deck_form_text_prompt`, which prints `[deck-form] WARNING: ...` lines to
+# the SAME console on every retry (mapper-not-found, lizard-mode-absent, and
+# the validation message) and, unlike upstream's own `notice()`/`clear_logo`
+# path, never clears them. Measured row counts across the four blocking
+# captures: 16, 22, 28, 34 -- growing by a fixed 6 rows on every attempt,
+# not settling the way upstream's does. The three assertions below are LEFT
+# FAILING on purpose: weakening them would hide a real, reproducible defect
+# (unbounded console growth on repeated invalid input -- on real hardware,
+# with the OSK actually drawn, this would eventually scroll the keyboard off
+# the visible console). See docs/findings/T4-controller-only-install-first-run.md.
 USERNAME_INTRO="Let's setup your user account"
 
 # Guard against the vacuous shape: an identity comparison over two BLANK
@@ -680,26 +780,94 @@ screens::check "summary table shows the hostname" "$summary_hostname" "omarchy"
 screens::check "summary table shows the timezone" "$summary_timezone" "America/Mexico_City"
 screens::check "summary table shows the keyboard layout" "$summary_keyboard" "uk"
 
-assert "summary confirmed -> disk picker" \
-  screens::advance_and_vanish "$(extract 25-summary)" "$(extract 26-disk-picker)" \
-  "Select install disk" "Keyboard"
-assert "disk selected -> overwrite confirm" \
-  screens::advance_and_vanish "$(extract 26-disk-picker)" "$(extract 27-disk-confirm)" \
-  "Confirm overwriting" "Select install disk"
+# ⚠️ MIGRATED: upstream's own recap ("Does this look right?", default "Yes")
+# accepts on the bare `ret` that landed us on 26-disk-confirm, and disk_form
+# (deck-form.sh's override) auto-skips the picker entirely -- the sole
+# eligible disk is this harness's own result device, same hazard the
+# original header already warns about. So the very NEXT screen is already
+# deck-form.sh's OWN confirm_disk_overwrite, not upstream's picker or its
+# "Confirm overwriting" text -- there is no picker screen to assert here on
+# this ISO with this device topology. Confirmed by three consecutive raw
+# captures being byte-for-byte identical in the run that found this
+# (docs/findings/T4-controller-only-install-first-run.md).
+assert "summary confirmed -> Deck's disk-overwrite confirm (picker auto-skipped, one eligible disk)" \
+  screens::advance_and_vanish "$(extract 25-summary)" "$(extract 26-disk-confirm)" \
+  "will be erased. There is no recovery." "Keyboard"
 
-log "--- the disk-confirm default cursor (measured, feeds T4 §2.2 item 1) --"
-assert "overwrite confirm offers 'Yes, install'" \
-  screens::marker_present "$(extract 27-disk-confirm)" "Yes, install"
+log "--- the disk-confirm default cursor, Deck's SAFETY FLIP (T4 §2.2 item 1) --"
+assert "overwrite confirm offers Deck's own text: 'Yes, erase and install'" \
+  screens::marker_present "$(extract 26-disk-confirm)" "Yes, erase and install"
+assert "overwrite confirm offers Deck's own text: 'No, go back'" \
+  screens::marker_present "$(extract 26-disk-confirm)" "No, go back"
+assert "overwrite confirm states the install is unencrypted (no passphrase to type -- no keyboard exists)" \
+  screens::marker_present "$(extract 26-disk-confirm)" "This install is not encrypted"
 
-assert "'Yes, install' confirmed -> write_user_files ran, install attempted" \
-  screens::advance_and_vanish "$(extract 27-disk-confirm)" "$(extract 28-failure)" \
-  "Omarchy installation stopped" "Confirm overwriting"
-assert "failure menu's default item is 'Upload log for support' (measured; this is why we stop here)" \
-  screens::marker_present "$(extract 28-failure)" "Upload log for support"
+log "--- guard 4 again, on S4 this time: the disk-confirm default must ACTUALLY decline --"
+# ⚠️ MEASURED, not inferred: DECK_DISK_CONFIRM_DEFAULT=false in deck-form.sh
+# means the cursor starts on "No, go back" -- the OPPOSITE of upstream's own
+# confirm_disk_overwrite (affirmative default), which is exactly why the
+# PRE-migration version of this file could reach the failure menu on a bare
+# `ret`. A guard nobody has seen fail is not a guard (§6.4 lie #4) -- so this
+# sends `ret` AGAIN here and requires the screen to hold, using the same
+# content_digest identity guard 4 already uses for S3's blocking test, before
+# ever trying the affirmative path.
+assert "disk-confirm blocking test capture is not a blank screen" \
+  test "$(screens::nonblank_rows "$(extract 26-disk-confirm)")" -gt 0
+assert "disk-confirm blocking test capture 2 is not a blank screen" \
+  test "$(screens::nonblank_rows "$(extract 27-disk-confirm-holds)")" -gt 0
+assert "pressing Enter on disk-confirm does NOT start the install (default is 'No, go back')" \
+  screens::assert_blocking_held \
+    "$(screens::content_digest "$(extract 26-disk-confirm)")" \
+    "$(screens::content_digest "$(extract 27-disk-confirm-holds)")"
+assert "after the held Enter, disk-confirm is still the live screen" \
+  screens::marker_present "$(extract 27-disk-confirm-holds)" "Confirm erasing"
+refute "after the held Enter, the install did NOT start (no failure text yet)" \
+  screens::marker_present "$(extract 27-disk-confirm-holds)" "Omarchy installation stopped"
 
-log "--- A2/A3: the artefact files, and the pairing check (S5's own warning) ---"
-screens::check "user_configuration.json exists"  "$(screens::field "$result_txt" cfg.exists)" 1
-screens::check "user_credentials.json exists"    "$(screens::field "$result_txt" creds.exists)" 1
+log "--- crossing the confirm gate with gum's own advertised hotkey ---"
+# ⚠️ CORRECTED after a real run found this wrong. This assertion used to
+# expect 'y' to land straight on the failure menu (the pre-migration flow's
+# shape, where confirm_disk_overwrite -> write_user_files directly). It does
+# not: deck-form.sh's OWN `deck_final_summary` (S5, T4-screen-spec.md §1.2
+# patch P1 hunk 2 -- "deck_final_summary || abort", placed immediately
+# before write_user_files) sits between the disk-confirm gate and the actual
+# install attempt, and 'y' on 26/27's screen lands there instead --
+# CONFIRMED PRESENT AND WIRED UP: its own Field/Value table (Encryption,
+# Desktop, Boot rows deck-form.sh's summary_rows adds beyond upstream's own
+# recap), the S5/§5 offline-Wi-Fi consequence sentence, and a SECOND "Ready
+# to install?" gate with the SAME hotkey convention. This is genuinely new
+# information this run discovered, not a harness bug -- see
+# docs/findings/T4-controller-only-install-first-run.md.
+assert "'y' crosses the disk-confirm gate -> deck-form.sh's OWN S5 final summary (deck_final_summary)" \
+  screens::advance_and_vanish "$(extract 27-disk-confirm-holds)" "$(extract 28-deck-summary)" \
+  "Ready to install?" "Confirm erasing"
+assert "S5 final summary shows Encryption: Off" \
+  screens::marker_present "$(extract 28-deck-summary)" "Off"
+assert "S5 final summary shows Desktop: Omarchy" \
+  screens::marker_present "$(extract 28-deck-summary)" "Omarchy"
+assert "S5 final summary shows Boot: Gaming Mode" \
+  screens::marker_present "$(extract 28-deck-summary)" "Gaming Mode"
+assert "S5 final summary offers 'Install'" \
+  screens::marker_present "$(extract 28-deck-summary)" "Install"
+assert "S5 final summary offers 'Go back'" \
+  screens::marker_present "$(extract 28-deck-summary)" "Go back"
+
+# 🔴 DELIBERATE STOPPING POINT for this run, same discipline as the
+# pre-migration file's own stop at the failure menu -- except this time the
+# reason is scope, not safety: crossing THIS gate too (another `y`) would
+# reach write_user_files and a real (tiny, misaligned, fails-fast) partition
+# attempt, one step further than this run went. That is a legitimate next
+# step for a follow-up run, not a hole in this one -- see the findings doc's
+# "what a follow-up run should do differently" section. No key is sent after
+# this capture.
+log "--- A2/A3: the artefact files -- NOT YET WRITTEN, and that is the correct, expected state here ---"
+# write_user_files runs AFTER deck_final_summary's own "Ready to install?"
+# gate, which this run deliberately does not cross (see above) -- so a 0
+# here is not a failure of the harness, it is proof the run stopped exactly
+# where it says it stopped, and did not silently claim more than it drove.
+screens::check "user_configuration.json does not exist yet (write_user_files has not run)" "$(screens::field "$result_txt" cfg.exists)" 0
+screens::check "user_credentials.json does not exist yet (write_user_files has not run)" "$(screens::field "$result_txt" creds.exists)" 0
+screens::check "user_encrypt_installation.txt does not exist yet (write_user_files has not run)" "$(screens::field "$result_txt" encflag.exists)" 0
 
 cfg_b64=$(screens::field "$result_txt" cfg.content_b64 2>/dev/null || echo)
 creds_b64=$(screens::field "$result_txt" creds.content_b64 2>/dev/null || echo)
@@ -727,12 +895,21 @@ if [[ -n $cfg_b64 && -n $creds_b64 ]]; then
     enc_prefix=$(jq -r '.users[0].enc_password' "$creds_json" | cut -c1-3)
     # shellcheck disable=SC2016 # the literal '$6$' is the expected SHA-512 crypt prefix, not an expansion
     screens::check "root/user password is a SHA-512 crypt string (\$6\$...)" "$enc_prefix" '$6$'
-    # ⚠️ MEASURED, not assumed: mashing Enter through every prompt leaves
-    # disk encryption ON. Confirms T4-screen-spec.md §2.2 item 1's
-    # (READ-only, at spec-writing time) claim that turning it OFF needs
-    # Ctrl+C -- there is no other prompt for it in this flow.
+    # ⚠️ MIGRATED and INVERTED from the pre-fork measurement. Against
+    # upstream's UNMODIFIED wizard, mashing Enter through every prompt left
+    # disk encryption ON (Ctrl+C is the only toggle, and there is no Ctrl on
+    # a Deck -- T4-screen-spec.md §2.2 item 1). deck-form.sh's
+    # confirm_disk_overwrite exists specifically to make that impossible:
+    # deck_form_disk_encryption_mode() returns the unconditional constant
+    # "false" on every path, including decline. An unlockable LUKS Deck is a
+    # brick for this project's own intended user (docs/PROGRESS.md §5.12) --
+    # so THIS check now asserts the opposite of what it asserted pre-fork,
+    # and a regression back to "luks" here is exactly the defect §2.2 item 1
+    # first found.
     enc_type=$(jq -r '.disk_config.disk_encryption.encryption_type // "none"' "$cfg_json")
-    screens::check "disk encryption defaults ON without Ctrl+C (confirms T4 spec §2.2 item 1 by measurement)" "$enc_type" "luks"
+    screens::check "disk encryption is OFF (Deck's constant, T4 spec §3 deviation 4 -- no Ctrl key exists to turn it on, and an encrypted Deck has no way to type the LUKS passphrase)" "$enc_type" "none"
+    screens::check "no disk_encryption block was written at all (not merely empty)" \
+      "$(jq 'has("disk_config") and (.disk_config | has("disk_encryption"))' "$cfg_json")" "false"
   else
     log "note jq not available on this host -- skipping artefact FIELD checks (existence already proven above)"
   fi
@@ -745,7 +922,7 @@ screens::denominator
 log "======================================================================="
 
 if [[ $SCREENS_CHECKS_PASSED -eq $SCREENS_CHECKS_TOTAL && $SCREENS_CHECKS_TOTAL -gt 0 ]]; then
-  log "PASS -- the [V]-tier harness drove upstream's real wizard end to end, S0-through-S5-equivalent, with every §6.4 guard exercised"
+  log "PASS -- the [V]-tier harness drove the Deck-forked ISO's real installer end to end (S0 through the disk-confirm gate and into the failure menu), with every §6.4 guard exercised. NOTE: S2/S3's identity+hostname fields ran upstream's OWN unoverridden prompts, not deck-form.sh's -- see this file's MIGRATION HISTORY header and docs/findings/T4-controller-only-install-first-run.md"
   [[ ${VM_KEEP_WORK:-0} == 1 ]] || rm -rf "$WORK"
   exit 0
 else
