@@ -616,3 +616,23 @@ def configure_idle_policy(ctx) -> dict:
 def idle_policy_step(ctx) -> None:
     """``DeckStep`` entry point. Records under ``idle_policy``."""
     record_result(ctx.target, "idle_policy", configure_idle_policy(ctx))
+
+def configure_sleep_lock_mask(ctx) -> dict:
+    target = Path(ctx.target)
+    record = {"status": "configured", "error": None}
+    mask_path = target / "etc" / "systemd" / "user" / "omarchy-sleep-lock.service"
+    try:
+        mask_path.parent.mkdir(parents=True, exist_ok=True)
+        if mask_path.exists() or mask_path.is_symlink():
+            mask_path.unlink()
+        mask_path.symlink_to("/dev/null")
+        info("Masked omarchy-sleep-lock.service globally.")
+    except OSError as exc:
+        record["status"] = "failed"
+        record["error"] = str(exc)
+        error(f"Deck sleep lock mask: {exc}")
+    return record
+
+def mask_sleep_lock_step(ctx) -> None:
+    record_result(ctx.target, "mask_sleep_lock", configure_sleep_lock_mask(ctx))
+

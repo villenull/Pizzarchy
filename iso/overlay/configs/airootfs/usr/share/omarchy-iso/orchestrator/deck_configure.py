@@ -108,6 +108,7 @@ def deck_steps() -> list[DeckStep]:
         # counter-argument (the idle lock is not cosmetic) rather than hiding it.
         DeckStep("session_dconf", deck_session_settings.session_dconf_step, critical=False),
         DeckStep("idle_policy", deck_session_settings.idle_policy_step, critical=False),
+        DeckStep("mask_sleep_lock", deck_session_settings.mask_sleep_lock_step, critical=False),
         # T5f, 5.2. Two steps, not one: the boot menu and the kernel console are
         # different surfaces, written through different mechanisms, destroyed by
         # different events, and verified against different parsers. Both
