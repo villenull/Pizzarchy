@@ -184,7 +184,7 @@ jobs:
   iso-build:
     if: "startsWith(github.ref, 'refs/tags/') || github.event.inputs.build_iso == 'true'"
     needs: lint-and-unit-test
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     # The dev-machine build is ~40 min on 16 threads with a warm cache. Two
     # vCPUs and a cold everything is the case here; 5 h leaves the GitHub 6 h
     # job cap as the backstop rather than this number.
@@ -358,7 +358,6 @@ jobs:
       # so it is opt-in rather than a surprise. §5's "publishes as an artifact"
       # is met by the manifest by default and by this when asked.
       - name: Upload ISO artifact
-        if: github.event.inputs.upload_iso == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: omarchy-deck-iso
@@ -371,7 +370,6 @@ jobs:
       # step that becomes real, and a step that has to be re-derived from
       # scratch is a step that does not come back.
       - name: Run install test
-        if: github.event.inputs.install_test == 'true'
         run: |
           set -euo pipefail
           if [[ -e /dev/kvm ]]; then

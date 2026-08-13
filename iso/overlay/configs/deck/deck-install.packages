@@ -87,3 +87,4 @@ lib32-vulkan-radeon
 # on the build side and only visible on the target, which is what
 # test/unit/test-omarchy-deck-package.sh exists to catch in seconds.
 omarchy-deck
+gamescope-session

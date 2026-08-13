@@ -236,12 +236,12 @@ def make_target(
             "[Theme]\nCurrent=omarchy\n\n[Users]\nRememberLastUser=true\n"
         )
         (conf_d / "autologin.conf").write_text(
-            f"[Autologin]\nUser={username}\nSession=omarchy.desktop\n"
+            f"[Autologin]\nUser={username}\nSession=omarchy\n"
         )
     if state_conf:
         state = target / deck_autologin.SDDM_STATE_REL
         state.parent.mkdir(parents=True, exist_ok=True)
-        state.write_text("[Last]\nSession=omarchy.desktop\nUser=deck\n")
+        state.write_text("[Last]\nSession=omarchy\nUser=deck\n")
     return target
 
 
