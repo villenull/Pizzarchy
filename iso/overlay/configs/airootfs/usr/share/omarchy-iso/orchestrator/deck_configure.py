@@ -82,6 +82,7 @@ def deck_steps() -> list[DeckStep]:
     """
     from . import (
         deck_autologin,
+        deck_input,
         deck_menu_lock,
         deck_monitors,
         deck_patches,
@@ -143,6 +144,24 @@ def deck_steps() -> list[DeckStep]:
         # describe ONE physical panel. Limine and Hyprland use OPPOSITE sign
         # conventions. Both were seen on the screen; do not reconcile them.
         DeckStep("desktop_rotation", deck_monitors.desktop_rotation_step, critical=False),
+        # T5f, 5.6's other two lock-producer fixes, and §5.25 decision #1 --
+        # ~/.config/hypr/input.lua's `above_lock = 2` layer rule (makes the
+        # on-screen keyboard answerable over a lock surface) and §5.24a
+        # requirement #1's two `misc` DPMS lines (stops the QAM menu popup
+        # from waking a blanked, locked panel via Hyprland's own generic
+        # wake-on-any-input). Splices into the SAME per-user input.lua
+        # src/deck-session.sh's install_osk_kb_layout_rule already writes
+        # into, with its own distinct markers -- see deck_input.py's
+        # docstring for why the two writers cannot share one.
+        #
+        # `critical=False`, same argument as `desktop_rotation`: the failure
+        # is a degradation (the lock screen is answerable but the panel wakes
+        # for QAM while locked, or the OSK draws beneath the lock surface),
+        # and the Deck still boots, still autologins and still reaches
+        # Gaming Mode. It does NOT mask omarchy-sleep-lock.service -- that is
+        # §5.6's other producer, and it is not wired into this registry at
+        # all yet (deck_input.py's docstring records the gap).
+        DeckStep("lock_wake_dpms", deck_input.lock_wake_dpms_step, critical=False),
         # T5f, 5.6's third lock producer -- the `system.lock` row in Omarchy's
         # own menu. `critical=False` is argued at length in deck_menu_lock.py,
         # and it is the closest call in this registry: its failure leaves a
