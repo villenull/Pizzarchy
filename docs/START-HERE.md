@@ -3,36 +3,200 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
-> ## Where things stand (updated 2026-08-12, session 22 — READ THIS FIRST)
+> ## Where things stand (updated 2026-08-12, session 23 — READ THIS FIRST)
 >
-> *(This supersedes session 21's block below, which is kept for its own
+> *(This supersedes session 22's block below, which is kept for its own
 > evidence but is stale wherever it disagrees with this one. Verify every
 > "done" claim against the tree — `git log`, run the suite — before trusting
 > it; this project has been burned by stale ✅/🔴 marks in this exact file
-> more than once.)*
+> more than once. Session 22's block already carries some inline session-23
+> edits made before this header existed — both are consistent, this one is
+> just the complete, organized version.)*
 >
-> ### Phase 2 exit criteria: 2 of 4 closed, the other 2 reduce to ONE thing
+> ### Session 23 in one paragraph
+>
+> `iso/bin/build` ran for real for the first time ever and produced a working
+> ISO. That ISO was then actually driven through its own installer with a
+> virtual gamepad for the first time ever, reaching a screen nobody had seen
+> before and finding two real bugs. Two operator-reported on-screen-keyboard
+> defects (Move, emoji) were root-caused and fixed, deployed to the physical
+> Deck, and are live now. `input.lua`'s last missing lock-screen fix landed.
+> A never-run VM suite (`vm-gamepad-spike-test.sh`) got a real probe bug fixed
+> and its first-ever run is in progress. Six subagents ran across the session,
+> five on fully disjoint files with no collisions; the sixth (the gamepad
+> probe fix) went silent mid-task with no completion notification and its
+> real, sound work was recovered from the uncommitted tree rather than lost —
+> see "A subagent went silent" below, it is worth reading before trusting any
+> background-agent report in a future session at face value.
+>
+> ### Phase 2 exit criteria: 2 of 4 closed, criterion 1 much closer
 >
 > | # | Criterion | State |
 > |---|---|---|
-> | 1 | Controller-only QEMU install from our ISO | 🟡 **the ISO now exists** (`iso/bin/build` ran clean 2026-08-12, session 23 — see below); the QEMU install run itself is next |
+> | 1 | Controller-only QEMU install from our ISO | 🟡 **the harness now drives our real ISO and proves S0→S5** (59/62 checks, commit `454e5a8`) — 3 failures are a real reproduced product bug (see below), not harness noise. Not fully closed: S5 is a summary screen, not a completed disk install; the harness stops there |
 > | 2 | Hardware parity on OLED | ✅ closed session 21 |
-> | 3 | Both switch directions survive reboot | ✅ **closed session 22, on the panel** — see below |
-> | 4 | CI publishes an ISO; dry run shows zero NVIDIA | 🟡 the dev-machine build is proven; CI itself still has no `/dev/kvm` on a hosted runner, unaffected by this |
+> | 3 | Both switch directions survive reboot | ✅ closed session 22, on the panel |
+> | 4 | CI publishes an ISO; dry run shows zero NVIDIA | 🟡 the dev-machine build is proven end to end; CI itself still has no `/dev/kvm` on a hosted runner, untouched by anything this session did |
 >
-> **🟢 Session 23: `iso/bin/build` ran for real and produced a working ISO.**
-> First attempt failed on a corrupted cached package left over in the old
+> ### 🟢 `iso/bin/build` ran for real and produced a working ISO — commit `39d0da6`
+>
+> First attempt failed on a corrupted cached package left over in an old
 > scratch dir from earlier (pre-pin-fix) build attempts — not a code bug. A
 > fresh scratch dir (`~/.cache/omarchy-deck/iso-build-2`) built clean: all 8
-> guards passed, all 5 overlay patches applied (2 via git's 3-way-fallback
-> path on a shallow clone, hand-verified both landed anyway),
-> `omarchy-2026.08.13-x86_64-quattro.iso`, 6.39 GiB, sha256
-> `336f35715086604e75940d6baebc767d10b59c8714f845ca6640ae51f413f782`. Detail:
-> `docs/PROGRESS.md`'s T5 row. **The old `~/.cache/omarchy-deck/iso-build/`
-> scratch dir (and the ISOs in its `release/`) are stale — from before today's
-> commits — ignore them.** Criterion 1 is not closed yet: the ISO existing is
-> necessary, not sufficient — a controller-only QEMU install run against it is
-> the next concrete step, in progress this session.
+> guards passed (6.1, 6.3, 6.4a, 6.4b, 6.5a, 6.5b, 6.6), all 5 overlay patches
+> applied (2 via git's 3-way-fallback path on a shallow clone — hand-verified
+> both landed anyway: `configure_deck` import in `main.py`, the
+> `deck-dashboard.sh` source line in `omarchy-install-dashboard`),
+> `omarchy-deck` 0.2.0-1 built with its 2 runtime patches applied cleanly.
+> Output: `omarchy-2026.08.13-x86_64-quattro.iso`, 6.39 GiB, sha256
+> `336f35715086604e75940d6baebc767d10b59c8714f845ca6640ae51f413f782`, sitting
+> in scratch only (`~/.cache/omarchy-deck/iso-build-2/release/`) — **not
+> shipped, not in git, not on the Deck.** Detail: `docs/PROGRESS.md`'s T5 row.
+> **The old `~/.cache/omarchy-deck/iso-build/` scratch dir (and the ISOs in
+> its `release/`) are stale — from before today's commits — ignore them.**
+>
+> ### 🟡 The controller-only install harness now drives our real ISO, first time ever — commit `454e5a8`
+>
+> `test/vm/vm-installer-screens-test.sh` was deliberately built against an
+> *unmodified* upstream ISO (asserting our `deck-form.sh` is ABSENT) as a
+> stand-in for exactly this moment, per its own header comment. That migration
+> — point it at our real ISO, swap the marker strings for Deck-branded text —
+> had never been done. It's done now: ran the pre-migration harness against
+> the real ISO first to see the raw divergence (35/47), migrated the markers
+> and assertions, then **three QEMU boots, the last two bit-identical: 59/62
+> checks pass**, navigating S0's disclosure screen through the disk-confirm
+> safety flip (proven safe with three byte-identical decline-loop captures,
+> not inferred) into `deck_final_summary` (S5), a screen nobody had proven
+> before. Full record with exact commands and capture excerpts:
+> `docs/findings/T4-controller-only-install-first-run.md`.
+>
+> 🔴 **Two real product bugs found, left failing on purpose rather than
+> papered over:**
+> 1. `deck-form.sh`'s `omarchy_prompt_identity`/`_hostname`/`_timezone`
+>    overrides are **not wired up** on the real build — upstream's own
+>    unmodified prompts still run there, while `greeter`/username/password/
+>    `disk_form`/`confirm_disk_overwrite` are correctly overridden. Whoever
+>    owns `deck-form.sh` next should look at this.
+> 2. The username-retry screen **grows unboundedly** (16→22→28→34 rows across
+>    four measured attempts) because a WARNING line never clears between
+>    attempts.
+>
+> Criterion 1 is not closed: S5 is a summary screen, not a completed disk
+> install to a bootable target. The next step is pushing the same harness (or
+> `vm-install-test.sh`'s disk-image-assertion model) through to an actual
+> installed, bootable disk.
+>
+> ### 🟢 Two operator-reported OSK bugs, root-caused, fixed, and LIVE ON THE DECK
+>
+> Both keys were copied onto our on-screen keyboard from Valve's reference for
+> visual parity (T8) but were left as inert stubs — `src/deck_osk_layout.py`'s
+> own comments said so plainly ("TWO KEYS THAT NO RENDERER IMPLEMENTS YET").
+> Operator feedback after using the physical keyboard named exactly those two:
+>
+> - **"Move" now collapses the keyboard** (commit `86cba11`) — repurposed to
+>   set `self.closed = True`, the exact same signal `deck-input-mapper.py`
+>   already consumes to dismiss the overlay elsewhere. The dead `self.request`
+>   state for Move was removed, not left dangling. Mutation-tested (3 checks
+>   correctly fail when reverted).
+> - **The emoji key now opens Omarchy's real emoji picker** (commit
+>   `685440c`) — wired through the same `MENU_ACTIONS`/`pending_actions`/
+>   `run_pending`/`spawn_detached` path the QAM button already uses, calling
+>   `omarchy-menu-emoji`. ⚠️ The agent that built this **caught and corrected
+>   a wrong hypothesis it was given** (`["omarchy-menu", "emoji"]` — not a
+>   real verb) by reading the pinned upstream dispatcher itself rather than
+>   trusting the brief. Mutation-tested (breaking either wiring point, or
+>   reintroducing the wrong argv, each caught by a distinct new test).
+>
+> Both independently re-verified (full suite green, specific test files
+> re-run) before being **synced to the physical Deck and deployed live**:
+> `DECK_STAGE_ARGS=stage-input-mapper ./tools/deck-sync.sh deck-session.sh
+> src` installed the OSK modules + mapper + unit (all self-verified — dry-run
+> type test, OSK render test), then `systemctl --user restart
+> deck-input-mapper.service` picked up the new code immediately rather than
+> waiting for the next login. **Both are testable on the panel right now.**
+>
+> ### ⚠️ A subagent went silent mid-task — real work recovered, read this before trusting a background report
+>
+> The agent dispatched to actually *run* `vm-gamepad-spike-test.sh` for the
+> first time ever (fixed for a bash syntax error in `b96eaac`, never
+> executed) reported mid-session that it found and was fixing a **second, real
+> bug**: the scripted virtual gamepad wrote d-pad presses as `ABS_HAT0X/Y`,
+> but `deck-input-mapper.py` treats `ABS_HAT0X/Y` as the **left trackpad**
+> (measured on hardware, session 17) and only `BTN_DPAD_*` as the d-pad — a
+> probe using the wrong axis would let this suite pass while testing nothing
+> about d-pad navigation, precisely the "measurement tool lied" class
+> `docs/PROGRESS.md` §5.30c catalogues. Then **no completion notification ever
+> arrived**, and a direct status check later found the harness had no record
+> of the task at all — not running, not failed, just gone.
+>
+> Its fix was still sitting **uncommitted** in the working tree, and it was
+> sound: syntax-clean (`bash -n`, a direct AST parse of the embedded probe),
+> consistent with an already-established hardware fact, and the full 33-file
+> unit suite passed with it in place. Committed as `4d45ce3` after that
+> independent verification — **not** on the agent's say-so, which never came.
+>
+> ✅ **The suite's actual first run then happened, run directly rather than
+> through another agent, and it PASSED — 26/26 checks, ~60s guest runtime.**
+> A gamepad drives `gum` (single-select, multi-select, and the stick with
+> auto-repeat — one held direction advanced 4 rows) and archinstall's curses
+> menu (render, Enter, Esc, Down) through the kernel input layer, with no
+> UI-side cooperation. This is `docs/PROGRESS.md` §5.30c/T2's central question,
+> answered on real evidence for the first time — the suite existed and claimed
+> to answer it for sessions before this one, but had never actually run.
+>
+> **The lesson, stated plainly for whoever reads this next**: an agent
+> reporting "I'm waiting on X, I'll report back" is not evidence anything
+> completed — verify by checking the actual task state (a completion
+> notification, or a direct status query) and the actual tree (`git status`,
+> `git diff`) before either trusting or discarding what it claims to have
+> done. This session did both — recovered real work that would otherwise have
+> been lost, and did not credit a report that never actually arrived.
+>
+> ### ✅ `input.lua`'s last lock-screen fix landed — commit `a4b1eab`
+>
+> New module `deck_input.py`, modelled on `deck_monitors.py`'s exact
+> splice/seed/luac-gate/sibling-preservation pattern with its own markers,
+> wired into `deck_configure.deck_steps()` as `lock_wake_dpms`. Splices
+> §5.25 decision #1's `above_lock = 2` layer rule and §5.24a requirement #1's
+> `misc.key_press_enables_dpms`/`mouse_move_enables_dpms = false` into
+> `~/.config/hypr/input.lua`. 80/80 unit checks, 7/7 introduced faults caught
+> by mutation testing, independently re-run and confirmed green.
+>
+> 🔴 **Found by the same agent, not yet fixed**: `omarchy-sleep-lock.service`
+> masking (§5.6's OTHER lock producer) exists only as a dev-machine `stage-*`
+> action in `src/deck-session.sh` — confirmed NOT wired into the live-ISO
+> install path at all, so a fresh end-user install still ships this lock
+> producer unmasked. Its own task, not folded into this one.
+>
+> ✅ Also clarified: the OSK's per-device XKB block already had a writer
+> (`src/deck-session.sh`'s `install_osk_kb_layout_rule`) — pre-existing,
+> unrelated to `above_lock`'s gap. An earlier note in this file conflated the
+> two as though they were the same missing piece; they never were.
+>
+> ### ✅ `/etc/sudoers.d/asdcontrol` — decided: leave it
+>
+> Vendor-shipped (the `asdcontrol` package, not ours). Consistent with this
+> project's stance of not overriding upstream/vendor packaging decisions (same
+> reasoning as not auto-installing an AUR helper). Recorded in
+> `docs/findings/P22-deck-conformance-sweep.md` §4 as a deliberate non-action.
+>
+> ### What's left in phase 2 — concretely, after today
+>
+> - Push the install harness from S5 (a summary screen) through to an actual
+>   completed, bootable disk install — closes criterion 1 for real.
+> - `omarchy-sleep-lock.service` masking is missing from the live-ISO install
+>   path (found today, not yet fixed — see above).
+> - The two real bugs the install-migration found (unwired identity/hostname/
+>   timezone prompts; unbounded-growth username-retry screen).
+> - ✅ `vm-gamepad-spike-test.sh` ran and PASSED (26/26, see above) — done.
+> - Hardware-verify the DPMS/`above_lock` fix on the panel (code is deployed
+>   only to the Deck's mapper/OSK path via this session's sync; the Lua/Hyprland
+>   half installs at the NEXT full install or via its own ISO-orchestrator
+>   step, not by `deck-sync.sh` — don't conflate the two deploy paths).
+> - T10's extest spike — ~45 min Deck decision, unrelated to everything above,
+>   queued since session 20.
+> - The `Lid Switch` node question (T13 §8) — needs a physical trigger nobody
+>   has found a way to produce on a handheld with no lid. Likely stuck.
 >
 > ### T13/T14: all four power-button reports closed, hardware-verified
 >
