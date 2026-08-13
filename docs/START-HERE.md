@@ -32,33 +32,73 @@ work without waiting for further instruction.**
 >   separately. `test/osk-tty-e2e.py` is in neither glob and needs
 >   `/dev/uinput` (run by hand). Full suite inventory: session-23 block below.
 >
-> ### 🔴 Unpushed work — do this early
+> ### Push / CI state (verify, don't trust this line)
 >
-> As of this session's end, `main` is **2 commits ahead of `origin/main`**
-> and they are NOT pushed (`git rev-list --left-right --count origin/main...main`
-> → `0  2`). The two are `e729699` and `ae4b5bd` (both described below), plus
-> whatever the in-flight agent (next section) commits on top. **Confirm the
-> real count yourself and push when the tree is stable** — the operator did
-> not explicitly ask to push mid-session, so it was deliberately left for the
-> next actor to do once the in-flight run settles. Do not push a
-> half-finished patch.
+> At last update everything committed this session was **pushed to
+> `origin/main`** (`git rev-list --left-right --count origin/main...main`
+> should read `0  0`; confirm it yourself). The session-24 commits are
+> `e729699`, `ae4b5bd`, `65fcf99`, plus doc/CI housekeeping commits. **CI's
+> shellcheck was RED before this session** on a pre-existing SC2016
+> false-positive in `test/unit/test-deck-session.sh` (line ~1994, a deliberate
+> single-quoted grep pattern) — the long-standing "CI is green" claim was
+> stale. Fixed this session with a `# shellcheck disable=SC2016` directive; the
+> CI lint command above now exits 0. If you add a brand-new `*.sh` file, run
+> that command **after** `git add`-ing it — an untracked new suite slips past
+> the check until it is staged (this has bitten the project three times; see
+> the session-23 block's CI note).
 >
-> ### 🟡 An agent was still running when this session ended — CHECK IT FIRST
+> ### The `$1` blocker is FIXED — the blocker moved one layer deeper (still open)
 >
-> A background agent was dispatched to fix the `configurator` `$1` bug (see
-> "the current blocker" below) and re-run the install harness. It had NOT
-> reported back when the session ended. **Before doing anything else:**
-> `git log --oneline -6` and `git status` — if there is a new commit past
-> `ae4b5bd` touching `iso/overlay/patches/deck-form-invocation.patch` and/or
-> `test/vm/vm-install-controller-test.sh`, that agent finished; read
-> `docs/findings/T4-controller-only-install-first-run.md`'s newest section for
-> its result. If `deck-form-invocation.patch` shows as *modified but
-> uncommitted* in `git status`, the agent was interrupted mid-edit — read the
-> patch, decide whether its half-done change is sound, and either finish it or
-> `git checkout` it; do NOT build on top of a half-applied patch. (This exact
-> "an agent went silent, recover its work from the tree, don't trust a report
-> that never came" situation already happened once — session 23's block below
-> documents it. Same playbook applies.)
+> The `configurator` unguarded-`$1` crash (detailed below) is **fixed and
+> committed** (`65fcf99`, hunk 3 of `deck-form-invocation.patch`). With it, the
+> install harness (`test/vm/vm-install-controller-test.sh`) got the real
+> installer (`omarchy-install-dashboard`) to launch and **run the entire base
+> Omarchy setup to completion for the first time in this project's history**
+> (harness 10/11, was 9/11). Criterion 1 is **still NOT closed**: the install
+> now aborts one layer deeper, in **our own** `configure_deck` phase, on a real
+> bug in `orchestrator/deck_autologin.py` — `find_session()` appends `.desktop`
+> to the session name, but `DESKTOP_SESSION = "omarchy.desktop"` already carries
+> it, so it searches for `omarchy.desktop.desktop` (never exists) while the real
+> `omarchy.desktop` is present on the target. `autologin` is the sole
+> `critical=True` Deck step, so it halts the install. Root-caused off the actual
+> 16G install disk (mounted rootless, read `omarchy-deck-install.json` in the
+> `@log` subvolume): **only `autologin` failed — every other Deck step
+> succeeded** (`desktop_rotation`, `idle_policy`, `limine_rotation`,
+> `lock_wake_dpms`, `menu_lock_row`, `patches: applied`, `session_dconf`,
+> `tty_rotation`, `wifi`). Full account: `docs/findings/T4-controller-only-install-first-run.md`
+> §14.
+>
+> **Next step to advance criterion 1** (a likely one-line fix, but it lives in a
+> module with its own test suite that probably encodes the wrong fixture, so fix
+> the test too, and expect yet another layer past it — `gamescope-wayland.desktop`
+> is also absent from the ISO payload, a separate gap already flagged): correct
+> the double-`.desktop` in `orchestrator/deck_autologin.py`, rebuild the ISO
+> (`iso/bin/build` against `~/.cache/omarchy-deck/iso-build-2`; current good ISO
+> sha256 `a27230ff498f8b7b4be45f455192d135fb5ab777b3204022802da19e34b6ea6a`), and
+> re-run `test/vm/vm-install-controller-test.sh` — its disk-image assertions are
+> written and gated on `install.outcome=success`, so they have **never run yet**
+> and are what actually close criterion 1.
+>
+> ### ⚠️ Two process lessons for background/QEMU work (learned the hard way this session)
+>
+> - **Block synchronously; do NOT arm a `Monitor` and yield** for a long build
+>   or install. Twice this session an agent armed a monitor, ended its turn,
+>   and the build died mid-`pacstrap` on a corrupted cached package without the
+>   monitor's grep ever matching — so nothing woke it and it silently stalled
+>   for hours. Run the build/VM inside a Bash call with a real poll loop
+>   (`timeout` up to 600000ms/call, chain several calls) and only end the turn
+>   on a real terminal outcome. Also: `setsid nohup … &` makes `$!` the
+>   wrapper, not the build — track the real child/pidfile or you get false
+>   "process gone" readings.
+> - **Give every concurrent ISO build/VM its own cache dir.** `iso/bin/build`
+>   writes to `~/.cache/omarchy-deck/iso-build-2` by default; a second build (or
+>   an accidental `iso/bin/build --help`, which is NOT a real flag and kicks off
+>   a real build against the *default* `iso-build` dir) into the same tree
+>   corrupted a running VM's ISO mid-boot this session. Check `ps aux | grep -E
+>   'qemu-system|iso/bin/build'` before starting, and pass
+>   `OMARCHY_DECK_ISO_BUILD_DIR=…` to isolate. Corrupted cached packages there
+>   are root-owned (no passwordless local sudo) — clear them via a throwaway
+>   container, and a clean re-run generally re-fetches them fine.
 >
 > ### Session 24 in one paragraph
 >
@@ -66,20 +106,22 @@ work without waiting for further instruction.**
 > install, and (2) two real installer bugs the session-23 harness run had
 > found. **Both bugs (2) are fixed and committed** (`e729699`). **The install
 > (1) is closer than it has ever been but NOT closed**: a new harness
-> (`test/vm/vm-install-controller-test.sh`, committed `ae4b5bd`) pressed S5's
+ (`test/vm/vm-install-controller-test.sh`, committed `ae4b5bd`) pressed S5's
 > "Install" button for the first time in this project's history, `write_user_files`
-> succeeded, and then the install hit a **real, previously-invisible upstream
-> bug in `configurator`** (an unguarded `$1`, detailed below) that a
-> background agent was mid-fix on when the session ended. Along the way: one
+> succeeded, then hit a **previously-invisible upstream bug in `configurator`**
+> (an unguarded `$1`) — which was then **fixed** (`65fcf99`), after which the
+> real installer ran the **entire base Omarchy setup to completion** and aborted
+> one layer deeper, in our own `deck_autologin.py` (see "the blocker moved"
+> section above). Criterion 1 is much closer but still open. Along the way: one
 > genuine incident (two agents' ISO builds collided in a shared cache dir and
-> corrupted a running VM — lesson below), and a nice confirmation that (2)'s
+> corrupted a running VM — lesson above), and confirmation that (2)'s
 > hostname/timezone fix works on a real rebuilt ISO.
 >
 > ### Phase 2 exit criteria: still 2 of 4 closed
 >
 > | # | Criterion | State |
 > |---|---|---|
-> | 1 | Controller-only QEMU install from our ISO | 🟡 **the harness now presses "Install" and `write_user_files` succeeds** — further than ever before. Blocked on the `configurator $1` bug (being fixed by the in-flight agent). The disk-image assertions that would actually *prove* a bootable install exist in `test/vm/vm-install-controller-test.sh` but are gated on the install succeeding, so they have **never been exercised yet**. NOT closed until they pass. |
+> | 1 | Controller-only QEMU install from our ISO | 🟡 **the real installer now runs the entire base Omarchy setup to completion** (the `configurator $1` blocker is fixed, `65fcf99`) — much further than ever before. Now blocked one layer deeper on `deck_autologin.py`'s double-`.desktop` bug (see "the blocker moved" section above). The disk-image assertions that would *prove* a bootable install exist in `test/vm/vm-install-controller-test.sh` but are gated on install success, so they have **never been exercised yet**. NOT closed until they pass. |
 > | 2 | Hardware parity on OLED | ✅ closed session 21 |
 > | 3 | Both switch directions survive reboot | ✅ closed session 22, on the panel |
 > | 4 | CI publishes an ISO; dry run shows zero NVIDIA | 🟡 the dev-machine build is proven end to end; CI itself still has no `/dev/kvm` on a hosted runner. Untouched this session. |
@@ -129,11 +171,15 @@ work without waiting for further instruction.**
 > `systemd-time-wait-sync.service` never completes so `multi-user.target`
 > never activates and the probe never fired — reordered to `After=basic.target`.
 >
-> ### 🔴 The current blocker on criterion 1: an unguarded `$1` in `configurator`
+> ### ✅ The `$1` blocker — FIXED (`65fcf99`); kept here for the diagnosis
 >
-> After "Install" is pressed and `write_user_files` succeeds, `configurator`
-> crashes: **`line 1245: $1: unbound variable`**, and `omarchy-install-dashboard`
-> (the actual installer) never launches. Fully diagnosed:
+> *(This was "the current blocker" until it was fixed this session. Detail
+> retained because the mechanism is instructive and the fix pattern recurs.)*
+>
+> Before the fix, after "Install" was pressed and `write_user_files` succeeded,
+> `configurator` crashed: **`line 1245: $1: unbound variable`**, and
+> `omarchy-install-dashboard` (the actual installer) never launched. Fully
+> diagnosed:
 >
 > - In the pinned vendored copy `iso/upstream/configs/airootfs/root/configurator`
 >   the offending line is `if [[ $1 == "dry" ]]; then` (near the file's end,
@@ -150,15 +196,16 @@ work without waiting for further instruction.**
 >   which stays in effect for the rest of `configurator` (source runs in the
 >   same shell). A latent upstream bug that the fork's own safety `set -u`
 >   turns fatal.
-> - **The fix** (what the in-flight agent was applying): change that one `$1`
->   to `${1:-}` as a NEW HUNK in the existing `deck-form-invocation.patch` —
->   **not a new patch file** (this project has a hard 5-patch budget its own
->   docs argue about; `docs/tasks/T5-fork-plan.md §1`). Then rebuild the ISO
->   and re-run `vm-install-controller-test.sh` to exercise the disk-image
->   assertions that are already written and waiting. Expect the possibility of
->   yet another bug past this one — every layer of this install path has
->   surfaced a new invisible defect; leave any new one failing and documented,
->   do not weaken assertions to force green (this project's standing rule).
+> - **The fix that landed** (`65fcf99`): changed that one `$1` to `${1:-}` as a
+>   NEW HUNK (hunk 3) in the existing `deck-form-invocation.patch` — **not a new
+>   patch file** (this project has a hard 5-patch budget its own docs argue
+>   about; `docs/tasks/T5-fork-plan.md §1`; the patch header now carries the
+>   argument for hunk 3 too). Verified: `git apply --3way` clean against the
+>   pin, `test-iso-build.sh` 82/82 incl. patch-drift guard 6.6, ISO rebuilt
+>   clean, and the crash is gone on a real install. The prediction in this bullet
+>   held exactly: **there WAS another bug one layer past it** (`deck_autologin.py`,
+>   above). The standing rule proved itself — leave each new one failing and
+>   documented, do not weaken assertions to force green.
 >
 > ### ⚠️ Incident + lesson: don't share the ISO build cache across concurrent runs
 >
@@ -179,10 +226,12 @@ work without waiting for further instruction.**
 >
 > ### What's left in phase 2 after this session — concretely
 >
-> - **Close criterion 1 for real**: land the `configurator $1` fix (in flight),
->   rebuild, and get `vm-install-controller-test.sh`'s disk-image assertions to
->   actually pass against a completed, bootable install. That is the one thing
->   standing between "presses Install" and "criterion 1 closed."
+> - **Close criterion 1 for real** (the `$1` fix already landed): fix
+>   `deck_autologin.py`'s double-`.desktop` bug (+ its test fixture), rebuild,
+>   and get past whatever's next (`gamescope-wayland.desktop` payload gap is
+>   already flagged) until `vm-install-controller-test.sh`'s disk-image
+>   assertions actually run and pass against a completed, bootable install.
+>   Every layer of this install has surfaced one more bug — budget for that.
 > - **Criterion 4**: needs a self-hosted KVM runner for CI (no `/dev/kvm` on
 >   hosted runners) — untouched, its own body of work.
 > - Carried over from session 23 (all still open, none touched this session):
