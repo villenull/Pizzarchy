@@ -3759,7 +3759,7 @@ check("...and NEVER by falling back -- that would be terminal on the tty backend
 # T4 §2.3 -- `--osk-start-shown` and the machine-readable "bound" line
 # =============================================================================
 #
-# 🔴 WHAT MAKES THESE TESTS WORTH ANYTHING. `src/deck-form.sh` waits up to 5 s
+# 🔴 WHAT MAKES THESE TESTS WORTH ANYTHING. `deck-form.sh` waits up to 5 s
 # for BOUND_MARKER and then starts typing a Wi-Fi passphrase into a MASKED
 # field. Two failures are therefore possible and only one of them is obvious:
 #
@@ -3858,12 +3858,19 @@ check("the long-standing re-bind line is not mistaken for the marker",
 # 🔴 CROSS-FILE, and the reason this check is in the PRODUCER's suite as well as
 # the consumer's: these are two files in two languages that must spell one
 # string identically, and whichever suite the next editor runs has to go red.
-form_sh = (REPO_ROOT / "src" / "deck-form.sh").read_text()
+# Repointed 2026-08-12 (T5e): deck-form.sh moved to its SHIPPED path inside the
+# ISO overlay (iso/bin/build rsyncs overlay/configs/ over the upstream tree, so
+# this is /usr/share/omarchy-iso/deck-form.sh on the ISO). One copy, no src/
+# duplicate -- read_text() raising FileNotFoundError is the intended, loud
+# failure if that ever stops being true.
+DECK_FORM_SH = (REPO_ROOT / "iso" / "overlay" / "configs" / "airootfs"
+                / "usr" / "share" / "omarchy-iso" / "deck-form.sh")
+form_sh = DECK_FORM_SH.read_text()
 form_marker = next(
     (line.split("=", 1)[1].strip().strip('"')
      for line in form_sh.splitlines()
      if line.startswith("readonly DECK_OSK_BOUND_MARKER=")), None)
-check("src/deck-form.sh still declares the marker this suite can find",
+check("deck-form.sh still declares the marker this suite can find",
       form_marker is not None, True)
 check("...and it is spelled EXACTLY as the mapper prints it",
       form_marker, m.BOUND_MARKER)
@@ -4055,7 +4062,7 @@ import tempfile as _tempfile   # noqa: E402
 with _tempfile.TemporaryDirectory() as _tmp:
     console = pathlib.Path(_tmp) / "console"
 
-    # 1. THE INSTALLER'S OWN COMMAND LINE, exactly as src/deck-form.sh spawns it.
+    # 1. THE INSTALLER'S OWN COMMAND LINE, exactly as deck-form.sh spawns it.
     timeline, drawn, pad = run_main(["--osk-backend=tty", "--osk-start-shown"],
                                     str(console))
     i_marker = marker_index(timeline)
@@ -4074,7 +4081,7 @@ with _tempfile.TemporaryDirectory() as _tmp:
     # 2. THE DEGRADE PATH, run for real: an unopenable console. `--osk-tty` at a
     #    DIRECTORY is the cheapest honest stand-in for the three ways the tty
     #    keyboard fails to come up on the ISO. Nothing is drawn, so nothing may
-    #    be promised -- and src/deck-form.sh's five-second timeout is what turns
+    #    be promised -- and deck-form.sh's five-second timeout is what turns
     #    this into the visible degradation §2.3 asks for.
     timeline, _, _ = run_main(["--osk-backend=tty", "--osk-start-shown"], _tmp)
     check("an OSK that cannot be drawn gets NO marker, from a real run",

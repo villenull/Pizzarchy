@@ -1,0 +1,160 @@
+Give the Deck's own installer screens a route onto the ISO, and settle
+encryption where it is decided.
+
+    Target: configs/airootfs/root/configurator   (2 hunks, one file)
+    Pairs with: overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh
+    Spec: docs/tasks/T4-screen-spec.md §1.2 (patch P1);
+          docs/tasks/T5-fork-plan.md §1 (the budget) and §5.5 (encryption)
+
+=== WHY THIS IS THE FIFTH PATCH, AND THE ARGUMENT IT HAS TO MAKE ============
+
+docs/tasks/T5-fork-plan.md §1 point 3 sets the budget at "<= 4 patch files,
+and a fifth should have to argue for itself". test/unit/test-iso-build.sh
+enforces it mechanically. This is the fifth. The budget was raised to 5 --
+deliberately, not to "unbounded" -- and here is the argument, stated plainly
+enough to be overruled:
+
+  1. The budget's PURPOSE (§1 point 3, in its own words) is that "patches are
+     only allowed for build-time behaviour; everything install-time goes in
+     the package", so Phase 4's portable enablement layer (T7) stays
+     extractable. This patch does not violate that rule -- it is the one
+     class of change the rule cannot cover. deck-form.sh is not install-time
+     configuration of a target system; it is the LIVE ISO's own wizard. There
+     is no omarchy-deck package on the live ISO to put it in. The package
+     ships to the installed Deck, and this code has finished running before
+     that package exists.
+
+  2. There is no additive alternative. `configurator` sources exactly one
+     external file (setup-form.sh, at a path it hard-codes) and never
+     consults a drop-in directory, a hook path, or an environment variable
+     for anything else. Overlaying a whole modified `configurator` as an
+     additive file was the alternative, and it is strictly worse: a 1196-line
+     verbatim copy that upstream edits several times a day, diverging
+     silently, which is the exact failure mode §1's "the conflict is the
+     point" paragraph exists to avoid. A 2-hunk patch fails loudly on an
+     upstream move; a vendored copy does not fail at all.
+
+  3. §1's own patch table already counted this file: "| P1 |
+     configs/airootfs/root/configurator | 2 |". P1 was always in the plan.
+     What actually pushed the count past four was T4a's dashboard patch,
+     added later; the arithmetic changed, the design did not.
+
+  4. It carries two changes, not one. Both are edits to this same file, and
+     folding the second into this patch keeps the budget at 5 instead of 6.
+
+  If the operator disagrees: the fallback is not a smaller patch, it is
+  shipping an installer whose Wi-Fi passphrase screen, disk screen and
+  summary screen do not exist. deck-form.sh is 107KB with 147 passing
+  assertions and, before this patch, had shipped on zero ISOs.
+
+=== HUNK 1 -- source deck-form.sh ==========================================
+
+One `source`, immediately before `wait_for_stable_terminal`: after every
+function this file and the vendored setup-form.sh define, before any of the
+flow runs. Bash keeps the last definition of a name, so deck-form.sh replaces
+the screens a controller cannot drive and leaves the rest untouched.
+
+Behind a readability guard that exits 1. `configurator` does not `set -e`, so
+an unguarded `source` of a missing file prints one line and CONTINUES into
+upstream's keyboard-requiring screens -- the silent failure CLAUDE.md forbids,
+on the one screen a Deck owner cannot recover from.
+
+=== HUNK 2 -- deck_final_summary, and encryption OFF =======================
+
+`deck_final_summary || abort` is the second half of spec P1: S5 is a new
+screen, not an override, so it must be CALLED. Immediately before
+write_user_files is the only place every branch has converged and nothing
+below is still a question.
+
+And T5-fork-plan.md §5.5, encryption off by default -- but NOT where §5.5
+says to put it. §5.5 names `local mode="encrypted"` at lines 601 and 895
+(both line numbers re-verified against iso/upstream this session; both are
+right). Both are dead code once hunk 1 lands: deck-form.sh replaces
+`confirm_disk_overwrite` outright (line 895's whole function), and its
+`requires_full_disk_install() { return 0; }` makes `select_installation` set
+full_disk_only=true and skip `install_mode_form`, so "Free space install" can
+never be selected and `run_partition_decide` (line 601) is never called.
+Flipping those two strings would change no behaviour, and §5.5's own [B]
+check -- "grep the patched configurator for mode=unencrypted at both sites"
+-- would then pass for the wrong reason, which is this project's named
+recurring failure.
+
+So the invariant is enforced at the point of effect instead: one assignment
+and one check on the line before write_user_files, downstream of every screen
+path and every "go back" loop, immediately above the `if [[
+$encrypt_installation == true ]]` that writes the disk_encryption block into
+user_configuration.json. It executes on every install. It does not silently
+correct a `true` -- it aborts and says why, because encryption here yields a
+Deck whose owner has no keyboard to unlock it, and because turning it off
+also deletes archinstall's autologin drop-in (§5.1's coupling box), which
+configure_deck must restore separately.
+
+diff --git i/configs/airootfs/root/configurator w/configs/airootfs/root/configurator
+index 44e428b..685b2fc 100644
+--- i/configs/airootfs/root/configurator
++++ w/configs/airootfs/root/configurator
+@@ -980,6 +980,27 @@ select_installation() {
+ defer_provisioning=false
+ install_target="full_disk"
+ 
++# --- Omarchy Deck overlay, hunk 1 of 2: the installer's own screens --------
++#
++# Every function this file and the vendored setup-form.sh define is defined by
++# now, and none of the flow has run yet -- this is the ONLY window in which a
++# wrap works, which is why it is a patch and not an additive file. Bash keeps
++# the last definition of a name, so deck-form.sh replaces the screens that
++# cannot be driven with a controller (text entry, Wi-Fi, disk, summary) and
++# leaves every name it does not redefine exactly as upstream shipped it.
++#
++# The guard is not decoration. This script does not `set -e`, so a bare
++# `source` of a missing file prints one line to stderr and CARRIES ON into
++# upstream's keyboard-requiring screens on a device with no keyboard -- and
++# takes encryption-on-by-default with it (see hunk 2). Same shape as this
++# file's own SETUP_FORM guard at the top: check, say why, exit.
++if [[ ! -r /usr/share/omarchy-iso/deck-form.sh ]]; then
++  echo "ERROR: Deck installer screens not found at /usr/share/omarchy-iso/deck-form.sh" >&2
++  echo "The ISO overlay is incomplete; refusing to run an install nobody can drive." >&2
++  exit 1
++fi
++source /usr/share/omarchy-iso/deck-form.sh
++
+ # Let the live VT reach its settled width before the first screen so the logo
+ # isn't measured against the transient 80-column boot console.
+ wait_for_stable_terminal
+@@ -1022,6 +1043,36 @@ fi
+ 
+ clear
+ 
++# --- Omarchy Deck overlay, hunk 2 of 2: the summary, and encryption OFF ----
++#
++# S5, the review-before-install screen. NOT an override -- upstream has no
++# such screen -- so it has to be called, and this is the only place it can be
++# called from: every branch above converges here, and nothing below it is a
++# question. Declining redraws the flow (deck_final_summary re-drives
++# user_step/disk_form/select_installation itself) rather than returning here.
++deck_final_summary || abort
++
++# T5-fork-plan.md §5.5, enforced where it is decided rather than where it is
++# defaulted. Upstream's two `local mode="encrypted"` defaults (line 601 in
++# run_partition_decide, line 895 in confirm_disk_overwrite) are BOTH dead on
++# this ISO: deck-form.sh replaces confirm_disk_overwrite outright, and its
++# `requires_full_disk_install() { return 0; }` makes select_installation skip
++# install_mode_form, so "Free space install" can never be chosen and
++# run_partition_decide is never called. Flipping those two strings would
++# change nothing and would make a grep for mode="unencrypted" pass for the
++# wrong reason. This is the line that actually runs, on every install, after
++# every screen path and every "go back" loop, immediately before the value is
++# baked into user_configuration.json's disk_encryption block below.
++#
++# Full-disk encryption on a Steam Deck is an unanswerable LUKS prompt: no
++# keyboard exists at boot to type the passphrase. Nothing is silently
++# corrected -- if some future screen sets it, the install stops here and says
++# so, because a wrong answer here produces a device its owner cannot boot.
++: "${encrypt_installation:=false}"
++if [[ $encrypt_installation != false ]]; then
++  abort "Omarchy Deck installs unencrypted (T5-fork-plan.md §5.5): a LUKS passphrase cannot be typed on a device with no keyboard. Got encrypt_installation=$encrypt_installation"
++fi
++
+ write_user_files
+ 
+ if [[ $install_target == "free_space" ]]; then

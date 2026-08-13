@@ -1030,8 +1030,8 @@ pass "iso/RUNTIME is exactly 'basecamp/omarchy@6d7826d'"
 #
 #   A. the overlay is no longer empty, and says how much it carries -- so this
 #      section cannot quietly regress to a vacuous pass over nothing;
-#   B. the patch budget from T5-fork-plan.md §1 point 3 (<= 4 files, "a fifth
-#      should have to argue for itself") is enforced rather than aspirational;
+#   B. the patch budget from T5-fork-plan.md §1 point 3 ("a fifth should have
+#      to argue for itself") is enforced rather than aspirational;
 #   C. a patch is never staged and promoted at the same time (two divergent
 #      copies of the same edit is worse than either place alone);
 #   D. every promoted patch APPLIES to the pinned upstream, and the result
@@ -1056,10 +1056,42 @@ shopt -u nullglob
 # build-time behaviour, because anything install-time has to stay extractable
 # into the omarchy-deck package for Phase 4 (T7's enablement layer). The budget
 # is the pressure that keeps that line.
-(( ${#overlay_patches[@]} <= 4 )) ||
-  fail "iso/overlay/patches/ holds ${#overlay_patches[@]} patches; the budget is 4 (T5-fork-plan.md §1 point 3)" \
-    "A fifth patch has to argue for itself -- and the argument is usually that the change belongs in the omarchy-deck package instead."
-pass "the overlay patch budget is respected (${#overlay_patches[@]}/4 -- T5-fork-plan.md §1 point 3)"
+#
+# 🔴 RAISED FROM 4 TO 5, 2026-08-12 (T5e), deliberately -- and to 5, not to
+# "unbounded", because the number is the whole mechanism: a budget that moves
+# whenever it is inconvenient is not a budget. The fifth patch is
+# deck-form-invocation.patch, and the argument it had to make (written out in
+# full in that file's own header, so it travels with the change and can be
+# overruled on its merits) is:
+#
+#   - The rule the budget protects is "patches for build-time behaviour;
+#     install-time goes in the omarchy-deck package". This patch cannot break
+#     that rule, because it is neither: it edits the LIVE ISO's own wizard.
+#     There is no omarchy-deck package on the live ISO -- that package ships to
+#     the installed Deck, and `configurator` has finished running before it
+#     exists. The usual counter-argument ("put it in the package instead") has
+#     no target here.
+#   - There is no additive alternative. `configurator` sources exactly one
+#     external file, at a path it hard-codes, and consults no drop-in dir, hook
+#     path or env var. The alternative is overlaying a 1196-line verbatim copy
+#     that upstream edits several times a day and that diverges SILENTLY --
+#     precisely what §1's "the conflict is the point" paragraph rejects.
+#   - §1's own patch table already listed it: "| P1 |
+#     configs/airootfs/root/configurator | 2 |". What pushed the count past
+#     four was T4a's dashboard patch, added later. The arithmetic moved; the
+#     design did not.
+#   - It carries two changes to that one file (the source line and S5's call +
+#     the §5.5 encryption invariant), which is what keeps this at 5 and not 6.
+#
+# The cost of refusing it is not a smaller patch: it is an installer whose
+# Wi-Fi passphrase, disk and summary screens do not exist. Before this patch,
+# deck-form.sh -- 107KB, 147 passing assertions -- had shipped on zero ISOs.
+#
+# A SIXTH has to argue again, from scratch, against this same rule.
+(( ${#overlay_patches[@]} <= 5 )) ||
+  fail "iso/overlay/patches/ holds ${#overlay_patches[@]} patches; the budget is 5 (T5-fork-plan.md §1 point 3, raised from 4 in T5e -- see the block above)" \
+    "A sixth patch has to argue for itself -- and the argument is usually that the change belongs in the omarchy-deck package instead. Raising this number is a decision, not a fix."
+pass "the overlay patch budget is respected (${#overlay_patches[@]}/5 -- T5-fork-plan.md §1 point 3, raised from 4 in T5e)"
 
 # C. Staged and promoted are mutually exclusive states for the same patch.
 for staged in "${staged_patches[@]}"; do
@@ -1098,6 +1130,121 @@ if [[ -e "$ISO_ROOT/upstream/.git" ]]; then
   bash -n "$apply_scratch/builder/build-iso.sh" ||
     fail "the patched builder/build-iso.sh is valid bash"
   pass "the patched builder/build-iso.sh still parses"
+
+  # ---------------------------------------------------------------------
+  # The patched `configurator`. Added 2026-08-12 with T5e's fifth patch.
+  #
+  # This is the installer wizard itself, and unlike build-iso.sh a mistake in
+  # it is not caught by anything downstream: it is bash, interpreted line by
+  # line on the live ISO, in front of a person holding a Steam Deck. So the
+  # same "it applied" / "it parses" pair, plus the two properties the patch
+  # exists for -- neither of which a clean apply implies.
+  #
+  # Both are asserted POSITIONALLY, against the patched file's own line
+  # numbers, because both are position-dependent facts that a textual grep
+  # would happily confirm about a line in the wrong place. That is the same
+  # failure this suite's section 17 is named after.
+  # ---------------------------------------------------------------------
+  patched_configurator="$apply_scratch/configs/airootfs/root/configurator"
+  [[ -f $patched_configurator ]] ||
+    fail "the pinned upstream still ships configs/airootfs/root/configurator" \
+      "deck-form-invocation.patch patches it; if it moved, that patch is applying to a file that no longer drives the install."
+  bash -n "$patched_configurator" ||
+    fail "the patched root/configurator is valid bash" \
+      "A patch can apply cleanly and still leave a script that dies at line 1 on the ISO -- with no installer, no shell and no keyboard to recover with."
+  pass "the patched root/configurator still parses"
+
+  # first/last line number matching an ERE, or empty.
+  #
+  # The trailing `|| true` is load-bearing, and it is the opposite of swallowing
+  # a failure. This suite runs under `set -euo pipefail`, so without it a `grep`
+  # that matches NOTHING makes the whole command substitution non-zero and the
+  # suite dies on the assignment -- exit 1, no "not ok" line, no diagnosis --
+  # before the check below can say which property is missing. Proven, not
+  # assumed: that is exactly what the first run of the "source points at a path
+  # nobody ships" mutation did. "No match" is data here; every caller tests for
+  # empty and fails with its own sentence.
+  cfg_line() { grep -nE "$1" "$patched_configurator" | head -n1 | cut -d: -f1 || true; }
+  cfg_last_line() { grep -nE "$1" "$patched_configurator" | tail -n1 | cut -d: -f1 || true; }
+
+  # --- the source line, and WHERE it is ---------------------------------
+  #
+  # deck-form.sh works by redefinition: bash keeps the LAST definition of a
+  # function name. Sourced too early (before upstream defines the name it
+  # overrides) every override is silently undone; sourced too late (after the
+  # top-level flow has started) the screens have already been drawn. The
+  # window is exactly "after the last function definition, before the first
+  # top-level call", and nothing about a clean `git apply` checks that.
+  src_ln=$(cfg_line '^source /usr/share/omarchy-iso/deck-form\.sh$')
+  [[ -n $src_ln ]] ||
+    fail "the patched configurator sources /usr/share/omarchy-iso/deck-form.sh" \
+      "Without this line the Deck's screens exist on the ISO and nothing ever calls them -- which is exactly the state T5e was opened to fix."
+  last_fn_ln=$(cfg_last_line '^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{')
+  flow_ln=$(cfg_line '^wait_for_stable_terminal$')
+  [[ -n $last_fn_ln && -n $flow_ln ]] ||
+    fail "could not locate the definition/flow boundary in the patched configurator" \
+      "last function definition='$last_fn_ln', first top-level call='$flow_ln'. Upstream restructured; re-derive this boundary rather than deleting the check."
+  (( src_ln > last_fn_ln )) ||
+    fail "deck-form.sh is sourced at line $src_ln, BEFORE the last function definition at line $last_fn_ln" \
+      "Bash keeps the last definition of a name. Sourced above a definition it means to replace, every override is silently undone and upstream's keyboard-requiring screens run instead -- with no error anywhere."
+  (( src_ln < flow_ln )) ||
+    fail "deck-form.sh is sourced at line $src_ln, AFTER the flow starts at line $flow_ln" \
+      "The overrides would land after the screens they replace have already been drawn."
+  pass "the patched configurator sources deck-form.sh at line $src_ln -- after the last definition ($last_fn_ln), before the flow starts ($flow_ln)"
+
+  # --- and the source is guarded, because this script has no `set -e` ---
+  guard_ln=$(cfg_line '^if \[\[ ! -r /usr/share/omarchy-iso/deck-form\.sh \]\]; then$')
+  if [[ -z $guard_ln ]] || (( guard_ln >= src_ln )); then
+    fail "the source of deck-form.sh is not preceded by a readability guard" \
+      "configurator does not set -e: a bare 'source' of a missing file prints one line to stderr and CONTINUES into upstream's keyboard-requiring screens. Silent fall-through is the one failure mode CLAUDE.md names by name."
+  fi
+  grep -qE '^  exit 1$' <(sed -n "${guard_ln},${src_ln}p" "$patched_configurator") ||
+    fail "the deck-form.sh guard does not exit" \
+      "A guard that warns and continues is the same silent fall-through with extra words. Lines $guard_ln-$src_ln of the patched configurator."
+  pass "the source is guarded and exits 1 when deck-form.sh is missing (lines $guard_ln-$src_ln)"
+
+  # --- S5's call site ---------------------------------------------------
+  write_ln=$(cfg_line '^write_user_files$')
+  [[ -n $write_ln ]] ||
+    fail "the patched configurator still calls write_user_files at top level" \
+      "Both of hunk 2's changes are anchored to it."
+  summary_ln=$(cfg_line '^deck_final_summary \|\| abort$')
+  if [[ -z $summary_ln ]] || (( summary_ln >= write_ln )); then
+    fail "deck_final_summary is not called before write_user_files" \
+      "S5 is a NEW screen, not an override, so unlike every other screen in deck-form.sh it has to be called. Nothing else calls it: without this line the review-before-install screen simply never appears. (found at '$summary_ln', write_user_files at $write_ln)"
+  fi
+  pass "deck_final_summary is called at line $summary_ln, before write_user_files at $write_ln"
+
+  # --- T5-fork-plan.md §5.5, encryption OFF -----------------------------
+  #
+  # §5.5 asks for this at `local mode="encrypted"` (lines 601 and 895 of the
+  # unpatched file; both re-verified against the pin). Both are dead once
+  # deck-form.sh is sourced -- it replaces confirm_disk_overwrite outright,
+  # and its requires_full_disk_install() { return 0; } makes
+  # select_installation skip install_mode_form, so run_partition_decide is
+  # unreachable. A grep for mode="unencrypted" would therefore have passed
+  # while asserting nothing about the installed system. The patch enforces the
+  # invariant at the point of effect instead, and this asserts it THERE: after
+  # the last screen that could set it, before the value is written.
+  # shellcheck disable=SC2016  # these are EREs matched against the patched
+  # file's literal text, not shell expansions to be performed here.
+  enc_default_ln=$(cfg_line '^: "\$\{encrypt_installation:=false\}"$')
+  # shellcheck disable=SC2016
+  enc_check_ln=$(cfg_line '^if \[\[ \$encrypt_installation != false \]\]; then$')
+  [[ -n $enc_default_ln && -n $enc_check_ln ]] ||
+    fail "the patched configurator does not pin encrypt_installation to false before write_user_files" \
+      "T5-fork-plan.md §5.5: inheriting upstream's encrypted-by-default produces a Deck whose owner has no keyboard to type the LUKS passphrase into -- the product's central promise, broken at the last screen. (default='$enc_default_ln', tripwire='$enc_check_ln')"
+  grep -qE '^  abort ' <(sed -n "${enc_check_ln},${write_ln}p" "$patched_configurator") ||
+    fail "the encryption tripwire does not abort" \
+      "Silently correcting encrypt_installation would hide the screen that set it. §5.5's coupling box (§5.1) is why this must be loud: turning encryption off also deletes archinstall's autologin drop-in, and configure_deck has to restore it."
+  last_confirm_ln=$(cfg_last_line '(^|[[:space:]])confirm_disk_overwrite(;|$)')
+  [[ -n $last_confirm_ln ]] ||
+    fail "could not find the last confirm_disk_overwrite call in the patched configurator" \
+      "That call is the last screen that can set encrypt_installation; the invariant has to sit after it."
+  (( enc_default_ln > last_confirm_ln && enc_check_ln < write_ln )) ||
+    fail "the encryption invariant is not between the last disk screen ($last_confirm_ln) and write_user_files ($write_ln)" \
+      "Placed above the last screen that can set it, the invariant is a comment: the screen simply sets it again afterwards. (default=$enc_default_ln, tripwire=$enc_check_ln)"
+  pass "encryption is pinned off at lines $enc_default_ln/$enc_check_ln -- after the last disk screen ($last_confirm_ln), before write_user_files ($write_ln)"
 
   # The Valve repos must come AFTER [arch-mact2], i.e. last. pacman resolves
   # -S <name> by REPO ORDER, not version; putting Valve first was measured and
@@ -1314,6 +1461,93 @@ for sourced in "${patch_sourced_paths[@]}"; do
       "The patched script runs on every install, under 'set -e', and sourcing a file that is not there kills it there and then. A patch and the files it references are ONE unit: promote them in the same commit, into the overlay at their shipped path (src/iso-patches/README.md)."
 done
 pass "every absolute path promoted patches source (${patch_sourced_paths[*]}) has a file behind it"
+
+# ---------------------------------------------------------------------------
+# The CALL half of the same hazard, added 2026-08-12 with T5e's fifth patch.
+#
+# The two derivations above both key on the mechanism that pulls a file IN --
+# a Python import, a shell `source`. A patch can also depend on an overlay
+# file by calling something the file defines, and that dependency is invisible
+# to both. deck-form-invocation.patch does exactly this: hunk 2 adds
+# `deck_final_summary || abort`, and deck_final_summary is defined in
+# deck-form.sh, 2300 lines away in a different file.
+#
+# It is a real failure, not a theoretical one, and it is the WORST-shaped of
+# the three. Delete or rename that function and the source line still
+# resolves, the file still parses, `git apply` is still clean, and the two
+# checks above still pass -- then on the ISO, at the last screen before the
+# disk is written, bash prints "deck_final_summary: command not found",
+# returns 127, and `|| abort` ends the install. Every cheap check would have
+# been green.
+#
+# DERIVED, not hard-coded, and derived PER PATCH: the functions a patch calls
+# must be defined in a file THAT PATCH sources. Checking against every overlay
+# shell file would pass on a definition living in deck-dashboard.sh, which
+# runs in a different process and would not resolve here.
+# ---------------------------------------------------------------------------
+
+# patch_sourced_of <patch> -- the absolute /usr/share/omarchy-iso/ paths this
+# one patch adds a `source` (or `.`) of. Same extraction as the block above,
+# scoped to a single file.
+patch_sourced_of() {
+  grep -hoE '^\+[[:space:]]*(source|\.)[[:space:]]+["'"'"']?/usr/share/omarchy-iso/[^"'"'"'[:space:];&|)]+' "$1" |
+    sed -E 's|^\+[[:space:]]*(source\|\.)[[:space:]]+["'"'"']?||' | sort -u
+}
+
+# patch_calls_of <patch> -- the deck_* shell functions this patch CALLS on the
+# lines it adds. Command position only: the name must open a statement (start
+# of an added line, or after ; & | ( or one of the keywords that introduce
+# one), optionally negated, and must be followed by a delimiter rather than
+# `=`. That last clause is what keeps `deck_destination=...` in
+# deck-packages.patch -- a variable assignment, not a call -- out of the set.
+# Added lines only, and never comment lines: a name a patch merely mentions in
+# prose is not a dependency.
+patch_calls_of() {
+  grep -hE '^\+' "$1" |
+    grep -vE '^\+[[:space:]]*#' |
+    grep -oE '(^\+|[;&|(]|\b(if|until|while|then|do|else|elif))[[:space:]]*!?[[:space:]]*deck_[A-Za-z0-9_]+([[:space:]]|;|\)|\||$)' |
+    grep -oE 'deck_[A-Za-z0-9_]+' | sort -u
+}
+
+# shell_function_missing <fn> <abs-path>... -- empty if one of the shipped
+# files defines <fn>, otherwise a sentence saying why not. Resolution order is
+# the overlay first and the pinned upstream second, exactly as
+# orchestrator_module_missing and sourced_path_missing already do it.
+shell_function_missing() {
+  local fn=$1; shift
+  local abs candidate searched=0
+  for abs in "$@"; do
+    for candidate in "$ISO_ROOT/overlay/configs/airootfs$abs" "$ISO_ROOT/upstream/configs/airootfs$abs"; do
+      [[ -f $candidate ]] || continue
+      searched=1
+      grep -qE "^${fn}\(\)" "$candidate" && return 0
+    done
+  done
+  (( searched )) ||
+    { printf 'none of the files it sources (%s) could be read here' "$*"; return 0; }
+  printf 'nothing among the files it sources (%s) defines it' "$*"
+}
+
+patch_calls_seen=0
+for p in "${overlay_patches[@]}"; do
+  mapfile -t p_calls < <(patch_calls_of "$p")
+  (( ${#p_calls[@]} > 0 )) || continue
+  mapfile -t p_sourced < <(patch_sourced_of "$p")
+  (( ${#p_sourced[@]} > 0 )) ||
+    fail "$(basename -- "$p") calls ${p_calls[*]} but sources nothing under /usr/share/omarchy-iso/" \
+      "A patch that calls one of our shell functions without pulling in the file that defines it is a 'command not found' at run time on the ISO. Add the source line to the same patch."
+  for fn in "${p_calls[@]}"; do
+    why=$(shell_function_missing "$fn" "${p_sourced[@]}")
+    [[ -z $why ]] ||
+      fail "$(basename -- "$p") calls $fn, but $why" \
+        "This resolves at RUN time, on the ISO, at whichever screen the call sits on -- not at build time. git apply stays clean, bash -n stays clean, and the source-path check above stays green, because the file it names is still there; only the function inside it is gone. Promote the patch and the definitions it calls in one commit (src/iso-patches/README.md)."
+    patch_calls_seen=$(( patch_calls_seen + 1 ))
+  done
+  pass "every deck_* function $(basename -- "$p") calls (${p_calls[*]}) is defined in a file that same patch sources (${p_sourced[*]})"
+done
+(( patch_calls_seen > 0 )) ||
+  fail "no promoted patch calls a deck_* shell function" \
+    "deck-form-invocation.patch adds 'deck_final_summary || abort', so an empty derivation means this PATTERN went stale, not that the coupling went away -- the same refusal-to-pass-vacuously the two blocks above use. Fix the extraction in patch_calls_of, or remove this block on purpose."
 
 # ===========================================================================
 # 20. Guard 6.6 -- a runtime patch that no longer applies fails the BUILD.

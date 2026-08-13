@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Unit tests for src/deck-form.sh -- T4's installer screens (P2.5/P2.6).
+# Unit tests for iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh
 #
 # No VM, no gum, no real mapper, no Deck: every collaborator deck-form.sh
 # would normally reach for on the real ISO (the lizard sysfs knob,
@@ -35,6 +35,25 @@ fi
 
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 
+# The file under test, named ONCE. Moved 2026-08-12 (T5e) from src/deck-form.sh
+# to its shipped path inside the ISO overlay -- iso/bin/build rsyncs
+# overlay/configs/ over the scratch upstream tree, so this path IS
+# /usr/share/omarchy-iso/deck-form.sh on the built ISO, which is exactly the
+# path iso/overlay/patches/deck-form-invocation.patch sources. One copy, no
+# src/ duplicate. Asserted below rather than assumed, because a suite that
+# silently sources a stale second copy is worse than one that cannot find it.
+DECK_FORM_SH="$REPO_ROOT/iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh"
+[[ -f $DECK_FORM_SH ]] || {
+  printf 'not ok - the file under test exists at its shipped overlay path\n'
+  printf '%s\n' "expected $DECK_FORM_SH" >&2
+  exit 1
+}
+[[ ! -e "$REPO_ROOT/src/deck-form.sh" ]] || {
+  printf 'not ok - deck-form.sh exists in BOTH src/ and the overlay\n'
+  printf '%s\n' "The promotion is a git mv, not a copy: two divergent copies of a 107KB file is worse than either location alone (test-iso-build.sh applies the same rule to patches)." >&2
+  exit 1
+}
+
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1"; [[ -n ${2:-} ]] && printf '%s\n' "$2" >&2; exit 1; }
 
@@ -58,8 +77,8 @@ export DECK_FORM_TTY_OVERRIDE=/dev/pts/deck-form-test
 # the same way test-installer-harness-primitives.sh sources
 # vm-installer-screens.sh (which makes the identical -uo-only choice) under
 # its own `set -euo pipefail`.
-# shellcheck source=../../src/deck-form.sh
-source "$REPO_ROOT/src/deck-form.sh"
+# shellcheck source=../../iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh
+source "$DECK_FORM_SH"
 
 # ===========================================================================
 # Stubs for upstream `configurator` helpers this file's screen OVERRIDES
@@ -337,7 +356,7 @@ printf 'Y\n' >"$work/lizard-exit"
 cat >"$work/exit-abort-test.sh" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
-source "$REPO_ROOT/src/deck-form.sh"
+source "$DECK_FORM_SH"
 aborts() { exit 42; }
 DECK_TEXT_PROMPT_LIZARD_SYSFS="$work/lizard-exit" \
 DECK_TEXT_PROMPT_MAPPER_BIN="$work/fake-mapper-bound" \
@@ -367,7 +386,7 @@ pass "text_prompt's EXIT-trap safety net restores lizard mode AND kills the mapp
 cat >"$work/exit-owned-test.sh" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
-source "$REPO_ROOT/src/deck-form.sh"
+source "$DECK_FORM_SH"
 : >"$work/someone-elses-trap-fired"
 trap 'echo fired >"$work/someone-elses-trap-fired"' EXIT
 ok() { return 0; }
@@ -748,8 +767,8 @@ pass "premise: upstream prompts for the password (configurator:${pw_call}) after
 # code would either fire on the documentation or be weakened until it fired
 # on nothing.
 strip_comments() { LC_ALL=C grep -vE '^[[:space:]]*#' "$1"; }
-if strip_comments "$REPO_ROOT/src/deck-form.sh" | LC_ALL=C grep -qE 'loadkeys[^#]*\$\{?keyboard\b'; then
-  fail "src/deck-form.sh loads \$keyboard into the console keymap -- §5.20a is back"
+if strip_comments "$DECK_FORM_SH" | LC_ALL=C grep -qE 'loadkeys[^#]*\$\{?keyboard\b'; then
+  fail "deck-form.sh loads \$keyboard into the console keymap -- §5.20a is back"
 fi
 # Positive control: an absence assertion is worthless if the pattern could
 # never match anything. Upstream's own file is the known positive.
@@ -758,7 +777,7 @@ strip_comments "$CONFIGURATOR" | LC_ALL=C grep -qE 'loadkeys[^#]*\$\{?keyboard\b
 # The picker itself is deliberately NOT overridden (see the S2b block's
 # 'WHAT IS NOT DONE HERE'). Asserted so a future session that adds one does
 # it on purpose, having read why it was left alone.
-if LC_ALL=C grep -qE '^omarchy_prompt_keyboard\(\)' "$REPO_ROOT/src/deck-form.sh"; then
+if LC_ALL=C grep -qE '^omarchy_prompt_keyboard\(\)' "$DECK_FORM_SH"; then
   fail "deck-form.sh now overrides omarchy_prompt_keyboard -- upstream's picker was left alone deliberately (its body is not vendored here, so a replacement would be designed blind). Update the S2b block's reasoning if that changed."
 fi
 pass "deck-form.sh never loadkeys \$keyboard, and leaves upstream's picker in place"
@@ -888,7 +907,7 @@ DASHBOARD="$REPO_ROOT/iso/upstream/configs/airootfs/usr/local/bin/omarchy-instal
 # deck_final_summary is called by T4's patch P1 hunk 2, not by stock upstream.
 OVERRIDE_ALLOWLIST=" deck_final_summary "
 
-overrides=$(grep -oE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' "$REPO_ROOT/src/deck-form.sh" |
+overrides=$(grep -oE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' "$DECK_FORM_SH" |
               tr -d '()' | grep -v '^deck_form_' | sort -u)
 [[ -n $overrides ]] ||
   fail "found NO override functions in deck-form.sh -- this scanner is broken, not the file"
@@ -942,7 +961,7 @@ if [[ -r $CONFIGURATOR ]]; then
     if LC_ALL=C grep -qE "\\\$\{?${bad}\b" "$CONFIGURATOR"; then
       fail "upstream DOES read \$${bad} -- this suite's premise is wrong, re-derive the contract"
     fi
-    LC_ALL=C grep -qE "^\s*${bad}=" "$REPO_ROOT/src/deck-form.sh" &&
+    LC_ALL=C grep -qE "^\s*${bad}=" "$DECK_FORM_SH" &&
       fail "deck-form.sh sets \$${bad}, which upstream never reads -- the silent-empty bug is back"
   done
   pass "the two names that were silently wrong are pinned as wrong"
@@ -1502,7 +1521,7 @@ s1_run() {
   : >"$work/s1-$name/gum.log"
   s1_rc=0
   env "${s1_env[@]}" \
-      DECK_FORM_PATH="$REPO_ROOT/src/deck-form.sh" \
+      DECK_FORM_PATH="$DECK_FORM_SH" \
       DECK_NET_STATE_DIR="$work/s1-$name" \
       DECK_TEST_SAY_LOG="$work/s1-$name/say.log" \
       DECK_TEST_SSID_OUT="$work/s1-$name/wifi-ssid" \
@@ -1524,7 +1543,7 @@ s1_out()   { cat "$work/s1-$1/${DECK_NET_OUTCOME_FILE}" 2>/dev/null; }
 # --- §5 row 1: no wlan0 -> skip S1 entirely, never block ---
 mkdir -p "$work/s1-nohw"
 env "${s1_env[@]}" DECK_NET_SYSFS="$work/net-none" \
-    DECK_FORM_PATH="$REPO_ROOT/src/deck-form.sh" \
+    DECK_FORM_PATH="$DECK_FORM_SH" \
     DECK_NET_STATE_DIR="$work/s1-nohw" DECK_TEST_SAY_LOG="$work/s1-nohw/say2.log" \
     IWCTL_LOG="$work/s1-nohw/iwctl.log" FAKE_GUM_LOG="$work/s1-nohw/gum.log" \
     timeout 20 bash "$work/s1-boot.sh" >/dev/null 2>&1 || fail "S1 must return 0 with no Wi-Fi hardware -- it must never block the install (this is also every QEMU run)"
@@ -1676,7 +1695,7 @@ printf '%s\n%s\n' $'\360\237\224\222 My Home Network' "$DECK_NET_SKIP_ROW" >"$wo
 : >"$work/s1-portal/iwctl.log"; : >"$work/s1-portal/gum.log"
 env "${s1_env[@]}" \
     DECK_CURL_BIN="$work/bin-portal/curl" \
-    DECK_FORM_PATH="$REPO_ROOT/src/deck-form.sh" \
+    DECK_FORM_PATH="$DECK_FORM_SH" \
     DECK_NET_STATE_DIR="$work/s1-portal" \
     DECK_TEST_SAY_LOG="$work/s1-portal/say.log" \
     IWCTL_LOG="$work/s1-portal/iwctl.log" \
@@ -1704,7 +1723,7 @@ printf '%s\n' "$DECK_NET_SKIP_ROW" >"$work/s1-noscan/choose.q"
 : >"$work/s1-noscan/iwctl.log"; : >"$work/s1-noscan/gum.log"
 env "${s1_env[@]}" \
     IWCTL_NETWORKS="$work/networks-empty.raw" \
-    DECK_FORM_PATH="$REPO_ROOT/src/deck-form.sh" \
+    DECK_FORM_PATH="$DECK_FORM_SH" \
     DECK_NET_STATE_DIR="$work/s1-noscan" \
     DECK_TEST_SAY_LOG="$work/s1-noscan/say.log" \
     IWCTL_LOG="$work/s1-noscan/iwctl.log" \
@@ -1742,7 +1761,7 @@ printf '%s\n%s\n' $'\360\237\224\222 CorpNet' "$DECK_NET_SKIP_ROW" >"$work/s1-co
 : >"$work/s1-corp/iwctl.log"; : >"$work/s1-corp/gum.log"
 env "${s1_env[@]}" \
     IWCTL_NETWORKS="$work/networks-8021x.raw" \
-    DECK_FORM_PATH="$REPO_ROOT/src/deck-form.sh" \
+    DECK_FORM_PATH="$DECK_FORM_SH" \
     DECK_NET_STATE_DIR="$work/s1-corp" \
     DECK_TEST_SAY_LOG="$work/s1-corp/say.log" \
     IWCTL_LOG="$work/s1-corp/iwctl.log" \
