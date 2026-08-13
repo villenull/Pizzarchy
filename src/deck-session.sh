@@ -3174,9 +3174,12 @@ EOF
 # precisely in the case where $SUDO is empty, which is the opposite of every
 # other use of it in this file.
 #
-# (The three `$SUDO -u` calls further down stage_desktop_settings predate this
-# and carry the same hazard. They are left alone deliberately -- changing them
-# is a separate change with its own tests -- but do not copy them.)
+# ✅ FIXED 2026-08-12: this used to predict a live failure in the three
+# `$SUDO -u` calls further down stage_desktop_settings, and it did fire on
+# real hardware the first time `stage-desktop-settings` ran under `sudo
+# ./deck-session.sh` (root from the start, SUDO=""): `-u: command not found`,
+# and the idle policy silently never got written. All three now go through
+# this function.
 run_as_desktop_user() {
   local user=$1; shift
   if [[ -n $SUDO ]]; then
@@ -3589,12 +3592,12 @@ stage_desktop_settings() {
     [[ -e $OMARCHY_SHELL_JSON_DEFAULTS ]] ||
       fail "${shell_json} is absent and ${OMARCHY_SHELL_JSON_DEFAULTS} does not exist to seed from; writing an idle-only file would strip the bar"
     log "seeding ${shell_json} from Omarchy's shipped defaults"
-    $SUDO -u "$invoking_user" install -D -m 0644 "$OMARCHY_SHELL_JSON_DEFAULTS" "$shell_json" ||
+    run_as_desktop_user "$invoking_user" install -D -m 0644 "$OMARCHY_SHELL_JSON_DEFAULTS" "$shell_json" ||
       fail "could not seed ${shell_json}"
   fi
 
   log "setting Omarchy idle policy: screensaver=${IDLE_SCREENSAVER_SECONDS}s lock=${IDLE_LOCK_SECONDS}s"
-  $SUDO -u "$invoking_user" python3 - "$shell_json" "$IDLE_SCREENSAVER_SECONDS" "$IDLE_LOCK_SECONDS" <<'PY' ||
+  run_as_desktop_user "$invoking_user" python3 - "$shell_json" "$IDLE_SCREENSAVER_SECONDS" "$IDLE_LOCK_SECONDS" <<'PY' ||
 import json, sys, pathlib
 path, screensaver, lock = pathlib.Path(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
 try:
@@ -3613,7 +3616,7 @@ PY
 
   # Re-read as the shell will, rather than trusting the write.
   local check
-  check=$($SUDO -u "$invoking_user" python3 - "$shell_json" <<'PY'
+  check=$(run_as_desktop_user "$invoking_user" python3 - "$shell_json" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1]))
 idle = cfg.get("idle", {})
@@ -4790,13 +4793,17 @@ stage_power_button() {
   log "A long press does nothing: no threshold in this project has been read"
   log "from source, and the ten-second hardware hold is unchanged."
   log ""
-  log "⚠️ DESKTOP MODE WILL ALSO LEAVE THE SYSTEM MENU OPEN behind the suspend."
-  log "   Omarchy binds XF86PowerOff to 'omarchy-menu toggle system'. Today the"
-  log "   duplicate press toggles it open and shut again, which is the 'flash'"
-  log "   that was reported; with the duplicate gone, one press opens it and"
-  log "   leaves it open. That bind is a USER config file and is NOT changed by"
-  log "   this stage. The supported fix, as the desktop user, in"
-  log "   ~/.config/hypr/bindings.lua:"
+  log "⚠️ DESKTOP MODE MAY STILL SHOW A BRIEF SYSTEM-MENU FLASH before it sleeps."
+  log "   The udev rule above only changes what LOGIND watches; Omarchy's"
+  log "   'omarchy-menu toggle system' bind (XF86PowerOff) reads raw key events"
+  log "   from the compositor's own input layer, which still sees BOTH power"
+  log "   events, so the toggle-open/toggle-close pair that caused the original"
+  log "   'flash' report is UNCHANGED at the compositor. What changed is that"
+  log "   suspend now fires off a single event and can win the race, cutting the"
+  log "   menu's animation short. MEASURED once on hardware, 2026-08-12: a"
+  log "   split-second flash, not a stuck-open menu -- n=1, and system load or"
+  log "   animation settings could shift the race either way."
+  log "   OPTIONAL cosmetic fix, as the desktop user, in ~/.config/hypr/bindings.lua:"
   log "     hl.unbind(\"XF86PowerOff\")"
   log "   ⚠️ A Lua syntax error there makes Hyprland discard the WHOLE file"
   log "   silently, with 'hyprctl configerrors' still clean. Check it with"

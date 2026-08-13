@@ -642,14 +642,18 @@ Every one of these is a place where the answer below is a **guess**.
    different answer. One `systemd-inhibit --list`.
 3. 🟠 **systemd's long-press duration**, and whether the Deck's button can ever
    satisfy it. §4.0. Blocks any long-press design; blocks nothing else.
-4. 🟠 **Does the panel wake by itself from s2idle** with nothing calling
-   `omarchy-system-wake`? §5.1. Hardware only.
-5. 🟠 **Does the Deck use s2idle or deep suspend**, and does gamescope survive
-   it? Not read, not measured. `cat /sys/power/mem_sleep` answers the first half
-   in one read-only command.
+4. ✅ **ANSWERED — moot.** Question presumed s2idle; the Deck cannot enter it
+   (see §9 below). Nothing calls `omarchy-system-wake` and nothing needs to:
+   deep/S3 resume is driven by the EC/power button at the hardware level, and
+   §9's cycle woke on the second press with no such call anywhere in the chain.
+5. ✅ **ANSWERED — deep (S3), not s2idle**, and gamescope survives it.
+   `docs/findings/P22-deck-conformance-sweep.md` §9.6/9.7 read the cause
+   (`PM: Steam Deck quirk - no s2idle allowed!`, kernel `6.11.11-valve29`); §9
+   below is a live suspend/resume cycle measuring the same thing from the
+   journal, with gamescope's PID unchanged across it.
 6. 🟡 **Does the `Lid Switch` node ever assert on a handheld?** §5.2 row D. If
    it does, the Deck locks itself for no reason. `evtest /dev/input/event1`
-   during the same capture as question 1 costs nothing extra.
+   during the same capture as question 1 costs nothing extra. Still open.
 7. ✅ **ANSWERED — what SteamOS itself does, from Valve's code.** §4.1/§4.2 are
    filled in. The headline is that it does **not** go through logind at all:
    Valve sets `HandlePowerKey=ignore` and hands the key to `steamos-powerbuttond`,
@@ -661,3 +665,154 @@ Every one of these is a place where the answer below is a **guess**.
    mechanism is unavailable to us in Desktop Mode; the systemd-primitive design
    stands on its own merits, not on parity. **Gaming Mode is different — Steam
    IS running there**, which is the first thing to check against §3's hole.
+
+---
+
+## 9. 🟢 HARDWARE VERIFICATION, 2026-08-12 — the whole chain, on the operator's Deck
+
+**Everything in this section was pressed, watched and read by the operator or
+measured by SSH immediately before/after, not inferred.** `stage-power-button`
+and `stage-boot-default-gaming` (both built earlier the same session — see
+`docs/tasks/T13-power-button-and-sleep.md` and
+`docs/RECOVERY.md`'s new section) were deployed via `deck-sync.sh` and run for
+real, then the Deck was rebooted.
+
+### 9.1 Deploy sequence actually run, in order
+
+1. `stage-desktop-settings` — installed the **global** sleep-lock mask
+   (`/etc/systemd/user/omarchy-sleep-lock.service -> /dev/null`, replacing the
+   fragile per-user-only mask `docs/findings/P22-deck-conformance-sweep.md` §5
+   found). **Verified on disk**, both before and after a bug fix (§9.2).
+2. `stage-power-button` — installed the udev rule and the logind drop-in.
+   **No live effect**, by design (§2.2's "nothing has changed yet" — removing a
+   udev tag live cannot reliably un-register a device logind already
+   enumerated). Confirmed dormant before reboot: files present,
+   `HandlePowerKey` unchanged in the live logind state.
+3. `stage-boot-default-gaming` — installed and enabled
+   `deck-boot-default-gaming.service`. Confirmed dormant before reboot:
+   `ActiveState=inactive`, `Session=omarchy` (Desktop) still the live default.
+4. `sudo reboot`.
+
+### 9.2 🐞 Found on the way: `$SUDO -u` breaks when the script is already root
+
+Running `stage-desktop-settings` under `sudo ./deck-session.sh` (root from the
+very start, so `stage_preconditions` sets `SUDO=""`) failed on the idle-policy
+write with `-u: command not found` — exactly the failure a comment in the file
+had predicted for these three call sites and explicitly left unfixed
+("a separate change with its own tests"). Fixed by routing all three through
+the already-written `run_as_desktop_user` helper (previously used nowhere and
+itself untested). Two new regression assertions added to
+`test/unit/test-deck-session.sh` — there were previously **zero**, because the
+suite's fake-sudo harness always sets `SUDO` to a non-empty stub and never
+exercises the empty-and-root case. Re-deployed; `shell.json`'s `idle` block was
+then confirmed written (`{screensaver: 150, lock: 86400}`, 4 top-level keys
+intact — the seed-then-patch path did not strip the rest of the file).
+
+### 9.3 Reboot: landed in Gaming Mode
+
+**MEASURED, read-only, immediately post-boot** (uptime "up 0 min"):
+
+```
+$ pgrep -a gamescope-wl-style-check   # (illustrative name only; real check below)
+984 gamescope --generate-drm-mode fixed --xwayland-count 2 -w 1280 -h 800 \
+    --default-touch-mode 4 --hide-cursor-delay 3000 --max-scale 2 \
+    --fade-out-duration 200 --cursor-scale-height 720 -e \
+    -R /run/user/1000/gamescope.La4FWrW/startup.socket \
+    -T /run/user/1000/gamescope.La4FWrW/stats.pipe -O *,eDP-1
+
+$ systemctl status deck-boot-default-gaming.service
+Active: active (exited) ... Process: ExecStart=/usr/local/bin/deck-session-select gamescope --no-restart (code=exited, status=0/SUCCESS)
+
+$ systemctl --failed
+(empty)
+```
+
+`deck-boot-default-gaming.service` ran, exited 0, and the live session is
+`gamescope`, not the desktop the Deck was left in before the reboot (`Session=
+omarchy`). This is the first real boot with the unit installed; §7's `[H]`
+verification row for the reboot direction is closed.
+
+### 9.4 Power button: suspend, on the operator's own press — Gaming Mode
+
+Operator report, verbatim intent: one short press suspended the Deck; a second
+press resumed it, straight back into Gaming Mode, no password. **Corroborated
+independently from the journal and process table, not taken on the operator's
+word alone:**
+
+```
+$ journalctl -b | grep -iE "PM: suspend|PM: resume"
+Aug 12 19:36:00 steamdeck kernel: PM: suspend entry (deep)
+Aug 12 19:36:10 steamdeck kernel: PM: suspend exit
+
+$ pgrep -a gamescope        # BEFORE and AFTER: same PID, 984
+951 /bin/sh /usr/bin/start-gamescope-session
+984 gamescope --generate-drm-mode fixed ... (identical argv to §9.3)
+```
+
+Three things settled by this, that were INFERRED or unmeasured before tonight:
+
+1. 🟢 **§4.2 / open question 5**: suspend really is **deep (S3)**, matching
+   `P22`'s `dmesg` reading (`PM: Steam Deck quirk - no s2idle allowed!`) from a
+   *second, independent method* — a live suspend/resume cycle, not a sysfs read.
+2. 🟢 **"The session is never torn down" is now MEASURED, not just read out of
+   `gamescope-session`'s source.** Same PID before and after a real ~10 s
+   suspend. Desktop Mode's equivalent claim (§4.2 table) has still only been
+   read from source, not cycled — it is the natural next hardware check.
+3. 🟢 **Open question 4 is moot**, and cleanly so: nothing in this chain calls
+   `omarchy-system-wake`; the EC/power button woke the machine at the hardware
+   level, exactly as §4.2's SteamOS reading predicted for a machine with no
+   Steam mediating it.
+
+**Three pre-existing, boot-time failed units were also observed**
+(`galileo-mura-setup.service`, `ibus-gamescope.service`,
+`steam-notif-daemon.service`; all `203/EXEC`, all timestamped **19:35:09** —
+during the boot into Gaming Mode, a full minute before the suspend test began
+at 19:36:00). **Not a regression from this work**: `jupiter-hw-support` was
+skipped by an earlier operator decision (`docs/PROGRESS.md`), and these three
+look like components that package would have shipped. Worth a follow-up row,
+not a blocker for T13.
+
+### 9.5 What is still open after tonight
+
+- Desktop Mode's own suspend/resume cycle (only Gaming Mode was pressed
+  tonight) — same-PID-across-suspend needs its own measurement there.
+- Whether the System menu is left open after a Desktop Mode press, as §2's
+  design note predicts (the duplicate press is gone, so nothing closes it).
+- The `Lid Switch` question (§8 item 6).
+- The three `203/EXEC` units, if the operator wants Gaming Mode's audio/IME/
+  notification helpers working — separate from T13's scope.
+
+### 9.6 Desktop Mode: also suspends and resumes clean — and the menu-flash prediction was too pessimistic
+
+**Operator report, same session, immediately after §9.4:** switched to Desktop
+Mode, pressed the power button — suspended, resumed straight back into Desktop
+Mode, no password. One catch: right before sleeping, the System menu opened
+for a **split second**, then the screen went dark.
+
+That is a **better** outcome than the deploy-time warning predicted (§9.1's
+stage output said Desktop Mode would leave the menu **open** behind the
+suspend, not flash it), and the reason is a mechanism this file had not
+worked through: **the udev `power-switch` tag change only affects what
+`logind` watches. It does nothing to what the compositor sees.** Hyprland's
+`XF86PowerOff` bind (§2.1) reads raw key events off its own input layer,
+which still receives **both** `event2` and `event4`'s presses regardless of
+either one's udev tags — udev tags are a `logind`-only concept, invisible to
+libinput/Hyprland's device handling. So `omarchy-menu toggle system` still
+fires **twice**, ~130–200 ms apart (§2.2's measured gap), toggling the menu
+open then shut, exactly as before this fix. What changed is only the
+**suspend** side: `logind` now sees a single tagged press (`event4` alone)
+and can act on it immediately, and on this run it won the race — the screen
+went dark before the menu's open animation, or the second toggle-closed call,
+had time to be seen. **MEASURED once, n=1.** Under different compositor load
+or animation settings the race could resolve the other way and the menu
+could be visibly open for longer; this is not a guarantee, just what
+happened this time.
+
+`stage-power-button`'s printed guidance was corrected to describe this
+mechanism rather than the untested prediction, and the `hl.unbind` line is
+now offered as an **optional cosmetic** fix rather than "the supported fix"
+for a problem that, so far, does not visibly occur.
+
+**Net effect: all four of the operator's original defects are now closed on
+real hardware** — Desktop Mode suspends, Gaming Mode suspends, both resume to
+where they were with no password, and a reboot always lands in Gaming Mode.

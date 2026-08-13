@@ -3311,17 +3311,24 @@ power_undo_rule=$(grep -nF -- "rm -f ${POWER_UDEV_RULE}" "$work/stage.out" | hea
     "the reverse order puts the duplicate KEY_POWER press back underneath a live HandlePowerKey=suspend. Got the drop-in at output line ${power_undo_conf} and the rule at ${power_undo_rule}."$'\n'"$(out)"
 pass "the printed undo is ordered handler-first, which is the only order that is safe at every point in between"
 
-# --- the consequence nobody would predict ---------------------------------
+# --- the consequence, corrected against a real hardware measurement --------
 #
-# With the duplicate gone, Omarchy's XF86PowerOff bind fires ONCE, so the
-# System menu opens and STAYS open behind the suspend -- where today's two
-# presses toggle it open and shut, which is the "flash" that was reported.
-# That bind is a user config file and is not this stage's to change, so the
-# stage has to say so.
+# First written as a PREDICTION: with the duplicate gone, Omarchy's
+# XF86PowerOff bind would fire once and the System menu would stay open
+# behind the suspend. MEASURED wrong on 2026-08-12
+# (docs/findings/T13-power-button-and-sleep.md §9.6): removing the udev
+# power-switch tag changes what LOGIND watches, not what the COMPOSITOR
+# sees -- Hyprland's bind still reads both presses off its own input layer,
+# so the menu still toggles open-then-shut exactly as before. What changed
+# is only that suspend can now win the race and cut the flash short. The
+# operator saw a split-second flash, not a stuck-open menu -- n=1, so the
+# text says "may still", not a guarantee either way. That bind is still a
+# user config file and not this stage's to change, so it still offers the
+# unbind as an optional, cosmetic fix.
 ok_in_out 'hl.unbind("XF86PowerOff")' \
-  "the stage prints the one-line fix for Omarchy's power-key menu bind, which it deliberately does not touch"
-ok_in_out "leaves it open" \
-  "and explains why that gets WORSE rather than better once the duplicate press is gone"
+  "the stage prints the one-line OPTIONAL fix for Omarchy's power-key menu bind, which it deliberately does not touch"
+ok_in_out "SYSTEM-MENU FLASH" \
+  "and describes the measured mechanism (the compositor still sees both presses) rather than the earlier, measured-wrong prediction that the menu would stay open"
 
 # --- idempotency -----------------------------------------------------------
 run_stage_body stage_power_button

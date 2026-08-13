@@ -1928,4 +1928,73 @@ power_sorts_after 95-deck-session.conf autologin.conf &&
     "'9' < 'a', so 95-deck-session.conf sorted BEFORE autologin.conf and the SDDM drop-in silently never applied. A comparator that says otherwise agrees with the comment that was wrong."
 pass "power_sorts_after answers the historical 95-/autologin case correctly ('9' < 'a'), so it would have caught that bug"
 
+# ===========================================================================
+# run_as_desktop_user -- the SUDO="" regression, found on real hardware
+# ===========================================================================
+#
+# 2026-08-12: `sudo ./deck-session.sh stage-desktop-settings` on the Deck --
+# root from the start, so stage_preconditions sets SUDO="" -- failed with
+# `-u: command not found` and never wrote the idle policy. Three call sites in
+# stage_desktop_settings did `$SUDO -u "$invoking_user" ...` directly; with
+# SUDO="" that expands to `-u "$invoking_user" ...`, which bash tries to run as
+# a command named '-u'. A comment beside run_as_desktop_user had predicted this
+# exact failure and left those three sites unfixed "deliberately... a separate
+# change with its own tests" -- and no test ever existed for either half.
+# Fixed by routing all three through run_as_desktop_user, which is itself
+# untested until now.
+
+# Branch 1: SUDO is set (the ordinary `./deck-session.sh` invocation, not yet
+# root). Must invoke exactly `$SUDO -u <user> <cmd...>` -- captured via a stub
+# standing in for $SUDO, so this is the argv actually built, not an inference.
+rasdu_stub_out=$(mktemp)
+rasdu_stub=$(mktemp)
+cat >"$rasdu_stub" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$RASDU_CAPTURE"
+STUB
+chmod +x "$rasdu_stub"
+RASDU_CAPTURE="$rasdu_stub_out" SUDO="$rasdu_stub" bash -c '
+  . "$1"
+  SUDO="$2"
+  run_as_desktop_user someuser echo hello
+' _ "$REPO_ROOT/src/deck-session.sh" "$rasdu_stub" || true
+[[ $(cat "$rasdu_stub_out") == "-u someuser echo hello" ]] ||
+  fail_test "run_as_desktop_user invokes '\$SUDO -u <user> <cmd...>' when SUDO is set" \
+    "captured: '$(cat "$rasdu_stub_out")'"
+pass "run_as_desktop_user, SUDO set: invokes '\$SUDO -u <user> <cmd...>' -- the ordinary case"
+rm -f "$rasdu_stub_out" "$rasdu_stub"
+
+# Branch 2: SUDO="" and not root (this test process). Historically this was
+# EXACTLY the state that silently ran '-u' as a command -- a write that never
+# happened, with no error surfaced to the stage's caller in a form a human
+# would read as "the idle policy was not set". run_as_desktop_user must fail
+# LOUDLY here instead, naming why, rather than doing nothing.
+rasdu_err=$(mktemp)
+rasdu_rc=0
+bash -c '
+  . "$1"
+  SUDO=""
+  run_as_desktop_user someuser echo hello
+' _ "$REPO_ROOT/src/deck-session.sh" >/dev/null 2>"$rasdu_err" || rasdu_rc=$?
+[[ $rasdu_rc -ne 0 ]] ||
+  fail_test "run_as_desktop_user fails when SUDO is empty and this process is not root" \
+    "exited 0 -- meaning it either ran 'echo hello' as OUR uid (wrong user, silently) or ran '-u' as a command and swallowed the failure. Either way nothing readable reached the caller."
+grep -qF -- 'someuser' "$rasdu_err" ||
+  fail_test "the failure names the user it could not become" "$(cat "$rasdu_err")"
+grep -qiE -- '-u:? command not found' "$rasdu_err" &&
+  fail_test "the OLD bug reproduced: '-u' was executed as a command" \
+    "$(cat "$rasdu_err") -- run_as_desktop_user regressed to the unguarded \$SUDO -u form"
+pass "run_as_desktop_user, SUDO empty + not root: fails loudly naming the user, not '-u: command not found'"
+rm -f "$rasdu_err"
+
+# The three sites this bug actually lived in must route through the guarded
+# helper, not the raw form -- grepped on the SOURCE, so a future edit that
+# reintroduces '$SUDO -u' anywhere in the file is caught before it ships,
+# without needing root to exercise it.
+raw_sudo_u_sites=$(grep -n '\$SUDO -u ' "$REPO_ROOT/src/deck-session.sh" | grep -v '^[0-9]*:#' || true)
+[[ -z $raw_sudo_u_sites ]] ||
+  fail_test "no call site uses the unguarded '\$SUDO -u' form -- every one must go through run_as_desktop_user" \
+    "$raw_sudo_u_sites"
+pass "no call site in src/deck-session.sh uses the unguarded '\$SUDO -u <user>' form"
+
 echo "all deck-session.sh tests passed"

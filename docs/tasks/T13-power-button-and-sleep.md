@@ -3,7 +3,11 @@
 **Evidence and every citation: `docs/findings/T13-power-button-and-sleep.md`.
 Read it first — this file is the build order, not the argument.**
 
-**Status:** specified 2026-08-12 (session 22). Nothing built.
+**Status:** ✅ **BUILT AND HARDWARE-VERIFIED 2026-08-12 (session 22).**
+`stage-power-button` and `stage-boot-default-gaming` are both deployed and
+confirmed on the operator's Deck, by the operator's own hands — see the
+🟢 HARDWARE VERIFICATION block in `docs/findings/T13-power-button-and-sleep.md`.
+The stale line below ("nothing built") is kept as history; do not trust it.
 **Model:** Opus. This is hardware control logic on a device with no keyboard,
 and one of the changes can produce a suspend loop (R1). Same class as
 `docs/PLAN.md` §11.
