@@ -2244,7 +2244,7 @@ develop; all need it to confirm.
 
 | # | Requirement | Note |
 |---|---|---|
-| 1 | **Only the power button should wake the panel** — QAM should not | Deliberately narrowing the wake surface. ⚠️ Verify the mechanism above first: if QAM wakes it via `omarchy-menu` rather than via input, "stop QAM waking it" is a different change than it sounds |
+| 1 | **Only the power button should wake the panel** — QAM should not | ✅ **Coded 2026-08-12 (session 23), `deck_input.py`, commit `a4b1eab`** — `misc.key_press_enables_dpms`/`mouse_move_enables_dpms = false` spliced into `input.lua`, wired into `deck_configure.deck_steps()`. Not yet hardware-verified: `hyprctl getoption` both = `int: 0`, then press QAM while locked and confirm the panel stays dark |
 | 2 | **Display-on time should be ~20 s, not ~2 s** | 2 s is not enough to aim a trackpad at a password field. This is the lock screen's own idle timeout, distinct from the 150 s screensaver and the 86400 s lock in `shell.json` |
 | 3 | **The OSK should auto-hide after unlock** | It currently persists into the desktop session. Ours is summon-only (§5.27), so nothing dismisses it on unlock today |
 2. 🔴 **There is no `unlock` IPC.** `qs ipc show` gives the `lock` target exactly

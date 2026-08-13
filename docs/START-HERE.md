@@ -84,14 +84,32 @@ work without waiting for further instruction.**
 > - ✅ **`iso/bin/build` ran, supervised, 2026-08-12 (session 23) — see above.**
 >   🔴 **Next: the controller-only QEMU install run itself**, against the ISO
 >   this produced — this is what actually closes criterion 1, not the build.
-> - `~/.config/hypr/input.lua` still has no writer — the OSK's per-device XKB
->   block and the lock's `above_lock = 2` rule. `deck_monitors.py` (which
->   wrote the sibling file `monitors.lua` this session) already ships the
->   guard whatever writes this owes it —
->   `deck_monitors.snapshot_siblings`/`assert_siblings_preserved`.
-> - §5.24a's one remaining item: only the power button should wake the
->   *blanked lock panel* (QAM currently does too) — a Quickshell-side gate,
->   unrelated to T13's systemd suspend work. Do not conflate the two.
+> - ✅ **`input.lua`'s `above_lock = 2` rule and the DPMS wake-suppression fix
+>   both landed 2026-08-12 (session 23), commit `a4b1eab`.** New module
+>   `deck_input.py`, modelled on `deck_monitors.py`'s splice/sibling-guard
+>   pattern with its own markers, wired into `deck_configure.deck_steps()`.
+>   80/80 unit checks, 7/7 introduced faults caught by mutation testing,
+>   independently re-run and confirmed green. §5.24a's requirement #1 (only
+>   the power button wakes the blanked panel, not QAM) is now **code, not just
+>   research** — `misc.key_press_enables_dpms`/`mouse_move_enables_dpms =
+>   false` are in the spliced block. 🔴 **Still open, found by the same
+>   agent**: `omarchy-sleep-lock.service` masking (§5.6's OTHER lock producer)
+>   exists only as a dev-machine `stage-*` action in `src/deck-session.sh` —
+>   confirmed NOT wired into the live-ISO install path at all, so a fresh
+>   end-user install still ships this lock producer unmasked. Its own task,
+>   not folded into this one — same shape as `above_lock` was before today,
+>   don't let it go stale the same way.
+> - ✅ **The OSK's per-device XKB block already had a writer** — that was
+>   `src/deck-session.sh`'s `install_osk_kb_layout_rule`/`OSK_KB_RULE_BEGIN`/
+>   `END`, pre-existing and untouched by the above. (An earlier version of
+>   this bullet conflated it with `above_lock`'s gap; they were never the same
+>   gap — corrected here after actually reading the code.)
+> - §5.24a's one remaining item — only the power button should wake the
+>   *blanked lock panel* — **is now closed in code** (see above); what's left
+>   is hardware verification: `hyprctl getoption misc:key_press_enables_dpms`/
+>   `mouse_move_enables_dpms` both read `int: 0`, then press QAM while locked
+>   and confirm the panel stays dark. A Quickshell/Hyprland-config fix,
+>   unrelated to T13's systemd suspend work — do not conflate the two.
 > - The `Lid Switch` node question (T13 §8) — needs a physical trigger nobody
 >   has found a way to produce on a handheld with no lid. Likely stuck until
 >   someone thinks of one.
