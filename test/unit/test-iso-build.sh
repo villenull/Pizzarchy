@@ -303,11 +303,17 @@ linked=$(find "$NO_DOCKER_PATH" -maxdepth 1 | wc -l)
 STUB_DOCKER_PATH="$work/stub-docker-bin"
 mkdir -p "$STUB_DOCKER_PATH"
 ln -s "$NO_DOCKER_PATH"/* "$STUB_DOCKER_PATH/" 2>/dev/null || true
+#
+# It writes a few bytes rather than an empty file on purpose: section 23
+# asserts bin/build's size line against `stat` on this artifact, and a 0-byte
+# ISO would make "the number is the file's size" and "the number is zero"
+# indistinguishable.
 cat >"$STUB_DOCKER_PATH/docker" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >"$DOCKER_STUB_ARGS"
 mkdir -p "$DOCKER_STUB_RELEASE"
-: >"$DOCKER_STUB_RELEASE/omarchy-2026.08.11-x86_64.iso"
+printf 'fixture iso payload, stands in for six gigabytes\n' \
+  >"$DOCKER_STUB_RELEASE/omarchy-2026.08.11-x86_64.iso"
 EOF
 chmod +x "$STUB_DOCKER_PATH/docker"
 
@@ -987,12 +993,19 @@ pass "guard 6.5b catches a passwordless grant shipped INSIDE a mirror package an
 # ---------------------------------------------------------------------------
 # 18. The real repo's iso/ skeleton matches docs/tasks/T5-fork-plan.md §1.
 #
-# The submodule pin check is conditional: actions/checkout in
-# .github/workflows/ci.yml does not fetch submodules (no `submodules:` key),
-# so iso/upstream is an empty directory there. That is a CI-workflow
-# property this suite does not own and cannot fix -- skip that one
-# sub-assertion when the submodule isn't populated rather than failing on an
-# environment precondition, but say so out loud rather than passing quietly.
+# The submodule pin check is conditional: the lint-and-unit-test job in
+# .github/workflows/ci.yml -- the one that runs this suite -- does not fetch
+# submodules (no `submodules:` key on its actions/checkout), so iso/upstream is
+# an empty directory there. Skip that one sub-assertion when the submodule
+# isn't populated rather than failing on an environment precondition, but say
+# so out loud rather than passing quietly.
+#
+# ⚠️ T5g's iso-build job DOES set `submodules: true` -- it has to, because
+# bin/build refuses a submodule that is not exactly at the pin. So this is now
+# a per-job property rather than a property of the file, and
+# test/unit/test-ci-workflow.sh asserts BOTH halves: that the build job fetches
+# it and that the lint job still does not. If the lint job ever starts
+# fetching, this skip becomes a lie and that suite goes red first.
 # ---------------------------------------------------------------------------
 
 ISO_ROOT="$REPO_ROOT/iso"
@@ -1290,7 +1303,7 @@ if [[ -e "$ISO_ROOT/upstream/.git" ]]; then
   [[ -z $real_dirty ]] || fail "iso/upstream has no local modifications" "$real_dirty"
   pass "the real iso/upstream submodule is checked out clean, exactly at the UPSTREAM pin"
 else
-  printf 'skip - iso/upstream is not checked out in this environment (actions/checkout has no submodules: key in .github/workflows/ci.yml, which this suite does not own) -- the fixture-based tests above cover bin/build'"'"'s pin-verification logic regardless\n'
+  printf 'skip - iso/upstream is not checked out in this environment (the lint-and-unit-test job in .github/workflows/ci.yml deliberately has no submodules: key; the iso-build job does) -- the fixture-based tests above cover bin/build'"'"'s pin-verification logic regardless\n'
 fi
 
 # ---------------------------------------------------------------------------
@@ -1942,5 +1955,225 @@ run_build "$f47"
   fail "an underivable PKGBUILD must not be reported as a package that ships nothing" "$BUILD_OUT"
 [[ $BUILD_OUT != *"docker is required"* ]] || fail "it must stop the build" "$BUILD_OUT"
 pass "🔴 guard 6.4a fails loudly when it cannot derive a PKGBUILD's /usr/bin targets, rather than silently exempting nothing"
+
+# ===========================================================================
+# 22. Guard 6.4b's SECOND provider set -- the same widening, asked of the
+#     ARTIFACT.
+#
+# Section 21 fixed the cheap half. Until this section, 6.4b still asked only
+# omarchy-dev + omarchy-settings-dev, so a literal /usr/bin/omarchy-deck-* in
+# the orchestrator passed 6.4a and failed 6.4b -- after Docker, ~40 minutes and
+# ~6 GB later, with a diagnosis pointing at omarchy-dev's exclusion list, which
+# is not where the fix lives.
+#
+# The four claims here are the ones that make the widening a guard rather than
+# a hole: our built package IS a provider (a), the union still rejects a name
+# nobody ships (b), an absent package of ours is a REJECTION and not an absence
+# of expectation (c), and the package in the mirror is the one THIS build made
+# (d/e). Every one of them is a case where the guard must go red.
+# ===========================================================================
+
+# deck_mirror_fixture <fixture-root> <mirror-dir> -- the two runtime packages
+# every post-docker run needs, at the fixture's own runtime sha.
+deck_mirror_fixture() {
+  local mirror=$1
+  make_fake_package "$mirror" omarchy-dev "4.0.0.r1617.g${FIXTURE_RUNTIME_SHA:0:7}" \
+    omarchy-setup-system omarchy-provision-user
+  make_fake_package "$mirror" omarchy-settings-dev "4.0.0.r1617.g${FIXTURE_RUNTIME_SHA:0:7}" \
+    omarchy-upload-log
+}
+
+# add_deck_pkgbuild writes pkgver=0.1.0 pkgrel=1, so the built artifact this
+# suite fabricates has to agree with it -- that agreement is section 22d.
+DECK_PKG_VER=0.1.0-1
+
+# --- 22a. our own built package is a provider, and is named as one ----------
+
+f48="$work/f48"
+make_fixture "$f48"
+calls_the_applier "$f48"
+# shellcheck disable=SC2016  # PKGBUILD text: $pkgdir/$srcdir must reach the file UNEXPANDED -- that is the string guard 6.4a's derivation reads.
+add_deck_pkgbuild "$f48" '  install -Dm755 "$srcdir/omarchy-deck-apply-patches" "$pkgdir/usr/bin/omarchy-deck-apply-patches"'
+scratch48="$work/scratch-48"
+mirror48="$scratch48/offline-mirror-cache/mirror/offline"
+deck_mirror_fixture "$mirror48"
+make_fake_package "$mirror48" omarchy-deck "$DECK_PKG_VER" omarchy-deck-apply-patches
+BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f48" \
+  "OMARCHY_DECK_ISO_BUILD_DIR=$scratch48" \
+  "DOCKER_STUB_ARGS=$work/docker-args-48" \
+  "DOCKER_STUB_RELEASE=$scratch48/release"
+[[ $BUILD_STATUS -eq 0 ]] ||
+  fail "a binary our own built package ships must satisfy guard 6.4b" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"guard 6.4b OK"* ]] || fail "6.4b reports its pass" "$BUILD_OUT"
+[[ $BUILD_OUT == *"from our own built packages (omarchy-deck-apply-patches)"* ]] ||
+  fail "the pass line says WHICH names our packages covered, as 6.4a's does" "$BUILD_OUT"
+[[ $BUILD_OUT == *"guard 6.4b: omarchy-deck $DECK_PKG_VER built from configs/deck/pkgbuilds/omarchy-deck"* ]] ||
+  fail "6.4b reports the package it read, with its version and entry count" "$BUILD_OUT"
+pass "guard 6.4b accepts /usr/bin/omarchy-deck-apply-patches from our own BUILT package and names the provider"
+
+# --- 22b. 🔴 the union is not a bypass, and the artifact is not the recipe --
+#
+# 6.4a passes: the PKGBUILD's package() body installs the applier. The archive
+# in the mirror does not contain it. That gap -- recipe vs artifact -- is the
+# entire reason 6.4b exists, and it must not be widened away.
+f49="$work/f49"
+make_fixture "$f49"
+calls_the_applier "$f49"
+# shellcheck disable=SC2016  # PKGBUILD text: $pkgdir/$srcdir must reach the file UNEXPANDED -- that is the string guard 6.4a's derivation reads.
+add_deck_pkgbuild "$f49" '  install -Dm755 "$srcdir/omarchy-deck-apply-patches" "$pkgdir/usr/bin/omarchy-deck-apply-patches"'
+scratch49="$work/scratch-49"
+mirror49="$scratch49/offline-mirror-cache/mirror/offline"
+deck_mirror_fixture "$mirror49"
+make_fake_package "$mirror49" omarchy-deck "$DECK_PKG_VER" omarchy-deck-something-else
+BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f49" \
+  "OMARCHY_DECK_ISO_BUILD_DIR=$scratch49" \
+  "DOCKER_STUB_ARGS=$work/docker-args-49" \
+  "DOCKER_STUB_RELEASE=$scratch49/release"
+[[ $BUILD_STATUS -eq 1 ]] ||
+  fail "🔴 a name no BUILT package ships must still reject the ISO" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"guard 6.4a OK"* ]] ||
+  fail "6.4a should have passed here -- the recipe installs it; that is the gap 6.4b closes" "$BUILD_OUT"
+[[ $BUILD_OUT == *"guard 6.4b"*"/usr/bin/omarchy-deck-apply-patches"* ]] ||
+  fail "6.4b names the binary the packages do not contain" "$BUILD_OUT"
+# The two provider sets stay distinguishable -- different bugs, different fixes.
+[[ $BUILD_OUT == *"THE PINNED RUNTIME'S PACKAGES DO NOT SHIP IT"* && $BUILD_OUT == *"OUR PACKAGE DOES NOT SHIP IT EITHER"* ]] ||
+  fail "the refusal separates the two bugs and their two different fixes" "$BUILD_OUT"
+[[ $BUILD_OUT == *"our packages  our own packages (omarchy-deck) ship"*"omarchy-deck-something-else"* ]] ||
+  fail "the refusal prints what our built package DOES ship, so a wrong artifact is visible" "$BUILD_OUT"
+[[ -f "$scratch49/release/omarchy-2026.08.11-x86_64.iso.rejected" ]] ||
+  fail "an ISO rejected by the widened 6.4b is still renamed so it cannot be flashed" "$BUILD_OUT"
+pass "🔴 guard 6.4b's second provider set is a union, not a bypass: a name no built package ships still rejects the ISO"
+
+# --- 22c. 🔴 an absent package of ours is a REJECTION ----------------------
+#
+# Deliberately no call to our applier: the union is satisfied without our
+# package at all, so nothing but the missing-artifact check can fail this run.
+# That is the "found nothing == found no problems" shape, and it must be red.
+f50="$work/f50"
+make_fixture "$f50"
+# shellcheck disable=SC2016  # PKGBUILD text: $pkgdir/$srcdir must reach the file UNEXPANDED -- that is the string guard 6.4a's derivation reads.
+add_deck_pkgbuild "$f50" '  install -Dm755 "$srcdir/omarchy-deck-apply-patches" "$pkgdir/usr/bin/omarchy-deck-apply-patches"'
+scratch50="$work/scratch-50"
+mirror50="$scratch50/offline-mirror-cache/mirror/offline"
+deck_mirror_fixture "$mirror50"
+BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f50" \
+  "OMARCHY_DECK_ISO_BUILD_DIR=$scratch50" \
+  "DOCKER_STUB_ARGS=$work/docker-args-50" \
+  "DOCKER_STUB_RELEASE=$scratch50/release"
+[[ $BUILD_STATUS -eq 1 ]] ||
+  fail "🔴 a build that owed omarchy-deck and produced none must be rejected" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"no omarchy-deck package in"*"and this build owed one"* ]] ||
+  fail "the refusal says the package was owed, not merely absent" "$BUILD_OUT"
+[[ $BUILD_OUT == *"the local package build did not run"* ]] ||
+  fail "the refusal names the defect (the local build did not run), not a missing binary" "$BUILD_OUT"
+[[ $BUILD_OUT != *"guard 6.4b OK"* ]] ||
+  fail "🔴 it must not also report a pass -- the union was satisfied without our package" "$BUILD_OUT"
+[[ -f "$scratch50/release/omarchy-2026.08.11-x86_64.iso.rejected" ]] ||
+  fail "the ISO built without our package must not keep a flashable name" "$BUILD_OUT"
+pass "🔴 guard 6.4b rejects a build that owed one of our packages and produced none, even when every called binary resolves"
+
+# --- 22d. the package in the mirror is the one THIS build made -------------
+#
+# The offline mirror is a persistent bind mount (guard 6.3), so a previous
+# run's artifact outlives the run that made it. A version that disagrees with
+# the recipe means this build did not produce it.
+f51="$work/f51"
+make_fixture "$f51"
+calls_the_applier "$f51"
+# shellcheck disable=SC2016  # PKGBUILD text: $pkgdir/$srcdir must reach the file UNEXPANDED -- that is the string guard 6.4a's derivation reads.
+add_deck_pkgbuild "$f51" '  install -Dm755 "$srcdir/omarchy-deck-apply-patches" "$pkgdir/usr/bin/omarchy-deck-apply-patches"'
+scratch51="$work/scratch-51"
+mirror51="$scratch51/offline-mirror-cache/mirror/offline"
+deck_mirror_fixture "$mirror51"
+make_fake_package "$mirror51" omarchy-deck "0.0.9-1" omarchy-deck-apply-patches
+BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f51" \
+  "OMARCHY_DECK_ISO_BUILD_DIR=$scratch51" \
+  "DOCKER_STUB_ARGS=$work/docker-args-51" \
+  "DOCKER_STUB_RELEASE=$scratch51/release"
+[[ $BUILD_STATUS -eq 1 ]] ||
+  fail "a stale omarchy-deck left in the persistent mirror must be refused" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"is version '0.0.9-1'"*"says pkgver=0.1.0"* ]] ||
+  fail "the refusal quotes both versions -- the artifact's and the recipe's" "$BUILD_OUT"
+[[ $BUILD_OUT != *"guard 6.4b OK"* ]] ||
+  fail "a stale package must not also produce a pass line" "$BUILD_OUT"
+pass "guard 6.4b refuses an omarchy-deck whose version disagrees with the recipe this build carried (the persistent-mirror stale artifact)"
+
+# --- 22e. a version it cannot read is refused, not skipped -----------------
+f52="$work/f52"
+make_fixture "$f52"
+# shellcheck disable=SC2016  # PKGBUILD text: $pkgdir/$srcdir must reach the file UNEXPANDED -- that is the string guard 6.4a's derivation reads.
+add_deck_pkgbuild "$f52" '  install -Dm755 "$srcdir/omarchy-deck-apply-patches" "$pkgdir/usr/bin/omarchy-deck-apply-patches"'
+# The exact thing that PKGBUILD's own header forbids: a version derived at
+# build time. There is then nothing to compare the artifact against.
+# shellcheck disable=SC2016  # the $(...) must land in the PKGBUILD UNEXPANDED -- that is the case under test.
+sed -i 's/^pkgver=.*/pkgver=$(git describe --tags)/' \
+  "$f52/iso/overlay/configs/deck/pkgbuilds/omarchy-deck/PKGBUILD"
+scratch52="$work/scratch-52"
+mirror52="$scratch52/offline-mirror-cache/mirror/offline"
+deck_mirror_fixture "$mirror52"
+make_fake_package "$mirror52" omarchy-deck "$DECK_PKG_VER" omarchy-deck-apply-patches
+BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f52" \
+  "OMARCHY_DECK_ISO_BUILD_DIR=$scratch52" \
+  "DOCKER_STUB_ARGS=$work/docker-args-52" \
+  "DOCKER_STUB_RELEASE=$scratch52/release"
+[[ $BUILD_STATUS -eq 1 ]] ||
+  fail "a derived pkgver leaves nothing to compare against and must be refused" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"could not read a literal pkgver="* ]] ||
+  fail "the refusal explains that it could not derive the version" "$BUILD_OUT"
+pass "guard 6.4b refuses a PKGBUILD whose pkgver it cannot read rather than skipping the staleness check"
+
+# --- 22f. no packages of ours declared: said out loud, not passed silently --
+#
+# The legitimate empty case (an overlay with no configs/deck/pkgbuilds/) must
+# be reported as "nothing was owed", so a green log cannot be read as "our
+# package was checked and was fine".
+f53="$work/f53"
+make_fixture "$f53"
+scratch53="$work/scratch-53"
+mirror53="$scratch53/offline-mirror-cache/mirror/offline"
+deck_mirror_fixture "$mirror53"
+BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f53" \
+  "OMARCHY_DECK_ISO_BUILD_DIR=$scratch53" \
+  "DOCKER_STUB_ARGS=$work/docker-args-53" \
+  "DOCKER_STUB_RELEASE=$scratch53/release"
+[[ $BUILD_STATUS -eq 0 ]] || fail "an overlay that declares no packages of ours still builds" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"declares no configs/deck/pkgbuilds/*/PKGBUILD, so this build owes no package of ours"* ]] ||
+  fail "the empty case states that nothing was owed, rather than passing silently" "$BUILD_OUT"
+pass "guard 6.4b distinguishes 'no package of ours was owed' from 'our package was checked'"
+
+# ===========================================================================
+# 23. The size number (T5-iso-and-payload.md §4, T5g).
+#
+# One fixed machine-readable line, because .github/workflows/ci.yml's size gate
+# parses it. The assertion that matters is not that a number is printed but
+# that it is THE FILE'S size: a gate fed a constant would pass forever.
+# test/unit/test-ci-workflow.sh owns the other end of this coupling.
+# ===========================================================================
+
+f54="$work/f54"
+make_fixture "$f54"
+scratch54="$work/scratch-54"
+mirror54="$scratch54/offline-mirror-cache/mirror/offline"
+deck_mirror_fixture "$mirror54"
+BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f54" \
+  "OMARCHY_DECK_ISO_BUILD_DIR=$scratch54" \
+  "DOCKER_STUB_ARGS=$work/docker-args-54" \
+  "DOCKER_STUB_RELEASE=$scratch54/release"
+[[ $BUILD_STATUS -eq 0 ]] || fail "the size-line fixture build should succeed" "status=$BUILD_STATUS $BUILD_OUT"
+size_line=$(printf '%s\n' "$BUILD_OUT" | grep '^\[iso-build\] iso size: ' || true)
+[[ -n $size_line ]] || fail "bin/build prints an 'iso size:' line for a successful build" "$BUILD_OUT"
+[[ $(printf '%s\n' "$size_line" | grep -c .) -eq 1 ]] ||
+  fail "exactly one size line, or the gate cannot tell which number is the artifact's" "$size_line"
+reported_bytes=$(printf '%s\n' "$size_line" | sed -n 's/^\[iso-build\] iso size: \([0-9][0-9]*\) bytes.*/\1/p')
+[[ -n $reported_bytes ]] || fail "the size line carries a plain byte count the gate can parse" "$size_line"
+final_iso_path=$(printf '%s\n' "$BUILD_OUT" | sed -n 's/^\[iso-build\] build complete: //p')
+[[ -f $final_iso_path ]] || fail "the build names the artifact it produced" "$BUILD_OUT"
+actual_bytes=$(stat -c '%s' "$final_iso_path")
+[[ $reported_bytes == "$actual_bytes" ]] ||
+  fail "the reported size must be the artifact's real size" "reported=$reported_bytes actual=$actual_bytes"
+(( actual_bytes > 0 )) ||
+  fail "the fixture ISO must be non-empty, or 'the number is the size' and 'the number is zero' are the same assertion"
+[[ $size_line == *"GiB)"* ]] || fail "the size line also carries a human-readable GiB figure" "$size_line"
+pass "bin/build records the ISO size as a parseable byte count that equals the artifact's own size"
 
 printf '\nall iso-build tests passed\n'

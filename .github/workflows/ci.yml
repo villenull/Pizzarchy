@@ -12,24 +12,80 @@
 #                         always been test-*.sh; the comment was narrower than
 #                         the code, which is the direction that makes a reader
 #                         think a suite isn't running.)
-#   iso-install-test    — tags only. Builds the ISO and runs
-#                         vm-install-test.sh against it (T0 §1's tier-1
-#                         harness). NOTE: GitHub-hosted runners have no
-#                         /dev/kvm (confirmed absent from upstream
-#                         omarchy-iso's own CI for the same reason —
-#                         session 1 research), so this runs under TCG
-#                         software emulation, not KVM — vm-install-test.sh
-#                         detects this automatically and falls back, but
-#                         it will be much slower than a KVM-accelerated
-#                         local run. A self-hosted runner with KVM would
-#                         remove this constraint if the timeout below
-#                         proves too tight in practice.
+#   iso-build           — tags, or a deliberate workflow_dispatch. Runs
+#                         iso/bin/build for real, gates the resulting ISO's
+#                         size, and records size + sha256. T5g;
+#                         T5-iso-and-payload.md §4 (size) and §5 (build
+#                         reproducibly / CI builds it on tag).
+#
+# ---------------------------------------------------------------------------
+# 🔴 NOTHING IN THE iso-build JOB HAS EVER RUN. Read this before trusting it.
+# ---------------------------------------------------------------------------
+#
+# It was written and validated STATICALLY (test/unit/test-ci-workflow.sh: the
+# YAML parses, every path it names exists, its environment matches
+# iso/bin/build's actual interface, and the size gate is executed against
+# synthetic build logs including out-of-range ones). No ISO has been built by
+# CI, on this runner or any other. The first tag push is the experiment, and
+# it is expected to be the step that finds the problems.
+#
+# What that experiment is up against, stated as arithmetic rather than hope
+# (sizes MEASURED — docs/findings/T5a-parity.md A1, docs/tasks/T5-fork-plan.md
+# §7 "Measured numbers"):
+#
+#   * DISK. mkarchiso works inside the container at /var/cache/work, which is
+#     the container's writable layer — i.e. Docker's data-root, NOT one of the
+#     bind mounts. Uncompressed airootfs ~7.1 GB, the .sfs ~5.9 GB and the ISO
+#     ~6.3 GB can coexist there, so budget ~20 GB for Docker plus ~19 GB of
+#     host scratch (pacman cache + offline-mirror cache + /out). A hosted
+#     runner's / has ~14–21 GB free; /mnt has ~65 GB. That is why this job
+#     moves BOTH Docker's data-root and the build scratch onto /mnt, and why
+#     it checks free space before starting instead of dying at 90% with ENOSPC.
+#   * TIME. Two vCPUs, ~6 GB of packages to download, and a zstd squashfs over
+#     ~7 GB. The 40 minutes this takes on the dev machine is a floor, not an
+#     estimate; the job cap here is deliberately generous.
+#   * NETWORK. mirror.omarchy.org, pkgs.omarchy.org, Valve's repos, github.com
+#     for two full clones (basecamp/omarchy and omacom-io/omarchy-pkgs — their
+#     PKGBUILDs' pkgver() counts commits, so no shallow clone).
+#
+# If it turns out a hosted runner cannot do this, the fix is a self-hosted
+# runner (which also brings /dev/kvm, and with it the install test below) —
+# NOT a job trimmed until it goes green. A green tick that did not build an
+# ISO is worse than no job at all; that is the failure this whole repo keeps
+# paying for (docs/PROGRESS.md §5.30c).
+#
+# ---------------------------------------------------------------------------
+# Where the install test went (it used to be this job's second half)
+# ---------------------------------------------------------------------------
+#
+# GitHub-hosted runners have no /dev/kvm (confirmed absent from upstream
+# omarchy-iso's own CI for the same reason — session 1 research), so
+# vm-install-test.sh falls back to TCG software emulation. A full Omarchy
+# install is LUKS + pacstrap + ~1200 packages; under TCG that does not
+# plausibly fit beside a 1–3 h ISO build inside one job. So it is a step of
+# this job (the ISO never crosses a job boundary — a ~6 GB artifact round trip
+# would cost more than the install test), OFF unless explicitly asked for by
+# workflow_dispatch, and its first honest home is a self-hosted KVM runner.
 
 name: CI
 
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      build_iso:
+        description: "Build the ISO (~1-3 h). Tags do this automatically."
+        type: boolean
+        default: false
+      upload_iso:
+        description: "Also upload the ~6 GB ISO as an artifact (storage quota!)."
+        type: boolean
+        default: false
+      install_test:
+        description: "Run vm-install-test.sh against it (needs /dev/kvm to finish)."
+        type: boolean
+        default: false
 
 jobs:
   lint-and-unit-test:
@@ -122,47 +178,210 @@ jobs:
           done
           exit $status
 
-  # T5 (ISO build) hasn't landed yet — this job's ISO-build step is a
-  # placeholder until it does. Gated on a tag push so it doesn't block
-  # ordinary PRs on infrastructure that doesn't exist yet.
-  iso-install-test:
-    if: startsWith(github.ref, 'refs/tags/')
+  # T5g. Gated on a tag push (or a deliberate dispatch) so it never blocks an
+  # ordinary PR on a 1-3 h build. Read the 🔴 block at the top of this file
+  # first: none of this has been executed.
+  iso-build:
+    if: "startsWith(github.ref, 'refs/tags/') || github.event.inputs.build_iso == 'true'"
     needs: lint-and-unit-test
     runs-on: ubuntu-latest
+    # The dev-machine build is ~40 min on 16 threads with a warm cache. Two
+    # vCPUs and a cold everything is the case here; 5 h leaves the GitHub 6 h
+    # job cap as the backstop rather than this number.
+    timeout-minutes: 300
+    env:
+      # OUTSIDE the repo, which iso/bin/build refuses to build inside, and on
+      # /mnt, which is the only volume on a hosted runner large enough (see the
+      # DISK note at the top of this file).
+      OMARCHY_DECK_ISO_BUILD_DIR: /mnt/omarchy-deck-iso-build
+      ISO_BUILD_LOG: iso-build.log
     steps:
+      # submodules: true, unlike the lint job above. iso/bin/build verifies
+      # iso/upstream is a clean checkout exactly at iso/UPSTREAM's pin and
+      # refuses to build otherwise, so the submodule is not optional here.
+      # (The lint job deliberately does NOT fetch it: two unit suites skip
+      # their submodule-dependent assertions there and say so out loud.)
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
-      - name: Report KVM availability
+      - name: Host dependencies
         run: |
-          if [[ -e /dev/kvm ]]; then
-            echo "/dev/kvm present"
-          else
-            echo "/dev/kvm absent — vm-install-test.sh will fall back to TCG (slow, expected on GitHub-hosted runners)"
+          set -euo pipefail
+          sudo apt-get update
+          # rsync    — bin/build rsyncs iso/overlay/configs over the scratch tree
+          # bsdtar   — guards 6.4b and 6.5b read the BUILT packages with it, and
+          #            both refuse to run without it rather than skipping
+          sudo apt-get install -y rsync libarchive-tools
+
+      - name: Make room, and prove there is room
+        run: |
+          set -euo pipefail
+          echo "::group::before"
+          df -h / /mnt
+          echo "::endgroup::"
+
+          # The preinstalled toolchains nothing here uses. ~30 GB on a standard
+          # ubuntu-latest image; failures are ignored on purpose (an image that
+          # stops shipping one of these is not a reason to fail the build).
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+
+          # Docker's data-root is where mkarchiso's work dir actually lands
+          # (it is the container's writable layer, not a bind mount), so it has
+          # to be on the big volume too.
+          sudo mkdir -p /mnt/docker
+          sudo systemctl stop docker
+          printf '{ "data-root": "/mnt/docker" }\n' | sudo tee /etc/docker/daemon.json
+          sudo systemctl start docker
+          docker info --format 'docker data-root: {{.DockerRootDir}}'
+
+          sudo mkdir -p "$OMARCHY_DECK_ISO_BUILD_DIR"
+          sudo chown "$(id -u):$(id -g)" "$OMARCHY_DECK_ISO_BUILD_DIR"
+
+          echo "::group::after"
+          df -h / /mnt
+          echo "::endgroup::"
+
+          # Fail HERE, with the number, rather than at 90% of a two-hour build
+          # with ENOSPC. 45 GiB is Docker (~20) + host scratch (~19) + slack,
+          # from the measured sizes quoted at the top of this file.
+          need_kib=$(( 45 * 1024 * 1024 ))
+          have_kib=$(df -P --output=avail /mnt | tail -n1 | tr -d ' ')
+          if (( have_kib < need_kib )); then
+            echo "/mnt has $(( have_kib / 1024 / 1024 )) GiB free; this build needs ~45 GiB." >&2
+            echo "A hosted runner may simply be too small for it — see the DISK note" >&2
+            echo "in .github/workflows/ci.yml. Do not 'fix' this by shrinking the check." >&2
+            exit 1
           fi
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 qemu-utils ovmf parted dosfstools mtools btrfs-progs jq openssl socat
-
+      # No OMARCHY_ISO_REF / OMARCHY_MIRROR here on purpose: bin/build pins both
+      # itself (guard 6.1) and REFUSES to run if the environment disagrees.
+      # No OMARCHY_DECK_PKGS_SRC either: iso/PKGS exists, so bin/build clones
+      # omacom-io/omarchy-pkgs at that pin. If iso/PKGS is ever deleted this job
+      # must start setting it, and test/unit/test-ci-workflow.sh asserts that
+      # coupling rather than leaving it to be discovered here.
       - name: Build ISO
         run: |
-          echo "TODO(T5): no ISO build entry point exists in this repo yet." >&2
-          echo "Once omarchy-deck-iso (or this repo's own build step) lands," >&2
-          echo "invoke it here to produce the .iso this job tests." >&2
-          exit 1
+          set -euo pipefail
+          ./iso/bin/build 2>&1 | tee "$ISO_BUILD_LOG"
 
-      - name: Run install test
+      # 🔴 A GATE THAT CANNOT FAIL IS NOT A GATE. This step is extracted and
+      # executed against synthetic logs by test/unit/test-ci-workflow.sh —
+      # in range, under, over, absent and ambiguous — so it is the one part of
+      # this job that has actually been run.
+      #
+      # The bounds are wide, and deliberately so. MEASURED anchors:
+      #   6,390,581,248  the stock reference ISO (docs/PROGRESS.md §1.1)
+      #   6,273,040,384  our pinned build before T5c's mirror content
+      #                  (docs/findings/T5a-parity.md A1)
+      #     +570,425,344 T5c's +544 MiB of Valve/Deck packages, ~1:1 on ISO
+      #                  size because the mirror is stored uncompressed inside
+      #                  the squashfs (T5-fork-plan.md §7)
+      #   => ~6.84 GB expected today
+      # Everything except our own three locally built packages still rolls with
+      # `edge`, and 2 days of drift alone moved an ISO by 117 MB, so a tight
+      # band would go red for reasons nobody caused — the false positive that
+      # teaches people to ignore a check (docs/PROGRESS.md §5.17). This catches
+      # the failures size can honestly detect: an ISO with no offline mirror in
+      # it, and runaway growth. "Did the Deck packages land?" is asked properly,
+      # by name, elsewhere — deck-nvidia-dry-run.sh and guard 6.4b.
+      - name: ISO size gate
+        env:
+          ISO_SIZE_MIN_BYTES: "6000000000"
+          ISO_SIZE_MAX_BYTES: "8000000000"
         run: |
-          shopt -s nullglob
-          isos=(*.iso)
-          [[ ${#isos[@]} -eq 1 ]] || { echo "expected exactly one built .iso, found ${#isos[@]}"; exit 1; }
-          VM_INSTALL_TIMEOUT_SEC=3600 ./test/vm/vm-install-test.sh "${isos[0]}"
+          set -euo pipefail
+          if [[ ! -f $ISO_BUILD_LOG ]]; then
+            echo "no build log at $ISO_BUILD_LOG — the gate has nothing to read" >&2
+            exit 1
+          fi
+          matches=$(grep -c '^\[iso-build\] iso size: [0-9][0-9]* bytes' "$ISO_BUILD_LOG" || true)
+          if [[ $matches -ne 1 ]]; then
+            echo "expected exactly 1 'iso size:' line in $ISO_BUILD_LOG, found $matches." >&2
+            echo "iso/bin/build prints it once per successful build; if its format changed," >&2
+            echo "this gate has been silently matching nothing — which passes everything." >&2
+            exit 1
+          fi
+          bytes=$(sed -n 's/^\[iso-build\] iso size: \([0-9][0-9]*\) bytes.*/\1/p' "$ISO_BUILD_LOG")
+          gib=$(( bytes * 100 / 1073741824 ))
+          printf 'ISO size: %s bytes (%d.%02d GiB)\n' "$bytes" $(( gib / 100 )) $(( gib % 100 ))
+          if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+            printf '### ISO size\n\n`%s` bytes (%d.%02d GiB), gate `%s`..`%s`\n' \
+              "$bytes" $(( gib / 100 )) $(( gib % 100 )) \
+              "$ISO_SIZE_MIN_BYTES" "$ISO_SIZE_MAX_BYTES" >>"$GITHUB_STEP_SUMMARY"
+          fi
+          if (( bytes < ISO_SIZE_MIN_BYTES )); then
+            echo "ISO is $bytes bytes, below the $ISO_SIZE_MIN_BYTES floor." >&2
+            echo "An image this small has lost something structural — most likely the" >&2
+            echo "offline mirror, which is ~6 GB of the artifact. Do not lower the floor" >&2
+            echo "to make this pass; find what is missing." >&2
+            exit 1
+          fi
+          if (( bytes > ISO_SIZE_MAX_BYTES )); then
+            echo "ISO is $bytes bytes, above the $ISO_SIZE_MAX_BYTES ceiling." >&2
+            echo "Something is being carried that was not budgeted for. Raising the" >&2
+            echo "ceiling is a decision (and a USB-target question), not a fix." >&2
+            exit 1
+          fi
 
-      - name: Upload ISO artifact
+      - name: Record size and checksum
+        run: |
+          set -euo pipefail
+          iso=$(sed -n 's/^\[iso-build\] build complete: //p' "$ISO_BUILD_LOG")
+          [[ -n $iso && -f $iso ]] || { echo "could not locate the built ISO from the log" >&2; exit 1; }
+          {
+            echo "file: $(basename -- "$iso")"
+            echo "bytes: $(stat -c '%s' "$iso")"
+            echo "sha256: $(sha256sum "$iso" | cut -d' ' -f1)"
+            echo "upstream: $(cat iso/UPSTREAM)"
+            echo "runtime: $(cat iso/RUNTIME)"
+            echo "pkgs: $(cat iso/PKGS)"
+            echo "ref: ${GITHUB_REF:-unknown}"
+          } | tee iso-manifest.txt
+
+      # Always, and small: the log and the manifest are what a failed run needs
+      # and what a successful one is asked to record (T5-iso-and-payload.md §4,
+      # "record it in docs/PROGRESS.md" — this is the number to copy).
+      - name: Upload build log and manifest
         if: always()
         uses: actions/upload-artifact@v4
         with:
+          name: omarchy-deck-iso-manifest
+          path: |
+            iso-build.log
+            iso-manifest.txt
+          if-no-files-found: warn
+
+      # The ISO itself is ~6.4 GB. On a private repo's free Actions storage
+      # (500 MB) one upload does not fit, and the upload itself costs minutes,
+      # so it is opt-in rather than a surprise. §5's "publishes as an artifact"
+      # is met by the manifest by default and by this when asked.
+      - name: Upload ISO artifact
+        if: github.event.inputs.upload_iso == 'true'
+        uses: actions/upload-artifact@v4
+        with:
           name: omarchy-deck-iso
-          path: "*.iso"
-          if-no-files-found: ignore
+          path: /mnt/omarchy-deck-iso-build/release/*.iso
+          if-no-files-found: error
+          compression-level: 0
+
+      # OFF by default — see "Where the install test went" at the top. Left in
+      # place, and in this job, because when a KVM runner exists this is the
+      # step that becomes real, and a step that has to be re-derived from
+      # scratch is a step that does not come back.
+      - name: Run install test
+        if: github.event.inputs.install_test == 'true'
+        run: |
+          set -euo pipefail
+          if [[ -e /dev/kvm ]]; then
+            echo "/dev/kvm present"
+          else
+            echo "/dev/kvm absent — vm-install-test.sh falls back to TCG. A full"
+            echo "install under TCG is not expected to finish inside this job."
+          fi
+          sudo apt-get install -y qemu-system-x86 qemu-utils ovmf parted \
+            dosfstools mtools btrfs-progs jq openssl socat
+          iso=$(sed -n 's/^\[iso-build\] build complete: //p' "$ISO_BUILD_LOG")
+          [[ -n $iso && -f $iso ]] || { echo "no ISO to test" >&2; exit 1; }
+          VM_INSTALL_TIMEOUT_SEC=3600 ./test/vm/vm-install-test.sh "$iso"

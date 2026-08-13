@@ -51,12 +51,18 @@
 #            it refuses the build before six gigabytes of downloads.
 #      6.4b  AFTER docker, on the .pkg.tar.zst files the build actually
 #            produced: the same names exist as usr/bin/<name> members of
-#            omarchy-dev or omarchy-settings-dev. This is the sufficient
-#            half. The two packages are checked as a UNION because that is
+#            omarchy-dev, omarchy-settings-dev, or one of OUR OWN locally
+#            built packages (configs/deck/pkgbuilds/*). This is the
+#            sufficient half. They are checked as a UNION because that is
 #            how they install: omarchy-dev's PKGBUILD ships all of bin/
 #            EXCEPT omarchy-debug, omarchy-debug-idle and omarchy-upload-log,
 #            which omarchy-settings-dev ships instead, and omarchy-dev
-#            hard-depends on omarchy-settings-dev.
+#            hard-depends on omarchy-settings-dev; and omarchy-deck ships
+#            /usr/bin/omarchy-deck-apply-patches, which the pinned runtime
+#            will never contain. The union keeps the sets DISTINGUISHABLE:
+#            "the pinned runtime does not ship this" and "our package does
+#            not ship this either" are different bugs with different fixes,
+#            and both halves say which one they mean.
 #
 #      6.4b also asserts the pin TOOK EFFECT: both PKGBUILDs derive pkgver
 #      as <base>.r<count>.g<short sha> from the checkout's git history, so a
@@ -575,6 +581,28 @@ else
   DECK_PROVIDER_NOTE="there is no omarchy-deck PKGBUILD at ${DECK_PKGBUILD#"$SCRATCH_SRC"/} in the overlaid tree, so our package provides nothing"
 fi
 
+# WHICH PACKAGES OF OURS THIS BUILD OWES, derived here and consumed by 6.4b.
+#
+# The patched builder/build-iso.sh (iso/overlay/patches/deck-packages.patch,
+# seam S4) declares the set exactly once, as "every directory under
+# configs/deck/pkgbuilds/ that holds a PKGBUILD", and builds each one straight
+# into the offline mirror. Deriving the same set from the same directory -- in
+# the OVERLAID tree, which is the copy the container was handed -- is what lets
+# 6.4b say "this package should be in the mirror and is not" instead of
+# discovering an absence it has no expectation to compare against.
+#
+# Read here rather than in 6.4b's own block only because the scratch tree is
+# what it is at this point and nothing between here and Docker touches it; the
+# consumer is 300 lines down.
+DECK_PKGBUILDS_ROOT="$SCRATCH_SRC/configs/deck/pkgbuilds"
+DECK_PACKAGE_NAMES=()
+if [[ -d $DECK_PKGBUILDS_ROOT ]]; then
+  while IFS= read -r deck_pkg_dir; do
+    [[ -f "$deck_pkg_dir/PKGBUILD" ]] || continue
+    DECK_PACKAGE_NAMES+=("$(basename -- "$deck_pkg_dir")")
+  done < <(find "$DECK_PKGBUILDS_ROOT" -mindepth 1 -maxdepth 1 -type d | sort)
+fi
+
 # The union of the two provider sets. It is a union, not a bypass: a name that
 # neither ships is still a hard failure, and the message below has to say WHICH
 # provider was supposed to have it, because they are different bugs with
@@ -947,12 +975,12 @@ latest_iso=$(find "${built_isos[@]}" -maxdepth 0 -printf '%T@ %p\n' | sort -rn |
 # ---------------------------------------------------------------------------
 # Guard 6.4b -- the same coupling, re-asked of the artifact that will ship.
 #
-# 6.4a read the runtime CHECKOUT; this reads the .pkg.tar.zst files
-# builder/build-omarchy-packages.sh actually produced, which is what the
-# target installs. They can differ: omarchy-dev's PKGBUILD ships bin/*
-# except omarchy-debug, omarchy-debug-idle and omarchy-upload-log, which
+# 6.4a read the runtime CHECKOUT and our PKGBUILD (a recipe); this reads the
+# .pkg.tar.zst files the build actually produced, which is what the target
+# installs. They can differ: omarchy-dev's PKGBUILD ships bin/* except
+# omarchy-debug, omarchy-debug-idle and omarchy-upload-log, which
 # omarchy-settings-dev ships instead -- so the honest provider set is the
-# UNION of the two packages, and only the packages know it.
+# UNION of the packages, and only the packages know it.
 #
 # The packages are readable from here because the container writes the
 # offline mirror into a bind mount (build-iso.sh's
@@ -967,16 +995,35 @@ latest_iso=$(find "${built_isos[@]}" -maxdepth 0 -printf '%T@ %p\n' | sort -rn |
 # --local-source silently not having applied is precisely the failure this
 # slice exists to prevent, and it is invisible in a green build log.
 #
-# ⚠️ OWED: the second provider set 6.4a just grew is NOT here yet. 6.4a now
-# accepts a name that our own omarchy-deck package's PKGBUILD installs into
-# /usr/bin; this half still asks only omarchy-dev + omarchy-settings-dev. So
-# the day a literal /usr/bin/omarchy-deck-* appears in the orchestrator, 6.4a
-# passes and THIS guard fails -- after Docker, with the wrong diagnosis
-# ("check pkgbuilds/omarchy-dev's package() exclusion list"), which is the same
-# wrong-diagnosis bug 6.4a was just fixed for, moved six gigabytes later. The
-# fix is symmetric: read the built omarchy-deck package out of the offline
-# mirror and add its usr/bin members to PROVIDED_BINS. Deliberately left for
-# the slice that owns the built package, and it needs its own negative test.
+# ✅ THE SYMMETRY 6.4a GREW FIRST IS NOW HERE. This half used to ask only
+# omarchy-dev + omarchy-settings-dev, so the day a literal
+# /usr/bin/omarchy-deck-* appeared in the orchestrator, 6.4a passed and this
+# guard failed -- after Docker, with the wrong diagnosis ("check
+# pkgbuilds/omarchy-dev's package() exclusion list"), i.e. the same
+# wrong-diagnosis bug 6.4a had just been fixed for, six gigabytes later. It now
+# reads OUR built packages out of the same offline mirror, by the same rule
+# (.PKGINFO is the authority on which package a file is; usr/bin/* members are
+# the provider set), and keeps the two sets separate in every message.
+#
+# 🔴 AN ABSENT PACKAGE OF OURS IS A REJECTION, NOT A QUIET PASS. The set of
+# packages we owe is derived above from configs/deck/pkgbuilds/*/PKGBUILD in the
+# OVERLAID tree -- the same single declaration the patched build-iso.sh builds
+# from (seam S4, "CONSUMER 1"). So "the mirror has no omarchy-deck" is not an
+# absence of expectation, it is an expectation that went unmet: the local
+# package build did not run. Passing on it would be this project's recurring
+# failure -- "found nothing" reported as "found no problems"
+# (docs/PROGRESS.md §5.30c) -- and the consequence is concrete, because
+# omarchy-deck is listed in deck-install.packages: pacstrap fails on a target
+# the offline mirror does not carry, ~1000 packages into an install, on a
+# device with no terminal.
+#
+# The version question is asked of our packages too, but differently, because
+# the pin is a different one. omarchy-dev's version must carry iso/RUNTIME's
+# sha; omarchy-deck's pkgver is hand-set in a commit (its PKGBUILD forbids a
+# derived one, since /configs is a bind mount with no .git), so the pin is the
+# recipe itself. The offline mirror is PERSISTENT across builds (guard 6.3), so
+# without this a build whose deck-packages.patch stopped applying would silently
+# ship the PREVIOUS run's omarchy-deck -- present, readable, and stale.
 # ---------------------------------------------------------------------------
 
 OFFLINE_MIRROR_DIR="$OFFLINE_MIRROR_CACHE_DIR/mirror/offline"
@@ -1013,63 +1060,172 @@ command -v bsdtar >/dev/null 2>&1 ||
 [[ -d $OFFLINE_MIRROR_DIR ]] ||
   reject_iso "guard 6.4b: no offline mirror at $OFFLINE_MIRROR_DIR after a successful build. The container should have written the locally built packages there."
 
-PROVIDED_BINS=()
-for pkg_name in "$RUNTIME_PACKAGE" "$SETTINGS_PACKAGE"; do
+# find_mirror_package <pkgname> -- sets MIRROR_PKG_FILE, MIRROR_PKG_VER and
+# MIRROR_PKG_BINS for the one package of that name in the offline mirror, or
+# leaves MIRROR_PKG_FILE empty if there is none. Rejects on ambiguity: two
+# archives for one name means the ISO's contents cannot be attributed to
+# either, which is not a state any check downstream can reason about.
+MIRROR_PKG_FILE=""
+MIRROR_PKG_VER=""
+MIRROR_PKG_BINS=()
+find_mirror_package() {
+  local pkg_name=$1 candidate
+  MIRROR_PKG_FILE=""
+  MIRROR_PKG_VER=""
+  MIRROR_PKG_BINS=()
   shopt -s nullglob
-  pkg_candidates=("$OFFLINE_MIRROR_DIR/$pkg_name-"*.pkg.tar.*)
+  local candidates=("$OFFLINE_MIRROR_DIR/$pkg_name-"*.pkg.tar.*)
   shopt -u nullglob
-
-  pkg_file=""
-  pkg_version=""
-  for candidate in "${pkg_candidates[@]}"; do
+  for candidate in "${candidates[@]}"; do
     [[ $candidate == *.sig ]] && continue
     inspect_package "$candidate"
     # The glob is a prefix match; .PKGINFO is the authority on which package
     # this file actually is.
     [[ $PKG_NAME == "$pkg_name" ]] || continue
-    [[ -z $pkg_file ]] ||
+    [[ -z $MIRROR_PKG_FILE ]] ||
       reject_iso "guard 6.4b: more than one $pkg_name package in $OFFLINE_MIRROR_DIR. Cannot tell which one the ISO carries, so cannot verify either."
-    pkg_file=$candidate
-    pkg_version=$PKG_VER
-    PROVIDED_BINS+=("${PKG_BINS[@]}")
+    MIRROR_PKG_FILE=$candidate
+    MIRROR_PKG_VER=$PKG_VER
+    MIRROR_PKG_BINS=("${PKG_BINS[@]}")
   done
+}
 
-  [[ -n $pkg_file ]] ||
+# --- provider set 1: the pinned runtime's own packages ---------------------
+
+RUNTIME_PROVIDED_BINS=()
+for pkg_name in "$RUNTIME_PACKAGE" "$SETTINGS_PACKAGE"; do
+  find_mirror_package "$pkg_name"
+
+  [[ -n $MIRROR_PKG_FILE ]] ||
     reject_iso "guard 6.4b: no $pkg_name package in $OFFLINE_MIRROR_DIR. --local-source should have built one from $RUNTIME_SLUG@$RUNTIME_SHORT; its absence means the local build did not run and the ISO's runtime came from the '$BUILD_MIRROR' channel instead -- an unpinned runtime, which is the whole thing this slice removes."
 
-  case $pkg_version in
+  case $MIRROR_PKG_VER in
     *".g$RUNTIME_SHORT"*) ;;
-    *) reject_iso "guard 6.4b: $pkg_name is version '$pkg_version', which does not carry iso/RUNTIME's commit ($RUNTIME_SHORT). Both PKGBUILDs derive pkgver from the source tree's git history, so this package was NOT built from $RUNTIME_SLUG@$RUNTIME_HEAD. The runtime pin did not take effect." ;;
+    *) reject_iso "guard 6.4b: $pkg_name is version '$MIRROR_PKG_VER', which does not carry iso/RUNTIME's commit ($RUNTIME_SHORT). Both PKGBUILDs derive pkgver from the source tree's git history, so this package was NOT built from $RUNTIME_SLUG@$RUNTIME_HEAD. The runtime pin did not take effect." ;;
   esac
-  build_log "guard 6.4b: $pkg_name $pkg_version built from $RUNTIME_SLUG@$RUNTIME_SHORT (${#PKG_BINS[@]} usr/bin entries)"
+  RUNTIME_PROVIDED_BINS+=("${MIRROR_PKG_BINS[@]}")
+  build_log "guard 6.4b: $pkg_name $MIRROR_PKG_VER built from $RUNTIME_SLUG@$RUNTIME_SHORT (${#MIRROR_PKG_BINS[@]} usr/bin entries)"
 done
 
-(( ${#PROVIDED_BINS[@]} > 0 )) ||
+(( ${#RUNTIME_PROVIDED_BINS[@]} > 0 )) ||
   reject_iso "guard 6.4b: the built packages ship no usr/bin members at all. That is not a runtime; refusing to report a pass."
 
+# --- provider set 2: the packages WE build (the symmetric half) ------------
+#
+# Same mirror, same rule, separate list -- see the block header for why an
+# absence here is a rejection and why the version question is asked against
+# the recipe rather than against iso/RUNTIME.
+
+DECK_BUILT_BINS=()
+DECK_BUILT_NOTE=""
+if (( ${#DECK_PACKAGE_NAMES[@]} == 0 )); then
+  DECK_BUILT_NOTE="the overlaid tree declares no configs/deck/pkgbuilds/*/PKGBUILD, so this build owes no package of ours and the provider set is the runtime's alone"
+  build_log "guard 6.4b: $DECK_BUILT_NOTE"
+else
+  for pkg_name in "${DECK_PACKAGE_NAMES[@]}"; do
+    # The recipe's hand-set version, read from the copy the container built
+    # from. Under-deriving must not be quiet (6.4a's lesson): a pkgver this
+    # cannot read is refused rather than skipped, because a skipped version
+    # check is indistinguishable from a passing one in a green log.
+    recipe_pkgver=$(sed -n 's/^pkgver=//p' "$DECK_PKGBUILDS_ROOT/$pkg_name/PKGBUILD" | head -n1)
+    case $recipe_pkgver in
+      ""|*'$'*|*'`'*|*'('*)
+        reject_iso "guard 6.4b: could not read a literal pkgver= out of configs/deck/pkgbuilds/$pkg_name/PKGBUILD (got '$recipe_pkgver').
+
+  That file's own rules forbid a derived pkgver -- /configs is a read-only bind
+  mount with no .git in it, and a version that moves per build breaks the
+  'exactly one artifact per name' check in the patched build-iso.sh. Without a
+  literal version here there is nothing to compare the built package against,
+  and the offline mirror is persistent across builds, so a stale artifact from
+  a previous run would pass unnoticed. Set pkgver by hand, in a commit." ;;
+    esac
+
+    find_mirror_package "$pkg_name"
+
+    [[ -n $MIRROR_PKG_FILE ]] ||
+      reject_iso "guard 6.4b: no $pkg_name package in $OFFLINE_MIRROR_DIR, and this build owed one.
+
+  configs/deck/pkgbuilds/$pkg_name/PKGBUILD exists in the overlaid tree, and
+  the patched builder/build-iso.sh builds every such directory straight into
+  this mirror (seam S4). So its absence after a SUCCESSFUL container run means
+  the local package build did not run at all -- deck-packages.patch did not
+  reach this build, or the mirror was pruned after the package was placed.
+
+  This is a defect, not an exemption. Reporting it as a pass would be
+  'found nothing' recorded as 'found no problems'. The ISO would install with
+  no $pkg_name on the target -- and $pkg_name is named in
+  configs/deck/deck-install.packages, so pacstrap fails on a package the
+  offline mirror does not carry, ~1000 packages into an install, on a device
+  with no terminal."
+
+    case $MIRROR_PKG_VER in
+      "$recipe_pkgver"|"$recipe_pkgver"-*|*:"$recipe_pkgver"|*:"$recipe_pkgver"-*) ;;
+      *) reject_iso "guard 6.4b: $pkg_name in $OFFLINE_MIRROR_DIR is version '$MIRROR_PKG_VER', but configs/deck/pkgbuilds/$pkg_name/PKGBUILD says pkgver=$recipe_pkgver.
+
+  The offline mirror is a persistent bind mount across builds (guard 6.3), so
+  the likeliest cause is that THIS build did not produce the package and a
+  previous run's artifact is still sitting there. The ISO would ship a
+  $pkg_name built from a recipe nobody in this build ever read." ;;
+    esac
+
+    DECK_BUILT_BINS+=("${MIRROR_PKG_BINS[@]}")
+    build_log "guard 6.4b: $pkg_name $MIRROR_PKG_VER built from configs/deck/pkgbuilds/$pkg_name (${#MIRROR_PKG_BINS[@]} usr/bin entries)"
+  done
+  DECK_BUILT_NOTE="our own packages (${DECK_PACKAGE_NAMES[*]}) ship ${#DECK_BUILT_BINS[@]} /usr/bin entries between them"
+  (( ${#DECK_BUILT_BINS[@]} == 0 )) ||
+    DECK_BUILT_NOTE="$DECK_BUILT_NOTE: ${DECK_BUILT_BINS[*]}"
+fi
+
+# --- the union. Not a bypass: a name neither set covers still rejects. ------
+
 missing_bins=()
+deck_built_supplied=()
 for want in "${REQUIRED_TARGET_BINS[@]}"; do
   found=0
-  for have in "${PROVIDED_BINS[@]}"; do
+  for have in "${RUNTIME_PROVIDED_BINS[@]}"; do
     [[ $want == "$have" ]] && { found=1; break; }
   done
+  if (( ! found )); then
+    for have in "${DECK_BUILT_BINS[@]}"; do
+      [[ $want == "$have" ]] && { found=1; deck_built_supplied+=("$want"); break; }
+    done
+  fi
   (( found )) || missing_bins+=("$want")
 done
 
 if (( ${#missing_bins[@]} > 0 )); then
   reject_iso "guard 6.4b: the ISO's orchestrator calls binaries the packages it carries do not contain.
 
-  installer   $UPSTREAM_SLUG@$upstream_head (iso/UPSTREAM)
-  runtime     $RUNTIME_SLUG@$RUNTIME_HEAD (iso/RUNTIME)
+  installer     $UPSTREAM_SLUG@$upstream_head (iso/UPSTREAM)
+  runtime       $RUNTIME_SLUG@$RUNTIME_HEAD (iso/RUNTIME)
+  runtime pkgs  $RUNTIME_PACKAGE + $SETTINGS_PACKAGE (${#RUNTIME_PROVIDED_BINS[@]} usr/bin entries between them)
+  our packages  $DECK_BUILT_NOTE
 
-  Missing from $RUNTIME_PACKAGE + $SETTINGS_PACKAGE (${#PROVIDED_BINS[@]} usr/bin entries between them):
+  Shipped by neither provider, in the artifacts this build produced:
 $(printf '    /usr/bin/%s\n' "${missing_bins[@]}")
-  Guard 6.4a passed on the checkout, so the file exists in bin/ and the
-  PKGBUILD did not install it -- check pkgbuilds/$RUNTIME_PACKAGE's package()
-  exclusion list in the pkgs checkout."
+  Two different bugs wear this shape, and the fix is not the same one:
+
+    * THE PINNED RUNTIME'S PACKAGES DO NOT SHIP IT. Guard 6.4a passed on the
+      checkout, so the file IS in bin/ and the PKGBUILD did not install it --
+      check pkgbuilds/$RUNTIME_PACKAGE's package() exclusion list in the pkgs
+      checkout ($PKGS_SRC).
+
+    * OUR PACKAGE DOES NOT SHIP IT EITHER. If the name is one of ours, the pins
+      are both fine: the built package on the 'our packages' line above does not
+      contain usr/bin/<name>. 6.4a reads the PKGBUILD's package() body and this
+      half reads the ARCHIVE, so a name that satisfied 6.4a and fails here means
+      the recipe and the artifact disagree -- the install line was changed,
+      conditioned, or never ran.
+
+  Left alone, either one fails at 'Configuring system', phase 5 of 14, AFTER
+  partitioning, LUKS, pacstrap and ~1200 packages."
 fi
 
-build_log "guard 6.4b OK: all ${#REQUIRED_TARGET_BINS[@]} orchestrator-called binaries are present in the packages this ISO carries"
+if (( ${#deck_built_supplied[@]} > 0 )); then
+  build_log "guard 6.4b OK: all ${#REQUIRED_TARGET_BINS[@]} orchestrator-called binaries are present in the packages this ISO carries -- ${#deck_built_supplied[@]} from our own built packages (${deck_built_supplied[*]}), the rest from $RUNTIME_PACKAGE + $SETTINGS_PACKAGE (${#RUNTIME_PROVIDED_BINS[@]} usr/bin entries)"
+else
+  build_log "guard 6.4b OK: all ${#REQUIRED_TARGET_BINS[@]} orchestrator-called binaries are present in the packages this ISO carries -- all from $RUNTIME_PACKAGE + $SETTINGS_PACKAGE (${#RUNTIME_PROVIDED_BINS[@]} usr/bin entries); $DECK_BUILT_NOTE"
+fi
 
 # ---------------------------------------------------------------------------
 # Guard 6.5b -- the payload audit, re-asked of what the build actually produced.
@@ -1121,6 +1277,30 @@ case $latest_iso in
   *-"$BUILD_ISO_REF".iso) final_iso=$latest_iso ;;
   *) final_iso="${latest_iso%.*}-$BUILD_ISO_REF.iso"; mv -f "$latest_iso" "$final_iso" ;;
 esac
+
+# THE SIZE NUMBER (T5-iso-and-payload.md §4, T5g). Printed in one fixed,
+# machine-readable shape because something else parses it: the size gate in
+# .github/workflows/ci.yml reads exactly
+#
+#     [iso-build] iso size: <bytes> bytes
+#
+# out of this run's log, and test/unit/test-ci-workflow.sh asserts that the
+# gate's expression still matches the line this line produces. Change the
+# format here and that suite goes red in seconds -- which is the point, since
+# the alternative is a gate that silently matches nothing and therefore
+# silently passes everything.
+#
+# stat, not `du` or `ls`: the apparent byte count is what a USB target and a
+# release note care about, and it is the number docs/findings/T5a-parity.md
+# and docs/PROGRESS.md record for every image measured so far.
+iso_bytes=$(stat -c '%s' "$final_iso") ||
+  build_fail "built $final_iso but could not stat it to record its size"
+# Integer arithmetic and printf, both bash builtins, rather than awk or bc: by
+# this point the script has already proved it can build an ISO, and failing at
+# the last line for want of a formatting tool would be absurd.
+iso_gib_hundredths=$(( iso_bytes * 100 / 1073741824 ))
+printf -v iso_gib '%d.%02d' $(( iso_gib_hundredths / 100 )) $(( iso_gib_hundredths % 100 ))
+build_log "iso size: $iso_bytes bytes ($iso_gib GiB)"
 
 build_log "build complete: $final_iso"
 build_log "$(du -h "$final_iso" | cut -f1) -- $(sha256sum "$final_iso")"

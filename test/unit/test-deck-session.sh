@@ -1541,17 +1541,40 @@ pass "the row line ends with a trailing comma, so the same block splices into an
 # docs/findings/P16-redistribution-and-trademark.md: ship a codepoint, not
 # Valve's artwork. And ONE codepoint -- Nerd Font glyphs live in a plane where
 # it is easy to paste a surrogate pair and get two tofu boxes instead.
-python3 - "$MENU_ROW_ICON" <<'PY' ||
-import sys, unicodedata
-icon = sys.argv[1]
-assert len(icon) == 1, f"the icon is {len(icon)} characters, not one glyph: {icon!r}"
+# 🔴 The icon is a JSON \\uXXXX ESCAPE PAIR in src/, not a character and not
+# bash's $'\\U...'. Found on the Deck 2026-08-12 while this suite was green:
+# $'\\U...' is LOCALE-DEPENDENT -- a UTF-8 locale expands it, C/POSIX emits the
+# literal ten ASCII bytes. The dev machine is UTF-8; an ssh session to the Deck
+# is LC_CTYPE=POSIX, so the rendered row carried an invalid JSON escape and the
+# stage refused to install it. This asserts the DECODED value; the
+# locale-independence check below is the one that would actually have caught it.
+python3 - "$MENU_ROW_ICON" <<'ICONPY' ||
+import sys, unicodedata, json
+raw = sys.argv[1]
+assert all(ord(c) < 128 for c in raw), (
+    "the icon constant must be pure ASCII so no locale can alter it: %r" % raw)
+icon = json.loads('"' + raw + '"')
+assert len(icon) == 1, "the icon decodes to %d characters, not one glyph: %r" % (len(icon), icon)
 cp = ord(icon)
 assert unicodedata.category(icon) == "Co", "the icon is not a private-use codepoint"
-assert 0xF0000 <= cp <= 0xFFFFD, f"U+{cp:X} is outside the Nerd Font private-use plane"
-PY
-  fail_test "the menu row's icon is exactly one private-use codepoint" \
+assert 0xF0000 <= cp <= 0xFFFFD, "U+%X is outside the Nerd Font private-use plane" % cp
+ICONPY
+  fail_test "the menu row's icon is an ASCII escape decoding to one private-use codepoint" \
     "got $(printf '%q' "$MENU_ROW_ICON")"
-pass "the menu row's icon is a single Nerd Font codepoint, not a surrogate pair and not an icon-theme name"
+pass "the menu row's icon is pure ASCII in src/ and decodes to a single Nerd Font codepoint"
+
+# 🔴 THE ASSERTION THAT WOULD HAVE CAUGHT THE DECK FAILURE. Render the block
+# under a UTF-8 locale and under C/POSIX; the bytes must be identical. Any
+# locale-sensitive escape makes them diverge, and the Deck runs the POSIX one.
+_loc_utf8=$(LC_ALL=C.UTF-8 bash -c 'source "$1"; render_menu_row_block' _ "$REPO_ROOT/src/deck-session.sh" | od -An -c)
+_loc_posix=$(LC_ALL=C bash -c 'source "$1"; render_menu_row_block' _ "$REPO_ROOT/src/deck-session.sh" | od -An -c)
+[[ -n $_loc_posix ]] ||
+  fail_test "the C/POSIX render produced nothing at all" \
+    "an empty render would make the comparison below pass for the wrong reason"
+[[ $_loc_utf8 == "$_loc_posix" ]] ||
+  fail_test "the menu row renders identically under C.UTF-8 and C/POSIX" \
+    "they differ, so the row that reaches the Deck is not the row this suite tested"
+pass "the menu row renders byte-identically under C.UTF-8 and C/POSIX -- no locale-dependent escape survives"
 
 # Nothing in src/ may name Valve's or a console vendor's glyph. Checked on the
 # rendered block rather than on the constant, so a future second row is covered

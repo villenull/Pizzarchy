@@ -168,7 +168,7 @@ readonly RETURN_DESKTOP_FILE=/usr/share/applications/deck-return-to-gaming.deskt
 # row or .desktop pointing at ${SELECT_BIN} would need a password nobody on a
 # Deck can type.
 readonly RETURN_ACTION="${STEAM_SHIM} gamescope"
-readonly RETURN_LABEL="Return to Gaming Mode"
+readonly RETURN_LABEL="Gaming Mode"
 readonly RETURN_DESCRIPTION="Switch back to the Steam Big Picture session"
 
 # --- the Quickshell menu row (Omarchy 4.0) --------------------------------
@@ -209,7 +209,20 @@ readonly MENU_ROW_ID=gaming
 # surrogate pair), it is in that font, and its Nerd Font name carries no
 # vendor: `md-steam`, `fa-steam` and `md-microsoft_xbox_controller` all exist
 # and are all the wrong answer here.
-readonly MENU_ROW_ICON=$'\U000F0297'
+# 🔴 WRITTEN AS A JSON ESCAPE, NOT AS A CHARACTER, AND NOT AS $'\U000F0297'.
+# Found on the Deck 2026-08-12, after 28 green suites: `$'\U...'` is
+# LOCALE-DEPENDENT. Under a UTF-8 locale bash expands it to the character
+# (f3 b0 8a 97); under C/POSIX it silently emits the literal ten ASCII bytes
+# `\U000F0297`. The dev machine is UTF-8 and every test passed; an ssh session
+# to the Deck runs LC_CTYPE="POSIX", so the rendered row carried an invalid
+# JSON escape and the stage refused to install it. The failure was loud only
+# because the stage parses back what it renders.
+#
+# `\udb80\ude97` is the UTF-16 surrogate pair for U+F0297 and is pure ASCII in
+# this file, so no locale can change what gets written. JSON.parse (Quickshell)
+# and json.loads (our readback) both recombine it; verified round-tripping to
+# U+F0297. The glyph is md-gamepad_variant -- see the cmap note above.
+readonly MENU_ROW_ICON='\udb80\ude97'
 
 # The row is spliced into a file this script does not own, between whole-line
 # markers, exactly as install_osk_kb_layout_rule does for Hyprland's Lua. See
@@ -4861,7 +4874,7 @@ After installing:
   steamos-session-select desktop    switch to the desktop now
 
 Stages also cover Gaming Mode / display defects (PROGRESS.md 5.11, 5.14, 5.15):
-  stage-menu-row           splices a 'Return to Gaming Mode' row into the
+  stage-menu-row           splices a 'Gaming Mode' row into the
                            Quickshell menu (~/${MENU_EXT_REL}
                            and /etc/skel's copy). Same command as the .desktop
                            entry, by one shared constant; the file is parsed
