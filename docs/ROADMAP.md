@@ -135,11 +135,25 @@ short, targeted Deck iterations over `tools/deck-sync.sh`.
 ### Exit criteria
 
 - [ ] A complete controller-only install runs start to finish in QEMU from
-      our ISO — zero keyboard input. **Blocked on one thing: nobody has run
-      `iso/bin/build`.** Every ingredient exists (T5d/e/f, T12, the 5-patch
-      overlay, the `omarchy-deck` package) and is unit-tested, but a real
-      container build has never executed. Not runnable on the dev machine —
-      needs a supervised session or CI's self-hosted KVM runner (P2.8, below).
+      our ISO — zero keyboard input. **STALE as of session 23/24 — `iso/bin/build`
+      has run for real multiple times now** (most recently for commit
+      `e729699`, sha256 `d07bf6cbe...`), and a controller-only `[V]` run has
+      now been driven all the way past S5's "Ready to install?" gate into
+      `write_user_files` on a real, correctly-sized target disk
+      (`test/vm/vm-install-controller-test.sh`, session 24). **Still not
+      closed — reason changed entirely: `configurator` itself crashes right
+      after `write_user_files`** (`$1: unbound variable` under `set -u`, a
+      plain upstream bug in `configurator`'s own trailing dry-run check,
+      reached by every full-disk interactive install; not Deck-specific, not
+      seen before because no earlier run had pressed "Install" on a disk
+      sized to survive it) — so `omarchy-install-dashboard` (the real
+      partitioner/installer) never launches. One-line fix
+      (`$1` → `${1:-}`), not yet applied (`iso/overlay/patches/` territory,
+      out of session 24's scope). Full account:
+      `docs/findings/T4-controller-only-install-first-run.md` §13. Once
+      fixed, re-run the same harness — its disk-image assertions (partition
+      table, UKI, Limine config, package set) are already written and gated
+      on `install.outcome=success`, not yet exercised.
 - [x] ✅ **CLOSED 2026-08-12 (session 21).** Every hardware-parity row has a
       recorded result on OLED. `docs/findings/hardware-parity.md` — 7/7 human
       rows plus P2.3's fan/TDP/charge-limit batch, all measured with operator
@@ -157,8 +171,12 @@ short, targeted Deck iterations over `tools/deck-sync.sh`.
       guard (`deck-nvidia-dry-run.sh`) is unit-proven but has never run inside
       the real build either.
 
-**Net: 2 of 4 closed. The other 2 both reduce to "run a real container build
-at least once"** — nothing left is a code gap.
+**Net: 2 of 4 closed.** Criterion 4 still reduces to "run a real container
+build on a self-hosted KVM runner." **Criterion 1 no longer does — session
+24 ran it, repeatedly, and found a real one-line code gap** (`configurator`'s
+unguarded `$1`, `docs/findings/T4-controller-only-install-first-run.md` §13)
+blocking every interactive full-disk install before the real installer ever
+starts.
 
 ---
 

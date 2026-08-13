@@ -650,3 +650,324 @@ rebuilt ISO", not "find out why".
    rewrite to match (parse or reuse the regex, not `declare -p` an array
    that is never there) before the reserved-username check does anything on
    a real ISO. Owner: whoever next touches `deck-form.sh`'s S3 block.
+7. ~~A follow-up `[V]` run should press one more `y` on `deck_final_summary`~~
+   — **done, §13.** It does cross the gate; the run that crosses it hits a
+   NEW, more severe blocker before `omarchy-install-dashboard` ever starts —
+   see §13.4.
+
+---
+
+## 13. 2026-08-13 (same day, later session) — phase 2 exit criterion 1: NOT
+    closed. A real, reproducible product bug blocks every interactive
+    full-disk install, found by being the first run ever to press "Install"
+    on a real, correctly-sized target disk
+
+**Task:** close phase 2 exit criterion 1 — "a complete controller-only
+install runs start to finish in QEMU from our ISO" — by extending past S5's
+gate (§7's deliberate stop) with a disk-image-assertion model
+(`test/vm/vm-install-test.sh`'s own pattern: assert on the resulting disk,
+never on log text, `docs/PLAN.md` §8.1).
+
+**Bottom line, upfront:** the criterion is **not closed**, and this session's
+own new harness proves exactly why, precisely — not "it timed out, unclear
+why." **Every interactive (human/controller-driven, non-`cidata`) full-disk
+Omarchy install — Deck-forked or not — crashes immediately after
+`write_user_files`, before the real installer (`omarchy-install-dashboard`)
+is ever launched.** The cause is a pre-existing bug in **upstream's own**
+`configurator` script, unrelated to any of `deck-form.sh`'s overrides, never
+seen before this session because no prior run of this project's harnesses
+had ever pressed "Install" past S5 on a disk sized to survive the attempt.
+`vm-install-test.sh`'s own cidata-based install (T0, "verified end-to-end
+against a real ISO build", `docs/PROGRESS.md`'s session-2 log entry) cannot
+see this bug either — the cidata path in `.automated_script.sh` skips
+`configurator` entirely.
+
+### 13.1 The new harness: `test/vm/vm-install-controller-test.sh`
+
+A new file (not an extension of `vm-installer-screens-test.sh`, which
+explicitly documents in its own header why it can never safely be pointed at
+a real-sized disk — see that file's "WHY THIS IS A NEW FILE" section for the
+full argument, copied into the new file's own header too). Reuses the
+S0→S5 key sequence **verbatim** from this doc's §3/§9 (same qcodes, same 6s
+cadence — that portion is already proven, not re-litigated) via a duplicated
+probe, then adds:
+
+- **Step 29**: S5's own `y` ("Install") hotkey, crossing `deck_final_summary`'s
+  gate into `write_user_files` — the point every previous run of this
+  project's harnesses (§7, and `docs/findings/T4-harness-first-run.md`
+  before this ISO existed) deliberately stopped short of.
+- An **unbounded poll** (not a fixed sleep) for the real install's terminal
+  state, since a real package install's duration is not knowable in advance
+  the way a scripted `gum` redraw's is.
+- **Step 30**: accepting `omarchy-install-dashboard`'s own upstream
+  `reboot_prompt()` ("Reboot Now", plain `gum confirm --default`, READ from
+  `iso/upstream/configs/airootfs/usr/local/bin/omarchy-install-dashboard`) —
+  never reached this session, see §13.4.
+- A **real, 16G, 1MiB-aligned target disk** (`vm-install-test.sh`'s own
+  sizing), booted with **`-nic none`** — no network device of any kind, on
+  purpose, so a pass could never be quietly explained by "well, it could
+  reach the internet." This is provably safe: `phases_impl.py:190` hardcodes
+  `arch.make_mirror_handler(offline=True)` for every install this
+  orchestrator ever runs, and `_mount_offline_package_cache` bind-mounts the
+  ISO's own bundled `/var/cache/omarchy/mirror/offline` — READ, not assumed,
+  before this session trusted it enough to drop the NIC entirely.
+- **No result-carrying block device.** The screens harness's report travels
+  on a virtio-blk device that doubles as the (deliberately tiny/misaligned)
+  install target — exactly the arrangement this new file cannot reuse, since
+  its whole point is a target disk sized to survive a real install. Facts
+  and screen captures stream over the serial line instead
+  (`T4PROBE:FACT:...` / `T4PROBE:CAP:name:<base64>`, emitted as they happen,
+  not batched at the end), and the host reconstructs a
+  `screens::extract_section`-compatible report from `serial.log` after the
+  guest is gone — deliberately robust to the guest disappearing mid-run
+  (a real failure, a timeout, or the reboot this session's own fix, §13.3,
+  makes possible), which a single end-of-run dump would not be.
+
+### 13.2 A collision, not a defect: the ISO changed under a running VM
+
+First attempt (`sha256 336f357...`, the session-23 ISO cited at the top of
+this doc) stalled for ~10 minutes with zero probe output and QEMU's serial
+log frozen mid-firmware ("`BdsDxe: starting Boot0002`"). Root cause: a
+**parallel agent's own `iso/bin/build`** (working §12's two `deck-form.sh`
+fixes, commit `e729699`) wrote a fresh ISO to the exact same path
+(`~/.cache/omarchy-deck/iso-build-2/release/omarchy-2026.08.13-x86_64-quattro.iso`)
+**while this session's QEMU process still had the old file open as its
+cdrom backing store** — the classic shared-cache-path hazard, confirmed
+by the file's mtime landing one second before the stall and the new sha256
+(`d07bf6c...`) matching exactly what a clean rebuild from `e729699` would
+produce. The stalled process (pid 2858231) was killed and the run restarted
+clean against the verified new ISO — every result in §13.3 onward is
+against `sha256 d07bf6cbe96ac417d3fe8a632283ef872cffa42d79d16bfb8a91e3ddaa3bfea3`,
+**not** the session-23 hash this doc's header still cites (that ISO no
+longer exists on disk; treat the header's hash as historical, not
+reproducible, from this point in the doc onward). Verified, not assumed,
+before trusting it: `git log -1 e729699` matches the commit message §12
+describes, is on `main`, touches exactly `deck-form.sh`, and the ISO's mtime
+is one second after that commit's timestamp.
+
+Net effect, worth stating plainly: this session's run is against an ISO
+that **already carries both of §12's fixes** — a strictly newer baseline
+than any previous run of any harness in this project.
+
+### 13.3 A real defect in THIS session's OWN harness, found and fixed:
+     `After=multi-user.target` never fires with `-nic none`
+
+Restarting clean against the verified ISO reproduced the **identical**
+symptom — zero probe output, ever, despite the VM clearly being alive
+(`query-status` returned `"running": true`; `info registers` showed a
+kernel-space `RIP` inside a `hlt` idle loop, not a hung firmware — a live,
+idle guest, not a frozen one). A QMP `screendump` proved the wizard was
+fully up and interactive (the Deck greeter, on screen, waiting for input) —
+manually sending `ret` via QMP advanced it to the keyboard list normally.
+**So the wizard worked. Only this file's own injected probe never ran.**
+
+Diagnosed live, no reinstall needed, via a root shell on **tty2**
+(`archiso login: root`, no password — same access point
+`docs/PROGRESS.md` line 2404 records using previously) reached by sending
+`ctrl+alt+f2` over QMP, then typing diagnostic commands character-by-character
+over QMP `send-key` (a throwaway helper script, not committed — every
+character mapped to a qcode, `shift+letter` for uppercase, a small delay
+between keys after an unpaced first attempt visibly garbled/dropped
+keystrokes) and reading results back by `cat`-ing them to `/dev/ttyS0`,
+which lands directly in the host's own `serial.log`:
+
+```
+○ t4-install-controller-probe.service - T4 install-controller probe
+     Loaded: loaded (/run/systemd/generator.early/t4-install-controller-probe.service; generated)
+     Active: inactive (dead)
+        Job: 182
+-- No entries --                    # journalctl -u ...: never ran, not "failed"
+
+$ systemctl list-jobs
+JOB UNIT                                TYPE  STATE
+2   multi-user.target                   start waiting
+67  systemd-time-wait-sync.service      start running
+...
+182 t4-install-controller-probe.service start waiting
+
+$ systemd-analyze critical-chain t4-install-controller-probe.service
+Bootup is not yet finished (org.freedesktop.systemd1.Manager.FinishTimestampMonotonic=0).
+```
+
+**The credential injection worked perfectly** — all three files
+(`systemd.extra-unit....service`, `systemd.unit-dropin.multi-user.target`,
+`t4installprobe.sh`) landed in `/run/credentials/@system/` byte-identical to
+what was sent (verified against the running QEMU process's own `/proc/PID/cmdline`),
+and systemd correctly generated the unit from it. **The bug was the ordering
+this file copied from the sibling screens harness without re-deriving it**:
+`After=multi-user.target`, pulled in via a `Wants=` drop-in on
+`multi-user.target` itself — the exact same shape
+`vm-installer-screens-test.sh` uses successfully. That harness boots with
+`-nic user,model=virtio-net-pci`; this one boots `-nic none` (§13.1, on
+purpose). With **no network device of any kind**, `systemd-time-wait-sync.service`
+never completes (no NTP source ever answers, ever), so `multi-user.target`'s
+own job sits `start waiting` for the life of the VM — it never reaches
+`active`. A unit ordered `After=multi-user.target` in that state does not
+start late; it **never starts at all**, for as long as the VM runs. The Deck
+wizard on tty1 is unaffected (reached via `getty`, no such dependency), which
+is exactly why the wizard worked throughout while the probe stayed silent.
+
+**Fix**: `After=multi-user.target` → `After=basic.target`, and the `Wants=`
+drop-in target credential key changed to match
+(`systemd.unit-dropin.basic.target`). `basic.target` depends only on
+`sysinit`/`paths`/`slices`/`sockets`/`timers` — no network, no time-sync —
+and is reached early on every boot this project has ever measured. The
+probe's own greeter-wait loop already tolerates starting "too early" (polls
+up to 300s), so there was no matching risk on the other side. **Re-run
+against the identical ISO, fixed harness: the probe ran, and reached S5's
+gate (steps 1–29) on exactly the proven 6s cadence.**
+
+### 13.4 The real result: `configurator` crashes on every interactive
+     full-disk install, right after `write_user_files`, before the real
+     installer ever starts
+
+Step 29 (`y` on `deck_final_summary`'s "Ready to install?") **crossed the
+gate** — confirmed by `advance_and_vanish` on the "Ready to install?" marker
+and by `write_user_files`'s own artefacts landing on disk (verified directly
+via the tty2 root shell, `ls -la /root/`):
+`user_configuration.json` (4053 bytes), `user_credentials.json` (402 bytes),
+`user_email_address.txt`, `user_encrypt_installation.txt`,
+`user_full_name.txt` — all present, all timestamped together, all after the
+gate-crossing keypress.
+
+**Bonus, unplanned confirmation of §12.2's fix**: the written
+`user_configuration.json` shows `"hostname": "steamdeck"` (not upstream's
+`"omarchy"` default — `DECK_HOSTNAME`, correctly applied) and
+`"timezone": "Europe/Amsterdam"` (not the stale default either), with
+`"kb_layout": "uk"` matching this run's own down-arrow keyboard selection —
+the identity/hostname/timezone override bug §12.2 fixed is confirmed working
+**on a real, freshly-built ISO**, independent of that session's own unit
+tests. No `disk_encryption` block, `user_encrypt_installation.txt` = `false`
+— the encryption-off contract still holds at the real artefact level too.
+
+**Then the probe's install-outcome poll ran the full 2100s (35 min) in-guest
+deadline and found neither "Installed Omarchy in" nor "Omarchy installation
+stopped" — `install.outcome=timeout`.** A live `screendump`, taken before the
+host's own `RUN_TIMEOUT` reclaimed the VM, showed why: `deck_final_summary`'s
+own table was still the last thing rendered on screen, and directly below
+it, in plain terminal text (not a `gum` screen at all):
+
+```
+./configurator: line 1245: $1: unbound variable
+~/.automated_script.sh  1.58s user 3.50s system 2% cpu 2:54.34 total
+1 root@archiso ~ #
+```
+
+`.automated_script.sh` (`set -euo pipefail`) invokes `./configurator` with
+**zero positional arguments** on the interactive path (only the `cidata`
+branch, which never calls `configurator` at all, could supply one) — READ,
+`iso/upstream/configs/airootfs/root/.automated_script.sh:101`. `configurator`
+(deployed length confirmed 1247 lines via the tty2 shell, `wc -l ./configurator`)
+ends with:
+
+```sh
+if [[ $1 == "dry" ]]; then
+  print_dry_run_files
+fi
+```
+
+**Bare `$1`, not `${1:-}`.** A few dozen lines earlier, the sibling check in
+the `free_space` install branch (`iso/upstream/.../configurator:1030`, READ)
+gets this right — `if [[ ${1:-} == "dry" ]]; then` — but this second,
+identical-looking check at the true end of the file, reached by the
+**`full_disk`** branch (the ONLY branch a Deck install can take —
+`requires_full_disk_install` in `deck-form.sh` returns 0 unconditionally,
+§4 S4), does not. Under `set -u`, referencing an unset `$1` is fatal. The
+crash happens **after** `write_user_files` (line 1025, already run
+successfully, artefacts on disk) and **before** anything that would invoke
+`/usr/local/bin/omarchy-install-dashboard` — which lives entirely in
+`.automated_script.sh`, `configurator`'s own *caller*, and is therefore never
+reached once `configurator` itself dies non-zero under `.automated_script.sh`'s
+own `set -e`.
+
+**This is not a Deck-specific bug.** Nothing in T4's two patch hunks
+(`source deck-form.sh`, `deck_final_summary || abort`) touches this code —
+both hunks land near the top of the file, nowhere near its last four lines.
+**Upstream's own unmodified installer has the identical defect**, on the
+identical (and only) code path a controller-only, keyboard-less, non-`cidata`
+human install can take. It has never been seen before because:
+
+- `vm-install-test.sh`'s own cidata-based T0 run (`docs/PROGRESS.md`,
+  session-2 log entry, "verified end-to-end against a real ISO build")
+  never executes `configurator` at all — `.automated_script.sh`'s cidata
+  branch (`if /usr/local/bin/omarchy-cidata-load; then ... skip the
+  configurator`) is a hard `else`-exclusive fork.
+- `vm-installer-screens-test.sh` (§7, this doc) has, until this session,
+  never pressed past S5's gate — by design, on a disk too small/misaligned
+  to survive a real attempt.
+- No `[H]` hardware install of this fork has been attempted either (§10
+  item 5, still open).
+
+**Left failing, not weakened, per this project's own discipline** (CLAUDE.md,
+`docs/tasks/T4-screen-spec.md` throughout): the new harness's
+`install.outcome` check asserts `success`, gets `timeout`, and fails —
+correctly. **9/11 checks passed**; the 2 failures are both this exact,
+now-diagnosed fact (`install.outcome=timeout`, not `success`), and the
+disk-image assertions are correctly *skipped*, not force-passed, since the
+gate they depend on (a successful install) was never reached. See
+`docs/PROGRESS.md`/`docs/ROADMAP.md` for how this changes the exit-criterion
+1 record — **it is explicitly NOT marked closed**, and now has a precise,
+fixable, one-line-diff reason instead of an open question.
+
+### 13.5 What this session does and does not claim
+
+**Proven, this session:**
+- The Deck-forked wizard, on a freshly rebuilt ISO carrying §12's fixes,
+  navigates S0 through S5's gate correctly, including the two now-fixed
+  bugs' absence (no unbounded warning growth measured across four retries
+  this run; identity/hostname/timezone correctly Deck-branded in both the
+  on-screen table and the real written artefact).
+- Crossing S5's gate genuinely starts the real install (`write_user_files`
+  runs, artefacts land, byte-identical in shape to §6's proof but now
+  against the REAL `deck_final_summary` values, closing §12.3 item 7/this
+  doc's old §10 item 4).
+- The install then crashes, deterministically, reproducibly (this is a pure
+  bash `set -u` bug — no timing, no hardware, no randomness involved; it
+  will reproduce on the very next attempt, in QEMU or on real hardware,
+  every time) before the real installer ever starts.
+
+**Not proven, and not claimed:**
+- That a full install completes and produces a bootable disk. It has never
+  gotten far enough to test.
+- That fixing the `$1` bug is sufficient — once `omarchy-install-dashboard`
+  actually launches, its own real partitioning/package/bootloader work is
+  still entirely unmeasured against this project's Deck fork specifically.
+- That this bug is exclusive to the Deck fork or this session's tree — it
+  reads as a plain upstream defect, but confirming that against unpatched
+  upstream's own ISO was out of this session's scope (this session only had
+  the Deck-forked ISO on disk).
+
+### 13.6 Follow-ups flagged (not fixed here — file-ownership/scope reasons)
+
+1. **Fix `configurator`'s trailing `if [[ $1 == "dry" ]]` to `${1:-}`** —
+   the actual unblock for phase 2 exit criterion 1. This is a one-line
+   change, but it lands in `iso/upstream`'s vendored `configurator` (via
+   whatever patch mechanism `iso/overlay/patches/` uses for upstream-file
+   edits — this session did not open that directory, which is explicitly a
+   parallel agent's territory this session, per this task's own scope
+   fence). Owner: whoever owns the `iso/overlay/patches/` seam next.
+2. **Re-run this harness once that fix lands** — steps 1–29 and the harness
+   mechanics themselves need no further changes; only the product bug blocks
+   a green run. If `install.outcome=success` next time, the (already-written,
+   §13.1) disk-image assertions run for the first time and either close
+   criterion 1 for real or surface the next real blocker.
+3. `deck-input-mapper` payload-set question (§10 item 3) — still open,
+   still not this file's territory.
+4. `[H]` full hardware install — still entirely unattempted (§10 item 5).
+5. **NEW: `DECK_RESERVED_USERNAMES_VAR` fix** (§12.3 item 6) — still open,
+   `deck-form.sh` S3 territory, unrelated to this section.
+
+### 13.7 Files
+
+- `test/vm/vm-install-controller-test.sh` — new file, this session. Drives
+  S0→S5 (reused key sequence), crosses S5's gate, polls for the real
+  install's outcome, and (not yet exercised — gated on §13.6 item 1) asserts
+  partition table / UKI presence / Limine config / package set / hostname /
+  no-crypttab against the resulting disk image, reusing
+  `test/lib/vm-disk-image.sh` and `test/lib/vm-assertions.sh` unmodified.
+- Preserved work dir (`VM_KEEP_WORK=1`, the only surviving run — the first,
+  ISO-collision run and the second, pre-`basic.target`-fix run were both
+  discarded after diagnosis): `/var/tmp/t4-install-controller-run3/`
+  (`serial.log`, the reconstructed `report.txt`, six streamed screen
+  captures, `probe.sh`, and `live-check.png`/`.ppm` — the QMP screendump
+  showing the `configurator` crash text directly).
