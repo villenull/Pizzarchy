@@ -77,7 +77,99 @@ Not `suspend`. **Deleting Omarchy's drop-in without replacing it would make the
 power button hard-power-off the Deck**, which is worse than the current
 behaviour. Any fix must set the value explicitly.
 
-### 2.2 The "only while held" detail — INFERRED, with the measurement that settles it
+### 2.2 ✅ RESOLVED BY MEASUREMENT, 2026-08-12 — and the answer was none of the three hypotheses
+
+**The capture below was run on the operator's Deck, with the operator pressing
+the button. Everything in this subsection after the outcome is the reasoning
+that preceded it, kept because the hypotheses were ranked wrong and that is
+worth seeing.**
+
+🔴 **First, two corrections to §2.1 and to the spec's step 1, both cheap and
+both the kind that waste a hardware session:**
+
+1. **`evtest` and `libinput` are NOT INSTALLED on the Deck.** The capture
+   command this file and the task spec both specified **cannot run as written**.
+   `python-evdev` is present (the mapper depends on it) and was used instead,
+   grabbing nothing and watching all 18 nodes. *A runbook command nobody has
+   executed is a hypothesis — §5.30c, again, in this file's own step 1.*
+2. **`event0` is SILENT.** §2.1 row 1 names the two ACPI `Power Button` nodes,
+   `event0` (`PNP0C0C`) and `event2` (`LNXPWRBN`), from the P15 recon. A capture
+   aimed at only those two saw **zero events across 75 seconds** — the first run
+   did exactly that and proved nothing. The second live node is **`event4`,
+   `"AT Translated Set 2 keyboard"`**, which no prior document named.
+
+**The trace. One physical press, held ~3 s** (`t` relative, seconds):
+
+```
+450.902  event4  KEY_POWER  PRESS      <- AT Translated Set 2 keyboard
+451.100  event2  KEY_POWER  PRESS      <- ACPI LNXPWRBN, 198 ms later
+451.100  event2  KEY_POWER  RELEASE    <- SAME MILLISECOND
+453.820  event4  KEY_POWER  RELEASE    <- 2.92 s: tracks the physical hold
+```
+
+**Sample size 3, and all three are the same shape** — one tap and two holds, in
+a 600 s window:
+
+| press | `event4` PRESS → `event2` PRESS | `event4` press→release (the physical hold) |
+|---|---|---|
+| tap | **131 ms** | 133 ms |
+| hold | **198 ms** | 2.92 s |
+| hold | **198 ms** | 1.14 s |
+
+So the ACPI notify lands ~130–200 ms after the press and is **uncorrelated with
+hold length**, while `event4` tracks the hold exactly. `event0` emitted nothing
+across all three. ⚠️ n=3 — enough to settle the *shape*, not enough to pin the
+latency; do not write 198 ms into code as a constant.
+
+**Positive
+control:** in the same capture, `BTN_SOUTH` on `event7` appeared with the
+mapper's translated `KEY_ENTER` on `event17` — so the capture was demonstrably
+alive, which is what makes the two silent runs before it interpretable as "the
+operator was not pressing" rather than "the key emits nothing".
+
+**The answer:**
+
+| Node | Behaviour | Can it express a hold? |
+|---|---|---|
+| **`event4`** ("AT Translated Set 2 keyboard") | A **real key**: down on press, up on release, 2.92 s apart | **Yes** |
+| **`event2`** (ACPI `LNXPWRBN`) | A **fire-and-forget notify**: one instantaneous press+release ~198 ms after the press, **independent of hold duration** | **No, ever** |
+| `event0` (ACPI `PNP0C0C`) | Silent | — |
+
+**So hypothesis A is WRONG** — the two nodes do not split the press and release
+edges; both fire near the press. **B is closest but under-described**, and **C
+(autorepeat) is dead**: a 2.92 s hold produced no repeats at all.
+
+**Two consequences that decide the fix:**
+
+1. 🔴 **Both live nodes are tagged `power-switch`, so logind would see TWO
+   presses per physical press.** Risk R1 is real, not theoretical:
+   `HandlePowerKey=suspend` applied naively gets two suspend requests ~198 ms
+   apart, the second landing at or just after resume.
+2. **`HandlePowerKeyLongPress=` can only ever work through `event4`.** The ACPI
+   node cannot hold a key down, so any long-press design that reaches logind
+   through it is unbuildable — not slow, *unbuildable*.
+
+**The "only while held" report is fully explained, and confirmed by the
+operator's own eyes.** Two presses 198 ms apart hit a bind whose action is a
+*toggle* (`shell.qml:513`), so the menu opens and closes 198 ms later —
+**always**, regardless of hold length. Asked directly whether a deliberate 3 s
+hold kept the menu up or flashed it, the operator answered **"just flash"**.
+The original description was the 0.5 s case, where a 198 ms flash and the hold
+are subjectively the same thing.
+
+➡️ **The fix, and it independently reproduces Valve's.** Drop the ACPI node from
+`power-switch` via a udev rule, leaving `event4` as the single source, and only
+then set `HandlePowerKey=`. Valve blacklists the same ACPI node by name on
+Jupiter and Galileo (`STEAMOS_POWER_BUTTON_IGNORE=1`, §4.1) — arrived at from
+their own measurement, and now from ours. Two independent routes to one answer
+is the strongest evidence this file contains.
+
+---
+
+*(Everything below is the pre-measurement reasoning, kept deliberately: it
+ranked A first and A was wrong.)*
+
+### 2.2a The "only while held" detail — the original INFERRED analysis
 
 The operator's phrasing is specific: *"I press the power button 0.5 seconds, I
 see that submenu for half a second."* The menu opens on press and closes on
