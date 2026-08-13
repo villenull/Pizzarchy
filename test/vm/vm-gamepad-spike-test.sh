@@ -126,18 +126,25 @@ cat >"$pad_src" <<'PAD'
 #!/usr/bin/env python3
 """Scripted virtual gamepad. Commands on stdin, one per line:
   key <BTN_NAME> <0|1>      button state
-  hat <X|Y> <-1|0|1>        d-pad
+  hat <X|Y> <-1|0|1>        d-pad (emits BTN_DPAD_*, see below)
   abs <X|Y> <value>         left stick raw value
   tap <BTN_NAME>            press+release with a human-ish gap
   sleep <seconds>
 Capabilities mirror the linux gamepad ABI subset the Deck's controller
-exposes (BTN_SOUTH/EAST/NORTH/WEST, TL/TR, START/SELECT, HAT0, ABS_X/Y)."""
+exposes (BTN_SOUTH/EAST/NORTH/WEST, TL/TR, START/SELECT, BTN_DPAD_*, ABS_X/Y,
+HAT0). HAT0 is declared for realism -- hid-steam advertises it too -- but
+deliberately NOT what `hat` writes: deck-input-mapper.py treats ABS_HAT0X/Y
+as the left trackpad (measured on hardware) and only BTN_DPAD_* as the
+d-pad, so `hat` presses the BTN_DPAD_* button instead. Writing raw
+ABS_HAT0X/Y here would silently test nothing -- the mapper has no branch for
+it at all, by design."""
 import sys, time
 from evdev import UInput, AbsInfo, ecodes as e
 
 caps = {
     e.EV_KEY: [e.BTN_SOUTH, e.BTN_EAST, e.BTN_NORTH, e.BTN_WEST,
-               e.BTN_TL, e.BTN_TR, e.BTN_START, e.BTN_SELECT],
+               e.BTN_TL, e.BTN_TR, e.BTN_START, e.BTN_SELECT,
+               e.BTN_DPAD_UP, e.BTN_DPAD_DOWN, e.BTN_DPAD_LEFT, e.BTN_DPAD_RIGHT],
     e.EV_ABS: [
         (e.ABS_X, AbsInfo(0, -32768, 32767, 16, 128, 0)),
         (e.ABS_Y, AbsInfo(0, -32768, 32767, 16, 128, 0)),
@@ -148,7 +155,9 @@ caps = {
 ui = UInput(caps, name="Spike Virtual Pad", vendor=0x28de, product=0x1205)
 print("pad-ready", flush=True)
 AX = {"X": e.ABS_X, "Y": e.ABS_Y}
-HAT = {"X": e.ABS_HAT0X, "Y": e.ABS_HAT0Y}
+DPAD = {("X", -1): e.BTN_DPAD_LEFT, ("X", 1): e.BTN_DPAD_RIGHT,
+        ("Y", -1): e.BTN_DPAD_UP, ("Y", 1): e.BTN_DPAD_DOWN}
+dpad_down = {"X": None, "Y": None}  # which BTN_DPAD_* (if any) this axis last pressed
 for line in sys.stdin:
     parts = line.split()
     if not parts:
@@ -161,7 +170,15 @@ for line in sys.stdin:
         time.sleep(0.06)
         ui.write(e.EV_KEY, getattr(e, parts[1]), 0); ui.syn()
     elif cmd == "hat":
-        ui.write(e.EV_ABS, HAT[parts[1]], int(parts[2])); ui.syn()
+        axis, val = parts[1], int(parts[2])
+        prev = dpad_down[axis]
+        if prev is not None:
+            ui.write(e.EV_KEY, prev, 0); ui.syn()
+            dpad_down[axis] = None
+        if val != 0:
+            btn = DPAD[(axis, val)]
+            ui.write(e.EV_KEY, btn, 1); ui.syn()
+            dpad_down[axis] = btn
     elif cmd == "abs":
         ui.write(e.EV_ABS, AX[parts[1]], int(parts[2])); ui.syn()
     elif cmd == "sleep":
