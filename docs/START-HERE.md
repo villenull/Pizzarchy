@@ -68,16 +68,31 @@ work without waiting for further instruction.**
 > `tty_rotation`, `wifi`). Full account: `docs/findings/T4-controller-only-install-first-run.md`
 > §14.
 >
-> **Next step to advance criterion 1** (a likely one-line fix, but it lives in a
-> module with its own test suite that probably encodes the wrong fixture, so fix
-> the test too, and expect yet another layer past it — `gamescope-wayland.desktop`
-> is also absent from the ISO payload, a separate gap already flagged): correct
-> the double-`.desktop` in `orchestrator/deck_autologin.py`, rebuild the ISO
-> (`iso/bin/build` against `~/.cache/omarchy-deck/iso-build-2`; current good ISO
-> sha256 `a27230ff498f8b7b4be45f455192d135fb5ab777b3204022802da19e34b6ea6a`), and
-> re-run `test/vm/vm-install-controller-test.sh` — its disk-image assertions are
-> written and gated on `install.outcome=success`, so they have **never run yet**
-> and are what actually close criterion 1.
+> **The `deck_autologin.py` code+test fix has now LANDED** (unit-proven only —
+> NOT yet proven end to end): the root cause was that `DESKTOP_SESSION` carried
+> the `.desktop` extension while `find_session()` appends it, so it hunted for
+> `omarchy.desktop.desktop`. `DESKTOP_SESSION` is now the bare basename
+> `"omarchy"`, matching `GAMING_SESSION`'s format and `src/deck-session.sh`'s own
+> authority ("the basename … without the extension"). The unit fixture had
+> **encoded the bug** (it built its own session file from the same
+> `{DESKTOP_SESSION}.desktop` expression, so it could never catch the format
+> mismatch); the test now carries a NON-tautological invariant (both session
+> constants must be bare basenames, and `DESKTOP_SESSION` must equal
+> deck-session.sh's first desktop candidate), mutation-proven to fail against the
+> old constant and pass against the fix. 13/13 Python suites green.
+>
+> **What still remains to actually close criterion 1** (this fix was made without
+> an ISO rebuild, per an explicit cheap-fix decision): rebuild the ISO
+> (`iso/bin/build` against `~/.cache/omarchy-deck/iso-build-2`; last good ISO
+> sha256 `a27230ff498f8b7b4be45f455192d135fb5ab777b3204022802da19e34b6ea6a`,
+> pre-dates this autologin fix) and re-run `test/vm/vm-install-controller-test.sh`
+> so its disk-image assertions finally run — they are gated on
+> `install.outcome=success` and have **never executed**. Expect the possibility
+> of yet another layer: `gamescope-wayland.desktop` is absent from the ISO
+> payload (a separate flagged gap), so even a successful install may land in
+> Desktop Mode (`status="desktop"`), not Gaming Mode — the autologin step treats
+> that as a loud non-fatal degradation, so it should no longer ABORT the install,
+> but it is not yet the intended Gaming-Mode-default end state.
 >
 > ### ⚠️ Two process lessons for background/QEMU work (learned the hard way this session)
 >
