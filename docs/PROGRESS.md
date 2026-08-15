@@ -3465,6 +3465,55 @@ because a synthesised chord silently does nothing if upstream edits the binding,
 with nothing to read anywhere. Verify against Omarchy's own `bindings.lua` that
 `SUPER+W` is in fact `killactive` before wiring it.
 
+### 5.38 🔴 THE POWER BUTTON STAGE NEVER RAN, AND BACKLIGHT DISCOVERY USES THE WRONG KERNEL (session 28, read over SSH)
+
+Both found by reading `/var/log/omarchy-deck-install.json` and the live system,
+after the operator asked why the power button does nothing.
+
+**D9 🔴 the power button is `ignore`, and our T13 stage is not in the bake's
+stage list.** `systemd-analyze cat-config` resolves `HandlePowerKey=ignore` from
+`/etc/systemd/logind.conf.d/10-ignore-power-button.conf`, which `pacman -Qo`
+attributes to **`omarchy-settings-dev`**. logind logs `Power key pressed short`
+on every press — the key is detected and delivered, and logind is told to drop
+it. Suspend is available (`/sys/power/state` = `freeze mem disk`, `mem_sleep` =
+`s2idle [deep]`), so nothing is missing at the hardware or kernel layer.
+
+`src/deck-session.sh` carries a substantial T13 power-button stage —
+drop-in sort-order verification (`:4985-5006`), a udev untagging premise check
+(`:4982`), an explicit `HandlePowerKeyLongPress` (`:898`), a double-suspend guard
+(`:5133`). The install record lists **thirteen** bake stages
+(`greeter-rotation, input-mapper, lizard-mode, menu-row, osk-kb-layout,
+preconditions, priv-write-helper, return-icon, sddm-resilience, session-select,
+steam-hook, timezone-helper, update-stub`) and **no power-button stage is among
+them.** `/etc/udev/rules.d/` on the target is empty; no drop-in of ours exists.
+**Written, unit-tested, documented, never wired — the P32 family again**, now at
+six members (Steam, the mapper, `steamos-session-select`, the reserved-username
+list, `deck-fetch.packages`, and this).
+
+**D10 🔴 `stage-priv-write-helper` FAILED at install, and the reason is
+structural.** The record:
+
+> `backlight: /sys/class/backlight/amdgpu_bl1/brightness (discovered, not assumed)`
+> … `steamos-priv-write: '/sys/class/backlight/amdgpu_bl1/brightness' is not writable even as root`
+
+**On the booted system `amdgpu_bl1` does not exist.** The only node is
+`amdgpu_bl0` (`cur=39638`, `max=65535`, root-writable). The bake runs in a chroot
+on the live ISO, whose kernel is **stock archiso, not Neptune**, and the two
+enumerate the backlight differently. So this is not bad luck: **discovering
+hardware through the installer's kernel and baking the answer into a target that
+boots a different kernel is unsound in general.** Even a successful write would
+have recorded the wrong node. Every other stage that reads hardware state at
+chroot time needs auditing for the same class of error.
+
+⚠️ **This corrects this file's own earlier account.** The bl0/bl1 trouble was
+recorded as a hardcoded node; it is in fact *discovered*, correctly, in the wrong
+kernel. The whitelist (`deck-session.sh:2376`) remains device-agnostic and
+remains not the bug — measured and disproved in `0becd4b`; do not re-diagnose it.
+
+The bake's other twelve stages reported `ok`, and `session_bake.status` is
+`partial` — the loud-degradation design working: it named the failed stage and
+said the machine would still reach Gaming Mode, which is exactly what happened.
+
 ---
 
 ## 6. Blocked on human
