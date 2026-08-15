@@ -36,11 +36,14 @@ partly superseded**; read the banner at its top before trusting any section.
 - **Limine only.** No GRUB, no systemd-boot paths. Deliberate, after real
   breakage with systemd-boot's UKI conventions (`docs/PLAN.md` §6.3).
 - **Target Omarchy 4.0, not 3.x.** The test Deck runs
-  `omarchy-dev 4.0.0.r1617.g6d7826d-1` (version file `4.0.0.alpha`) — exactly
-  `iso/RUNTIME`'s pin, so target and test asset agree. Read off the device
-  2026-08-12 (`docs/findings/P22-deck-conformance-sweep.md` §9.6). A "the Deck
-  runs 3.8.4" claim lived here for sessions after `docs/PROGRESS.md` had
-  corrected it; don't reintroduce it.
+  `omarchy-dev 4.0.0.r1744.gf002044-1` — exactly `iso/RUNTIME`'s pin
+  (`basecamp/omarchy@f0020448ca87`; `gf002044` is that commit), so target and
+  test asset agree. Read off the device 2026-08-15 after it was **reinstalled
+  from our own stable ISO** (session 28). Previously this line said
+  `r1617.g6d7826d-1` / version file `4.0.0.alpha`, read 2026-08-12 — true of the
+  *old* install, stale the moment the Deck was rebuilt. A "the Deck runs 3.8.4"
+  claim also lived here for sessions after `docs/PROGRESS.md` had corrected it;
+  don't reintroduce either.
 - **No keyboard or terminal for a standard install.** Every screen in
   `docs/PLAN.md` §6.1a must be reachable by Deck buttons/trackpads alone. This
   now includes typing a Wi-Fi password.
