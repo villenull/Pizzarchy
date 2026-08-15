@@ -3,10 +3,49 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
-> ## Where things stand (updated 2026-08-15, session 27 — READ THIS FIRST)
+> ## Where things stand (updated 2026-08-15, session 28 — READ THIS FIRST)
 >
 > *(Supersedes every block below wherever they disagree. Same rule: verify every
 > "done"/✅ against the tree before trusting it.)*
+>
+> ### 🔴 SESSION 28 — THE ISO MET REAL HARDWARE, AND FOUR P1s FELL OUT
+>
+> **Read `docs/PROGRESS.md` §5.32 before anything else in this file.** The
+> session-27 block below is factually correct about the *build* and now
+> **misleading about what it means**. The ISO it celebrates installed on the
+> physical Deck and produced a machine that could not do its job.
+>
+> | Symptom on hardware | Component that existed all along | Never wired into |
+> |---|---|---|
+> | No OSK on any installer text screen | `deck-input-mapper.py` + OSK modules | the live airootfs (`python-evdev` absent too) |
+> | Black screen, no Steam | `steam`, Neptune kernel, `steamdeck-dsp` in the package lists | **nothing reads those lists to install** |
+> | "Unable to download the required update (2)"; dead brightness | `steamos-update`, `steamos-priv-write` — already written in `src/deck-session.sh` | the installer never runs `deck-session.sh` |
+> | No "Switch to Desktop" | the whole session layer in `src/deck-session.sh` | same |
+>
+> **One defect, four faces: a component exists, is unit-tested, is documented,
+> and is never wired into the install.** Eleven install steps reported green and
+> QEMU scored 18/18 on that same machine — every assertion checked that *our
+> steps ran*, none that *the outcome exists*. **T4/criterion 1 is REOPENED.**
+>
+> Findings: `P32-osk-mapper-missing-from-live-iso.md`, `P32-steam-never-installed.md`,
+> `P32-tty-path-anomaly.md` (UNREPRODUCED, no action).
+>
+> **The Deck was REINSTALLED from our own stable ISO** and is now on
+> `omarchy-dev 4.0.0.r1744.gf002044-1` = `iso/RUNTIME`'s pin. It has `sshd`
+> enabled (key-only, no root, `ufw limit 22/tcp`) — `ssh steamdeck` works, and
+> **ufw rate-limits to 6 connections/30 s**, so batch remote commands into one
+> invocation. Steam was installed by hand to un-break it; `deck-session.sh` was
+> run live, so the session layer + `steamos-*` helpers are present.
+>
+> ⚠️ **Trap that cost an hour, do not repeat:** trackpad haptics do **not** prove
+> the OS booted (firmware `lizard_mode` does that with no kernel), and the
+> `quiet splash loglevel=0 … vt.global_cursor_default=0` cmdline makes a healthy
+> boot **visually identical to a dead one** on every VT.
+>
+> ⚠️ **`amdgpu_bl0` vs `bl1`:** the backlight index is assigned by driver
+> enumeration and is **not stable** — measured `bl0` under Neptune, `bl1` under
+> stock Arch. `deck-session.sh` hardcoded `bl0`, which silently breaks the
+> brightness whitelist. Discover it, never hardcode it.
 >
 > ### ✅ Omarchy 4.0.0 STABLE — rebase DONE, ISO BUILT, merged to `main`
 >
