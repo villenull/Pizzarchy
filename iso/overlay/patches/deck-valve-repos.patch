@@ -1,8 +1,7 @@
-diff --git i/configs/pacman-online-edge.conf w/configs/pacman-online-edge.conf
-index 0ac18d8..24fe2ba 100644
---- i/configs/pacman-online-edge.conf
-+++ w/configs/pacman-online-edge.conf
-@@ -33,3 +33,43 @@ Server = https://pkgs.omarchy.org/edge/$arch
+diff --git i/configs/pacman-online-stable.conf w/configs/pacman-online-stable.conf
+--- i/configs/pacman-online-stable.conf
++++ w/configs/pacman-online-stable.conf
+@@ -33,3 +33,43 @@ Server = https://pkgs.omarchy.org/stable/$arch
  Server = https://mirror.funami.tech/arch-mact2/os/x86_64
  Server = https://github.com/NoaHimesaka1873/arch-mact2-mirror/releases/download/release
  SigLevel = Never
