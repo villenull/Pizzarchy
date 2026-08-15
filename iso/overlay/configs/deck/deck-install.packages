@@ -211,25 +211,37 @@ steamdeck-dsp
 # newest", because nothing newer has been validated on hardware. If the series
 # moves, move it in BOTH files and in deck-mirror.packages.
 #
-# ⚠️ WHAT THIS DOES NOT DO, AND THE GAP IT LEAVES. The target still installs
-# stock `linux` as well: archinstall pacstraps `kernels=` during its own
-# minimal_installation (phase 3 of 14, long before configure_deck), the default
-# is ["linux"], and nothing in any package list can change that. So the
-# installed system carries TWO kernels and Limine gets TWO UKIs to order.
-# "Neptune only, no stock-linux fallback entry" is a separate, boot-chain
-# slice -- it needs `kernels` in the archinstall config, or upstream's own
-# swap-the-kernel-out route (`pacman -Rdd linux` inside the target, which is
-# what omarchy-hw-intel-ptl's ptl-kernel.sh does and what phases_impl.py's
-# kernel-removal hooks are deliberately left live for). Neither belongs in a
-# package list, and neither has been verified. UNTIL THAT SLICE LANDS, WHICH
-# KERNEL A DECK ACTUALLY BOOTS IS DECIDED BY limine-entry-tool, NOT BY US.
+# ✅ THE STOCK-KERNEL GAP IS CLOSED (2026-08-15, later the same day). This
+# block used to warn that the target ALSO pacstraps stock `linux` via
+# archinstall's own `kernels=` (phase 3 of 14, long before configure_deck), so
+# a Deck carried two kernels and `limine-entry-tool` -- not us -- decided which
+# one booted. That slice has now landed, by the route this comment named:
+# `deck-form.sh` overrides upstream's `detect_kernel()` (it is sourced into
+# `configurator` at patched line 1057, 101 lines BEFORE the top-level
+# `kernel_choice=$(detect_kernel)` at 1158, measured on the patched file), so
+# `user_configuration.json` carries "kernels": [ "linux-neptune-611" ] and
+# archinstall pacstraps Neptune as THE kernel. One kernel, one UKI.
+# Operator decision: Neptune only, no stock-linux fallback entry.
 #
-# ⚠️ ESP SIZE. The measured UKI on hardware was 74,987,520 B for one kernel.
-# Two kernels means two of them in /EFI/Linux plus their fallbacks. Nobody has
-# measured the ESP headroom on a real install with both; that is the first
-# thing an ISO build should be asked.
+# 🔴 linux-firmware-neptune is DELIBERATELY NOT HERE, and must not be added.
+# It would kill the install at phase 3. Valve's package declares
+# conflicts/replaces against only `linux-firmware` and `linux-firmware-whence`,
+# but Arch split that into ten per-vendor subpackages -- so pacman removes the
+# two it was told about and then dies in the file-conflict check:
+#   "linux-firmware-neptune: /usr/lib/firmware/... exists in filesystem
+#    (owned by linux-firmware-other)"
+# Measured in a VM by src/omarchy-deck-kernel.sh (see its
+# `colliding_arch_firmware` / `stage_firmware_swap`, ~534-584), which works
+# around it with an explicit `pacman -Rdd` of the colliding subpackages.
+# PACSTRAP HAS NO SUCH STEP. Safe to omit: `linux-neptune-611`'s .PKGINFO
+# depends only on coreutils/initramfs/kmod, so nothing drags it in, and Arch's
+# own linux-firmware-* covers amdgpu and the ath11k radio. It stays in
+# deck-mirror.packages so the post-install swap has a local source.
+#
+# ⚠️ ESP SIZE, now a smaller question but still unmeasured: one UKI measured
+# 74,987,520 B on hardware. With Neptune-only there should be exactly one --
+# which is itself a thing the next build must confirm rather than assume.
 linux-neptune-611
-linux-firmware-neptune
 
 # --- python-evdev -----------------------------------------------------------
 #

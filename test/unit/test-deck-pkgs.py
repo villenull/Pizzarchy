@@ -312,7 +312,22 @@ check_true(
 )
 
 check_true("the Neptune kernel is now pacstrapped", "linux-neptune-611" in install_names)
-check_true("…and so is its firmware", "linux-firmware-neptune" in install_names)
+check(
+    "🔴 linux-firmware-neptune is NOT pacstrapped -- it would kill the install "
+    "at phase 3 (Valve declares conflicts against linux-firmware and -whence "
+    "only, but Arch split it into ten subpackages, so pacman removes those two "
+    "and then dies on file conflicts with the rest; measured in a VM by "
+    "src/omarchy-deck-kernel.sh's colliding_arch_firmware/stage_firmware_swap, "
+    "and pacstrap has no -Rdd step). Safe to omit: linux-neptune-611's "
+    ".PKGINFO depends only on coreutils/initramfs/kmod",
+    "linux-firmware-neptune" in install_names,
+    False,
+)
+check_true(
+    "…but it stays mirror-carried, so the post-install firmware swap has a "
+    "local source",
+    "linux-firmware-neptune" in mirror_raw,
+)
 check(
     "🔴 the kernel HEADERS are deliberately mirror-only (nothing on the target "
     "builds modules)",
