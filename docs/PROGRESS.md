@@ -3158,13 +3158,38 @@ them:**
    on every VT" was read as "never reached userspace"; the journal showed two
    complete boots.
 
-**A bug that would have shipped in the *fix*, caught by running the stages live:**
-`src/deck-session.sh` hardcodes `/sys/class/backlight/amdgpu_bl0/brightness`, but
-this Deck has **only `amdgpu_bl1`** — so the `steamos-priv-write` whitelist
-permits a node that does not exist and brightness stays dead. **The index is
-assigned by driver enumeration and is not stable**: earlier sessions measured
-`bl0` under Neptune, this one `bl1` under stock Arch. Must be discovered at
-runtime, never hardcoded.
+**A bug caught by running the stages live — and a first diagnosis of it that was
+wrong, corrected here the same evening.** `src/deck-session.sh` hardcoded
+`/sys/class/backlight/amdgpu_bl0/brightness`, and this Deck has **only
+`amdgpu_bl1`**. The first reading (mine) was *"the `steamos-priv-write` whitelist
+permits a node that does not exist, so brightness stays dead."* **That is false,
+and measurement killed it:** the whitelist is a regex over the device component —
+`^/sys/class/backlight/[A-Za-z0-9_.:+-]+/brightness$` — so it is device-name
+agnostic and **accepted `bl1` the whole time**. Proven by executing the real
+rendered helper.
+
+The actual defect was in the **verification**, which is worse and much easier to
+miss. `DECK_BACKLIGHT` (the hardcoded `bl0` path) was the node
+`verify_priv_write_helper` writes to prove the helper works. That file does not
+exist here, so verify took its `[[ -r $bl ]]` else-branch, warned, and **the
+stage reported ok having never exercised the write path at all.** The device's
+own journal from the live 13:33 run is the proof — two refusal lines logged
+(`/etc/shadow`, a non-numeric value) and **no accept line**. The non-numeric
+check proves nothing about the node either: the value guard rejects before the
+path is touched, so it logs identically against a node that does not exist.
+Textbook §5.30c — *the passing state was indistinguishable from the
+not-having-run state.*
+
+**The index is assigned by driver enumeration and is not stable**: measured `bl0`
+under Neptune, `bl1` under stock `linux 7.1.8-arch1-3`. Now discovered at runtime
+(`BACKLIGHT_GLOB` + a three-outcome `find_backlight`: found / no backlight class
+at all → warn / backlights exist but none is amdgpu → fail), with the three
+outcomes finally under test. Measured context: Steam asks for that node **1051
+times in one session**, and it is mode `0644 root:root`, so the helper is the
+only possible writer — there is no path where the slider works by accident.
+**Still unproven on hardware: a successful write.** The acceptance test is a
+`steamos-priv-write` *accept* line in the journal, not a slider that looks like
+it moved.
 
 **Also confirmed good, first hardware evidence for all of it:** the UKI builds
 (`omarchy_linux.efi`, 75 MB) and `limine-mkinitcpio-hook` fires; Limine renders

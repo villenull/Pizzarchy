@@ -44,8 +44,12 @@ work without waiting for further instruction.**
 >
 > ⚠️ **`amdgpu_bl0` vs `bl1`:** the backlight index is assigned by driver
 > enumeration and is **not stable** — measured `bl0` under Neptune, `bl1` under
-> stock Arch. `deck-session.sh` hardcoded `bl0`, which silently breaks the
-> brightness whitelist. Discover it, never hardcode it.
+> stock Arch. `deck-session.sh` hardcoded `bl0`; now discovered at runtime.
+> **The first diagnosis of this was wrong and is worth reading as a lesson**
+> (§5.32): "the whitelist rejects bl1" was plausible and false — the whitelist is
+> a device-agnostic regex that always accepted it. The real defect was that
+> *verification* wrote to the hardcoded node, found it absent, warned, and **the
+> stage reported ok without ever exercising the write path**. §5.30c again.
 >
 > ### ✅ Omarchy 4.0.0 STABLE — rebase DONE, ISO BUILT, merged to `main`
 >
