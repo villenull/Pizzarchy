@@ -479,6 +479,168 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 5b. Stage the LIVE ISO's on-screen keyboard.
+#
+# 🔴 THE P1 THIS EXISTS FOR. omarchy-2026.08.15-x86_64-quattro.iso shipped the
+# installer's text SCREENS (configs/airootfs/.../deck-form.sh, which the
+# overlay rsync above put there) without the BINARY those screens launch to
+# draw a keyboard. On the first real-hardware boot the Wi-Fi passphrase prompt
+# came up with "mapper not found at /usr/local/bin/deck-input-mapper" and no
+# way to type -- on a machine with no keyboard. Same for the username, the
+# account password (masked, so a mistake would be invisible) and the hostname:
+# all four go through deck_form_text_prompt.
+# docs/findings/P32-osk-mapper-missing-from-live-iso.md is the full write-up.
+#
+# --- WHY A BUILD-TIME COPY OUT OF src/, RATHER THAN AN OVERLAY FILE ---------
+#
+# The finding named two candidate routes. Neither was the one taken, and the
+# reason is worth writing down because "just do it the way deck-form.sh is
+# done" is the obvious answer and it is wrong here:
+#
+#   Route 1, a tracked copy at iso/overlay/configs/airootfs/usr/local/bin/
+#   deck-input-mapper. This is how deck-form.sh ships, and for deck-form.sh it
+#   is right: that file has no other home, the overlay IS its source. The
+#   mapper does have another home -- src/deck-input-mapper.py, 190 KB, under
+#   active development, with its own unit suites pointing at src/ and
+#   src/deck-session.sh installing it onto the TARGET from there. A second
+#   tracked copy of it (plus its two OSK modules, ~80 KB more) would be four
+#   files that drift SILENTLY from the ones every test reads. This repo's
+#   recurring defect is a second declaration going stale, not a missing one.
+#
+#   Route 2, carry it in the omarchy-deck package and install that package
+#   into the live set. The package is built for the TARGET: it also ships a
+#   pacman hook, a patch applier and a systemd unit that have no business
+#   running in the live root, and it ships no mapper today. Adding one to it
+#   to solve a live-ISO problem couples two unrelated lifetimes.
+#
+# So: ONE source of truth (src/), copied into the overlaid tree at build time,
+# with a guard that reads the CONSUMER's own declaration to decide where it
+# goes. The treatment matches `deck-session.sh stage-input-mapper` exactly --
+# the script installed 0755 WITHOUT its .py extension, the importable modules
+# 0644 in a lib directory beside it -- because the mapper computes its own
+# module search path from its install location and the two must agree.
+#
+# ⚠️ EVERY PATH AND NAME BELOW IS DERIVED, none is written twice:
+#   * the destination comes from deck-form.sh's DECK_MAPPER_BIN literal, so
+#     moving the path in the consumer moves the file (or fails the build);
+#   * the OSK backend comes from deck-form.sh's DECK_MAPPER_ARGS, so asking
+#     for a renderer we do not stage fails the build;
+#   * the module directory is computed from the destination the same way
+#     src/deck-input-mapper.py's OSK_SEARCH_DIRS computes it, and that
+#     computation is cross-checked against the mapper's own source below.
+# ---------------------------------------------------------------------------
+
+LIVE_FORM_SH="$SCRATCH_SRC/configs/airootfs/usr/share/omarchy-iso/deck-form.sh"
+LIVE_MAPPER_SRC="$REPO_ROOT/src/deck-input-mapper.py"
+# The one module the mapper loads unconditionally at import time (it decides
+# which keycodes the uinput device DECLARES, and an undeclared keycode is
+# dropped by the kernel with no error anywhere). The renderer is derived from
+# the backend below and appended to this.
+LIVE_OSK_MODULES=(deck_osk_layout.py)
+
+[[ -f $LIVE_FORM_SH ]] ||
+  build_fail "cannot stage the live on-screen keyboard: no deck-form.sh at ${LIVE_FORM_SH#"$SCRATCH_SRC"/} in the overlaid tree. That file IS the installer's Deck screens; without it there is nothing to stage a keyboard for, and the overlay rsync above should have put it there."
+
+# `|| true` on the pipeline, not on grep: `set -o pipefail` is on, so a grep
+# that matches nothing would otherwise abort this script inside the command
+# substitution -- silently, with no message, which is the one thing this file
+# is not allowed to do (CLAUDE.md). The empty result is handled below, loudly.
+LIVE_MAPPER_DEST=$(
+  grep -oE '^readonly DECK_MAPPER_BIN=[^[:space:]]+' "$LIVE_FORM_SH" |
+    sed -E 's|^readonly DECK_MAPPER_BIN=||' | head -n1 || true
+)
+[[ -n $LIVE_MAPPER_DEST ]] ||
+  build_fail "cannot stage the live on-screen keyboard: no 'readonly DECK_MAPPER_BIN=<path>' in ${LIVE_FORM_SH#"$SCRATCH_SRC"/}. That literal is where deck_form_text_prompt looks for the mapper, and it is the ONLY authority for where this build must put it. Refusing to guess a path -- guessing wrong reproduces the exact P32 failure with a green build log."
+[[ $LIVE_MAPPER_DEST == /* ]] ||
+  build_fail "deck-form.sh's DECK_MAPPER_BIN is '$LIVE_MAPPER_DEST', which is not an absolute path. It is used as an airootfs destination here and as an executable path on the live ISO; a relative value cannot be either."
+
+LIVE_MAPPER_BACKEND=$(
+  grep -oE -- '--osk-backend=[A-Za-z0-9_-]+' "$LIVE_FORM_SH" |
+    sed -E 's|^--osk-backend=||' | sort -u || true
+)
+[[ -n $LIVE_MAPPER_BACKEND ]] ||
+  build_fail "cannot stage the live on-screen keyboard: no --osk-backend=<name> in ${LIVE_FORM_SH#"$SCRATCH_SRC"/}'s DECK_MAPPER_ARGS. The backend decides WHICH renderer module has to be in the image; without it this step would stage a mapper that starts, navigates, and has no keyboard."
+[[ $(printf '%s\n' "$LIVE_MAPPER_BACKEND" | grep -c .) -eq 1 ]] ||
+  build_fail "deck-form.sh names more than one --osk-backend ($(printf '%s' "$LIVE_MAPPER_BACKEND" | tr '\n' ' ')). Which renderer the live ISO needs is then ambiguous, and staging the wrong one fails only on hardware."
+LIVE_OSK_MODULES+=("deck_osk_${LIVE_MAPPER_BACKEND}.py")
+
+# The module directory, computed from the destination exactly as
+# src/deck-input-mapper.py's OSK_SEARCH_DIRS computes it: <its own dir>/../lib/
+# deck-osk. Cross-checked against the mapper's own source so this cannot drift
+# into a directory the mapper will never search -- the failure mode
+# test/unit/test-osk-install-layout.sh was written for (present, enumerated,
+# silent).
+LIVE_OSK_LIB_DEST="$(dirname -- "$(dirname -- "$LIVE_MAPPER_DEST")")/lib/deck-osk"
+[[ -f $LIVE_MAPPER_SRC ]] ||
+  build_fail "cannot stage the live on-screen keyboard: no ${LIVE_MAPPER_SRC#"$REPO_ROOT"/}. That file is the mapper; src/ is its single source of truth and this build copies it rather than keeping a second tracked copy in the overlay."
+grep -q '"lib" / "deck-osk"' "$LIVE_MAPPER_SRC" ||
+  build_fail "${LIVE_MAPPER_SRC#"$REPO_ROOT"/} no longer computes its OSK search path as <its own dir>/../lib/deck-osk, but this build still stages the modules into $LIVE_OSK_LIB_DEST. The mapper would start, navigation would work, and the keyboard would be missing with one line on stderr nobody reads. Move both together."
+
+live_mapper_staged="$SCRATCH_SRC/configs/airootfs$LIVE_MAPPER_DEST"
+install -Dm0755 "$LIVE_MAPPER_SRC" "$live_mapper_staged" ||
+  build_fail "could not stage $LIVE_MAPPER_SRC into the airootfs at $LIVE_MAPPER_DEST"
+for live_osk_module in "${LIVE_OSK_MODULES[@]}"; do
+  [[ -f "$REPO_ROOT/src/$live_osk_module" ]] ||
+    build_fail "the live ISO's --osk-backend=$LIVE_MAPPER_BACKEND needs src/$live_osk_module and there is no such file. Either the backend name in deck-form.sh's DECK_MAPPER_ARGS is wrong, or the module was renamed without it. Refusing to ship a mapper whose keyboard cannot load."
+  install -Dm0644 "$REPO_ROOT/src/$live_osk_module" \
+    "$SCRATCH_SRC/configs/airootfs$LIVE_OSK_LIB_DEST/$live_osk_module" ||
+    build_fail "could not stage src/$live_osk_module into the airootfs at $LIVE_OSK_LIB_DEST"
+done
+
+# 🔴 AND THE EXECUTABLE BIT, WHICH THE COPY ABOVE DOES NOT SURVIVE.
+#
+# mkarchiso does `cp -af --no-preserve=ownership,mode` out of the profile's
+# airootfs/ (archiso's _make_custom_airootfs). Modes are DISCARDED: everything
+# lands 0644 root:root regardless of what it was on the host. The ONLY thing
+# that puts the bit back is a matching entry in configs/profiledef.sh's
+# `file_permissions` array -- which is why upstream declares one for every one
+# of its own /usr/local/bin scripts.
+#
+# Get this wrong and deck-form.sh's `[[ -x $mapper_bin ]]` is false, the OSK
+# never starts, and the operator sees the EXACT P32 message again -- from an
+# image that does contain the mapper. That is a worse bug than the one being
+# fixed, because the file is right there.
+#
+# This is done here rather than as a sixth entry in iso/overlay/patches/ for a
+# reason beyond the patch budget (T5-fork-plan.md §1 point 3, currently 5/5):
+# the array's contents are decided by what THIS step stages, so a hand-written
+# patch listing the path would be a second, hand-kept declaration of the first
+# -- the staleness this whole block is arranged to avoid. It is derived, and
+# the anchor is checked rather than assumed.
+LIVE_PROFILEDEF="$SCRATCH_SRC/configs/profiledef.sh"
+[[ -f $LIVE_PROFILEDEF ]] ||
+  build_fail "no configs/profiledef.sh in the overlaid tree. archiso reads the executable bits of everything in airootfs/ from its file_permissions array; without that file the staged mapper ships mode 0644 and deck-form.sh's -x test fails on the ISO."
+grep -q '^file_permissions=(' "$LIVE_PROFILEDEF" ||
+  build_fail "configs/profiledef.sh has no 'file_permissions=(' array. archiso copies airootfs with --no-preserve=mode, so that array is the only thing that can make $LIVE_MAPPER_DEST executable on the live ISO. Upstream restructured it; find where the modes are declared now and stage the entry there."
+if grep -qF "[\"$LIVE_MAPPER_DEST\"]" "$LIVE_PROFILEDEF"; then
+  build_log "profiledef.sh already declares $LIVE_MAPPER_DEST; leaving upstream's entry alone"
+else
+  # Inserted before the array's closing ')' -- the first line that is exactly
+  # ')' at or after the declaration. Done in bash rather than with sed/awk so
+  # that "the anchor was never found" is a distinct, loud outcome instead of a
+  # zero exit over an unchanged file, which is how a stream editor reports
+  # matching nothing.
+  mapfile -t live_profiledef_lines <"$LIVE_PROFILEDEF"
+  live_in_perms=0
+  live_perm_inserted=0
+  : >"$LIVE_PROFILEDEF.staged"
+  for live_line in "${live_profiledef_lines[@]}"; do
+    [[ $live_line == 'file_permissions=('* ]] && live_in_perms=1
+    if (( live_in_perms )) && [[ $live_line == ')' ]]; then
+      printf '  ["%s"]="0:0:0755"\n' "$LIVE_MAPPER_DEST" >>"$LIVE_PROFILEDEF.staged"
+      live_in_perms=0
+      live_perm_inserted=1
+    fi
+    printf '%s\n' "$live_line" >>"$LIVE_PROFILEDEF.staged"
+  done
+  (( live_perm_inserted )) ||
+    build_fail "could not declare $LIVE_MAPPER_DEST executable: configs/profiledef.sh opens a file_permissions=( array and never closes it on a line of its own. That is the anchor this insertion needs; refusing to write a profiledef this step could not place an entry in, because the result would be an ISO carrying a mapper it cannot execute."
+  mv "$LIVE_PROFILEDEF.staged" "$LIVE_PROFILEDEF"
+fi
+
+build_log "staged the live on-screen keyboard: $LIVE_MAPPER_DEST (0755) + ${#LIVE_OSK_MODULES[@]} module(s) in $LIVE_OSK_LIB_DEST (${LIVE_OSK_MODULES[*]}), backend '$LIVE_MAPPER_BACKEND' as deck-form.sh asks for it"
+
+# ---------------------------------------------------------------------------
 # 6. The guards. 6.1 already ran above (it gates which env vars reach Docker
 #    at all, so it has to run before this point). 6.3 is structural -- it is
 #    the scratch PACMAN_CACHE_DIR set up in step 2 and the absence, anywhere
@@ -829,6 +991,160 @@ $(printf '%s\n' "${patch_rejects[@]}")
 fi
 
 build_log "guard 6.6 OK: all ${#runtime_patches[@]} runtime patch(es) in ${RUNTIME_PATCH_DIR#"$REPO_ROOT"/} still apply cleanly to $RUNTIME_SLUG@$RUNTIME_SHORT ($(printf '%s ' "${runtime_patches[@]##*/}"))"
+
+# ---------------------------------------------------------------------------
+# Guard 6.7 -- the live ISO carries the keyboard its own screens require.
+#
+# docs/findings/P32-osk-mapper-missing-from-live-iso.md, point 3 of its fix
+# outline: "the whole point of the guard family is to catch exactly this 'the
+# screen references a thing the image does not carry' gap."
+#
+# 6.4a asks that question of the TARGET (does the runtime ship the binaries the
+# orchestrator shells out to). Nothing asked it of the LIVE ROOT, and that is
+# how an ISO shipped whose installer screens launch /usr/local/bin/
+# deck-input-mapper on an image that contained no such file, no OSK modules and
+# no python-evdev. Every tier below hardware was structurally blind to it: the
+# unit suites drive deck-form.sh's functions directly against fake mappers, and
+# the QEMU harness never presses a button at the live tty.
+#
+# FOUR ASSERTIONS, and they are deliberately asked of DIFFERENT ARTIFACTS --
+# three of them about things step 5b just did, and the fourth about something
+# no step here controls:
+#
+#   a. the mapper is in the overlaid airootfs, at the path deck-form.sh's own
+#      DECK_MAPPER_BIN names, non-empty and executable ON THE HOST SIDE;
+#   b. configs/profiledef.sh declares that path with an executable mode, so it
+#      is still executable after mkarchiso's --no-preserve=mode copy. (a)
+#      without (b) is the same visible failure from a different cause;
+#   c. every OSK module the declared backend needs is in the directory the
+#      mapper will search;
+#   d. the live package list carries python-evdev, AND the patched
+#      builder/build-iso.sh actually reads that list into packages.x86_64. The
+#      second half is the one that matters: a list nothing consumes is a
+#      comment, and it would leave the mapper dying at its first import line
+#      with the screens still launching it.
+#
+# Checking (a)-(c) against work this script did four hundred lines up is not
+# circular busywork: what it pins is the COUPLING to files this script does not
+# own -- deck-form.sh's path and backend, src/'s module names, upstream's
+# profiledef structure. Any of those moving is what would break, and each one
+# fails here with a diagnosis naming the file to fix rather than with a Wi-Fi
+# screen nobody can type into.
+#
+# The names are derived (§6.4's rule): the dependency below comes from what the
+# staged Python actually imports, not from a hand-kept list that would go stale
+# against our own next edit.
+# ---------------------------------------------------------------------------
+
+# (a) the mapper itself.
+[[ -f $live_mapper_staged ]] ||
+  build_fail "guard 6.7: nothing at airootfs$LIVE_MAPPER_DEST in the overlaid tree, but ${LIVE_FORM_SH#"$SCRATCH_SRC"/} launches exactly that path to draw the installer's on-screen keyboard. Step 5b should have staged it. This is the P32 shape: screens in the image, keyboard not."
+[[ -s $live_mapper_staged ]] ||
+  build_fail "guard 6.7: airootfs$LIVE_MAPPER_DEST is EMPTY. A zero-byte mapper passes an -x test, starts, exits immediately, and deck-form.sh degrades on a timeout instead of on a missing file -- the same screen, a worse diagnosis."
+[[ -x $live_mapper_staged ]] ||
+  build_fail "guard 6.7: airootfs$LIVE_MAPPER_DEST is not executable in the source tree. deck-form.sh gates on '[[ -x \$mapper_bin ]]' and would print 'mapper not found' about a file that is right there."
+
+# (b) and the bit survives mkarchiso.
+live_perm_entry=$(grep -F "[\"$LIVE_MAPPER_DEST\"]" "$LIVE_PROFILEDEF" || true)
+[[ -n $live_perm_entry ]] ||
+  build_fail "guard 6.7: configs/profiledef.sh declares no file_permissions entry for $LIVE_MAPPER_DEST.
+
+  archiso copies the profile's airootfs/ with 'cp -af --no-preserve=ownership,mode'
+  (_make_custom_airootfs). The host-side mode is DISCARDED -- the file lands 0644
+  root:root -- and file_permissions is the only thing that puts the executable bit
+  back. Upstream declares one for each of its own /usr/local/bin/omarchy-* scripts
+  for this reason.
+
+  Without it the ISO contains the mapper and cannot run it, and deck-form.sh
+  reports 'mapper not found' -- which sends the next reader looking for a missing
+  file instead of a missing mode."
+# The entry's shape is ["<path>"]="<uid>:<gid>:<mode>". archiso splits it on ':'
+# and hands the third field straight to chmod, so the OWNER digit of that field
+# -- third from the right, because the mode may or may not carry a leading
+# setuid digit -- is literally the bit deck-form.sh's -x test will see (the
+# installer runs as root). Checking the LAST digit instead would pass a 0700
+# and fail an 0711, both of which are wrong answers.
+live_perm_mode=${live_perm_entry##*:}
+live_perm_mode=${live_perm_mode%%\"*}
+[[ $live_perm_mode =~ ^[0-7]{3,4}$ ]] ||
+  build_fail "guard 6.7: cannot read a mode out of configs/profiledef.sh's entry for $LIVE_MAPPER_DEST:
+    $live_perm_entry
+  Expected [\"<path>\"]=\"<uid>:<gid>:<mode>\". Refusing to assume a mode this guard could not parse -- an unreadable declaration is not a passing one."
+case ${live_perm_mode: -3:1} in
+  1|3|5|7) ;;
+  *) build_fail "guard 6.7: configs/profiledef.sh declares $LIVE_MAPPER_DEST mode $live_perm_mode, which does not grant execute to its owner. archiso applies this verbatim with chmod after copying, so this IS the mode on the shipped ISO, and deck-form.sh's '[[ -x \$mapper_bin ]]' would be false against a file that is present." ;;
+esac
+
+# (c) the modules the declared backend needs, where the mapper will look.
+live_missing_modules=()
+for live_osk_module in "${LIVE_OSK_MODULES[@]}"; do
+  [[ -s "$SCRATCH_SRC/configs/airootfs$LIVE_OSK_LIB_DEST/$live_osk_module" ]] ||
+    live_missing_modules+=("$live_osk_module")
+done
+(( ${#live_missing_modules[@]} == 0 )) ||
+  build_fail "guard 6.7: the live ISO asks for --osk-backend=$LIVE_MAPPER_BACKEND but airootfs$LIVE_OSK_LIB_DEST is missing ${live_missing_modules[*]}. The mapper resolves that directory from its own install path, finds nothing, prints one line on stderr and CARRIES ON -- navigation works, there are no character keys, and the install looks like it merely timed out. Stage the modules with the script, as a set."
+
+# (d) the runtime dependency, derived from what the staged Python imports, and
+#     proved to be reachable by the thing that installs it.
+#
+# The module -> package mapping is the one hand-written fact here, and it is
+# small on purpose: everything else about this check (which files to scan, and
+# whether they import at all) comes from the staged tree.
+declare -A LIVE_PKG_FOR_PYTHON_MODULE=(
+  [evdev]=python-evdev
+)
+
+LIVE_PACKAGES_LIST="$SCRATCH_SRC/configs/deck/deck-live.packages"
+[[ -f $LIVE_PACKAGES_LIST ]] ||
+  build_fail "guard 6.7: no configs/deck/deck-live.packages in the overlaid tree. That file is the LIVE root's package list -- the target's list (deck-install.packages) is a different question and does not put anything in the ISO you boot."
+
+mapfile -t LIVE_PACKAGE_NAMES < <(grep -hv '^#\|^$' "$LIVE_PACKAGES_LIST" | tr -d '[:blank:]' | sort -u)
+(( ${#LIVE_PACKAGE_NAMES[@]} > 0 )) ||
+  build_fail "guard 6.7: configs/deck/deck-live.packages holds no package names (empty, or entirely comments). A guard with an empty subject is not a passing guard."
+
+# Which third-party Python modules the staged OSK payload imports at module
+# scope. Restricted to the names we can map to a package, because an unmapped
+# import is a question for a human, not a silent pass -- see the loop below.
+mapfile -t LIVE_PY_IMPORTS < <(
+  grep -hoE '^(from|import) [a-z_][a-z0-9_]*' \
+    "$live_mapper_staged" \
+    "$SCRATCH_SRC/configs/airootfs$LIVE_OSK_LIB_DEST"/*.py |
+    sed -E 's/^(from|import) //' | sort -u
+)
+(( ${#LIVE_PY_IMPORTS[@]} > 0 )) ||
+  build_fail "guard 6.7 cannot run: no top-level imports found in the staged mapper or its OSK modules. The mapper imports evdev at module scope, so zero matches means this derivation went stale, not that the dependency went away."
+
+live_unsatisfied_deps=()
+for live_py_module in "${LIVE_PY_IMPORTS[@]}"; do
+  live_dep_pkg=${LIVE_PKG_FOR_PYTHON_MODULE[$live_py_module]:-}
+  [[ -n $live_dep_pkg ]] || continue          # stdlib, or a sibling OSK module
+  live_dep_found=0
+  for live_pkg in "${LIVE_PACKAGE_NAMES[@]}"; do
+    [[ $live_pkg == "$live_dep_pkg" ]] && { live_dep_found=1; break; }
+  done
+  (( live_dep_found )) || live_unsatisfied_deps+=("$live_py_module -> $live_dep_pkg")
+done
+(( ${#live_unsatisfied_deps[@]} == 0 )) ||
+  build_fail "guard 6.7: the staged on-screen keyboard imports modules the live ISO does not install.
+
+$(printf '    %s\n' "${live_unsatisfied_deps[@]}")
+  configs/deck/deck-live.packages currently carries: ${LIVE_PACKAGE_NAMES[*]}
+
+  An ImportError at module scope kills the mapper before it can print its
+  'deck-input-mapper: bound' marker, so deck-form.sh waits out its 5 s deadline
+  and degrades -- with the mapper file present and executable, which makes the
+  message it prints actively misleading. Add the package to that list."
+
+# ...and the list has to be READ by something. A package list nothing consumes
+# is a comment: it would leave every assertion above satisfied and the ISO
+# still missing the dependency.
+LIVE_PATCHED_BUILDER="$SCRATCH_SRC/builder/build-iso.sh"
+[[ -f $LIVE_PATCHED_BUILDER ]] ||
+  build_fail "guard 6.7 cannot run: no builder/build-iso.sh in the overlaid tree to check the live package list against."
+grep -q 'deck-live\.packages' "$LIVE_PATCHED_BUILDER" ||
+  build_fail "guard 6.7: nothing in the patched builder/build-iso.sh reads configs/deck/deck-live.packages, so its entries reach neither packages.x86_64 nor the offline mirror. The list exists, the guard above is satisfied by it, and the ISO carries none of it -- a check passing for the wrong reason. iso/overlay/patches/deck-packages.patch (seam S6) is what appends it; it has probably been dropped or rebased away."
+
+build_log "guard 6.7 OK: the live root carries $LIVE_MAPPER_DEST (executable, and declared 0755 in profiledef.sh so mkarchiso's --no-preserve=mode copy cannot strip it), ${#LIVE_OSK_MODULES[@]} OSK module(s) for backend '$LIVE_MAPPER_BACKEND' in $LIVE_OSK_LIB_DEST, and ${#LIVE_PACKAGE_NAMES[@]} live package(s) build-iso.sh installs (${LIVE_PACKAGE_NAMES[*]})"
 
 # ---------------------------------------------------------------------------
 # Guard 6.5 -- the payload audit (T5-fork-plan.md §6.5, specified in §5.4).

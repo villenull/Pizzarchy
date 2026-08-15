@@ -1,0 +1,44 @@
+# Packages installed into the LIVE ISO itself -- the environment the installer
+# runs in, NOT the system it installs.
+#
+# Three lists, three different questions, and mixing them up is how the bug
+# this file exists to fix happened in the first place:
+#
+#   deck-install.packages   pacstrapped onto the TARGET at install time
+#   deck-mirror.packages    carried in the offline mirror for later
+#   deck-live.packages      installed into the LIVE root -- this file
+#
+# builder/build-iso.sh (patched by iso/overlay/patches/deck-packages.patch,
+# seam S6) appends every entry here to `packages.x86_64`, which is both what
+# mkarchiso pacstraps into the live root AND one of the inputs to the offline
+# mirror's download list. So an entry here is downloaded once and installed
+# once, into the ISO.
+#
+# ⚠️ Entries must be BARE names, never repo-qualified. Unlike
+# deck-mirror.packages this list is resolved against the offline mirror by
+# mkarchiso as well as against the online repos, and a qualified name aborts
+# the single-repo offline resolve.
+#
+# 🔴 iso/bin/build guard 6.7 reads this file before Docker starts and refuses
+# a build whose live ISO would carry the on-screen keyboard's script without
+# the library it imports. Do not remove an entry to "slim the ISO" without
+# reading that guard.
+
+# --- the on-screen keyboard's runtime dependency ----------------------------
+#
+# /usr/local/bin/deck-input-mapper does `from evdev import InputDevice, UInput,
+# ecodes, list_devices` at module scope (src/deck-input-mapper.py), and so does
+# the layout core it imports (src/deck_osk_layout.py, for `ecodes`). Without
+# this package the mapper dies at its first import line, deck-form.sh's
+# deck_form_text_prompt never sees the `deck-input-mapper: bound` marker, and
+# every text screen -- Wi-Fi password, username, account password, hostname --
+# comes up with no way to type on a machine that has no keyboard.
+#
+# That is exactly what shipped in omarchy-2026.08.15-x86_64-quattro.iso and was
+# found on the first real-hardware boot:
+# docs/findings/P32-osk-mapper-missing-from-live-iso.md.
+#
+# extra/python-evdev, BSD-3-Clause (redistributable -- CLAUDE.md's "nothing
+# unlicensed or AUR-only"), depends only on glibc and python, both already in
+# the live root. Measured 2026-08-15: 123.70 KiB download, 830.98 KiB installed.
+python-evdev

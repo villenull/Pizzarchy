@@ -1,5 +1,5 @@
 diff --git i/builder/build-iso.sh w/builder/build-iso.sh
-index db8daa2..5f32ff4 100755
+index db8daa2..82341f8 100755
 --- i/builder/build-iso.sh
 +++ w/builder/build-iso.sh
 @@ -104,6 +104,123 @@ if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
@@ -126,7 +126,54 @@ index db8daa2..5f32ff4 100755
  # Node.js binary for offline mise install.
  NODE_DIST_URL="https://nodejs.org/dist/latest"
  NODE_SHASUMS=$(curl -fsSL "$NODE_DIST_URL/SHASUMS256.txt")
-@@ -164,6 +281,39 @@ else
+@@ -121,6 +238,46 @@ cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
+ arch_packages=(linux-t2 git gum jq openssl plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
+ printf '%s\n' "${arch_packages[@]}" >> "$build_cache_dir/packages.x86_64"
+ 
++# --- Steam Deck (omarchy-deck overlay, T5-fork-plan.md §3 seam S6) ----------
++#
++# The LIVE root's own Deck additions. This is the third package list and the
++# only one about the ISO you boot rather than the system you install:
++#
++#   deck-install.packages   pacstrapped onto the TARGET
++#   deck-mirror.packages    carried in the offline mirror, installed later
++#   deck-live.packages      installed into the LIVE ISO -- here
++#
++# 🔴 WHY IT IS A FILE AND NOT THREE MORE WORDS IN `arch_packages` ABOVE.
++# A build guard has to be able to read the declaration BEFORE Docker starts,
++# and this file is inside /configs, which iso/bin/build's guard 6.7 can see on
++# the host. The specific thing it guards: `python-evdev` is the runtime import
++# of /usr/local/bin/deck-input-mapper, which is the on-screen keyboard EVERY
++# text screen of the Deck installer is built around (deck-form.sh's
++# deck_form_text_prompt). Ship the screens without it and the ISO boots, the
++# installer runs, and there is simply no way to type a Wi-Fi password on a
++# machine with no keyboard -- the P1 found on the first hardware boot
++# (docs/findings/P32-osk-mapper-missing-from-live-iso.md).
++#
++# It lands in packages.x86_64 BEFORE the `all_packages` collection below reads
++# that file, so one entry reaches both consumers: mkarchiso's live pacstrap and
++# the offline mirror's download list. Appending after that point would install
++# nothing, because the mirror would not carry it.
++#
++# $deck_list_dir is declared and checked once, up beside the seam-S4 block.
++# Same emptiness refusal as seam S1's two lists, for the same reason: an empty
++# grep here is indistinguishable from a list that legitimately added nothing,
++# and the failure would only surface on hardware.
++if ! grep -qv '^#\|^$' "$deck_list_dir/deck-live.packages"; then
++  echo "ERROR: $deck_list_dir/deck-live.packages has no package entries" >&2
++  echo "       (missing, empty, or entirely comments)." >&2
++  echo "       The live ISO would boot without the on-screen keyboard's runtime" >&2
++  echo "       dependency, and every text screen of the installer would degrade" >&2
++  echo "       to 'attach a keyboard' on a machine that has none." >&2
++  exit 1
++fi
++grep -hv '^#\|^$' "$deck_list_dir/deck-live.packages" \
++  >>"$build_cache_dir/packages.x86_64"
++
+ # The live ISO boots linux-t2 (see airootfs/etc/mkinitcpio.d/linux-t2.preset), so
+ # stock linux is a second kernel nobody boots: ~147MB of ISO, plus its own archiso
+ # initramfs, copied into both the ISO tree and the size-constrained FAT EFI image.
+@@ -164,6 +321,39 @@ else
    setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
  fi
  
@@ -166,7 +213,7 @@ index db8daa2..5f32ff4 100755
  mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
  cp "${base_pkg_lists[0]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
  cp "${base_pkg_lists[1]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-other.packages"
-@@ -187,12 +337,40 @@ if [[ ! -f $setup_form ]]; then
+@@ -187,12 +377,40 @@ if [[ ! -f $setup_form ]]; then
  fi
  cp "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"
  
@@ -207,7 +254,7 @@ index db8daa2..5f32ff4 100755
      grep -hv '^#\|^$' /builder/archinstall.packages
      # Always include the selected Omarchy packages so the target install can
      # find the runtime and companion packages in the offline mirror.
-@@ -213,6 +391,69 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+@@ -213,6 +431,69 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
    )
  fi
  
@@ -277,7 +324,7 @@ index db8daa2..5f32ff4 100755
  mkdir -p /tmp/offlinedb
  download_offline_packages() {
    pacman --config /configs/pacman-online-${OMARCHY_MIRROR}.conf --noconfirm -Syw \
-@@ -266,6 +507,36 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+@@ -266,6 +547,36 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
    done
  fi
  

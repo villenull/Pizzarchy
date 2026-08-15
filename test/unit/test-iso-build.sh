@@ -145,6 +145,66 @@ def run_chroot_finalizer(ctx):
     subprocess.run(["/usr/bin/omarchy-provision-user", "--force"], check=True)
 '
 
+# --- the live on-screen keyboard's fixture (guard 6.7, P32) ----------------
+#
+# Stand-ins rather than symlinks to the real src/, for the same reason
+# FIXTURE_ORCHESTRATOR_PY is a stand-in: the negative cases below have to
+# MUTATE these (move the mapper path, ask for a renderer that does not exist,
+# drop the dependency), and mutating the repo's own files is not an option.
+# Each carries exactly the literals the staging step and guard 6.7 derive from,
+# and section 18 separately asserts the REAL files still carry them -- so a
+# fixture that drifted from the product would be caught there rather than
+# silently testing a shape nothing ships.
+FIXTURE_DECK_FORM_SH='#!/usr/bin/env bash
+# Stand-in for the installer'"'"'s Deck screens. Only the two declarations
+# iso/bin/build derives from are real.
+readonly DECK_MAPPER_BIN=/usr/local/bin/deck-input-mapper
+readonly DECK_OSK_BOUND_MARKER="deck-input-mapper: bound"
+readonly -a DECK_MAPPER_ARGS=(--osk-backend=tty --osk-start-shown)
+'
+
+FIXTURE_MAPPER_PY='#!/usr/bin/env python3
+"""Stand-in for src/deck-input-mapper.py."""
+import pathlib
+import sys
+
+from evdev import InputDevice, UInput, ecodes as e, list_devices
+
+_HERE = pathlib.Path(__file__).resolve().parent
+OSK_SEARCH_DIRS = (
+    _HERE,
+    _HERE.parent / "lib" / "deck-osk",
+)
+print("deck-input-mapper: bound", file=sys.stderr)
+'
+
+FIXTURE_OSK_LAYOUT_PY='"""Stand-in for src/deck_osk_layout.py."""
+from evdev import ecodes as e
+
+OSK_KEYCODES = (e.KEY_A,)
+'
+
+FIXTURE_OSK_TTY_PY='"""Stand-in for src/deck_osk_tty.py."""
+import deck_osk_layout as osk
+
+ROWS = osk.OSK_KEYCODES
+'
+
+# Upstream's configs/profiledef.sh, reduced to the one thing that matters here:
+# archiso copies airootfs with --no-preserve=mode, so this array is the only
+# thing that can make anything in it executable. The two /usr/local/bin entries
+# are real upstream ones, kept so the insertion is exercised against a
+# non-empty array.
+FIXTURE_PROFILEDEF_SH='#!/usr/bin/env bash
+# shellcheck disable=SC2034
+
+iso_name="omarchy"
+file_permissions=(
+  ["/etc/shadow"]="0:0:400"
+  ["/usr/local/bin/omarchy-iso-install"]="0:0:755"
+)
+'
+
 git_commit_all() {
   local repo=$1 msg=$2
   git -C "$repo" -c user.email=test@example.com -c user.name=test add -A
@@ -184,6 +244,22 @@ make_fixture() {
   # check it against, or the positive case would be measuring the wrong thing.
   # bin/build hard-fails when it can find no patch directory at all, so every
   # fixture carries one -- which is itself the assertion in section 20.
+  # The live on-screen keyboard's inputs (guard 6.7). bin/build copies these out
+  # of src/ into the overlaid airootfs rather than carrying a second tracked
+  # copy in the overlay, so the fixture has to supply them the same way the repo
+  # does -- as src/ files, plus the overlay's deck-form.sh that declares where
+  # they go and the live package list that names the dependency.
+  printf '%s' "$FIXTURE_MAPPER_PY" >"$root/src/deck-input-mapper.py"
+  chmod +x "$root/src/deck-input-mapper.py"
+  printf '%s' "$FIXTURE_OSK_LAYOUT_PY" >"$root/src/deck_osk_layout.py"
+  printf '%s' "$FIXTURE_OSK_TTY_PY" >"$root/src/deck_osk_tty.py"
+  mkdir -p "$root/iso/overlay/configs/airootfs/usr/share/omarchy-iso" \
+           "$root/iso/overlay/configs/deck"
+  printf '%s' "$FIXTURE_DECK_FORM_SH" \
+    >"$root/iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh"
+  printf '# fixture live package list\npython-evdev\n' \
+    >"$root/iso/overlay/configs/deck/deck-live.packages"
+
   mkdir -p "$root/src/omarchy-deck-patches/patches"
   cat >"$root/src/omarchy-deck-patches/patches/0010-fixture-runtime.patch" <<'EOF'
 --- a/bin/omarchy-setup-system
@@ -205,7 +281,12 @@ EOF
   git_init "$up"
   mkdir -p "$up/configs" "$up/builder" "$orchestrator"
   printf 'placeholder\n' >"$up/configs/placeholder.conf"
-  printf '#!/bin/bash\necho fixture build-iso.sh ran\n' >"$up/builder/build-iso.sh"
+  printf '%s' "$FIXTURE_PROFILEDEF_SH" >"$up/configs/profiledef.sh"
+  # Guard 6.7's last assertion is that SOMETHING reads the live package list --
+  # in the real tree that is deck-packages.patch's seam S6 hunk. The fixture's
+  # builder stands in for the patched result.
+  printf '#!/bin/bash\necho fixture build-iso.sh ran\ngrep -hv "^#" /configs/deck/deck-live.packages >>packages.x86_64\n' \
+    >"$up/builder/build-iso.sh"
   printf '%s' "$FIXTURE_ORCHESTRATOR_PY" >"$orchestrator/phases_impl.py"
   git_commit_all "$up" 'fixture upstream commit'
   FIXTURE_UPSTREAM_SHA=$(git -C "$up" rev-parse HEAD)
@@ -2181,5 +2262,325 @@ actual_bytes=$(stat -c '%s' "$final_iso_path")
   fail "the fixture ISO must be non-empty, or 'the number is the size' and 'the number is zero' are the same assertion"
 [[ $size_line == *"GiB)"* ]] || fail "the size line also carries a human-readable GiB figure" "$size_line"
 pass "bin/build records the ISO size as a parseable byte count that equals the artifact's own size"
+
+# ===========================================================================
+# 24. Guard 6.7 -- the live ISO carries the keyboard its own screens require.
+#
+# 🔴 THE REGRESSION THIS SECTION EXISTS FOR ALREADY SHIPPED.
+# omarchy-2026.08.15-x86_64-quattro.iso carried the installer's text screens
+# (deck-form.sh) and none of the on-screen keyboard they launch: no
+# /usr/local/bin/deck-input-mapper, no OSK modules, no python-evdev. On the
+# first real-hardware boot the Wi-Fi passphrase prompt came up with no way to
+# type, on a machine with no keyboard, which defeats CLAUDE.md's central
+# constraint. docs/findings/P32-osk-mapper-missing-from-live-iso.md.
+#
+# Every tier below hardware was structurally blind to it, and still is: the
+# deck-form.sh suites drive its functions directly against FAKE mappers (which
+# is right -- they are testing the degrade protocol), and the QEMU harness
+# never presses a button at the live tty. So the only thing that can catch it
+# early is a build guard, and the only thing that can catch the GUARD rotting
+# is this section. Every case below therefore proves the guard FIRES, not just
+# that a good tree passes.
+#
+# The four couplings, one per failure this reproduces:
+#   a. deck-form.sh says WHERE the mapper goes            (24b, 24c, 24i)
+#   b. src/ is its single source of truth                  (24d, 24e)
+#   c. profiledef.sh is what makes it executable           (24f, 24g)
+#   d. the live package list is real and is consumed       (24h, 24j)
+# ===========================================================================
+
+# Re-commit a fixture's upstream repo and move iso/UPSTREAM onto it. bin/build
+# refuses a submodule that is not exactly at the pin, so any edit to the
+# fixture's stand-in upstream has to move both together.
+refresh_fixture_upstream() {
+  local root=$1 msg=$2
+  git_commit_all "$root/iso/upstream" "$msg"
+  printf 'fixture/upstream@%s\n' "$(git -C "$root/iso/upstream" rev-parse HEAD)" \
+    >"$root/iso/UPSTREAM"
+}
+
+# --- 24a. the positive case, and its denominator ---------------------------
+
+f55="$work/f55"
+make_fixture "$f55"
+scratch55="$work/scratch-55"
+run_build "$f55" "OMARCHY_DECK_ISO_BUILD_DIR=$scratch55"
+[[ $BUILD_OUT == *"docker is required"* ]] ||
+  fail "a fixture carrying the live OSK payload reaches the docker step" "$BUILD_OUT"
+[[ $BUILD_OUT == *"guard 6.7 OK"* ]] || fail "guard 6.7 logs success on a well-formed tree" "$BUILD_OUT"
+
+staged55="$scratch55/src/configs/airootfs/usr/local/bin/deck-input-mapper"
+[[ -f $staged55 ]] ||
+  fail "the mapper is staged into the airootfs at deck-form.sh's DECK_MAPPER_BIN path" "$BUILD_OUT"
+[[ -x $staged55 ]] || fail "the staged mapper is executable in the source tree"
+# The name loses its .py, matching src/deck-session.sh's stage-input-mapper --
+# the mapper computes its module search path from its own location, and a
+# 'deck-input-mapper.py' in /usr/local/bin is a path deck-form.sh never looks at.
+[[ ! -e "${staged55}.py" ]] ||
+  fail "the staged mapper must not keep its .py extension" "deck-form.sh looks for $staged55"
+diff -q "$f55/src/deck-input-mapper.py" "$staged55" >/dev/null ||
+  fail "the staged mapper is a copy of src/, not something reconstructed"
+for mod in deck_osk_layout.py deck_osk_tty.py; do
+  [[ -s "$scratch55/src/configs/airootfs/usr/local/lib/deck-osk/$mod" ]] ||
+    fail "the OSK module $mod is staged where the mapper will search for it" "$BUILD_OUT"
+done
+# 🔴 The half that is invisible until an ISO is booted: mkarchiso copies
+# airootfs with --no-preserve=mode, so the host-side +x above means nothing on
+# its own.
+grep -qF '["/usr/local/bin/deck-input-mapper"]="0:0:0755"' \
+  "$scratch55/src/configs/profiledef.sh" ||
+  fail "profiledef.sh gains a file_permissions entry making the mapper executable after mkarchiso's --no-preserve=mode copy" \
+    "$(cat "$scratch55/src/configs/profiledef.sh")"
+# and it is ADDED to the array, not written over it.
+grep -qF '["/usr/local/bin/omarchy-iso-install"]="0:0:755"' \
+  "$scratch55/src/configs/profiledef.sh" ||
+  fail "upstream's own file_permissions entries survive the insertion" \
+    "$(cat "$scratch55/src/configs/profiledef.sh")"
+bash -n "$scratch55/src/configs/profiledef.sh" ||
+  fail "the rewritten profiledef.sh is still valid bash" \
+    "archiso sources it; a broken array is a build that dies inside the container"
+pass "guard 6.7 passes on a well-formed tree, and the mapper, its OSK modules and its 0755 declaration are all really there"
+
+# --- 24b. no deck-form.sh: the guard has no subject and says so ------------
+#
+# Not "stage it to the default path anyway". The consumer's own literal is the
+# only authority for where the file goes, and guessing is how the original bug
+# would come back wearing a green build log.
+f56="$work/f56"
+make_fixture "$f56"
+rm "$f56/iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh"
+run_build "$f56"
+[[ $BUILD_STATUS -eq 1 ]] || fail "a tree with no deck-form.sh must not build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"no deck-form.sh at"* ]] ||
+  fail "the refusal says which file is missing" "$BUILD_OUT"
+[[ $BUILD_OUT != *"docker is required"* ]] ||
+  fail "it must stop before docker" "$BUILD_OUT"
+pass "a missing deck-form.sh stops the build instead of staging a keyboard to a guessed path"
+
+# --- 24c. deck-form.sh with no DECK_MAPPER_BIN literal ---------------------
+
+f57="$work/f57"
+make_fixture "$f57"
+form57="$f57/iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh"
+sed -i '/^readonly DECK_MAPPER_BIN=/d' "$form57"
+run_build "$f57"
+[[ $BUILD_STATUS -eq 1 ]] || fail "an underivable mapper path must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"no 'readonly DECK_MAPPER_BIN=<path>'"* ]] ||
+  fail "the refusal names the literal it could not find" "$BUILD_OUT"
+[[ $BUILD_OUT == *"Refusing to guess a path"* ]] ||
+  fail "the refusal says why guessing is not the fallback" "$BUILD_OUT"
+pass "guard 6.7 derives the destination from deck-form.sh and refuses to invent one"
+
+# --- 24d. src/ is the single source of truth, and its absence is fatal -----
+
+f58="$work/f58"
+make_fixture "$f58"
+rm "$f58/src/deck-input-mapper.py"
+run_build "$f58"
+[[ $BUILD_STATUS -eq 1 ]] || fail "no mapper in src/ must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"src/deck-input-mapper.py"* ]] ||
+  fail "the refusal names the source file it expected" "$BUILD_OUT"
+pass "the mapper is copied out of src/ at build time, and a missing source stops the build"
+
+# --- 24e. 🔴 the backend and its renderer move together --------------------
+#
+# The nastiest shape in this family: a mapper with the layout core but no
+# renderer STARTS, binds, and navigates. Only the keyboard is missing, and it
+# says so on one stderr line inside a file deck-form.sh redirects. Session 17
+# lost a day to exactly that, which is why test-osk-install-layout.sh exists
+# for the target and why this exists for the ISO.
+f59="$work/f59"
+make_fixture "$f59"
+form59="$f59/iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh"
+sed -i 's/--osk-backend=tty/--osk-backend=holograph/' "$form59"
+run_build "$f59"
+[[ $BUILD_STATUS -eq 1 ]] ||
+  fail "a backend whose renderer is not in src/ must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"src/deck_osk_holograph.py"* ]] ||
+  fail "the refusal names the module the declared backend needs" "$BUILD_OUT"
+[[ $BUILD_OUT != *"docker is required"* ]] ||
+  fail "it must stop before docker" "$BUILD_OUT"
+pass "🔴 asking for a renderer the image would not carry fails the build, not the Wi-Fi screen"
+
+# --- 24f. 🔴 present but not executable: the mkarchiso trap ----------------
+#
+# The one that would otherwise ship. mkarchiso's _make_custom_airootfs does
+# `cp -af --no-preserve=ownership,mode`, so every airootfs file lands 0644
+# whatever it was on the host. A file_permissions entry that does not grant
+# execute produces an ISO that CONTAINS the mapper and reports "mapper not
+# found" -- a worse bug than the original, because the file is right there.
+f60="$work/f60"
+make_fixture "$f60"
+sed -i 's|\(\["/usr/local/bin/omarchy-iso-install"\]="0:0:755"\)|\1\n  ["/usr/local/bin/deck-input-mapper"]="0:0:0644"|' \
+  "$f60/iso/upstream/configs/profiledef.sh"
+refresh_fixture_upstream "$f60" 'profiledef declares the mapper non-executable'
+run_build "$f60"
+[[ $BUILD_STATUS -eq 1 ]] ||
+  fail "a non-executable file_permissions mode must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"does not grant execute to its owner"* ]] ||
+  fail "the refusal says the mode is the problem" "$BUILD_OUT"
+[[ $BUILD_OUT == *"0644"* ]] || fail "the refusal quotes the offending mode" "$BUILD_OUT"
+pass "🔴 guard 6.7 fires on a mapper declared 0644 -- present in the ISO and unrunnable, which reads as 'mapper not found'"
+
+# --- 24g. no file_permissions array at all --------------------------------
+
+f61="$work/f61"
+make_fixture "$f61"
+sed -i '/^file_permissions=(/,/^)/d' "$f61/iso/upstream/configs/profiledef.sh"
+refresh_fixture_upstream "$f61" 'profiledef with no file_permissions array'
+run_build "$f61"
+[[ $BUILD_STATUS -eq 1 ]] ||
+  fail "a profiledef with nowhere to declare the mode must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"file_permissions"* ]] ||
+  fail "the refusal names the array it needs" "$BUILD_OUT"
+[[ $BUILD_OUT == *"--no-preserve=mode"* ]] ||
+  fail "the refusal gives the RIGHT diagnosis -- archiso discards modes -- rather than 'chmod it'" "$BUILD_OUT"
+pass "upstream restructuring profiledef.sh fails the build with the archiso reason, not a silent 0644"
+
+# --- 24h. 🔴 the runtime dependency, derived from what the code imports ----
+
+f62="$work/f62"
+make_fixture "$f62"
+printf '# fixture live package list\n# (python-evdev deliberately absent)\nsome-other-package\n' \
+  >"$f62/iso/overlay/configs/deck/deck-live.packages"
+run_build "$f62"
+[[ $BUILD_STATUS -eq 1 ]] ||
+  fail "a live package list without the mapper's import must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"evdev -> python-evdev"* ]] ||
+  fail "the refusal names the import AND the package that satisfies it" "$BUILD_OUT"
+[[ $BUILD_OUT == *"some-other-package"* ]] ||
+  fail "the refusal shows what the list DOES carry, so the reader can see it was read" "$BUILD_OUT"
+pass "🔴 guard 6.7 derives the dependency from what the staged Python imports and fails when the live ISO would not install it"
+
+# The derivation must not be a hard-coded 'python-evdev must be present': a
+# mapper that stopped importing evdev entirely should stop requiring it.
+f63="$work/f63"
+make_fixture "$f63"
+sed -i '/^from evdev import/d' "$f63/src/deck-input-mapper.py"
+sed -i 's/^from evdev import ecodes as e$/import json/' "$f63/src/deck_osk_layout.py"
+printf '# fixture live package list\nsome-other-package\n' \
+  >"$f63/iso/overlay/configs/deck/deck-live.packages"
+run_build "$f63"
+[[ $BUILD_OUT == *"guard 6.7 OK"* ]] ||
+  fail "code that imports no evdev must not be required to install python-evdev" "$BUILD_OUT"
+pass "the dependency check is derived from the code, not a constant -- dropping the import drops the requirement"
+
+# ...but an empty derivation is an ERROR, not a pass over nothing. Same rule as
+# guard 6.4a's empty-match case: a guard with no subject is not a passing guard.
+f64="$work/f64"
+make_fixture "$f64"
+{
+  printf '#!/usr/bin/env python3\n'
+  # The OSK-search-path literal stays: without it the build stops one step
+  # earlier, on a different (also correct) refusal, and this case would be
+  # measuring that one instead.
+  printf 'OSK_SEARCH_DIRS = (_HERE, _HERE.parent / "lib" / "deck-osk")\n'
+  printf 'print("no imports here")\n'
+} >"$f64/src/deck-input-mapper.py"
+chmod +x "$f64/src/deck-input-mapper.py"
+printf '"""no imports"""\nOSK_KEYCODES = ()\n' >"$f64/src/deck_osk_layout.py"
+printf '"""no imports"""\nROWS = ()\n' >"$f64/src/deck_osk_tty.py"
+run_build "$f64"
+[[ $BUILD_STATUS -eq 1 ]] ||
+  fail "zero derived imports must be an ERROR (a stale pattern looks exactly like this)" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"guard 6.7 cannot run"* ]] ||
+  fail "the refusal says the derivation found nothing, rather than reporting a pass" "$BUILD_OUT"
+pass "guard 6.7 finding no imports at all fails rather than passing on an empty set"
+
+# --- 24i. 🔴 a list nothing reads is a comment -----------------------------
+#
+# The assertion that keeps the other four honest: deck-live.packages could name
+# every dependency correctly and reach the ISO in none of them if the patch
+# that appends it to packages.x86_64 were dropped or rebased away. Every check
+# above would still be green.
+f65="$work/f65"
+make_fixture "$f65"
+printf '#!/bin/bash\necho fixture build-iso.sh ran, reading no deck list\n' \
+  >"$f65/iso/upstream/builder/build-iso.sh"
+refresh_fixture_upstream "$f65" 'builder that never reads the live package list'
+run_build "$f65"
+[[ $BUILD_STATUS -eq 1 ]] ||
+  fail "a live package list nothing consumes must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"nothing in the patched builder/build-iso.sh reads configs/deck/deck-live.packages"* ]] ||
+  fail "the refusal explains that the list reaches nothing" "$BUILD_OUT"
+[[ $BUILD_OUT == *"deck-packages.patch"* ]] ||
+  fail "the refusal names the patch that is supposed to consume it" "$BUILD_OUT"
+pass "🔴 guard 6.7 refuses a live package list that no consumer reads -- a check passing for the wrong reason"
+
+# and the absent-list case is distinguished from the unread-list case.
+f66="$work/f66"
+make_fixture "$f66"
+rm "$f66/iso/overlay/configs/deck/deck-live.packages"
+run_build "$f66"
+[[ $BUILD_STATUS -eq 1 ]] || fail "no live package list must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"no configs/deck/deck-live.packages"* ]] ||
+  fail "an absent list is reported as absent" "$BUILD_OUT"
+[[ $BUILD_OUT == *"deck-install.packages"* ]] ||
+  fail "the refusal distinguishes the LIVE list from the TARGET list, because confusing them is how this bug happened" "$BUILD_OUT"
+pass "an absent live package list is refused, and named as a different question from the target's list"
+
+# --- 24j. the destination FOLLOWS deck-form.sh, it is not hard-coded -------
+#
+# The positive proof of 24c's refusal: move the consumer's literal and the
+# whole payload moves with it, module directory included -- which is how the
+# mapper itself resolves its imports (<its own dir>/../lib/deck-osk).
+f67="$work/f67"
+make_fixture "$f67"
+form67="$f67/iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh"
+sed -i 's|^readonly DECK_MAPPER_BIN=.*|readonly DECK_MAPPER_BIN=/opt/deck/bin/deck-input-mapper|' "$form67"
+scratch67="$work/scratch-67"
+run_build "$f67" "OMARCHY_DECK_ISO_BUILD_DIR=$scratch67"
+[[ $BUILD_OUT == *"guard 6.7 OK"* ]] || fail "a relocated mapper path is staged, not refused" "$BUILD_OUT"
+[[ -x "$scratch67/src/configs/airootfs/opt/deck/bin/deck-input-mapper" ]] ||
+  fail "the mapper follows deck-form.sh's declared path" "$BUILD_OUT"
+[[ -s "$scratch67/src/configs/airootfs/opt/deck/lib/deck-osk/deck_osk_tty.py" ]] ||
+  fail "the OSK modules follow it too, into the directory the mapper computes from its own location" "$BUILD_OUT"
+[[ ! -e "$scratch67/src/configs/airootfs/usr/local/bin/deck-input-mapper" ]] ||
+  fail "nothing is left behind at the old hard-coded path"
+grep -qF '["/opt/deck/bin/deck-input-mapper"]="0:0:0755"' \
+  "$scratch67/src/configs/profiledef.sh" ||
+  fail "the file_permissions entry names the new path as well" \
+    "$(cat "$scratch67/src/configs/profiledef.sh")"
+pass "the staged path, the module directory and the 0755 declaration all follow deck-form.sh's own literal"
+
+# --- 24k. the REAL repo still has the shape this section fixtures ----------
+#
+# Everything above runs against stand-ins. These assertions are what stop the
+# stand-ins from drifting into a shape nothing ships -- the failure where a
+# suite is green about a product it no longer describes.
+real_form="$ISO_ROOT/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh"
+[[ -f $real_form ]] || fail "the real deck-form.sh is in the overlay"
+real_mapper_bin=$(grep -oE '^readonly DECK_MAPPER_BIN=[^[:space:]]+' "$real_form" |
+  sed -E 's|^readonly DECK_MAPPER_BIN=||' | head -n1)
+[[ -n $real_mapper_bin ]] ||
+  fail "the real deck-form.sh still declares DECK_MAPPER_BIN in the form bin/build derives" \
+    "If this literal is reformatted, the build stages nothing and guard 6.7 refuses -- loudly, but the fix is here."
+real_backend=$(grep -oE -- '--osk-backend=[A-Za-z0-9_-]+' "$real_form" |
+  sed -E 's|^--osk-backend=||' | sort -u)
+[[ $(printf '%s\n' "$real_backend" | grep -c .) -eq 1 ]] ||
+  fail "the real deck-form.sh names exactly one --osk-backend" "got: $real_backend"
+[[ -f "$REPO_ROOT/src/deck-input-mapper.py" ]] ||
+  fail "src/deck-input-mapper.py is the mapper's single source of truth"
+[[ -f "$REPO_ROOT/src/deck_osk_layout.py" ]] ||
+  fail "src/deck_osk_layout.py exists -- the mapper loads it at import time"
+[[ -f "$REPO_ROOT/src/deck_osk_${real_backend}.py" ]] ||
+  fail "src/deck_osk_${real_backend}.py exists for the backend the ISO asks for"
+grep -q '"lib" / "deck-osk"' "$REPO_ROOT/src/deck-input-mapper.py" ||
+  fail "the real mapper still computes its OSK search path as <its own dir>/../lib/deck-osk" \
+    "bin/build stages the modules there; move both together or the keyboard silently disappears."
+real_live_list="$ISO_ROOT/overlay/configs/deck/deck-live.packages"
+[[ -f $real_live_list ]] || fail "iso/overlay/configs/deck/deck-live.packages exists"
+grep -qx 'python-evdev' "$real_live_list" ||
+  fail "the real live package list carries python-evdev" \
+    "The mapper imports evdev at module scope; without the package the ISO has the script and cannot run it."
+# Bare names only: this list is resolved against the single-repo offline mirror.
+while IFS= read -r live_entry; do
+  [[ $live_entry != */* ]] ||
+    fail "deck-live.packages entries must be bare, never repo-qualified" "got: $live_entry"
+done < <(grep -hv '^#\|^$' "$real_live_list")
+grep -q 'deck-live\.packages' "$ISO_ROOT/overlay/patches/deck-packages.patch" ||
+  fail "deck-packages.patch still appends the live package list to packages.x86_64" \
+    "Without that hunk the list reaches neither the live root nor the offline mirror."
+pass "the real repo's deck-form.sh ($real_mapper_bin, backend '$real_backend'), src/ modules, deck-live.packages and deck-packages.patch all agree"
 
 printf '\nall iso-build tests passed\n'
