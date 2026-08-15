@@ -1,0 +1,41 @@
+Fixture tree for the T12 upstream-patch seam.
+
+These are VERBATIM COPIES of upstream files, not adaptations. They are byte
+identical to what the pinned runtime installs under /usr/share/omarchy, which is
+the only reason the tests are worth anything: a hand-written approximation of the
+context lines would let a patch pass here and reject on the device.
+
+  Source      https://github.com/basecamp/omarchy
+  Ref         f0020448         (the RUNTIME pin = tag v4.0.0, Omarchy 4.0.0
+                                stable; see iso/RUNTIME, docs/PROGRESS.md §5.31)
+  Fetched     2026-08-15, via `git show f0020448:<path>` from a full clone
+  Licence     MIT (upstream repo)
+
+  shell/plugins/lock/Service.qml     551 lines
+    sha256 3f0a265a09f7957e8f5d74666595d3136ec64899c414426190460f9e2098e701
+  default/limine/limine.conf          20 lines
+    sha256 282f055fdd439301c2249fc3ca579d88621080c8c4df150d6a15555b7c8581df
+
+Replaces test/fixtures/t12-omarchy-6d7826d (the beta-2/edge pin), retired
+2026-08-15 with the 4.0.0 stable rebase. What actually moved between the two:
+
+  * Service.qml  471 -> 551 lines. Upstream added the stranded-lock recovery
+    path and reworked the fingerprint/PAM flow, which shifted our blank-timer
+    block from line ~373 to ~416 and rewrote the `onTriggered` body just below
+    it. Patch 0010 still applies -- its context lines are byte-identical and the
+    applier uses offset-tolerant `git apply` -- so this is drift, not a break.
+    Classified in docs/findings/T9-stable-delta-classification.md (delta B).
+  * limine.conf  UNCHANGED, byte for byte (same sha256 as at 6d7826d). Patch
+    0020's target did not move at all across 127 upstream commits.
+
+⚠️ WHEN iso/RUNTIME MOVES, THIS DIRECTORY MUST MOVE WITH IT. Refetch both
+files at the new ref, rename the directory, and re-run
+test/unit/test-t12-patch-applier.sh. If a shipped patch no longer applies to
+the refreshed fixture that is not a test bug -- it is the seam doing its one
+job, and the patch needs a rebase. The suite asserts the directory name matches
+iso/RUNTIME so a stale fixture cannot sit here unnoticed.
+
+The drift fixture for `interval: 3000` (upstream commit 35a6940, "Just 3
+seconds of screen on after lock") is not stored: the suite derives it from
+Service.qml by substituting the literal, which reproduces upstream's content in
+that neighbourhood exactly and cannot go stale independently of the file above.

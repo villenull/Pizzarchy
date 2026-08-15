@@ -417,8 +417,10 @@ pass "a malformed iso/UPSTREAM ('owner/repo@sha' violated) is refused"
 
 f6="$work/f6"
 make_fixture "$f6"
-run_build "$f6" OMARCHY_MIRROR=stable
-[[ $BUILD_STATUS -eq 1 ]] || fail "OMARCHY_MIRROR=stable in the environment must be refused (guard 6.1)" "status=$BUILD_STATUS $BUILD_OUT"
+# The fork pins mirror 'stable' as of the 4.0.0 stable rebase (2026-08-15), so
+# 'edge' is now the disagreeing value. Before that this pair was reversed.
+run_build "$f6" OMARCHY_MIRROR=edge
+[[ $BUILD_STATUS -eq 1 ]] || fail "OMARCHY_MIRROR=edge in the environment must be refused (guard 6.1)" "status=$BUILD_STATUS $BUILD_OUT"
 [[ $BUILD_OUT == *"guard 6.1"* ]] || fail "the refusal cites guard 6.1" "$BUILD_OUT"
 pass "guard 6.1: a caller's conflicting OMARCHY_MIRROR is refused, never silently overridden"
 
@@ -427,9 +429,9 @@ run_build "$f6" OMARCHY_ISO_REF=edge
 pass "guard 6.1: a caller's conflicting OMARCHY_ISO_REF is refused too"
 
 # Agreeing values are fine -- guard 6.1 checks agreement, not presence.
-run_build "$f6" OMARCHY_ISO_REF=quattro OMARCHY_MIRROR=edge
+run_build "$f6" OMARCHY_ISO_REF=quattro OMARCHY_MIRROR=stable
 [[ $BUILD_STATUS -ne 0 && $BUILD_OUT == *"docker is required"* ]] ||
-  fail "OMARCHY_ISO_REF=quattro OMARCHY_MIRROR=edge (agreeing with the pin) must NOT be refused" "$BUILD_OUT"
+  fail "OMARCHY_ISO_REF=quattro OMARCHY_MIRROR=stable (agreeing with the pin) must NOT be refused" "$BUILD_OUT"
 pass "guard 6.1: values that already agree with the fork's pin pass through"
 
 # --- 7. the scratch root may never be inside the repo -----------------------
@@ -1012,15 +1014,15 @@ ISO_ROOT="$REPO_ROOT/iso"
 
 [[ -f "$ISO_ROOT/UPSTREAM" ]] || fail "iso/UPSTREAM exists"
 upstream_content=$(cat "$ISO_ROOT/UPSTREAM")
-[[ $upstream_content == "omacom-io/omarchy-iso@a12bfea7a86c" ]] ||
-  fail "iso/UPSTREAM has the exact pin from T5-fork-plan.md §2" "got: $upstream_content"
-pass "iso/UPSTREAM is exactly 'omacom-io/omarchy-iso@a12bfea7a86c'"
+[[ $upstream_content == "omacom-io/omarchy-iso@174dd82b157b" ]] ||
+  fail "iso/UPSTREAM has the exact pin (4.0.0 stable rebase, 2026-08-15)" "got: $upstream_content"
+pass "iso/UPSTREAM is exactly 'omacom-io/omarchy-iso@174dd82b157b'"
 
 [[ -f "$ISO_ROOT/RUNTIME" ]] || fail "iso/RUNTIME exists"
 runtime_content=$(cat "$ISO_ROOT/RUNTIME")
-[[ $runtime_content == "basecamp/omarchy@6d7826d" ]] ||
-  fail "iso/RUNTIME has the exact pin from T5-fork-plan.md §2" "got: $runtime_content"
-pass "iso/RUNTIME is exactly 'basecamp/omarchy@6d7826d'"
+[[ $runtime_content == "basecamp/omarchy@f0020448ca87" ]] ||
+  fail "iso/RUNTIME has the exact pin (Omarchy 4.0.0 stable, tag v4.0.0)" "got: $runtime_content"
+pass "iso/RUNTIME is exactly 'basecamp/omarchy@f0020448ca87'"
 
 [[ -d "$ISO_ROOT/overlay/configs/airootfs" ]] || fail "iso/overlay/configs/airootfs/ exists"
 [[ -d "$ISO_ROOT/overlay/patches" ]] || fail "iso/overlay/patches/ exists"
@@ -1264,16 +1266,20 @@ if [[ -e "$ISO_ROOT/upstream/.git" ]]; then
   # rejected (docs/findings/P16-repo-overlap-audit.md: 101 overlapping names,
   # Valve older in 50). This is the assertion that stops a well-meaning
   # "match SteamOS" edit from silently downgrading the mesa/vulkan stack.
-  edge_conf="$apply_scratch/configs/pacman-online-edge.conf"
-  repo_order=$(grep -n '^\[' "$edge_conf" | sed 's/:.*\[/ /; s/\]//')
+  # The channel config the fork actually builds against: BUILD_MIRROR=stable
+  # since the 4.0.0 stable rebase (2026-08-15), so deck-valve-repos.patch
+  # targets pacman-online-stable.conf. Asserting against the edge config would
+  # pass while the build read a config with no Valve repos in it at all.
+  channel_conf="$apply_scratch/configs/pacman-online-stable.conf"
+  repo_order=$(grep -n '^\[' "$channel_conf" | sed 's/:.*\[/ /; s/\]//')
   for valve in jupiter-staging holo-staging; do
-    grep -q "^\[$valve\]" "$edge_conf" ||
-      fail "the patched pacman-online-edge.conf declares [$valve]" "$repo_order"
-    valve_line=$(grep -n "^\[$valve\]" "$edge_conf" | cut -d: -f1)
+    grep -q "^\[$valve\]" "$channel_conf" ||
+      fail "the patched pacman-online-stable.conf declares [$valve]" "$repo_order"
+    valve_line=$(grep -n "^\[$valve\]" "$channel_conf" | cut -d: -f1)
     for arch_repo in core extra multilib; do
-      arch_line=$(grep -n "^\[$arch_repo\]" "$edge_conf" | cut -d: -f1)
+      arch_line=$(grep -n "^\[$arch_repo\]" "$channel_conf" | cut -d: -f1)
       (( valve_line > arch_line )) ||
-        fail "[$valve] is declared before [$arch_repo] in pacman-online-edge.conf" \
+        fail "[$valve] is declared before [$arch_repo] in pacman-online-stable.conf" \
           "pacman resolves by repo order, not version. docs/PROGRESS.md §5.13: 101 names overlap and Valve's build is OLDER in 50 of them, the whole mesa/vulkan stack included. Qualify the one package that needs Valve's build (jupiter-staging/gamescope) instead of reordering."
     done
   done
@@ -1282,7 +1288,7 @@ if [[ -e "$ISO_ROOT/upstream/.git" ]]; then
   # build-iso.sh extracts the [omarchy] stanza into the container's own
   # pacman.conf with `awk '/^\[omarchy\]/,/^$/'` -- a range that ends at the
   # first blank line. Appending repos is safe only while that stays true.
-  extracted=$(awk '/^\[omarchy\]/,/^$/' "$edge_conf")
+  extracted=$(awk '/^\[omarchy\]/,/^$/' "$channel_conf")
   [[ $extracted == *"pkgs.omarchy.org"* ]] ||
     fail "build-iso.sh's [omarchy] stanza extraction still finds the omarchy repo" "$extracted"
   [[ $extracted != *"steamdeck-packages"* && $extracted != *"arch-mact2"* ]] ||
@@ -1297,8 +1303,8 @@ fi
 
 if [[ -e "$ISO_ROOT/upstream/.git" ]]; then
   real_head=$(git -C "$ISO_ROOT/upstream" rev-parse HEAD)
-  [[ $real_head == a12bfea7a86c* ]] ||
-    fail "iso/upstream is checked out at the pinned commit" "HEAD=$real_head, expected a12bfea7a86c*"
+  [[ $real_head == 174dd82b157b* ]] ||
+    fail "iso/upstream is checked out at the pinned commit" "HEAD=$real_head, expected 174dd82b157b*"
   real_dirty=$(git -C "$ISO_ROOT/upstream" status --porcelain)
   [[ -z $real_dirty ]] || fail "iso/upstream has no local modifications" "$real_dirty"
   pass "the real iso/upstream submodule is checked out clean, exactly at the UPSTREAM pin"

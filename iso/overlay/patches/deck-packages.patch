@@ -1,8 +1,8 @@
 diff --git i/builder/build-iso.sh w/builder/build-iso.sh
-index 6f919d0..5314438 100755
+index db8daa2..5f32ff4 100755
 --- i/builder/build-iso.sh
 +++ w/builder/build-iso.sh
-@@ -103,6 +103,123 @@ if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
+@@ -104,6 +104,123 @@ if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
    LOCAL_OMARCHY_BUILD=1
  fi
  
@@ -126,7 +126,7 @@ index 6f919d0..5314438 100755
  # Node.js binary for offline mise install.
  NODE_DIST_URL="https://nodejs.org/dist/latest"
  NODE_SHASUMS=$(curl -fsSL "$NODE_DIST_URL/SHASUMS256.txt")
-@@ -163,6 +280,39 @@ else
+@@ -164,6 +281,39 @@ else
    setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
  fi
  
@@ -166,7 +166,7 @@ index 6f919d0..5314438 100755
  mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
  cp "${base_pkg_lists[0]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
  cp "${base_pkg_lists[1]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-other.packages"
-@@ -186,12 +336,40 @@ if [[ ! -f $setup_form ]]; then
+@@ -187,12 +337,40 @@ if [[ ! -f $setup_form ]]; then
  fi
  cp "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"
  
@@ -207,7 +207,7 @@ index 6f919d0..5314438 100755
      grep -hv '^#\|^$' /builder/archinstall.packages
      # Always include the selected Omarchy packages so the target install can
      # find the runtime and companion packages in the offline mirror.
-@@ -212,6 +390,28 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+@@ -213,6 +391,69 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
    )
  fi
  
@@ -233,10 +233,51 @@ index 6f919d0..5314438 100755
 +  exit 1
 +fi
 +
++# Steam Deck: one package may legitimately appear in BOTH Deck lists, and the
++# two lists answer different questions. deck-mirror.packages decides WHICH
++# BUILD reaches the offline mirror and may repo-qualify to say so
++# (jupiter-staging/gamescope); deck-install.packages decides THAT a package is
++# installed and must stay bare, because it is resolved twice against the
++# single-repo offline mirror (its own header, and deck-nvidia-dry-run.sh fails
++# the build on a qualified name there).
++#
++# Both lists feed this ONLINE download list, and pacman rejects
++# `jupiter-staging/gamescope` together with `gamescope` as a "duplicate target"
++# -- which is exactly how the 4.0.0-stable rebuild first failed (2026-08-15).
++#
++# The QUALIFIED form is the one that must survive here. A bare `gamescope` sent
++# to the online `pacman -Syw` resolves by REPO ORDER, and Valve's repos are
++# appended last on purpose (PROGRESS.md 5.13 measured the alternative: 101
++# overlapping names, Valve older in 50). It would fetch Arch's bare compositor,
++# which ships no usr/share/wayland-sessions/gamescope-wayland.desktop -- the
++# file Gaming Mode's autologin looks for -- and the mistake would be invisible
++# until a target booted into Desktop Mode.
++#
++# So strip the bare form from the DOWNLOAD list only. It stays in the merged
++# install list, where pacstrap resolves it offline against the single build the
++# mirror kept -- Valve's.
++mirror_bare_dupes=()
++while read -r mirror_entry; do
++  [[ $mirror_entry == */* ]] || continue
++  mirror_bare_dupes+=(-e "${mirror_entry##*/}")
++done < <(grep -hv '^#\|^$' "$deck_list_dir/deck-mirror.packages")
++if ((${#mirror_bare_dupes[@]} > 0)); then
++  mapfile -t all_packages < <(
++    printf '%s\n' "${all_packages[@]}" | grep -Fxv "${mirror_bare_dupes[@]}" || true
++  )
++  # Same reasoning as the emptiness check above: `|| true` cannot tell grep's
++  # "matched nothing" from a real error, so assert the list survived.
++  if ((${#all_packages[@]} == 0)); then
++    echo "ERROR: stripping the bare forms of repo-qualified deck-mirror.packages" >&2
++    echo "       entries emptied the offline mirror target list." >&2
++    exit 1
++  fi
++fi
++
  mkdir -p /tmp/offlinedb
  download_offline_packages() {
    pacman --config /configs/pacman-online-${OMARCHY_MIRROR}.conf --noconfirm -Syw \
-@@ -265,6 +465,36 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+@@ -266,6 +507,36 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
    done
  fi
  
