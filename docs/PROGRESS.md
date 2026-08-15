@@ -3061,6 +3061,46 @@ the operator's Deck, which is still on the beta-2 pin.
 Detail: `docs/findings/T4-controller-only-install-first-run.md` §15. Evidence
 preserved at `~/.cache/omarchy-deck/stable-rebase/install-test/`.
 
+### 5.31b ✅ Criterion 4 closed — NVIDIA dry-run proven in a real build; publishing rescoped to P3.7
+
+**PHASE 2 IS NOW 4 OF 4.** Criterion 4 was *"CI publishes an ISO artifact; a dry
+run shows zero NVIDIA packages."* Both halves resolved 2026-08-15, one of them by
+a deliberate rescope stated out loud rather than quietly ticked.
+
+**The NVIDIA half is genuinely closed.** `deck-nvidia-dry-run.sh` was
+"unit-proven but has never run inside the real build". It ran inside the real
+container build, and — the part that makes it mean anything — **its negative
+control fired**: with the three Deck packages removed the resolve *does* surface
+NVIDIA drivers, and with them present it does not.
+
+```
+[deck-nvidia-dry-run] dry run over 169 targets (installed set + steamdeck-dsp steam)
+[deck-nvidia-dry-run] negative control fired as designed: egl-gbm egl-wayland
+                      egl-wayland2 egl-x11 lib32-nvidia-utils nvidia-utils
+[deck-nvidia-dry-run] OK: 1030 packages resolved, 0 NVIDIA driver packages
+[deck-nvidia-dry-run]     accepted by exception: linux-firmware-nvidia
+```
+
+**The publishing half is RESCOPED to P3.7, by operator decision.** It required a
+self-hosted runner, and **this repo is public** — GitHub advises against
+self-hosted runners on public repos because a fork's PR can run arbitrary code on
+the runner host, which here is the dev machine holding the SSH key to the Deck.
+Declined deliberately. A ~6 GB ISO is a poor Actions artifact anyway (retention
+clock, slow upload), and `ci.yml`'s own comment already names a **release asset**
+as its real home — which is P3.7. `ci.yml` now records this as a decision so no
+future session "fixes" it by registering a runner.
+
+⚠️ **The CI `iso-build` job itself has still never executed** and `ci.yml` still
+says so (its test asserts that sentence stays). What is proven is what the job
+would do: the local build, all eight guards green (§5.31).
+
+**A real latent bug fell out of this.** The `Upload ISO artifact` step had **no
+`if:` gate** despite its own comment promising opt-in — every run would have
+attempted the 6 GB upload and failed *after* a 1–3 h build, reading as "the build
+broke". Now gated; `test-ci-workflow.sh` is green (15/15) after being red the
+whole time. Unit suites: **19/20** (the last red, `test-vm-probe-integrity.sh`,
+is a scanner that cannot classify a heredoc — not a product defect).
+
 ---
 
 ## 6. Blocked on human

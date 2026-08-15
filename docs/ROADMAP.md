@@ -171,15 +171,46 @@ short, targeted Deck iterations over `tools/deck-sync.sh`.
       Gaming Mode as default) both deployed and confirmed by the operator
       pressing buttons, not just green suites. `docs/findings/T13-power-button-and-sleep.md`
       §9.
-- [ ] CI publishes an ISO artifact; a dry run shows zero NVIDIA packages.
-      **The build job is real now** (was a `TODO(T5)` stub) but has **never
-      executed** — no `/dev/kvm` on a hosted runner, so the install-test half
-      is dispatch-only pending a self-hosted KVM runner. The NVIDIA dry-run
-      guard (`deck-nvidia-dry-run.sh`) is unit-proven but has never run inside
-      the real build either.
+- [x] ✅ **CLOSED 2026-08-15 (session 27), with one clause deliberately
+      RESCOPED — read both halves.**
 
-**Net: 3 of 4 closed.** Criterion 4 still reduces to "run a real container
-build on a self-hosted KVM runner."
+      **"a dry run shows zero NVIDIA packages" — genuinely closed.** This was
+      the half that was "unit-proven but has never run inside the real build".
+      It has now run inside a **real container build**, and its negative control
+      fired, which is what makes the result mean anything:
+
+      ```
+      [deck-nvidia-dry-run] dry run over 169 targets (installed set + steamdeck-dsp steam)
+      [deck-nvidia-dry-run] negative control fired as designed: egl-gbm egl-wayland
+                            egl-wayland2 egl-x11 lib32-nvidia-utils nvidia-utils
+      [deck-nvidia-dry-run] OK: 1030 packages resolved, 0 NVIDIA driver packages
+      [deck-nvidia-dry-run]     accepted by exception: linux-firmware-nvidia
+      ```
+
+      **"CI publishes an ISO artifact" — RESCOPED to P3.7's release asset, by
+      operator decision 2026-08-15.** The blocker was never engineering: it was
+      that the job needs a self-hosted runner, and **this repo is public**, where
+      GitHub explicitly advises against self-hosted runners (a fork's PR can run
+      arbitrary code on the runner host — here, the dev machine holding the SSH
+      key to the Deck). Weighed and declined. A ~6 GB ISO is a poor Actions
+      artifact anyway — retention clock, slow upload — and `ci.yml`'s own comment
+      already calls a **release asset** its real home. Publishing is therefore
+      **P3.7's** job, where it always belonged.
+
+      ⚠️ **The CI `iso-build` job itself has still never executed**, and
+      `ci.yml` still says so in its header (`test/unit/test-ci-workflow.sh`
+      asserts that sentence stays until a real run exists — do not delete it).
+      What IS proven is the thing the job would do: `iso/bin/build` ran end to
+      end on the dev machine 2026-08-15, all eight guards green, producing
+      `omarchy-2026.08.15-x86_64-quattro.iso` (§5.31 / §5.31a).
+
+      **Fixed while closing this:** the `Upload ISO artifact` step had **no
+      `if:` gate** despite its comment claiming opt-in, so any run would have
+      attempted the 6 GB upload and failed *after* a 1–3 h build. Gated;
+      `test-ci-workflow.sh` green (15/15) after being red the whole time.
+
+**Net: 4 of 4 closed — PHASE 2 IS COMPLETE.** One clause rescoped with cause
+(publishing → P3.7), stated above rather than quietly ticked.
 
 ✅ **CRITERION 1 IS CLOSED — 2026-08-15 (session 27), 18/18, on a real install.**
 A controller-only run drove the Deck-forked ISO's real installer past S5's gate

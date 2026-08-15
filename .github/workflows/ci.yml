@@ -29,6 +29,21 @@
 # CI, on this runner or any other. The first tag push is the experiment, and
 # it is expected to be the step that finds the problems.
 #
+# ⚠️ AND THERE IS NO SELF-HOSTED RUNNER, BY DECISION (2026-08-15) — not by
+# neglect, so do not "fix" it by registering one. `iso-build` says
+# `runs-on: self-hosted`, and **this repository is public**. GitHub advises
+# against self-hosted runners on public repos because a fork's pull request can
+# execute arbitrary code on the runner host — which here is the dev machine
+# holding the SSH key to the test Deck. The operator weighed this and declined.
+#
+# What the runner would have proven is proven anyway, just not by CI:
+# `iso/bin/build` ran end to end on the dev machine 2026-08-15 (all eight guards
+# green, omarchy-2026.08.15-x86_64-quattro.iso), and `deck-nvidia-dry-run.sh`
+# executed inside that real build with its negative control firing —
+# "1030 packages resolved, 0 NVIDIA driver packages". docs/PROGRESS.md §5.31/§5.31a.
+# Publishing the ISO is P3.7's release asset, not an Actions artifact.
+# Keep the sentence at the top of this block until CI itself has really run.
+#
 # What that experiment is up against, stated as arithmetic rather than hope
 # (sizes MEASURED — docs/findings/T5a-parity.md A1, docs/tasks/T5-fork-plan.md
 # §7 "Measured numbers"):

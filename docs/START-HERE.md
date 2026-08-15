@@ -64,6 +64,25 @@ work without waiting for further instruction.**
 >    this is lower value than (1). `test/images/neptune-substrate.raw` is still the
 >    `edge` one.
 >
+> ### 🎉 PHASE 2 IS COMPLETE — 4 of 4 exit criteria (session 27)
+>
+> Criterion 1 closed by the 18/18 install run above. **Criterion 4 closed the
+> same day**: `deck-nvidia-dry-run.sh` ran inside a *real* container build with
+> its **negative control firing** ("1030 packages resolved, 0 NVIDIA driver
+> packages"), and the *"CI publishes an ISO artifact"* clause was **rescoped to
+> P3.7's release asset by operator decision** — it needed a self-hosted runner,
+> and this repo is **public**, where a fork's PR could run code on the dev
+> machine that holds the SSH key to the Deck. Declined deliberately; `ci.yml`
+> records it so nobody "fixes" it later by registering one.
+> ⚠️ The CI `iso-build` job itself still has never run — `ci.yml` still says so,
+> and its test enforces that sentence. **Do not delete it** until a real CI run
+> exists.
+>
+> Unit suites are now **19/20** (was 18/20): gating the ISO upload fixed a real
+> latent bug — the step promised opt-in in its comment but had no `if:`, so every
+> run would have attempted a 6 GB upload and failed *after* a 1–3 h build. The
+> last red (`test-vm-probe-integrity.sh`) is a scanner limitation, not a defect.
+>
 > ### Baseline captured session 27 (for rebase attribution)
 > shellcheck green; **18/20 sh unit suites green**, 2 PRE-EXISTING reds unrelated
 > to the rebase (`test-ci-workflow.sh` = ISO-upload-opt-in / CI storage;
