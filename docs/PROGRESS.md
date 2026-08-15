@@ -3217,9 +3217,12 @@ rather than by reading their reports. What landed:
    root. A correctly-written fetch step still could not have read it. Two
    independent bugs stacked behind one symptom.
 2. 🔴 **`linux-firmware-neptune` in the pacstrap list would have killed every
-   install at phase 3.** Valve declares conflicts against `linux-firmware` and
-   `-whence` only; Arch split it into ten subpackages, so pacman removes those
-   two and dies on file conflicts with the rest — *measured in a VM* by
+   install at phase 3.** Valve declares `conflict`/`replaces` against
+   `linux-firmware` **only** (`linux-firmware-whence` is a `depend`, not a second
+   conflict — corrected 2026-08-15 by re-reading `.PKGINFO`; the consequence and
+   the code are unchanged, the earlier prose was off by one). Arch split the
+   firmware into subpackages, so pacman removes the one it is told about and dies
+   on file conflicts with the rest — *measured in a VM* by
    `src/omarchy-deck-kernel.sh`, which works around it with `pacman -Rdd`.
    Pacstrap has no such step. Removed; safe because `linux-neptune-611`'s
    `.PKGINFO` depends only on `coreutils/initramfs/kmod` (read from the package).
@@ -3281,6 +3284,54 @@ panel; that the brightness slider moves (acceptance test is a
 `steamos-priv-write` **accept** line in the journal, not a slider that looks
 like it moved). Suites at merge: **21/22 sh** (the red is the pre-existing
 heredoc classifier), **15/15 py**.
+
+### 5.33b 🆕 Valve's firmware is 350 MiB the Deck almost certainly does not need — held pending hardware
+
+`docs/findings/P32-neptune-firmware-placement.md` (session 28). The question was
+where the now-orphaned `linux-firmware-neptune` should be *installed* from. The
+answer is **nowhere — and it probably should not be carried either.**
+
+Not a spot check: all **6,150 modules** of `linux-neptune-611` were extracted and
+every `firmware=` declaration read (plus `modules.builtin.modinfo`) — **1,973
+distinct firmware files Valve's own kernel can request.** Of those, exactly **32**
+are provided by Valve and absent from Arch's split `linux-firmware`, and all 32
+are for hardware the Deck does not have: AceNIC/Sun Cassini NICs, Korg/ESS/Yamaha
+sound cards, Eagle ADSL and dial-up modems, a DVB tuner, a ViCAM webcam, a
+ham-radio modem. Filtering the 32 for `amdgpu|ath11k|qca|cirrus|cs35l|vangogh`
+returns **zero**.
+
+- **Wi-Fi/BT (QCA2066 hw2.1):** identical path sets. `board-2.bin`, `m3.bin` and
+  all three BT blobs are **byte-identical**; `amss.bin` differs in size but
+  carries the *same* `QC_IMAGE_VERSION_STRING`. Arch stores the BT files as
+  dedupe symlinks, which is why a naive existence check reads as "missing".
+- The one Valve-only ath11k entry, `ath11k/QCA206X`, is a symlink to `QCA2066` —
+  and `ath11k.ko` contains `QCA2066/hw2.1` with **zero** occurrences of
+  `QCA206X`. Dead weight for this kernel.
+- **GPU:** all 11 `vangogh_*` paths in both, and parsing the AMD ucode headers
+  shows **Arch is newer or equal in every one** (Valve's is upstream pinned at
+  `jupiter.20260712`; Arch's is the `20260810` snapshot).
+- **Audio:** Arch ships the canonical `cirrus/cs35l41-dsp1-spk-prot.*`. Valve's
+  127 extra cirrus/TI files are keyed to Dell/ASUS/HP/Lenovo subsystem IDs.
+
+**Decision: keep carrying it for now, cut it after the next hardware boot.** The
+sweep is static analysis, and `linux-neptune-611` + Arch firmware has never run
+on the Deck — the only hardware install to date booted stock `linux`. Removing
+firmware on the strength of a module-table read, on the one platform this project
+has verified, is the wrong direction to be wrong in. Measured cost of holding:
+**349.6 MiB** (366,612,354 B), ~1:1 on ISO size because the mirror is stored
+uncompressed. Cutting it takes the ISO 6.383 → ~6.042 GiB and reduces the fork's
++544 MiB regression by 64%, to ~+194 MiB. Rejected outright: installing it from
+`configure_deck` (opens a real no-firmware window mid-install) or from a
+first-boot service (can strip the radio before the operator has confirmed Wi-Fi;
+loud-and-bricked is still bricked).
+
+**Two false comments found in `deck-mirror.packages` and fixed here**, both the
+P32 species in prose: the firmware entry still claimed "DUAL ENTRY, both of them"
+— an installer that `a380fe3` had deleted an hour after adding — and the headers
+entry justified itself at "~10 MiB" against a measured **33.8 MiB**. **Guard 6.8
+cannot catch either**: it flags a package list entry with no installer, and this
+gap is a third, unstated limitation — prose asserting a consumer that no single
+line names.
 
 ---
 
@@ -3424,8 +3475,10 @@ backup rescue (the rebuild wipes both).
   nor string comparison is right). This is why the version is pinned to one
   documented constant.
 - `linux-firmware-neptune` collides with Arch's *split* `linux-firmware`. Valve's
-  package declares `conflicts`/`replaces` against only two of the twelve
-  subpackages. Remove the other ten explicitly — `--overwrite` would leave Arch
+  package declares `conflicts`/`replaces` against **one** of the twelve
+  subpackages (`linux-firmware`; `-whence` is a `depend`, not a conflict — the
+  "two" here was wrong until 2026-08-15).
+  Remove the others explicitly — `--overwrite` would leave Arch
   owning those paths and the next `-Syu` would silently restore Arch's firmware
   over Valve's.
 - `limine-snapper-sync.service` holds the ESP open; the `umount`/`mount` cycle

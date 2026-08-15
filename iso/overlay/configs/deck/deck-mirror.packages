@@ -53,13 +53,36 @@
 # series moves, move it in all three places (here, deck-install.packages, and
 # src/omarchy-deck-kernel.sh).
 #
-# DUAL ENTRY, both of them: the bare names are in deck-install.packages as of
-# 2026-08-15, so pacstrap installs them from this mirror. Left BARE here rather
-# than qualified because P16's overlap audit measured no name collision for
-# either -- they exist only in jupiter-staging, so repo order cannot pick the
-# wrong build, and `sort -u` collapses the identical pair before `pacman -Syw`
-# ever sees it. (`gamescope` below is the opposite case and must be qualified.)
+# DUAL ENTRY -- but only linux-neptune-611. The bare name is in
+# deck-install.packages as of 2026-08-15, so pacstrap installs it from this
+# mirror. Left BARE here rather than qualified because P16's overlap audit
+# measured no name collision -- it exists only in jupiter-staging, so repo order
+# cannot pick the wrong build, and `sort -u` collapses the identical pair before
+# `pacman -Syw` ever sees it. (`gamescope` below is the opposite case and must be
+# qualified.)
 linux-neptune-611
+
+# 🔴 READER: NOBODY. Not the dual-entry pattern -- this line said "DUAL ENTRY,
+# both of them" until 2026-08-15 and that was false from the moment `a380fe3`
+# pulled the bare name back out of deck-install.packages an hour after putting it
+# in. Pacstrapping it kills the install at phase 3 on file conflicts with Arch's
+# split linux-firmware; only src/omarchy-deck-kernel.sh's `pacman -Rdd` dance can
+# swap it, and that runs on a booted system against the ONLINE Valve repos, so it
+# never reads this mirror copy either.
+#
+# The firmware itself is very likely unnecessary --
+# docs/findings/P32-neptune-firmware-placement.md swept all 6,150 modules of
+# linux-neptune-611 for `firmware=` declarations (1,973 distinct files) and found
+# only 32 that Arch's firmware lacks, every one of them for hardware the Deck does
+# not have (AceNIC/Cassini NICs, ADSL and dial-up modems, a DVB tuner, a webcam).
+# Wi-Fi/BT blobs are byte-identical or same-QC_IMAGE_VERSION; Arch's vangogh GPU
+# ucode is newer-or-equal in all 11 files.
+#
+# It is still carried, on purpose, because that sweep is static analysis and
+# `linux-neptune-611` + Arch firmware has never booted on the Deck (the one
+# hardware install to date ran stock `linux`). Deleting it is a 350 MiB ISO win
+# and the first cut T5g should take -- AFTER a hardware boot proves the panel,
+# radio and audio come up without it. Not before.
 linux-firmware-neptune
 
 # 🔴 READER: NOBODY, ON PURPOSE. This is the one entry in this file that is
@@ -76,8 +99,10 @@ linux-firmware-neptune
 #
 # It stays in the mirror rather than being deleted because a Deck that later
 # wants a DKMS module has no other source for headers matching a Valve kernel,
-# and the cost is ~10 MiB against a 350 MiB firmware package sitting beside it.
-# If T5g's size gate ever needs the space, this is the first line to cut.
+# and the cost is 33.8 MiB against a 350 MiB firmware package sitting beside it.
+# ("~10 MiB" stood here until 2026-08-15; measured, not estimated, now.) If T5g's
+# size gate needs space, cut the firmware above first -- it is ten times bigger
+# and has a documented case for going.
 linux-neptune-611-headers
 
 # --- Valve's audio DSP firmware ----------------------------------------------
