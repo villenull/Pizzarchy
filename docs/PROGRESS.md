@@ -3441,6 +3441,30 @@ local state while the dev machine could see only the network, with the operator
 as the sole lossy channel between them. The tie was broken by RST-vs-timeout from
 outside. **Fix belongs in the installer, not in a runbook.**
 
+### 5.37 🆕 Two more from the operator, both diagnosed over SSH (session 28)
+
+**D5 🐞 touch does nothing in Desktop Mode — the panel transform is not applied
+to the touchscreen.** Not a missing driver: `hyprctl devices` shows the OLED's
+controller bound and present as **`fts3528:00-2808:1015`**. The cause is that
+`eDP-1` is `800x1280@90.004`, **`transform: 3`**, `scale: 1.25`, and
+**`~/.config/hypr/` contains no `device` block at all** — nothing binds the touch
+device to the output, so its coordinates are never rotated with the panel and
+every tap lands 270° from the finger. Fix is to bind the touch device to `eDP-1`.
+⚠️ **Omarchy 4.0 configures Hyprland in LUA** (`hyprland.lua`, `input.lua`,
+`monitors.lua`, `bindings.lua`, via `hl.config({...})`), not the classic `.conf`
+syntax — the exact Lua spelling of a device block must be READ, not assumed, and
+anything in this repo that writes Hyprland config needs checking against it.
+
+**D6 🆕 operator request: a button to close the focused window**, analogous to
+`SUPER+W`. **`STEAM+Y` is free** — `deck-input-mapper.py` uses `BTN_MODE` as
+`OSK_CHORD_HOLD` with `BTN_NORTH` (physical X) as the OSK toggle, so
+`BTN_MODE`+`BTN_WEST` is unclaimed. **Implement it as a direct exec
+(`hyprctl dispatch killactive`), NOT as a synthesised `SUPER+W` chord** — that is
+this file's own established precedent at `src/deck-input-mapper.py:373`, taken
+because a synthesised chord silently does nothing if upstream edits the binding,
+with nothing to read anywhere. Verify against Omarchy's own `bindings.lua` that
+`SUPER+W` is in fact `killactive` before wiring it.
+
 ---
 
 ## 6. Blocked on human
