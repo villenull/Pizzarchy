@@ -87,4 +87,31 @@ lib32-vulkan-radeon
 # on the build side and only visible on the target, which is what
 # test/unit/test-omarchy-deck-package.sh exists to catch in seconds.
 omarchy-deck
-gamescope-session
+
+# --- Gaming Mode's session file (§14.6) ---------------------------------------
+#
+# 🔴 This line is what puts `/usr/share/wayland-sessions/gamescope-wayland.desktop`
+# on the target, which is the file deck_autologin.py's GAMING_SESSION looks for.
+# Without it the install completes and lands in DESKTOP mode -- the §14.6 gap.
+#
+# It said `gamescope-session` from 2026-08-14 (commit 56c6578) until 2026-08-15.
+# That package EXISTS IN NO VALVE REPO -- measured against the package databases
+# of all four (jupiter, jupiter-staging, holo, holo-staging): none ships any
+# `gamescope-session*`. The name was never build-validated, because the last real
+# ISO build predated it; the first build that tried it died on
+# `error: target not found: gamescope-session`.
+#
+# The session file is shipped by the gamescope PACKAGE ITSELF -- but only Valve's
+# build of it. Measured from the repo file-lists 2026-08-15:
+#   jupiter-staging/gamescope 3.16.25-3  ->  usr/share/wayland-sessions/gamescope-wayland.desktop
+#   extra/gamescope           3.16.25-1  ->  no wayland-sessions/ entry at all
+# deck-mirror.packages already pulls the Valve build into the offline mirror as
+# `jupiter-staging/gamescope` (qualified there, per §5.13). Nothing installed it:
+# omarchy-deck does not depend on gamescope and no other list named it, so the
+# mirror carried the compositor and the target never got it.
+#
+# Bare, NOT repo-qualified -- this file is resolved twice against the offline
+# mirror, whose pacman.conf declares one repo; a `jupiter-staging/` prefix here
+# aborts both resolves (this file's header, and deck-nvidia-dry-run.sh fails the
+# build on it). One repo means one candidate: Valve's, the one the mirror kept.
+gamescope

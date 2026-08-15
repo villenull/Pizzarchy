@@ -230,12 +230,30 @@ RUNTIME_SLUG=$PIN_SLUG
 RUNTIME_PIN=$PIN_SHA
 build_log "runtime pin: $RUNTIME_SLUG@$RUNTIME_PIN (enforced below -- §2 mechanism A)"
 
-# The package names build-iso.sh derives from OMARCHY_ISO_REF (its `case`
-# maps quattro|edge|dev|local -> the -dev packages). Named ONCE here and
-# passed into the container explicitly rather than letting both sides derive
-# them, so the host-side guard 6.4b and the container's package build cannot
+# The package names build-iso.sh derives from OMARCHY_ISO_REF (its `case`).
+# As of omarchy-iso 174dd82 ("Install the published Omarchy packages in the
+# default build") that case maps ONLY edge|dev|local -> the -dev packages, and
+# quattro (our ref) -> the released omarchy/omarchy-settings. We pass these in
+# explicitly (step 7's `-e`), which overrides the case either way -- named ONCE
+# here so the host-side guard 6.4b and the container's package build cannot
 # disagree about which files to look for. Same lesson as §3's S1: three
 # consumers of one list must read one list.
+#
+# 🔴 We keep the -dev NAMES on the stable channel, deliberately (the 4.0.0
+# stable rebase, 2026-08-15; docs/findings/T9-stable-rebase-remaining.md).
+# The released `omarchy` package carries a STATIC pkgver (`4.0.0-1`) with no
+# `.g<sha>`, and guard 6.4b's whole job is proving the ISO's runtime was built
+# from iso/RUNTIME rather than pulled from the channel -- a check that has no
+# purchase on a version that cannot name a commit. `omarchy-dev`'s PKGBUILD
+# derives `4.0.0.r<count>.g<sha>` from the source tree's git history, so the
+# pin stays verifiable.
+#
+# This costs nothing in content: measured 2026-08-15, pkgs.omarchy.org/stable
+# serves BOTH `omarchy-4.0.0-1` and `omarchy-dev-4.0.0.r1744.gf002044-1` -- and
+# that `gf002044` is exactly iso/RUNTIME's pin, i.e. on the stable channel the
+# -dev build IS the release commit. (On `edge` it is not: edge already serves
+# r1746.gb724f76, two commits past the release. Another reason BUILD_MIRROR is
+# stable.)
 RUNTIME_PACKAGE=omarchy-dev
 SETTINGS_PACKAGE=omarchy-settings-dev
 NVIM_PACKAGE=omarchy-nvim
@@ -243,27 +261,29 @@ NVIM_PACKAGE=omarchy-nvim
 # ---------------------------------------------------------------------------
 # Guard 6.1 -- ref and mirror must agree, and this build sets them itself.
 #
-# omarchy-iso-make's own defaults disagree (OMARCHY_ISO_REF=quattro,
-# OMARCHY_MIRROR=stable -- docs/tasks/T5-fork-plan.md §6.1), and the known-
-# good ISO this slice must reproduce (docs/PROGRESS.md §1.1,
-# docs/findings/T9-iso-comparison.md §2) was built with quattro/edge. Refuse
-# to run under any other combination rather than silently overriding one a
-# caller has already exported -- a caller who set OMARCHY_MIRROR=stable
-# expecting it to take effect must be told no, not built a different ISO
-# than they asked for.
+# As of the stable rebase (2026-08-15, iso/UPSTREAM=174dd82), the known-good
+# target is Omarchy 4.0.0 stable, built with **quattro/stable** -- upstream's
+# omarchy-iso-make default (OMARCHY_ISO_REF=quattro, OMARCHY_MIRROR=stable) now
+# agrees with us, because 174dd82 made the default quattro build install the
+# published packages. Refuse any other combination rather than silently
+# overriding one a caller already exported -- a caller who set OMARCHY_MIRROR=edge
+# expecting the old beta packages must be told no, not built a different ISO than
+# they asked for. (Pre-stable this line read quattro/edge; docs/findings/T9-stable-pin.md.)
 #
 # T5b note: upstream's `omarchy-iso-make --local-source` sets
 # OMARCHY_ISO_REF=local. We deliberately keep 'quattro' while mounting the
-# same two source trees, because build-iso.sh treats quattro|edge|dev|local
-# identically (all four select the -dev packages) and OMARCHY_ISO_REF's only
-# other effects are the /root/omarchy_iso_ref stamp and the debug build-info.
+# same two source trees. At 174dd82 build-iso.sh's `case` maps ONLY edge|dev|local
+# -> the -dev packages; quattro and local both fall through to the released
+# omarchy/omarchy-settings, so keeping 'quattro' selects the right packages, and
+# OMARCHY_ISO_REF's only other effects are the /root/omarchy_iso_ref stamp and
+# the debug build-info.
 # Switching to 'local' would change that stamp, and with it the one file the
 # T5a parity comparison against ~/ISOs/ is measured on
 # (docs/findings/T9-iso-comparison.md §2), for no build behaviour at all.
 # ---------------------------------------------------------------------------
 
 BUILD_ISO_REF=quattro
-BUILD_MIRROR=edge
+BUILD_MIRROR=stable
 
 if [[ -n ${OMARCHY_ISO_REF:-} && $OMARCHY_ISO_REF != "$BUILD_ISO_REF" ]]; then
   build_fail "OMARCHY_ISO_REF=$OMARCHY_ISO_REF is set in the environment, but this fork is pinned to ref '$BUILD_ISO_REF' (guard 6.1, T5-fork-plan.md §6.1). Unset it or bring it into agreement."

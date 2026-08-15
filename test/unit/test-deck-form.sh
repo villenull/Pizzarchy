@@ -752,10 +752,21 @@ LC_ALL=C grep -qF '"kb_layout": "$keyboard"' "$CONFIGURATOR" ||
   fail "upstream no longer writes \$keyboard into the archinstall JSON as kb_layout -- the reason this override PRESERVES the preference no longer holds; re-derive"
 pass "premise: \$keyboard is what reaches archinstall's kb_layout, so keeping it is what keeps the preference"
 
-kf_call=$(LC_ALL=C grep -n '^keyboard_form true$' "$CONFIGURATOR" | head -1 | cut -d: -f1)
-pw_call=$(LC_ALL=C grep -n 'omarchy_prompt_password' "$CONFIGURATOR" | head -1 | cut -d: -f1)
+# The call site, matched loosely on purpose. Upstream dropped the argument at
+# 4.0.0 stable (`keyboard_form true` -> `keyboard_form`, omarchy-iso 174dd82)
+# and calls it both indented and at top level, so pin the CALL, not its spelling.
+# The `() {` definition line cannot match this pattern.
+#
+# ⚠️ `|| true` is load-bearing, not laziness. Under this file's `set -euo
+# pipefail` a grep that matches nothing kills the suite inside the command
+# substitution -- before the `|| fail` below can say why. That is exactly how
+# this check failed when the pin moved: 33 passes, exit 1, and NOT ONE WORD
+# about the cause. Let the assertion do the reporting.
+kf_call=$(LC_ALL=C grep -nE '^[[:space:]]*keyboard_form([[:space:]]+true)?[[:space:]]*$' "$CONFIGURATOR" | head -1 | cut -d: -f1 || true)
+pw_call=$(LC_ALL=C grep -n 'omarchy_prompt_password' "$CONFIGURATOR" | head -1 | cut -d: -f1 || true)
 [[ -n $kf_call && -n $pw_call ]] ||
-  fail "could not locate upstream's keyboard_form/omarchy_prompt_password call sites -- this premise check is broken"
+  fail "could not locate upstream's keyboard_form/omarchy_prompt_password call sites -- this premise check is broken" \
+    "keyboard_form call: '${kf_call:-<none>}', omarchy_prompt_password: '${pw_call:-<none>}' in $CONFIGURATOR"
 [[ $kf_start -lt $pw_call ]] ||
   fail "upstream's password prompt no longer follows the keyboard step -- re-derive §5.20a's ordering claim"
 pass "premise: upstream prompts for the password (configurator:${pw_call}) after the keyboard step, and re-enters it from user_step"
