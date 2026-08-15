@@ -3197,6 +3197,51 @@ rotated correctly; `fbcon=rotate:1` reaches the real cmdline; autologin lands on
 `gaming` with the right session file; gamescope runs; the Wi-Fi profile carries
 from the installer and reconnects on its own; live-ISO Wi-Fi works on stable.
 
+### 5.33 ✅ All four P1s wired, plus three bugs found on the way (session 28)
+
+Five parallel Opus agents, disjoint file ownership, merged and verified by hand
+rather than by reading their reports. What landed:
+
+| Fix | Mechanism |
+|---|---|
+| **OSK in the installer** | build stages the mapper + its tty OSK modules into the live airootfs; `python-evdev` via a new `deck-live.packages`; **guard 6.7** |
+| **Steam / black screen** | new `deck_pkgs.py` step installs `deck-fetch.packages` online at install time, re-queries after (a zero exit that leaves the package absent is `failed`), and a self-disabling first-boot service says so on the machine if it did not land |
+| **Session layer** | new `deck_session_bake.py` runs `src/deck-session.sh` **inside the target** — not a second implementation. Delivers `steamos-session-select`, the `steamos-*` helpers and the target mapper, i.e. the Desktop row, the update modal and the brightness writer in one |
+| **Neptune only** | `deck-form.sh` overrides upstream's `detect_kernel()`; it is sourced into `configurator` **101 lines before** the call, measured on the patched file |
+| **The disease itself** | **guard 6.8** — a `configs/deck/*.packages` nothing installs FAILS THE BUILD (a checker's read does not count) — and **outcome assertions** on the installed image |
+
+**Three bugs nobody had spotted, each found only by doing the work:**
+
+1. 🔴 **`deck-fetch.packages` was never on the ISO at all.** `configs/deck/` lands
+   in the archiso *profile*; mkarchiso only copies `airootfs/` into the booted
+   root. A correctly-written fetch step still could not have read it. Two
+   independent bugs stacked behind one symptom.
+2. 🔴 **`linux-firmware-neptune` in the pacstrap list would have killed every
+   install at phase 3.** Valve declares conflicts against `linux-firmware` and
+   `-whence` only; Arch split it into ten subpackages, so pacman removes those
+   two and dies on file conflicts with the rest — *measured in a VM* by
+   `src/omarchy-deck-kernel.sh`, which works around it with `pacman -Rdd`.
+   Pacstrap has no such step. Removed; safe because `linux-neptune-611`'s
+   `.PKGINFO` depends only on `coreutils/initramfs/kmod` (read from the package).
+3. **`mangohud`/`lib32-mangohud` were consumer-less too**, and load-bearing —
+   `deck-session.sh` warns Gaming Mode's overlay needs `mangoapp`.
+
+**And one in our own new code**: the build's session-staging derived its module
+list from `deck-session.sh`'s `OSK_MODULES`, whose **first element is a
+variable** (`"$OSK_SRC_NAME"`), so the scrape yielded a filename of
+`$OSK_SRC_NAME`. Found by reading back what the extraction actually produced
+instead of assuming it worked. It now resolves `$NAME`/`${NAME}` against the
+file's own `readonly` and refuses anything still unexpanded.
+
+**Two claims in this document were wrong and are corrected above**: the
+whitelist/`bl1` diagnosis (§5.32), and `CLAUDE.md`'s Deck pin. Both were mine,
+both were plausible, both died to measurement.
+
+⚠️ **Everything here is UNVERIFIED until the ISO builds and boots.** The unit
+tier cannot see a missing live-tty OSK, and QEMU cannot see whether Neptune
+boots the panel. Suites at merge: **21/22 sh** (the red is the pre-existing
+heredoc classifier), **15/15 py**.
+
 ---
 
 ## 6. Blocked on human
