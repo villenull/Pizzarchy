@@ -3377,6 +3377,70 @@ guard and `rows_on_screen`'s wrap argument.
 **D4 🐞 the OSK flickers.** `write_at` rewrites every row with `\x1b[K` between a
 cursor save/restore on each repaint. Rate is unmeasured — measure before fixing.
 
+### 5.35 🆕 THE BLACK FIRST BOOT IS STEAM UPDATING ITSELF — measured, not inferred (session 28)
+
+Read over SSH from the installed Deck, from Steam's own
+`~/.local/share/Steam/logs/bootstrap_log.txt` (which survives reboots) and
+`systemd-analyze`. **`uname -r` on hardware:
+`6.11.11-valve29-1-neptune-611-g2dcfaf4df7ac`** — Valve's kernel, from our ISO,
+running on the Deck. §5.33a's biggest open question, closed by measurement.
+
+**The boot chain is NOT slow.** `systemd-analyze`: 5.781s firmware + 7.442s
+loader + 5.691s kernel + 20.253s userspace = **39.168s**, `graphical.target` at
+20.252s, `plymouth-quit.service` **659 ms**. Nothing here accounts for minutes.
+
+**The black window is Steam's first-run self-update, and it is 2m03s:**
+
+| time | bootstrap_log.txt |
+|---|---|
+| 15:08:15 | Steam launches (`-gamepadui`), `Verifying installation...`, `Downloading Update...` |
+| 15:08:15 | `Download failed: http error 0` → **`Error: Steam needs to be online to update.`** |
+| 15:08:16 | relaunches and retries — **succeeds this time** |
+| 15:09:51 | `Extracting package...` |
+| 15:10:14 | `Update complete, launching...` |
+| 15:10:18 | new client starts (updater built **Aug 3 2026**, was Jun 24) |
+
+**This root-causes P32 issue #4 as well, and it is a RACE, not a broken
+network.** The very first update attempt fails because Steam is started before
+NetworkManager has connectivity — one second later the identical request works.
+The operator saw the failure modal; the recovery was already underway.
+
+**Nothing can draw in that window today, and that is by construction.** The
+session is `sddm.service` under `graphical.target`; the kernel cmdline is
+`quiet splash loglevel=0 systemd.show_status=false vt.global_cursor_default=0
+fbcon=rotate:1`, so the console prints nothing; and plymouth has been gone since
+659 ms — three orders of magnitude before the window opens. So for ~2 minutes
+gamescope is up, Steam is running headless updating itself, and the panel is
+black with no channel to say so.
+
+**Operator request (2026-08-15): show something.** *"just something to tell users
+like don't turn me off. steam is unpacking."* Available on the target and worth
+weighing: `plymouth` (themes include `omarchy`, `spinner`, `spinfinity`; supports
+`display-message`) held past `plymouth-quit` with `--retain-splash` until Steam
+draws, `imv`, or a gamescope-side client. **Undecided — do not build before
+choosing.** Note it is first-boot-only: later boots reach Gaming Mode in ~39 s.
+
+**Also found: the journal is persistent (`/var/log/journal` exists) but
+`--list-boots` shows only boot 0**, so the actual first boot was NOT captured —
+everything above came from Steam's own log. Worth understanding before relying on
+`-b -1` for any future hardware forensics.
+
+### 5.36 🔴 SSH does not survive a reinstall, and setting it up by hand cost most of an evening
+
+The installer has **no SSH wiring at all** — no `openssh` in any package list, no
+unit, no key handling. It was configured by hand once (session 27), the
+session-28 reinstall wiped it, and reconstructing it took hours across two
+Claudes and a dozen operator round-trips. Causes, all mundane and all stacking:
+sudo is not NOPASSWD so every step needs a human; `&&` chaining ate the failures
+(**this file's own hard constraint, violated in the commands handed to the
+operator**); ufw `default deny` produced *timeout* while a missing sshd produces
+*refused*, so the first masked the second; `systemctl is-active` prints
+`inactive` for a unit that does not exist, making "never installed"
+indistinguishable from "not started"; and the Deck-side agent could see only
+local state while the dev machine could see only the network, with the operator
+as the sole lossy channel between them. The tie was broken by RST-vs-timeout from
+outside. **Fix belongs in the installer, not in a runbook.**
+
 ---
 
 ## 6. Blocked on human
