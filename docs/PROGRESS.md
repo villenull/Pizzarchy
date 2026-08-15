@@ -3237,9 +3237,49 @@ file's own `readonly` and refuses anything still unexpanded.
 whitelist/`bl1` diagnosis (§5.32), and `CLAUDE.md`'s Deck pin. Both were mine,
 both were plausible, both died to measurement.
 
-⚠️ **Everything here is UNVERIFIED until the ISO builds and boots.** The unit
-tier cannot see a missing live-tty OSK, and QEMU cannot see whether Neptune
-boots the panel. Suites at merge: **21/22 sh** (the red is the pre-existing
+### 5.33a ✅ The ISO built and the fixes are verified in QEMU (same session)
+
+**`omarchy-deck-2026.08.15-P32FIXES-x86_64.iso`**, 6.4 GiB, sha256
+`67290d46…a8fa`, build exit 0, **all nine guards green** (6.1, 6.3, 6.4a, 6.4b,
+6.5a, 6.5b, 6.6, 6.7, **6.8**). Built in a fresh scratch dir after the first
+attempt died on a corrupted cached `omarchy-keyring` — the third time that
+class has come out of `~/.cache/omarchy-deck/iso-build`, which `docs/PROGRESS.md`
+already calls stale; **stop reusing it**.
+
+**Two install runs, because one cannot answer both questions.**
+
+| | offline (`-nic none`, the default) | networked (`VM_NIC=user`, new) |
+|---|---|---|
+| result | **34/37**, `install.outcome=success` | **36/37**, `install.outcome=success` |
+| `steam` installed | FAIL — *correct*: fetched online by design, so offline it can only report the degradation | **✅ yes** |
+| Steam bootstrap tarball | FAIL — same cause | **✅ yes** |
+
+Everything else passed in both, and these are the assertions that **fired on the
+pre-fix ISO**:
+
+- `/usr/bin/steamos-session-select` ✅ — the missing "Switch to Desktop"
+- `steamos-update` + `steamos-priv-write` ✅ — the ENOENT update modal and the
+  brightness writer
+- `/usr/local/bin/deck-input-mapper` on the target ✅ — Desktop Mode navigation
+- live ISO carries the mapper, **executable** (`-rwxr-xr-x`), `python-evdev`
+  installed ✅ — the installer's on-screen keyboard
+- `steamdeck-dsp` ✅, `gamescope-wayland.desktop` ✅
+- **stock `linux` ABSENT**, and **exactly one UKI:
+  `omarchy_linux-neptune-611.efi`** ✅ — Neptune-only works end to end
+
+**The one shared failure is the fix working, not a defect.** S0's
+`Username>` assertion fails because `deck-form.sh` now says *"on-screen keyboard
+did not report bound within 5s"* instead of *"mapper not found"* — the mapper is
+present and launching, and cannot bind under QEMU because there is no gamepad.
+That 5 s pushes the prompt past the harness's screenshot. **The harness's
+timings predate the mapper ever being in the image** and need rebasing on the
+OSK bind deadline; an empty username is submitted and retried in the meantime.
+
+⚠️ **STILL UNPROVEN, AND ONLY HARDWARE CAN ANSWER IT:** that the OSK actually
+*draws* on a real tty and binds to a real controller; that Neptune lights the
+panel; that the brightness slider moves (acceptance test is a
+`steamos-priv-write` **accept** line in the journal, not a slider that looks
+like it moved). Suites at merge: **21/22 sh** (the red is the pre-existing
 heredoc classifier), **15/15 py**.
 
 ---
