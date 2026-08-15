@@ -3,7 +3,53 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
-> ## Where things stand (updated 2026-08-13, session 24 — READ THIS FIRST)
+> ## Where things stand (updated 2026-08-15, session 27 — READ THIS FIRST)
+>
+> *(Supersedes every block below wherever they disagree. Same rule: verify every
+> "done"/✅ against the tree before trusting it.)*
+>
+> ### 🆕 Omarchy 4.0.0 STABLE shipped — phase 3 is live, mid-rebase
+>
+> Upstream released **4.0.0 stable 2026-08-14** (`v4.0.0` = `f0020448`). This is
+> the target `CLAUDE.md` names; T6/phase 3 is no longer gated. Per the ROADMAP
+> escalation, stable landing collapses phase 2.9 + P3.6 into one rebase.
+>
+> **Session 27 did the entire hardware-free half of that rebase and committed it:**
+> - **Pin measured from inside the downloaded stable ISO** (`docs/findings/T9-stable-pin.md`):
+>   omarchy `f0020448` · omarchy-iso `174dd82` · omarchy-pkgs `bb66b9d` · channel
+>   **`stable`** (was edge) · runtime pkg **`omarchy 4.0.0-1`** (renamed from
+>   `omarchy-dev`) · version **`4.0.0`**. ISO sha256 `9224fab3…` matches upstream's
+>   published checksum.
+> - **127-commit delta classified** across four seams, every row citing a read
+>   hunk (`docs/findings/T9-stable-delta-classification.md`): **1 BREAKS US** (the
+>   `setup-system`→`apply-system` orchestrator call) that **self-heals via the
+>   submodule bump** and is guard-enforced; boot chain, lock, and Desktop Mode
+>   menu row all **SAFE**; all 5 ISO overlay patches apply clean on `174dd82`.
+> - **Operator-present Deck update runbook ready:** `docs/tasks/P36-deck-stable-update-runbook.md`.
+>
+> ### What is LEFT (verify, don't trust — check the tree)
+>
+> 1. **The pin+build change** (submodule bump to `174dd82`, `iso/{RUNTIME,UPSTREAM,PKGS}`,
+>    and `iso/bin/build` `edge`→`stable` + `omarchy-dev`→`omarchy`). Check `git log`
+>    for whether session 27 landed it — it was attempted all-or-nothing, gated on
+>    `test/unit/test-iso-build.sh` + shellcheck staying green. If NOT landed, the
+>    exact edits are enumerated in `docs/findings/T9-stable-pin.md` "What this breaks".
+> 2. **The Deck update itself** — operator-present, §6 of PROGRESS. Run
+>    `P36-deck-stable-update-runbook.md`. ⚠️ edge→stable replaces `omarchy-dev` with
+>    `omarchy` via a pacman conflict, and 5 migrations call `sudo` — **`ssh -t`, not
+>    headless**.
+> 3. **Substrate rebuild from the stable ISO + full suite run** — check whether
+>    session 27 finished it (`test/images/neptune-substrate.raw`).
+>
+> ### Baseline captured session 27 (for rebase attribution)
+> shellcheck green; **18/20 sh unit suites green**, 2 PRE-EXISTING reds unrelated
+> to the rebase (`test-ci-workflow.sh` = ISO-upload-opt-in / CI storage;
+> `test-vm-probe-integrity.sh` = a probe scanner can't classify a heredoc at
+> `vm-install-controller-test.sh:220`); **13/13 py green**.
+>
+> ---
+>
+> ## Where things stood (updated 2026-08-13, session 24)
 >
 > *(This supersedes the session-23 block below, which is kept for its
 > evidence but is stale wherever it disagrees with this one. Same rule as

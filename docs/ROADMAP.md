@@ -296,7 +296,7 @@ exactly what we did.
 | P3.3 | Kernel-update resilience: force a kernel reinstall, reboot, Neptune entry still default | `docs/tasks/T6-integration-release.md` §3 |
 | P3.4 | Fix → re-run the affected portion; be honest about blast radius | `docs/tasks/T6-integration-release.md` §2 |
 | P3.5 | Trademark/glyph check (Valve iconography), honest LCD statement, known-issues list | `docs/tasks/T6-integration-release.md` §5, `docs/PROGRESS.md` §5.8 |
-| P3.6 | Rebase onto Omarchy 4.0 **stable** (whenever it lands — if it lands earlier, fold in during phase 2), re-verify the shell hooks. **Run phase 2.9's procedure** (`docs/tasks/T9-beta2-rebase.md`) rather than improvising: by then it has been executed once, on a step that does not gate the release | `docs/tasks/T6-integration-release.md` §1 |
+| P3.6 🟡 | Rebase onto Omarchy 4.0 **stable**. **Stable shipped 2026-08-14** (`v4.0.0` = `f0020448`). Hardware-free half DONE 2026-08-15 (session 27): pin measured from inside the stable ISO (`docs/findings/T9-stable-pin.md`), 127-commit delta classified — 1 BREAKS-US that self-heals via the submodule bump, boot/lock/menu all safe (`docs/findings/T9-stable-delta-classification.md`). **Remaining: the operator-present Deck update** — `docs/tasks/P36-deck-stable-update-runbook.md`. Folds phase 2.9 forward as planned | `docs/tasks/T6-integration-release.md` §1 |
 | P3.7 | Tag, build, checksum, publish | `docs/tasks/T6-integration-release.md` §7 |
 
 ### Exit criteria

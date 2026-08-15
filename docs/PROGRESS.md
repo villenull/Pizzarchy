@@ -26,7 +26,7 @@ may use Wi-Fi (§2.2).
 | **T3** Gaming Mode + switching | ✅ **CLOSED 2026-08-12 (session 22).** §5.10/§5.14/§5.15/§5.16/§5.18/§5.11/§5.17/§5.28 all closed; P2.1/P2.2/P2.3/P2.4 all closed (ROADMAP's table); §5.24a's three lock-usability requests: **two closed** (display-on timing via T12's patch, OSK auto-hide confirmed deployed and wired), **one open** (only-power-button-wakes-the-blanked-panel — a Quickshell-side gate, untouched). Both reboot directions **hardware-verified on the panel** — `docs/findings/T13-power-button-and-sleep.md` §9 |
 | **T4** Controller-only installer | 🟡 **`deck-form.sh` has a route onto the ISO (session 22)** — the 5th overlay patch, argued in its own header, plus `deck-dashboard.sh` (T4a, session 22). Screen spec `docs/tasks/T4-screen-spec.md` still the design authority. `--osk-start-shown` + the mapper's `bound` readiness marker exist now, so S1's Wi-Fi passphrase prompt no longer degrades by construction. Session 23's `[V]` run against the real ISO found two real bugs (`docs/findings/T4-controller-only-install-first-run.md` §5/§2); **both fixed and unit-regression-tested (§12)**, then **re-verified on a real rebuilt ISO the same day** (§13.4): a fresh `[V]` run's written `user_configuration.json` shows `hostname: steamdeck` and a real geo timezone, not upstream's defaults — the fix holds on hardware-equivalent boot, not just in the unit suite. **That same run crossed S5's gate for the first time ever** (`y` on `deck_final_summary`, §13.4) and found a NEW, more severe blocker: `configurator` crashes (`$1: unbound variable`, `set -u`) immediately after `write_user_files`, before `omarchy-install-dashboard` ever starts — a plain upstream bug (unguarded `$1` at the very end of `configurator`, reached only by the full-disk branch every Deck install takes), not a Deck-specific one, invisible to every prior test because none had pressed "Install" on a disk sized to survive the attempt. **The `$1` fix landed 2026-08-13 (session 25, Opus)** as hunk 3 of `deck-form-invocation.patch` (`${1:-}`, matching the file's two already-correct sibling checks), the ISO was rebuilt (sha256 `a27230ff…`), and the harness re-run: **the `$1` crash is GONE — the real installer now launches and runs the entire base Omarchy setup to completion** (§14). Criterion 1 is **still not closed**, now blocked one layer deeper by a real bug in OUR OWN `orchestrator/deck_autologin.py`: `DESKTOP_SESSION = "omarchy.desktop"` gets `.desktop` appended a second time by `find_session`, so the desktop-session fallback searches `omarchy.desktop.desktop` (never exists) while the real `omarchy.desktop` sits right there — `choose_session` returns `failed`, and `autologin` (the registry's sole `critical=True` step) aborts the install. Every OTHER Deck step succeeds on a real install (measured off the target's `@log/omarchy-deck-install.json`, §14.4). **Left:** the one-line `deck_autologin.py` fix (`DESKTOP_SESSION="omarchy"` + fix its unit fixture, §14.6 item 1), and separately the absent `gamescope-wayland.desktop` in the ISO's package set (§14.6 item 2) |
 | **T5** ISO + package payload | 🟢 **`iso/bin/build` RAN FOR REAL 2026-08-12 (session 23), and it worked.** First-ever full-tree container build: all 8 guards (6.1, 6.3, 6.4a, 6.4b, 6.5a, 6.5b, 6.6) passed, all 5 overlay patches applied (2 via git's 3-way-merge fallback to direct application on a shallow clone — verified by hand that both landed: `configure_deck` import in `main.py`, the `deck-dashboard.sh` source line in `omarchy-install-dashboard`), `omarchy-deck` 0.2.0-1 built and its 2 runtime patches applied cleanly. Output: `omarchy-2026.08.13-x86_64-quattro.iso`, 6.39 GiB. **Rebuilt again the same day** (§12's two `deck-form.sh` fixes, commit `e729699`) at the same cache path — sha256 is now `d07bf6cbe96ac417d3fe8a632283ef872cffa42d79d16bfb8a91e3ddaa3bfea3`, **not** the `336f357...` hash this row used to cite; that ISO no longer exists on disk (overwritten in place — caught mid-boot by a concurrent QEMU run, `docs/findings/T4-controller-only-install-first-run.md` §13.2, no data lost, just a stale citation). First attempt (before either rebuild) failed on a corrupted cached package from an old scratch dir predating today's runtime pin; **treat the old `~/.cache/omarchy-deck/iso-build/` scratch dir's artifacts as stale/discardable, not evidence of anything**. **An actual controller-only QEMU install run against this ISO has now happened** (§13 of the same finding) — it does not yet close criterion 1: the run reaches `write_user_files` correctly but `configurator` itself crashes right after (a plain upstream `set -u` bug, §13.4), so the real installer never starts and the disk-image assertions this session wrote (`test/vm/vm-install-controller-test.sh`) have not run against a real completed install yet. **Update, session 25 (Opus):** the `$1` bug was fixed (hunk 3 of `deck-form-invocation.patch`), the ISO rebuilt clean (all 8 guards, sha256 `a27230ff498f8b7b4be45f455192d135fb5ab777b3204022802da19e34b6ea6a`), and the harness re-run — **the real installer now runs the whole base Omarchy setup to completion** and then aborts in our own `configure_deck` phase on the `deck_autologin.py` double-`.desktop` bug (§14). Harness now 10/11 (was 9/11), `install.outcome=failure` (was `timeout`); disk-image assertions STILL correctly skipped (gated on success), never exercised. `input.lua`'s **`above_lock`/DPMS half now has a writer and it works** on a real install (session 25 shows `lock_wake_dpms: configured`, `above_lock=2`, `user_path=/home/deck/.config/hypr/input.lua` in the target's deck-install record); the **OSK per-device XKB half of `input.lua` is a separate concern and its writer status is unverified here**, do not read this as closing it. ⚠️ **Infra note for the next builder:** a first rebuild attempt died mid-pacstrap on a corrupted cached `omarchy-settings-dev-*.pkg.tar.zst` (stale-scratch-dir class, same as session 23); a clean re-run re-fetched it and succeeded — treat checksum-corruption on a cached pkg as throwaway, clear the file and retry |
-| **T6** Integration + release | ⬜ not started | Gated on Omarchy 4.0 stable |
+| **T6** Integration + release | 🟡 **UNGATED 2026-08-14 — Omarchy 4.0.0 stable shipped** (`v4.0.0` = `f0020448`). Phase 3 is live. Stable pin measured + full delta classified 2026-08-15 (session 27, §5.31); Deck update runbook ready (`docs/tasks/P36-deck-stable-update-runbook.md`, operator-present). Rebase folds phase 2.9 + P3.6 into one move (ROADMAP escalation) | See §5.31 |
 | **T9** Rebase onto beta 2 | ✅ **done — phase 2.9 FULLY CLOSED 2026-08-11** | We were already on it, measured from inside both ISOs; the Deck confirmed on the pin (`omarchy-version` = `4.0.0.r1617.g6d7826d-1`) and the hands-on rows signed off on screen (session 20). Delta ahead classified, substrate pinned, four VM suites green |
 | **T12** Upstream-patch seam | ✅ **BUILT, PACKAGED AND HARDWARE-VERIFIED 2026-08-12 (session 22)** | The applier, ALPM re-apply hook and failure-surfacing unit ship inside `omarchy-deck` (mode 0755, enabled via a shipped `.wants` symlink, no scriptlet). Guard 6.6 (`iso/bin/build`) fails the build if a patch drifts from the pinned runtime. **Both patches applied for real on the Deck** — lock-blank timer 250ms→**20000ms**, Limine rotation (corrected `90`, not the shipped-then-fixed `270`) — verified on disk, idempotent re-`--verify` confirms `already applied` |
 | **T13** Power button + sleep | ✅ **CLOSED 2026-08-12 (session 22), all four operator-reported defects, hardware-verified** | `docs/findings/T13-power-button-and-sleep.md`. The mechanism: one physical press produces two `KEY_POWER` events on asymmetric nodes (a real key + a fire-and-forget ACPI notify); a udev rule drops the ACPI node from `power-switch`, a logind drop-in sets `HandlePowerKey=suspend` explicitly (its default is `poweroff`, not `suspend`). Deploy is a reboot-gated two-file write with a printed undo. **Measured on the panel**: suspend/resume clean in both Gaming and Desktop Mode, same `gamescope` PID across the cycle (session survives), deep/S3 confirmed twice independently (not s2idle, contra the initial research). One benign surprise, corrected in the stage's own text: Desktop Mode's System menu still flashes briefly (the compositor sees both raw presses regardless of the udev tag; only `logind`'s trigger became single-sourced) — n=1, not a guarantee either way |
@@ -281,6 +281,7 @@ missing will waste an hour rebuilding them.
 | ⚠️ **Previous substrate, kept** | `test/images/neptune-substrate.prev.raw` | The old **`stable`-channel** image (hook **1.36.0-1**). Kept only because it is the A/B control that proved the mtime oracle was invalid, and because rebuilding right now needs a workaround for a broken upstream Arch mirror. **Never point a suite at it expecting the product's boot chain** — that is the exact defect the pin exists to prevent. Delete once the mirror heals |
 | **`omarchy-iso` scratch clone** | session scratch — **will be lost** | Had two local deviations worth reapplying if rebuilding: `--network host` on the Docker run (§7's bridge throttle) and a scratch pacman cache instead of the host's (§3.10 item 3) |
 | 🆕 **extest, both targets** | `~/ISOs/extest-cb77cd4/libextest-{i686,x86_64}.so` | Built 2026-08-11 at pin `cb77cd4` (v1.0.4, MIT). The i686 one is what T10 preloads into Steam (Steam's input process is 32-bit). Rebuild: `tools/build-extest.sh` — pinned, licence-gated, contained toolchain, needs network once |
+| 🆕 **Omarchy 4.0.0 STABLE ISO (upstream's)** | `~/.cache/omarchy-deck/stable-rebase/omarchy-4.0.0.iso` | Downloaded 2026-08-15 (session 27) from `https://iso.omarchy.org/omarchy-4.0.0.iso`. **6,273,040,384 B**, sha256 `9224fab3720560f771969a99a499e5f7e0f8e2d6a0681d872d52f05fb5003da4` — **matches upstream's published v4.0.0 release checksum** (not just our download). airootfs.sfs (extracted alongside) sealed 2026-08-14 16:02:19 UTC. Pin measured from inside it: `docs/findings/T9-stable-pin.md`. Also in that dir: bare clones of omarchy/omarchy-iso/omarchy-pkgs used for the delta |
 
 ---
 
@@ -2949,8 +2950,69 @@ own OSK equally, and the approved touch/restyle plan assumes touch works.
 
 ---
 
+## 5.31 🆕 Omarchy 4.0.0 STABLE shipped 2026-08-14 — pin measured, delta classified (session 27, 2026-08-15)
+
+Upstream released **Omarchy 4.0.0 "Quattro"** on 2026-08-14 (`basecamp/omarchy`
+tag `v4.0.0` = `f0020448`). This is the target `CLAUDE.md` names and the event
+P3.6 waited on. Per the ROADMAP escalation, stable landing this close to phase
+2.9 collapses 2.9 + P3.6 into **one** rebase.
+
+**The pin, measured from inside the downloaded stable ISO** (full detail:
+`docs/findings/T9-stable-pin.md`):
+
+- basecamp/omarchy **`f0020448`** · omarchy-iso **`174dd82`** ("Install the
+  published Omarchy packages in the default build", 3 min before the airootfs
+  was sealed) · omarchy-pkgs **`bb66b9d`** ("Release omarchy 4.0.0")
+- **Channel `stable`** (was `edge`) · runtime package **`omarchy 4.0.0-1`**
+  (renamed from `omarchy-dev`, which declares `provides=omarchy`+`conflicts=omarchy`)
+  · settings **`omarchy-settings 4.0.0-1`** · version string **`4.0.0`** (a real
+  release string at last, not `4.0.0.alpha`)
+- ISO `omarchy-4.0.0.iso` 6,273,040,384 B, sha256 `9224fab3…` **matches
+  upstream's published checksum**.
+
+**The delta `6d7826d` → `f0020448` is 127 commits / 243 non-test files** — a real
+release, not the same-day rebuild phase 2.9 turned out to be. Classified file by
+file across four seams by independent agents, each citing read hunks
+(`docs/findings/T9-stable-delta-classification.md`):
+
+- **1 BREAKS US**, and it self-heals: the ISO orchestrator's
+  `omarchy-setup-system` call → `omarchy-apply-system` (R082). omarchy-iso
+  `174dd82` already calls the new name, so the **submodule bump fixes it**; and
+  `iso/bin/build` guard 6.4a `build_fail`s loudly if the pin moves without it
+  (test-iso-build case 12 encodes exactly this).
+- **Boot chain SAFE**: `omarchy-defaults.conf` byte-identical; the limine-cmdline
+  migration only rebuilds the UKI from unchanged drop-ins, *preserving*
+  `fbcon=rotate:1`. No migration reverts idle/rotation/lizard/backlight.
+- **Lock SAFE**: the stranded-lock recovery path exists but is already neutered
+  in our tree (`idle.lock=86400` + sleep-lock mask + `above_lock=2`); our
+  blank-timer patch still `git apply --check`s clean.
+- **Desktop Mode menu row SURVIVES**: the JSONC command-palette rewrite left the
+  extension mechanism intact — T3's fallback-free integration point holds.
+- **All 5 ISO overlay patches apply clean** against `174dd82` (`git apply --3way
+  --check` verified), so the submodule bump is not blocked.
+- **The tzupdate §7 to-do is CLOSED with no edit** — the comment was already
+  correct (verify-don't-trust).
+
+**The one NEW operational risk is SSH-abort, not reverted settings.** Five stable
+migrations call `sudo` without NOPASSWD, and the edge→stable package swap forces
+pacman to remove `omarchy-dev` (conflict). A headless `omarchy-update` over SSH
+can hang on any of these — the Deck runbook uses `ssh -t` + primed sudo for
+exactly this.
+
+**State at session-27 close:** the hardware-free analysis + records are done and
+committed. The Deck update itself is operator-present (runbook ready). See §6.
+
+---
+
 ## 6. Blocked on human
 
+- 🆕 **P3.6 — bring the Deck to Omarchy 4.0.0 stable (operator-present).** Runbook
+  ready: `docs/tasks/P36-deck-stable-update-runbook.md`. Needs the operator
+  because it writes to the Deck (snapshot, channel switch, `omarchy-update`) and
+  because the edge→stable swap replaces `omarchy-dev` with `omarchy` via a pacman
+  **conflict prompt** and five migrations call `sudo` — run with `ssh -t`, not
+  headless. Everything hardware-free (pin, delta, substrate, records) is done
+  (§5.31). This is the first hardware step of phase 3.
 - **`docs/ROADMAP.md` P1.4 — Ventoy on the test USB + the stock Omarchy 4.0 beta
   ISO.** `ventoy-bin` is not installed on the dev machine. The ISO can be
   downloaded, or built locally (a real build already succeeded in session 2 —
