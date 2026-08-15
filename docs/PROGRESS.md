@@ -281,6 +281,7 @@ missing will waste an hour rebuilding them.
 | ⚠️ **Previous substrate, kept** | `test/images/neptune-substrate.prev.raw` | The old **`stable`-channel** image (hook **1.36.0-1**). Kept only because it is the A/B control that proved the mtime oracle was invalid, and because rebuilding right now needs a workaround for a broken upstream Arch mirror. **Never point a suite at it expecting the product's boot chain** — that is the exact defect the pin exists to prevent. Delete once the mirror heals |
 | **`omarchy-iso` scratch clone** | session scratch — **will be lost** | Had two local deviations worth reapplying if rebuilding: `--network host` on the Docker run (§7's bridge throttle) and a scratch pacman cache instead of the host's (§3.10 item 3) |
 | 🆕 **extest, both targets** | `~/ISOs/extest-cb77cd4/libextest-{i686,x86_64}.so` | Built 2026-08-11 at pin `cb77cd4` (v1.0.4, MIT). The i686 one is what T10 preloads into Steam (Steam's input process is 32-bit). Rebuild: `tools/build-extest.sh` — pinned, licence-gated, contained toolchain, needs network once |
+| 🆕 **OUR ISO on 4.0.0 stable** | `~/.cache/omarchy-deck/stable-rebase/iso-build-stable/release/omarchy-2026.08.15-x86_64-quattro.iso` | **6,854,164,480 B (6.38 GiB)**, sha256 `e9fbd8edb8c69d698c5e575955a2dd27d4f394a704c7b6b55744a817748368c5`, built 2026-08-15 (session 27), build exit 0, all eight guards green. Carries channel **`stable`**, `omarchy-dev`+`omarchy-settings-dev` **`4.0.0.r1744.gf002044-1`** (= `iso/RUNTIME`'s pin), `omarchy-deck 0.2.0-1`, and **Valve's `gamescope 3.16.25-3`** (the §14.6 fix). **This supersedes the `a27230ff…` ISO** (session 25, beta-2 era). Rebuild env: `OMARCHY_DECK_ISO_BUILD_DIR=…/iso-build-stable`, `OMARCHY_DECK_RUNTIME_SRC=…/runtime-src`, `OMARCHY_DECK_PKGS_SRC=…/pkgs-src` |
 | 🆕 **Omarchy 4.0.0 STABLE ISO (upstream's)** | `~/.cache/omarchy-deck/stable-rebase/omarchy-4.0.0.iso` | Downloaded 2026-08-15 (session 27) from `https://iso.omarchy.org/omarchy-4.0.0.iso`. **6,273,040,384 B**, sha256 `9224fab3720560f771969a99a499e5f7e0f8e2d6a0681d872d52f05fb5003da4` — **matches upstream's published v4.0.0 release checksum** (not just our download). airootfs.sfs (extracted alongside) sealed 2026-08-14 16:02:19 UTC. Pin measured from inside it: `docs/findings/T9-stable-pin.md`. Also in that dir: bare clones of omarchy/omarchy-iso/omarchy-pkgs used for the delta |
 
 ---
@@ -2999,14 +3000,34 @@ pacman to remove `omarchy-dev` (conflict). A headless `omarchy-update` over SSH
 can hang on any of these — the Deck runbook uses `ssh -t` + primed sudo for
 exactly this.
 
-**State at session-27 close:** the analysis + records + runbook are on `main`.
-The pin+build change (submodule → `174dd82`, pins, `edge`→`stable`,
-`omarchy-dev`→`omarchy`) is verified-clean but lives on branch
-**`stable-rebase-pin`** (`5aaed0e`), kept off `main` because
-`test/unit/test-iso-build.sh` fixtures still encode the old `-dev`/`setup-system`
-names. Finish line — the fixture refactor (Path A vs B is the one operator
-decision) + the real ISO rebuild — is `docs/findings/T9-stable-rebase-remaining.md`.
-The Deck update itself is operator-present (runbook ready). See §6.
+**✅ State at session-27 close: THE ISO IS BUILT AND THE REBASE IS MERGED TO `main`.**
+
+`omarchy-2026.08.15-x86_64-quattro.iso`, 6.38 GiB, sha256
+`e9fbd8edb8c69d698c5e575955a2dd27d4f394a704c7b6b55744a817748368c5`, build exit 0,
+**all eight guards green**. `main` after the merge is identical to the pre-rebase
+baseline — shellcheck green, 18/20 sh, 13/13 py, same two pre-existing reds, **no
+regressions**.
+
+**Path B, by operator decision**, and measurement dissolved its one cost: the
+`stable` channel serves `omarchy-dev-4.0.0.r1744.gf002044-1` — `gf002044` **is**
+our pin — so on stable the `-dev` build *is* the release commit and guard 6.4b's
+sha-provenance check needed no redesign. (Path A would have required one: the
+released `omarchy 4.0.0-1` carries a static pkgver with no `.g<sha>`.)
+
+**§14.6 is root-caused and fixed on the way through.** `gamescope-session` (added
+session 26, never build-validated) exists in **no** Valve repo. The session file
+autologin needs is shipped by the gamescope package itself and **only Valve's
+build** of it (Arch's ships no `wayland-sessions/` at all). Our mirror already
+carried Valve's build; **nothing installed it**. Now it is on the install list —
+verified in the artifact, along with `gamescope-wayland.desktop` and
+`start-gamescope-session` inside the shipped package. ⚠️ **Payload-level only:
+"first boot lands in Gaming Mode" is still unproven** — that needs
+`vm-install-controller-test.sh` against this ISO (its disk-image assertions remain
+never-executed) and then P3.2 on hardware.
+
+Full account, including the mirror-vs-install list conflict this exposed:
+`docs/findings/T9-stable-rebase-remaining.md`. The Deck update itself is
+operator-present (runbook ready). See §6.
 
 ---
 

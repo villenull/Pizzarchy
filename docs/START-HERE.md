@@ -8,13 +8,30 @@ work without waiting for further instruction.**
 > *(Supersedes every block below wherever they disagree. Same rule: verify every
 > "done"/✅ against the tree before trusting it.)*
 >
-> ### 🆕 Omarchy 4.0.0 STABLE shipped — phase 3 is live, mid-rebase
+> ### ✅ Omarchy 4.0.0 STABLE — rebase DONE, ISO BUILT, merged to `main`
 >
 > Upstream released **4.0.0 stable 2026-08-14** (`v4.0.0` = `f0020448`). This is
 > the target `CLAUDE.md` names; T6/phase 3 is no longer gated. Per the ROADMAP
-> escalation, stable landing collapses phase 2.9 + P3.6 into one rebase.
+> escalation, stable landing collapsed phase 2.9 + P3.6 into one rebase — **and
+> that rebase is now on `main`, with a real ISO to show for it:**
 >
-> **Session 27 did the entire hardware-free half of that rebase and committed it:**
+> **`omarchy-2026.08.15-x86_64-quattro.iso`, 6.38 GiB, sha256 `e9fbd8ed…68c5`,
+> build exit 0, all eight guards green.** At
+> `~/.cache/omarchy-deck/stable-rebase/iso-build-stable/release/`. It supersedes
+> the `a27230ff…` ISO from session 25.
+>
+> **Path B** on the package-naming question, and measurement dissolved its cost:
+> `pkgs.omarchy.org/stable` serves `omarchy-dev-4.0.0.r1744.gf002044-1` — that
+> `gf002044` **is** our pin, so on stable the `-dev` build IS the release commit
+> and guard 6.4b needed no change. Our build produced exactly that version.
+>
+> **§14.6 root-caused and FIXED**: `gamescope-session` exists in no Valve repo;
+> the session file is shipped by the gamescope package itself and only **Valve's**
+> build (Arch's has no `wayland-sessions/`). The mirror had it, nothing installed
+> it. Now on the install list and verified inside the artifact. ⚠️ **Payload-level
+> only — "first boot lands in Gaming Mode" is still UNPROVEN.**
+>
+> **Session 27's earlier hardware-free work, also on `main`:**
 > - **Pin measured from inside the downloaded stable ISO** (`docs/findings/T9-stable-pin.md`):
 >   omarchy `f0020448` · omarchy-iso `174dd82` · omarchy-pkgs `bb66b9d` · channel
 >   **`stable`** (was edge) · runtime pkg **`omarchy 4.0.0-1`** (renamed from
@@ -29,25 +46,22 @@ work without waiting for further instruction.**
 >
 > ### What is LEFT (verify, don't trust — check the tree)
 >
-> 1. **The pin+build change is on branch `stable-rebase-pin` (`4a4073c`), NOT on
->    `main`.** Submodule bump to `174dd82` + pins + channel/package settings +
->    a Valve-repo patch fix are all verified-clean there. **The real docker build
->    WAS run (session 27, Path A per operator).** It passed every rebase-related
->    stage and built `omarchy 4.0.0-1` locally, then hit TWO blockers, neither
->    caused by the rebase: **(1) `gamescope-session` names a package that exists in
->    no Valve repo** (added unvalidated in `56c6578`/session 26 — the open §14.6
->    Gaming-Mode question), and **(2) guard 6.4b requires the runtime pkgver to
->    carry the git sha, which the released `omarchy 4.0.0-1` does not** — so Path A
->    needs guard 6.4b made channel-aware (Opus + operator decision; Path B avoids
->    it). **Full account + the decision owed: `docs/findings/T9-stable-rebase-remaining.md`
->    (the 2026-08-15 UPDATE section).** No real ISO can be produced until the
->    gamescope-session question is answered.
+> 1. 🔴 **PROVE THE ISO INSTALLS — the highest-value next step.** Run
+>    `test/vm/vm-install-controller-test.sh` against the NEW ISO. Its disk-image
+>    assertions are gated on `install.outcome=success` and have **still never
+>    executed** in this project's history. This is also the only way to learn
+>    whether the §14.6 fix actually lands a target in **Gaming Mode** — that is
+>    payload-verified but NOT end-to-end proven. Two known bugs were fixed since
+>    the last install run (`deck_autologin.py`'s double `.desktop`, and gamescope),
+>    so this run has a real chance of being the first clean one.
 > 2. **The Deck update itself** — operator-present, §6 of PROGRESS. Run
 >    `P36-deck-stable-update-runbook.md`. ⚠️ edge→stable replaces `omarchy-dev` with
 >    `omarchy` via a pacman conflict, and 5 migrations call `sudo` — **`ssh -t`, not
 >    headless**.
-> 3. **Substrate rebuild from the stable ISO + full suite run** — check whether
->    session 27 finished it (`test/images/neptune-substrate.raw`).
+> 3. **Substrate rebuild from the stable ISO** — NOT done. Confirmatory only: the
+>    boot chain was classified SAFE (`omarchy-defaults.conf` byte-identical), so
+>    this is lower value than (1). `test/images/neptune-substrate.raw` is still the
+>    `edge` one.
 >
 > ### Baseline captured session 27 (for rebase attribution)
 > shellcheck green; **18/20 sh unit suites green**, 2 PRE-EXISTING reds unrelated

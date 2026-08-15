@@ -125,9 +125,97 @@ Path B may now be the pragmatic choice — but that reverses the operator's stat
 preference, so it is theirs to make with this new information. **Neither path can
 produce a real ISO until the gamescope-session question is answered.**
 
-## To land the branch on main
-Blocked on the two decisions above. Once resolved: finish/redo the fixture refactor
-to match the chosen 6.4b invariant, get `test/unit/test-iso-build.sh` + shellcheck
-+ pin/payload suites green after a successful ISO rebuild, then merge. Baseline for
-attribution (session 27): 18/20 sh green + 13/13 py green, 2 pre-existing reds
-(`test-ci-workflow.sh`, `test-vm-probe-integrity.sh`) unrelated to the rebase.
+---
+
+# ✅ RESOLVED 2026-08-15 — operator chose Path B; the ISO BUILDS
+
+Everything above is kept as the reasoning that led here. Outcome:
+
+## The artifact
+**`omarchy-2026.08.15-x86_64-quattro.iso`** — 6,854,164,480 B (6.38 GiB),
+sha256 **`e9fbd8edb8c69d698c5e575955a2dd27d4f394a704c7b6b55744a817748368c5`**,
+`BUILD EXIT 0`, **all eight guards green** (6.1, 6.3, 6.4a, 6.4b, 6.5a, 6.5b, 6.6).
+At `~/.cache/omarchy-deck/stable-rebase/iso-build-stable/release/`.
+
+## Blocker 2 — dissolved by measurement, no guard change needed
+Path B keeps the `-dev` package NAMES on the `stable` channel. The key fact,
+measured rather than assumed: **`pkgs.omarchy.org/stable` serves
+`omarchy-dev-4.0.0.r1744.gf002044-1`** — and `gf002044` *is* `iso/RUNTIME`'s pin.
+So on stable the `-dev` build **is** the release commit, and guard 6.4b's
+sha-provenance check keeps working untouched. (On `edge` it would not: edge already
+serves `r1746.gb724f76`, two commits past the release — an independent reason
+`BUILD_MIRROR=stable` is right.) Our local build produced exactly
+`4.0.0.r1744.gf002044-1`; guard 6.4b passed with no redesign.
+
+## Blocker 1 — root-caused and FIXED (this is the real §14.6 bug)
+`gamescope-session` exists in **no** Valve repo (all four package DBs checked).
+The session file autologin looks for is shipped by the **gamescope package itself,
+and only Valve's build**:
+
+| package | ships `usr/share/wayland-sessions/gamescope-wayland.desktop`? |
+|---|---|
+| `jupiter-staging/gamescope` 3.16.25-3 | **yes** (plus `usr/bin/start-gamescope-session`) |
+| `extra/gamescope` 3.16.25-1 (Arch) | **no** — no `wayland-sessions/` at all |
+
+`deck-mirror.packages` already put Valve's build in the offline mirror, but
+**nothing installed it** — `omarchy-deck` does not depend on it and no list named
+it — so the target never got the session file and `src/deck-session.sh:931` told
+the user to run `pacman -S jupiter-staging/gamescope` by hand. `deck-install.packages`
+now names `gamescope` bare.
+
+That exposed a **structural conflict worth remembering**: a package may
+legitimately appear in *both* Deck lists — `deck-mirror.packages` decides WHICH
+BUILD (repo-qualified), `deck-install.packages` decides THAT IT IS INSTALLED
+(bare, single-repo offline resolve) — and both feed the online download, so pacman
+aborted on `duplicate target`. `deck-packages.patch` now strips the bare form from
+the DOWNLOAD list only. The qualified form must be the survivor: a bare `gamescope`
+sent online resolves by **repo order** to Arch's compositor, and the mistake would
+be invisible until a target booted into Desktop Mode.
+
+## Verified ON THE BUILT ARTIFACT (not inferred from the build log)
+- `root/omarchy_mirror` = **`stable`**; `root/omarchy_iso_ref` = `quattro`
+- offline mirror carries `omarchy-dev` + `omarchy-settings-dev`
+  **`4.0.0.r1744.gf002044-1`**, `omarchy-deck 0.2.0-1`, and **`gamescope 3.16.25-3`**
+  (Valve's — packager `ci-package-builder@steamos.cloud`)
+- that gamescope package contains **both** `gamescope-wayland.desktop` and
+  `start-gamescope-session` (the two things `deck-session.sh` checks for)
+- **`gamescope` is in the ISO's merged install list** (`usr/share/omarchy-iso/omarchy-base.packages`),
+  so pacstrap installs it — the mirror-vs-installed distinction that made §14.6
+  silent on the build side
+- live environment still has **0** `libwayland*` and no compositor binary — T8's
+  self-drawn-OSK premise holds on stable
+
+## Other real fixes this required
+- `deck-valve-repos.patch` retargeted `pacman-online-edge.conf` →
+  `pacman-online-stable.conf` (the config a stable build actually reads; without
+  it `steamdeck-dsp` did not resolve at all)
+- T12 fixture refreshed to the new pin: `Service.qml` 471→551 lines,
+  `limine.conf` **byte-identical**, and **both shipped runtime patches still
+  apply** (`test-t12-patch-applier.sh` 38/38) — the seam doing its job
+- `test-deck-form.sh` caught genuine upstream drift: stable calls `keyboard_form`
+  bare, not `keyboard_form true`. Fixed to match the *call* rather than its
+  spelling — and its greps now carry `|| true`, because under `set -euo pipefail`
+  a no-match killed the suite inside a command substitution **before** its own
+  `|| fail` could report (33 passes, exit 1, no diagnosis). Fail loudly.
+
+## ⚠️ What this does NOT prove
+The §14.6 fix is verified **at the payload level** — the right package, with the
+right file, on the install list. It is **not** yet proven end to end: no install
+run has been done against this ISO, so "first boot lands in **Gaming Mode**"
+remains unverified. That is
+`test/vm/vm-install-controller-test.sh` against this new ISO (its disk-image
+assertions are gated on `install.outcome=success` and have still never executed),
+and then P3.2 on hardware.
+
+## Benign build-log note
+`==> ERROR: Invalid option -k -- '/boot/vmlinuz-linux' must be readable` appears
+mid-build and is **not** a failure: it is a stale `linux.preset` for the plain
+`linux` package, which the live ISO does not install. The live kernel is
+`linux-t2`, and its initramfs generated successfully two lines earlier. Build
+exit 0.
+
+## Landed
+Merged to `main`. `main` after the merge: shellcheck green, **18/20 sh**, **13/13
+py** — identical to the pre-rebase baseline, with the same two pre-existing reds
+(`test-ci-workflow.sh` = CI storage policy, `test-vm-probe-integrity.sh` = a
+scanner that cannot classify a heredoc). **No regressions.**
