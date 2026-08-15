@@ -439,7 +439,31 @@ cred_unit="io.systemd.credential.binary:systemd.extra-unit.t4-install-controller
 cred_dropin="io.systemd.credential.binary:systemd.unit-dropin.basic.target=$(base64 -w0 <<<"$dropin_text")"
 cred_script="io.systemd.credential.binary:t4installprobe.sh=$(base64 -w0 <"$probe_src")"
 
-log "booting the ISO headless (timeout ${RUN_TIMEOUT}s, install poll deadline ${INSTALL_POLL_DEADLINE}s), -nic none (offline, on purpose -- see this file's header)"
+# ---------------------------------------------------------------------------
+# THE NIC, AND WHY IT IS NORMALLY ABSENT (see this file's header for the long
+# form: a pass here cannot be quietly explained by "well, it could reach the
+# internet"). Default stays `-nic none` -- do not change that default.
+#
+# VM_NIC=user opts INTO a NAT'd virtio NIC for the one question the offline run
+# structurally cannot answer: whether `deck_pkgs` actually FETCHES AND INSTALLS
+# steam. That step is online by design (T5-fork-plan.md §4.1: steam is fetched,
+# not bundled, and the installer's own S0 screen says so), so offline it can
+# only ever report `skipped-no-network` -- which proves the degradation is
+# loud, and proves nothing about the happy path. Both runs are needed; neither
+# replaces the other.
+#
+# ⚠️ With a NIC present, multi-user.target is reachable again, so the
+# `After=basic.target` reasoning ~line 400 stays correct but stops being
+# load-bearing. Do not "simplify" the probe on the strength of a networked run.
+VM_NIC=${VM_NIC:-none}
+case $VM_NIC in
+  none) VM_NIC_ARGS=(-nic none) ;;
+  # shellcheck disable=SC2054  # the commas are qemu's own -nic syntax, one arg
+  user) VM_NIC_ARGS=(-nic user,model=virtio-net-pci) ;;
+  *) fail "VM_NIC must be 'none' (default, offline) or 'user' (NAT'd virtio); got '$VM_NIC'" ;;
+esac
+
+log "booting the ISO headless (timeout ${RUN_TIMEOUT}s, install poll deadline ${INSTALL_POLL_DEADLINE}s), VM_NIC=${VM_NIC} (${VM_NIC_ARGS[*]}; default is offline on purpose -- see this file's header)"
 qemu-system-x86_64 \
   "${ACCEL_ARGS[@]}" \
   -smp "$SMP" -m "$MEM_MB" \
@@ -454,7 +478,7 @@ qemu-system-x86_64 \
   -device ide-cd,drive=cdrom0,bootindex=1 \
   -drive file="$target_disk",format=qcow2,if=none,id=target0 \
   -device virtio-blk-pci,drive=target0,serial=vmtarget \
-  -nic none \
+  "${VM_NIC_ARGS[@]}" \
   -display none -vga std \
   -qmp "unix:${qmp_sock},server,nowait" \
   -serial "file:${serial_log}" \
