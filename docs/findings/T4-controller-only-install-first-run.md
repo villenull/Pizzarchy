@@ -1208,3 +1208,117 @@ keyboard-less device with no way in), `configure_deck` re-raises and
   the code searched for `omarchy.desktop.desktop`). The 16G `target.qcow2` is
   kept; the intermediate `target.raw`/`root.raw` were deleted after the mount
   to reclaim space.
+
+---
+
+## 15. 2026-08-15 (session 27, Opus) — ✅ **IT PASSED. 18/18. Phase 2 exit criterion 1 is CLOSED.**
+
+**The run every previous section was building toward.** A controller-only run
+drove the Deck-forked ISO's real installer past S5's gate, through a **real**
+16G full-disk install, to `install.outcome=success` — and **the harness's
+disk-image assertions executed for the first time in this project's history.**
+They had been gated on `install.outcome=success` since they were written
+(§13/§14), so every prior run skipped them.
+
+```
+install.outcome=success   (waited 56s of a 2100s in-guest deadline)
+18/18 checks passed
+INSTALL TEST EXIT: 0
+```
+
+**The ISO under test:** `omarchy-2026.08.15-x86_64-quattro.iso`, sha256
+`e9fbd8edb8c69d698c5e575955a2dd27d4f394a704c7b6b55744a817748368c5` — the first
+ISO built against **Omarchy 4.0.0 stable** (`f0020448`), not a beta. Supersedes
+`a27230ff…` (§14's ISO).
+
+### What the disk-image assertions actually proved
+
+Read off the resulting image, not from log text (`docs/PLAN.md` §8.1):
+
+- partition table: exactly one ESP + one root partition
+- **one UKI, `omarchy_linux.efi`**, under `/EFI/Linux` on the ESP
+- **the Limine config at `/limine.conf` references that UKI** — the boot chain
+  is internally consistent on a disk this project has never before produced
+- installed package set includes base-devel / git / omarchy-keyring /
+  omarchy-settings / omarchy
+- `/etc/hostname` = `steamdeck` (§12's fix, now proven on a completed install)
+- **zero LUKS crypttab entries** — the Deck's encryption-off contract, proven at
+  the disk level rather than at the form
+
+### Every `configure_deck` step succeeded — read off the target's `@log`
+
+The record that aborted the install in §14 now reads (mounted rootless via
+`udisksctl`, `@log/omarchy-deck-install.json`):
+
+| step | status |
+|---|---|
+| **`autologin`** | **`gaming`** ← was `failed` in §14, and it halted the install |
+| `desktop_rotation` | `configured` |
+| `idle_policy` | `configured` |
+| `limine_rotation` | `configured` |
+| `lock_wake_dpms` | `configured` |
+| `mask_sleep_lock` | `configured` |
+| `menu_lock_row` | `overridden` |
+| `patches` | `applied` |
+| `session_dconf` | `configured` |
+| `tty_rotation` | `configured` |
+| `wifi` | `no-hardware` (expected — the harness runs `-nic none` on purpose) |
+
+**`autologin: gaming` is the value §14 was chasing.** Both bugs that produced
+`failed` are now dead on a real install: `deck_autologin.py`'s double-`.desktop`
+name (fixed session 26, unit-proven only until now) and the gamescope gap below.
+
+### §14.6's second item — the gamescope gap — is CLOSED, and it was a real bug
+
+§14.6 flagged that `gamescope-wayland.desktop` was absent from the ISO payload,
+so even a successful install would land in **Desktop Mode**. Session 26 tried to
+fix it by adding `gamescope-session` to `deck-install.packages`. **That package
+exists in no Valve repo** (all four DBs checked, 2026-08-15) and was never
+build-validated — the first build that tried it died on `target not found`.
+
+Root cause, measured: the session file is shipped by the **gamescope package
+itself, and only Valve's build of it** (`jupiter-staging/gamescope 3.16.25-3`
+ships `usr/share/wayland-sessions/gamescope-wayland.desktop`; Arch's
+`extra/gamescope 3.16.25-1` ships no `wayland-sessions/` at all). Our mirror
+already carried Valve's build — **nothing installed it**. Full account and the
+mirror-list-vs-install-list conflict it exposed:
+`docs/findings/T9-stable-rebase-remaining.md`.
+
+Verified **on the installed target**, not in the payload:
+
+```
+/usr/share/wayland-sessions/gamescope-wayland.desktop   present
+/usr/bin/gamescope                                      present
+/usr/bin/start-gamescope-session                        present
+/var/lib/pacman/local/gamescope-3.16.25-3               Valve's build
+```
+
+and the autologin config `configure_deck` wrote, which sorts last in
+`/etc/sddm.conf.d` so its `Session=` wins:
+
+```ini
+[Autologin]
+User=deck
+Session=gamescope-wayland
+Relogin=true
+```
+
+### ⚠️ What this still does NOT prove
+
+- **This is QEMU, not a Deck.** It proves the installer, the boot-chain
+  artifacts, and the session *selection*. It does **not** prove gamescope
+  renders, that Gaming Mode is usable on the panel (R-38's standard), or
+  anything about hardware. That is P3.2.
+- `wifi: no-hardware` is correct here and untested by construction — the harness
+  is deliberately offline.
+- Nothing here was run on the operator's Deck. The Deck is still on the beta-2
+  pin; `docs/tasks/P36-deck-stable-update-runbook.md` is the operator-present
+  path to move it.
+
+### Evidence
+
+Work dir preserved (`VM_KEEP_WORK=1`):
+`~/.cache/omarchy-deck/stable-rebase/install-test/` — `report.txt` (80 KB of
+streamed guest captures), `qmp.log`, `probe.sh`, `limine.conf`, the extracted
+UKI, and `target.qcow2` / `target.raw` / `root.raw`. Build log:
+`~/.cache/omarchy-deck/stable-rebase/build.log`.

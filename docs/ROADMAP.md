@@ -178,17 +178,25 @@ short, targeted Deck iterations over `tools/deck-sync.sh`.
       guard (`deck-nvidia-dry-run.sh`) is unit-proven but has never run inside
       the real build either.
 
-**Net: 2 of 4 closed.** Criterion 4 still reduces to "run a real container
-build on a self-hosted KVM runner." **Criterion 1 is now two fixes away, both
-one-liners, both diagnosed:** session 24 found `configurator`'s unguarded `$1`
-(fixed session 25); session 25's rebuilt-ISO run then got the real installer
-all the way through the base Omarchy setup and hit the second one —
-`deck_autologin.py`'s double-`.desktop` name bug aborting the sole critical
-Deck step (`docs/findings/T4-controller-only-install-first-run.md` §14). The
-harness's disk-image assertions still have never run (gated on a completed
-install). Fix the autologin bug, re-run, and either criterion 1 closes or the
-next real blocker surfaces — the pattern every layer of this harness has
-followed.
+**Net: 3 of 4 closed.** Criterion 4 still reduces to "run a real container
+build on a self-hosted KVM runner."
+
+✅ **CRITERION 1 IS CLOSED — 2026-08-15 (session 27), 18/18, on a real install.**
+A controller-only run drove the Deck-forked ISO's real installer past S5's gate
+through a **real** 16G full-disk install to `install.outcome=success`, and the
+harness's **disk-image assertions executed for the first time in this project's
+history** (they were gated on a completed install and every prior run skipped
+them): one ESP + one root partition, the UKI `omarchy_linux.efi`, a Limine
+config referencing it, the expected package set, hostname `steamdeck`, and zero
+LUKS crypttab entries. **`autologin: gaming`** — every `configure_deck` step
+succeeded, and `Session=gamescope-wayland` is what the install wrote. The ISO
+under test was the first built against **4.0.0 stable**. Both blockers this
+criterion had been stuck behind are dead: `configurator`'s unguarded `$1`
+(session 25) and `deck_autologin.py`'s double-`.desktop` (session 26), plus
+§14.6's gamescope gap root-caused and fixed the same day.
+Full account: `docs/findings/T4-controller-only-install-first-run.md` §15.
+⚠️ QEMU, not hardware — it proves the installer, the boot-chain artifacts and
+the session *selection*, not that Gaming Mode renders on the panel (P3.2).
 
 ---
 

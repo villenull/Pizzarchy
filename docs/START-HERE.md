@@ -46,15 +46,16 @@ work without waiting for further instruction.**
 >
 > ### What is LEFT (verify, don't trust — check the tree)
 >
-> 1. 🔴 **PROVE THE ISO INSTALLS — the highest-value next step.** Run
->    `test/vm/vm-install-controller-test.sh` against the NEW ISO. Its disk-image
->    assertions are gated on `install.outcome=success` and have **still never
->    executed** in this project's history. This is also the only way to learn
->    whether the §14.6 fix actually lands a target in **Gaming Mode** — that is
->    payload-verified but NOT end-to-end proven. Two known bugs were fixed since
->    the last install run (`deck_autologin.py`'s double `.desktop`, and gamescope),
->    so this run has a real chance of being the first clean one.
-> 2. **The Deck update itself** — operator-present, §6 of PROGRESS. Run
+> 1. ✅ **DONE — the ISO installs.** `vm-install-controller-test.sh` against the
+>    new ISO: **18/18, `install.outcome=success`, `autologin: gaming`.** The
+>    disk-image assertions **executed for the first time in this project's
+>    history** and passed (ESP+root, UKI `omarchy_linux.efi`, Limine config
+>    referencing it, package set, hostname, zero LUKS). Every `configure_deck`
+>    step succeeded; §14.6's gamescope gap is closed end to end on the installed
+>    target. **Phase 2 exit criterion 1 is CLOSED.** See PROGRESS §5.31a and
+>    `docs/findings/T4-controller-only-install-first-run.md` §15. ⚠️ QEMU, not
+>    hardware — Gaming Mode *rendering* is still unproven (P3.2).
+> 2. 🔴 **The Deck update itself is now the top item** — operator-present, §6 of PROGRESS. Run
 >    `P36-deck-stable-update-runbook.md`. ⚠️ edge→stable replaces `omarchy-dev` with
 >    `omarchy` via a pacman conflict, and 5 migrations call `sudo` — **`ssh -t`, not
 >    headless**.

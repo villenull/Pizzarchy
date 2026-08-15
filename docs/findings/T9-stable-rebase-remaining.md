@@ -198,14 +198,24 @@ be invisible until a target booted into Desktop Mode.
   a no-match killed the suite inside a command substitution **before** its own
   `|| fail` could report (33 passes, exit 1, no diagnosis). Fail loudly.
 
-## ⚠️ What this does NOT prove
-The §14.6 fix is verified **at the payload level** — the right package, with the
-right file, on the install list. It is **not** yet proven end to end: no install
-run has been done against this ISO, so "first boot lands in **Gaming Mode**"
-remains unverified. That is
-`test/vm/vm-install-controller-test.sh` against this new ISO (its disk-image
-assertions are gated on `install.outcome=success` and have still never executed),
-and then P3.2 on hardware.
+## ~~⚠️ What this does NOT prove~~ → ✅ PROVEN, same session
+
+*(Written before the install test ran, kept for the record: "the §14.6 fix is
+verified at the payload level … no install run has been done against this ISO,
+so 'first boot lands in Gaming Mode' remains unverified.")*
+
+**It has now been run and it passed.** `test/vm/vm-install-controller-test.sh`
+against this ISO: **18/18, `install.outcome=success`**, and the disk-image
+assertions — gated on a completed install and never executed before in this
+project — ran and passed. On the installed target:
+`gamescope-wayland.desktop`, `/usr/bin/gamescope`, `start-gamescope-session`,
+`gamescope-3.16.25-3` (Valve's) in the pacman DB, **`autologin: gaming`**, and
+`Session=gamescope-wayland` in the sddm config. Every `configure_deck` step
+succeeded. **Phase 2 exit criterion 1 is closed.**
+Detail: `docs/findings/T4-controller-only-install-first-run.md` §15.
+
+Still outstanding, and genuinely: **QEMU is not a Deck.** Gaming Mode
+*rendering* and usability on the panel remain P3.2, on hardware.
 
 ## Benign build-log note
 `==> ERROR: Invalid option -k -- '/boot/vmlinuz-linux' must be readable` appears
