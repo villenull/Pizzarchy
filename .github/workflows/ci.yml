@@ -357,7 +357,18 @@ jobs:
       # (500 MB) one upload does not fit, and the upload itself costs minutes,
       # so it is opt-in rather than a surprise. §5's "publishes as an artifact"
       # is met by the manifest by default and by this when asked.
+      # 🔴 OPT-IN, and the `if:` is the whole point -- the comment above said so
+      # since this step was written, but the condition was MISSING until
+      # 2026-08-15, so every run would have attempted the ~6 GB upload. That is
+      # the failure mode the comment describes: it fails AFTER a successful
+      # 1-3 h build, and reads as "the build broke". test/unit/test-ci-workflow.sh
+      # asserts this gate exists and was RED the whole time (see its own note).
+      #
+      # A tag push sends no inputs at all, so `inputs.upload_iso` is '' there and
+      # a release build uploads the manifest only -- deliberate: the ISO's home
+      # is a release asset (P3.7), not an Actions artifact with a retention clock.
       - name: Upload ISO artifact
+        if: github.event.inputs.upload_iso == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: omarchy-deck-iso
