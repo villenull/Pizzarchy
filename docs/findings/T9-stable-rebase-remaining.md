@@ -71,9 +71,63 @@ then the 15 unit + 4 VM suites + `osk-tty-e2e.py`. Boot chain was classified SAF
 (§1.1) warns the stable-channel rebuild may hit a broken upstream Arch mirror and
 need a workaround.
 
+## 🔴 UPDATE 2026-08-15 (session 27) — the real build was RUN; Path A hits TWO blockers
+
+The operator chose Path A and asked to finish the rebuild. I ran the real docker
+build (branch `stable-rebase-pin`, sources `runtime-src@f0020448` +
+`pkgs-src@bb66b9d`, fresh scratch `iso-build-stable`). **The stable rebase itself
+is correct — the build passed every rebase-related stage:** guard 6.1
+(quattro/stable agree), the runtime/pkgs pins, all 5 overlay patches, guard 6.4a
+(orchestrator now calls `omarchy-apply-system`, 424 candidates), and it **built
+`omarchy 4.0.0-1` and `omarchy-deck 0.2.0-1` locally and placed them in the
+offline mirror.** Then it hit two walls, neither caused by the rebase:
+
+### Blocker 1 — `gamescope-session` is a nonexistent package (pre-existing, §14.6)
+The build died in-container at `deck-nvidia-dry-run`: `error: target not found:
+gamescope-session`. **`gamescope-session` exists in NO Valve repo** (checked holo,
+jupiter, jupiter-staging, holo-staging — jupiter-staging ships `gamescope`
+3.16.25-3 but no session package). It was added to
+`iso/overlay/configs/deck/deck-install.packages:90` in commit `56c6578` (session
+26) to fix the §14.6 "lands in Desktop Mode not Gaming Mode" gap — but the last
+real ISO build (session 25, `a27230ff`) predates it, so **this line was never
+build-validated and names a package that does not exist.** Independent of the
+Omarchy channel (Valve repos are queried the same either way). **Decision owed:**
+what actually provides the Gaming-Mode gamescope session now — this is the open
+§14.6 question, not a rebase issue. (I fixed a *separate* real channel bug found
+here: `deck-valve-repos.patch` targeted `pacman-online-edge.conf`; retargeted to
+`stable.conf` so the Valve repos land in the config the stable build reads —
+committed on the branch, `4a4073c`. Without it `steamdeck-dsp` didn't resolve.)
+
+### Blocker 2 — guard 6.4b vs release-package versioning (Path A design issue)
+Even with gamescope-session fixed, the build would then be **rejected by guard
+6.4b** (`iso/bin/build:1108-1111`): it requires the runtime package version to
+carry iso/RUNTIME's git short-sha (`*".g$RUNTIME_SHORT"*`), which is how it proves
+the ISO's runtime came from our pin and not the channel. The **released `omarchy
+4.0.0-1` has a static pkgver with no `.gSHA`**, so `4.0.0-1` fails the pattern
+(verified). The `-dev` packages carry it (`4.0.0.rN.gSHA`); the release does not.
+**Path A therefore needs guard 6.4b made channel-aware** — on `stable` the channel
+serves the *same* fixed release our `--local-source` builds, so the sha-provenance
+check is moot there and should be replaced by a release-version-equality check (or
+a built-vs-channel content check). This is a **load-bearing boot-chain guard change
+= Opus + operator awareness**, not a mechanical edit. It also means the
+`test-iso-build.sh` fixture refactor must model whichever invariant is chosen —
+completing it against the *old* sha-carrying version would false-green a guard the
+real Path A build fails, so I reverted the partial fixture edits rather than ship a
+misleading green.
+
+### So: is Path A still the right call?
+Both blockers are real. Path A (released `omarchy`, matches upstream's ISO exactly)
+now clearly costs: (a) resolve the gamescope-session Gaming-Mode question, and (b)
+a guard-6.4b redesign. **Path B** (keep building `omarchy-dev` locally from
+`f0020448` — it carries the sha, satisfies 6.4b untouched, and is byte-identical
+source to `omarchy 4.0.0-1`) sidesteps (b) entirely; it still hits (a). Given (b),
+Path B may now be the pragmatic choice — but that reverses the operator's stated
+preference, so it is theirs to make with this new information. **Neither path can
+produce a real ISO until the gamescope-session question is answered.**
+
 ## To land the branch on main
-Finish the fixture refactor, get `test/unit/test-iso-build.sh` + the shellcheck
-CI command + the pin/payload suites green, ideally after a successful ISO
-rebuild, then `git merge stable-rebase-pin` (or PR it). Baseline for attribution
-(session 27): 18/20 sh green + 13/13 py green, 2 pre-existing reds
+Blocked on the two decisions above. Once resolved: finish/redo the fixture refactor
+to match the chosen 6.4b invariant, get `test/unit/test-iso-build.sh` + shellcheck
++ pin/payload suites green after a successful ISO rebuild, then merge. Baseline for
+attribution (session 27): 18/20 sh green + 13/13 py green, 2 pre-existing reds
 (`test-ci-workflow.sh`, `test-vm-probe-integrity.sh`) unrelated to the rebase.

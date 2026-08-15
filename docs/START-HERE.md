@@ -29,13 +29,19 @@ work without waiting for further instruction.**
 >
 > ### What is LEFT (verify, don't trust — check the tree)
 >
-> 1. **The pin+build change is on branch `stable-rebase-pin` (commit `5aaed0e`), NOT
->    on `main`** — kept off main because `test/unit/test-iso-build.sh` fixtures still
->    encode the old `omarchy-dev`/`setup-system` names. The submodule bump to `174dd82`
->    (which auto-fixes the one BREAKS-US row) + pins + channel/package settings are all
->    verified-clean on that branch. **The precise finish line — the fixture refactor
->    (Path A vs B, one operator decision), then the real ISO rebuild — is
->    `docs/findings/T9-stable-rebase-remaining.md`.** This is Opus work.
+> 1. **The pin+build change is on branch `stable-rebase-pin` (`4a4073c`), NOT on
+>    `main`.** Submodule bump to `174dd82` + pins + channel/package settings +
+>    a Valve-repo patch fix are all verified-clean there. **The real docker build
+>    WAS run (session 27, Path A per operator).** It passed every rebase-related
+>    stage and built `omarchy 4.0.0-1` locally, then hit TWO blockers, neither
+>    caused by the rebase: **(1) `gamescope-session` names a package that exists in
+>    no Valve repo** (added unvalidated in `56c6578`/session 26 — the open §14.6
+>    Gaming-Mode question), and **(2) guard 6.4b requires the runtime pkgver to
+>    carry the git sha, which the released `omarchy 4.0.0-1` does not** — so Path A
+>    needs guard 6.4b made channel-aware (Opus + operator decision; Path B avoids
+>    it). **Full account + the decision owed: `docs/findings/T9-stable-rebase-remaining.md`
+>    (the 2026-08-15 UPDATE section).** No real ISO can be produced until the
+>    gamescope-session question is answered.
 > 2. **The Deck update itself** — operator-present, §6 of PROGRESS. Run
 >    `P36-deck-stable-update-runbook.md`. ⚠️ edge→stable replaces `omarchy-dev` with
 >    `omarchy` via a pacman conflict, and 5 migrations call `sudo` — **`ssh -t`, not
