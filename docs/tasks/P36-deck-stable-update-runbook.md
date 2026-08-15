@@ -8,6 +8,13 @@
 >
 > **Model for the operator's session: Opus** — this is boot-chain + the one
 > physical device, and its job is noticing what silently changed (`CLAUDE.md`).
+>
+> 📓 **Session notes companion: `docs/tasks/P36-session-notes.md`** — the state
+> going in (all of it dated), what is on the USB stick, and the fill-in-as-you-go
+> record. Open both; this file is *what to do*, that one is *what is true* plus
+> the blanks. It also carries two things you want before you start: the Ventoy
+> menu now lists **two ISOs whose names differ by one character**, and the Valve
+> recovery image is **not on the stick**.
 
 ## What this does, in one line
 
