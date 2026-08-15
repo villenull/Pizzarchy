@@ -15,9 +15,35 @@
 # deck-mirror.packages, which is only ever resolved against the online repos.
 # deck-nvidia-dry-run.sh refuses the build if one appears here.
 #
-# Keep this list SHORT. Anything that only needs to be *available* belongs in
-# deck-mirror.packages and is installed by the omarchy-deck package (seam S4);
-# anything that touches the boot chain is T1/T5f's, not this file's.
+# 🔴 THIS FILE IS THE ONLY LIST THAT INSTALLS ANYTHING OFFLINE. The line that
+# used to stand here said "anything that only needs to be *available* belongs
+# in deck-mirror.packages and is installed by the omarchy-deck package (seam
+# S4)". THAT WAS NEVER TRUE. `omarchy-deck` declares no such dependencies and
+# nothing else read that list either, so the offline mirror carried the Neptune
+# kernel, the Neptune firmware and Valve's gamescope while the installed system
+# got none of them -- measured on the first hardware boot,
+# docs/findings/P32-steam-never-installed.md. The corrected rule:
+#
+#   in deck-mirror.packages ONLY          -> downloaded, kept in the mirror,
+#                                            INSTALLED BY NOBODY, and after the
+#                                            install the mirror is gone. Use
+#                                            this only for something whose
+#                                            reader is written down.
+#   in deck-mirror.packages AND HERE      -> the dual-entry pattern: the mirror
+#                                            list decides WHICH BUILD is
+#                                            fetched (it may repo-qualify),
+#                                            this list decides THAT pacstrap
+#                                            installs it, offline, on the
+#                                            target. `sort -u` in build-iso.sh
+#                                            collapses an identical bare pair,
+#                                            and the bare-form strip handles a
+#                                            qualified/bare pair.
+#   in deck-fetch.packages                -> not carried at all; installed over
+#                                            the network at install time by
+#                                            orchestrator/deck_pkgs.py.
+#
+# Anything that touches the boot chain is T1/T5f's, not this file's -- with the
+# one deliberate exception argued in the kernel section below.
 #
 # ---------------------------------------------------------------------------
 # The two vulkan-driver pins -- docs/PROGRESS.md §3.8
@@ -114,4 +140,114 @@ omarchy-deck
 # mirror, whose pacman.conf declares one repo; a `jupiter-staging/` prefix here
 # aborts both resolves (this file's header, and deck-nvidia-dry-run.sh fails the
 # build on it). One repo means one candidate: Valve's, the one the mirror kept.
+#
+# READER: pacstrap, from the offline mirror, during the target install.
 gamescope
+
+# --- Gaming Mode's performance overlay ---------------------------------------
+#
+# READER: pacstrap, from the offline mirror, during the target install.
+#
+# `mangohud`/`lib32-mangohud` ship /usr/bin/mangoapp, which Valve's
+# gamescope-mangoapp.service and src/deck-session.sh both expect
+# (deck-session.sh line ~962 warns "mangoapp not found (install mangohud) --
+# Gaming Mode's performance overlay will not work"). docs/PROGRESS.md §5.13's
+# follow-on measured that Arch's 0.8.4-1 is NEWER than Valve's 0.8.3-4 and
+# already carries mangoapp, so these stay BARE and resolve to Arch's build --
+# do not qualify them into jupiter-staging/ to match the line above.
+#
+# They were mirror-only until 2026-08-15, i.e. downloaded into the ISO and
+# installed by nobody -- the same defect as the kernel below, found by the same
+# hardware boot. The dual entry is the fix; deck-mirror.packages keeps its copy
+# so the "which build" decision stays where the measurement is written down.
+mangohud
+lib32-mangohud
+
+# ---------------------------------------------------------------------------
+# Valve's audio DSP firmware -- MOVED HERE FROM deck-fetch.packages 2026-08-15
+# ---------------------------------------------------------------------------
+#
+# READER: pacstrap, from the offline mirror, during the target install.
+#
+# T5-fork-plan.md §4.1 chose FETCH for this package on redistribution grounds
+# (`Licenses: Proprietary`, no licence text shipped --
+# docs/findings/P16-redistribution-and-trademark.md §1). That decision was
+# reversed by the operator on 2026-08-15: it now rides in the offline mirror,
+# the same posture `linux-firmware-neptune` has always had, and for the same
+# reason -- it is FIRMWARE the machine needs to have working audio at all, and
+# a first boot with tinny speakers is not a degradation anyone can act on.
+#
+# The bare name is here; `jupiter-staging/steamdeck-dsp` is in
+# deck-mirror.packages, which is what decides the build and keeps the online
+# download list unambiguous. Verified against the live repo 2026-08-15:
+# jupiter-staging carries steamdeck-dsp-0.38-1-any.
+#
+# ⚠️ `steam` did NOT move. It stays in deck-fetch.packages and is downloaded
+# from Valve at install time (Steam Subscriber Agreement; the installer's S0
+# screen discloses it). Do not "finish the job" by bundling it -- that is a
+# licensing question this project has deliberately not taken on.
+steamdeck-dsp
+
+# ---------------------------------------------------------------------------
+# 🔴 THE NEPTUNE KERNEL AND ITS FIRMWARE -- boot-chain-affecting, deliberately
+# ---------------------------------------------------------------------------
+#
+# READER: pacstrap, from the offline mirror, during the target install.
+#
+# deck-mirror.packages' own header argued the opposite of these two lines, and
+# it is worth reading before changing them: "linux-neptune-* is a KERNEL.
+# Pacstrapping it makes limine-mkinitcpio-hook build a second UKI and gives
+# limine-entry-tool a boot order to choose -- that is boot-chain work." That
+# caution was correct about the RISK and wrong about the alternative: carrying
+# a kernel in the mirror and installing it nowhere is not caution, it is 350+
+# MiB of ISO that changes nothing. Measured on the first hardware boot: the
+# installed system ran stock `linux 7.1.8-arch1-3`, with no Neptune kernel and
+# no linux-firmware-neptune anywhere on it
+# (docs/findings/P32-steam-never-installed.md).
+#
+# Operator decision, 2026-08-15: pacstrap them.
+#
+# 611 matches src/omarchy-deck-kernel.sh's NEPTUNE_SERIES_DEFAULT -- not "the
+# newest", because nothing newer has been validated on hardware. If the series
+# moves, move it in BOTH files and in deck-mirror.packages.
+#
+# ⚠️ WHAT THIS DOES NOT DO, AND THE GAP IT LEAVES. The target still installs
+# stock `linux` as well: archinstall pacstraps `kernels=` during its own
+# minimal_installation (phase 3 of 14, long before configure_deck), the default
+# is ["linux"], and nothing in any package list can change that. So the
+# installed system carries TWO kernels and Limine gets TWO UKIs to order.
+# "Neptune only, no stock-linux fallback entry" is a separate, boot-chain
+# slice -- it needs `kernels` in the archinstall config, or upstream's own
+# swap-the-kernel-out route (`pacman -Rdd linux` inside the target, which is
+# what omarchy-hw-intel-ptl's ptl-kernel.sh does and what phases_impl.py's
+# kernel-removal hooks are deliberately left live for). Neither belongs in a
+# package list, and neither has been verified. UNTIL THAT SLICE LANDS, WHICH
+# KERNEL A DECK ACTUALLY BOOTS IS DECIDED BY limine-entry-tool, NOT BY US.
+#
+# ⚠️ ESP SIZE. The measured UKI on hardware was 74,987,520 B for one kernel.
+# Two kernels means two of them in /EFI/Linux plus their fallbacks. Nobody has
+# measured the ESP headroom on a real install with both; that is the first
+# thing an ISO build should be asked.
+linux-neptune-611
+linux-firmware-neptune
+
+# --- python-evdev -----------------------------------------------------------
+#
+# CONSUMER: pacstrap, from the offline mirror (this list merges into
+# base_pkg_lists[0], which feeds both the mirror download and the target
+# install -- see deck-packages.patch's seam S1).
+#
+# 🔴 NOT a duplicate of the identically-named entry in deck-live.packages.
+# Those two lists answer different questions and BOTH need it:
+#
+#   deck-live.packages   the LIVE ISO's root, so the INSTALLER's on-screen
+#                        keyboard can run (guard 6.7)
+#   this list            the TARGET, so `stage-input-mapper` can install the
+#                        mapper for DESKTOP MODE navigation after the install
+#
+# Added 2026-08-15 (session 28) after the live run of deck-session.sh on the
+# operator's Deck aborted exactly here: `python3 -c "import evdev"` ->
+# ModuleNotFoundError, so stage-input-mapper failed -- correctly and loudly,
+# but to stderr, which is why nothing appeared in the journal. Without this
+# line the baked session layer (`session_bake`) fails on EVERY install.
+python-evdev

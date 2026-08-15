@@ -136,6 +136,8 @@ source "$REPO_ROOT/test/lib/vm-installer-screens.sh"
 source "$REPO_ROOT/test/lib/vm-disk-image.sh"
 # shellcheck source=../lib/vm-assertions.sh
 source "$REPO_ROOT/test/lib/vm-assertions.sh"
+# shellcheck source=../lib/vm-outcome-assertions.sh
+source "$REPO_ROOT/test/lib/vm-outcome-assertions.sh"
 
 ISO=${1:?"usage: $0 <iso-path> [work-dir]"}
 WORK=${2:-$(mktemp -d /var/tmp/vm-install-controller.XXXXXX)}
@@ -150,7 +152,15 @@ log() { printf '[vm-install-controller] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
 
 [[ -f $ISO ]] || fail "ISO not found: $ISO (do not download one -- pass an existing path as \$1)"
-for tool in qemu-system-x86_64 qemu-img socat base64 python3 awk jq mdir mcopy udisksctl sfdisk; do
+# `7z` is NOT optional, and the reason is the whole point of this run: the
+# live-ISO half of the outcome assertions reads the ISO's own squashfs to ask
+# whether the on-screen keyboard is actually in the image. A suite that
+# quietly skipped that when the reader was missing would be silent about
+# precisely the check that inspects the shipped artifact -- which is how
+# omarchy-2026.08.15 shipped installer screens and no keyboard
+# (docs/findings/P32-osk-mapper-missing-from-live-iso.md). Same reasoning
+# test/unit/test-iso-build.sh records for bsdtar.
+for tool in qemu-system-x86_64 qemu-img socat base64 python3 awk jq mdir mcopy udisksctl sfdisk 7z; do
   command -v "$tool" >/dev/null || fail "required tool '$tool' not found"
 done
 
@@ -643,8 +653,8 @@ if [[ $outcome == success ]]; then
     screens::check "at least one UKI (*.efi) exists under /EFI/Linux on the ESP (found $uki_count)" \
       "$([[ $uki_count -gt 0 ]] && echo yes || echo no)" yes
 
+    uki_names=()
     if [[ $uki_count -gt 0 ]]; then
-      uki_names=()
       while IFS= read -r -d '' f; do uki_names+=("$(basename "$f")"); done \
         < <(find "$uki_dir" -maxdepth 1 -iname '*.efi' -print0 | sort -z)
       log "discovered UKI(s): ${uki_names[*]}"
@@ -689,6 +699,24 @@ if [[ $outcome == success ]]; then
       screens::check "no LUKS crypttab entries on the installed disk (Deck's encryption-off contract, proven at the disk level)" \
         "$crypttab_entries" 0
 
+      # ===================================================================
+      # OUTCOME assertions -- "can this machine do its job", not "did our
+      # steps run". Everything above this line is a fact about work THIS
+      # PROJECT did: a partition table we wrote, a UKI our hook built, a
+      # hostname our installer set. All of it was green on 2026-08-15
+      # (18/18) against an install that had no Steam, no Neptune kernel, no
+      # session shims and no on-screen keyboard -- a machine that showed a
+      # black panel on real hardware for two full boots.
+      # docs/findings/P32-steam-never-installed.md §"the measurement failure".
+      #
+      # test/lib/vm-outcome-assertions.sh owns the checks; the same library
+      # is what test/vm/vm-outcome-assert.sh runs standalone against an
+      # already-installed image, so there is one implementation and the fast
+      # entry point cannot drift from the one that runs after a real install.
+      # ===================================================================
+      log "--- outcome assertions: can the installed machine do its job? ---"
+      outcome::check_installed_root "$root_at" "$REPO_ROOT" ${uki_names[@]+"${uki_names[@]}"}
+
       disk_image::root_unmount "$root_loop"
     else
       screens::check "root partition extracted and mounted for package/hostname/encryption checks" FAIL ok
@@ -700,12 +728,27 @@ else
   log "--- disk-image assertions SKIPPED: outcome was '$outcome', not 'success' ---"
 fi
 
+# ===========================================================================
+# OUTCOME assertions, live-ISO half -- and DELIBERATELY NOT GATED on the
+# install succeeding.
+#
+# These are questions about the image that was booted, not about what the
+# install produced: is the on-screen keyboard in the live root, is it
+# executable there (archiso's --no-preserve=mode discards the host's bit), is
+# the library it imports at module scope actually installed. An install that
+# FAILED needs those answers most of all -- the P32 mapper bug's whole
+# signature is text screens that come up with no way to type on a machine that
+# has no keyboard, which looks like a hang, not like a missing file.
+# ===========================================================================
+log "--- outcome assertions: does the LIVE ISO carry what its screens need? ---"
+outcome::check_live_iso "$ISO" "$REPO_ROOT"
+
 log "======================================================================="
 screens::denominator
 log "======================================================================="
 
 if [[ $SCREENS_CHECKS_PASSED -eq $SCREENS_CHECKS_TOTAL && $SCREENS_CHECKS_TOTAL -gt 0 && $outcome == success && $disk_checks_run -eq 1 ]]; then
-  log "PASS -- a controller-only run drove the Deck-forked ISO's real installer past S5's gate, through a REAL full-disk install (outcome=success), and the resulting disk image has a valid partition table, at least one UKI, a Limine config referencing it, and the expected package set. Phase 2 exit criterion 1 evidence."
+  log "PASS -- a controller-only run drove the Deck-forked ISO's real installer past S5's gate, through a REAL full-disk install (outcome=success); the resulting disk image has a valid partition table, at least one UKI, a Limine config referencing it, and the expected package set; and the OUTCOME assertions hold -- Steam, the DSP firmware, the Neptune kernel, gamescope and omarchy-deck are installed, stock linux is not, the session shims and the target-side mapper are on disk, and the live ISO carries an executable on-screen keyboard with python-evdev behind it. Phase 2 exit criterion 1 evidence."
   [[ ${VM_KEEP_WORK:-0} == 1 ]] || rm -rf "$WORK"
   exit 0
 else

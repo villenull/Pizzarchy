@@ -86,13 +86,32 @@ def deck_steps() -> list[DeckStep]:
         deck_menu_lock,
         deck_monitors,
         deck_patches,
+        deck_pkgs,
         deck_rotation,
+        deck_session_bake,
         deck_session_settings,
         deck_wifi,
     )
 
     return [
         DeckStep("wifi", deck_wifi.carry_wifi_step, critical=False),
+        # P3.2. Installs configs/deck/deck-fetch.packages (steam) into the
+        # target, online, at install time. AFTER wifi because it reads that
+        # step's recorded outcome to CLASSIFY a failure -- never to skip the
+        # attempt, since a dock's ethernet legitimately leaves wifi 'skipped'.
+        #
+        # 🔴 critical=False, and this is the step whose absence produced the
+        # black screen on the first hardware first-boot: with no Steam,
+        # gamescope starts and renders an empty session
+        # (docs/findings/P32-steam-never-installed.md). It is still not
+        # critical, because by this point the disk is partitioned and ~1200
+        # packages are pacstrapped -- aborting would discard a finished install
+        # over one package that one command repairs on a booted machine. What
+        # the finding actually demands is that the degradation cannot be
+        # SILENT, and it no longer can: the install record carries a deck_pkgs
+        # section, the phase prints, and omarchy-deck-steam-first-boot.service
+        # says so on the machine itself and stays in `systemctl --failed`.
+        DeckStep("pkgs", deck_pkgs.fetch_packages_step, critical=False),
         # T5e, 5.1. 🔴 THE ONLY critical=True STEP IN THE REGISTRY, and
         # deck_autologin.py argues it at length: its failure is not a
         # degradation but a Deck that cannot be logged into with a controller,
@@ -171,6 +190,24 @@ def deck_steps() -> list[DeckStep]:
         # power hold reboots into the autologin `deck_autologin` guarantees --
         # whereas the greeter that step defends against has no escape at all.
         DeckStep("menu_lock_row", deck_menu_lock.menu_lock_row_step, critical=False),
+        # P3.2. The session-switching layer, baked by running src/deck-session.sh
+        # itself inside the target -- deliberately NOT a second implementation of
+        # ~1500 lines of hardware-measured behaviour (deck_session_bake.py
+        # decision 1). Its absence is why the first hardware install had no
+        # "Switch to Desktop" row in Steam's power menu, and no steamos-*
+        # helpers, so Steam's OS-updater call ENOENT'd into a modal and the
+        # brightness slider had no privileged writer (docs/PROGRESS.md §5.32).
+        #
+        # AFTER menu_lock_row because both splice the same
+        # ~/.config/omarchy/extensions/omarchy-menu.jsonc, each behind its own
+        # markers, and BEFORE patches, which stays last for the reasons below.
+        #
+        # critical=False: the failure mode is a Deck that boots, autologins and
+        # plays games but cannot reach Desktop Mode. That is a degradation, and
+        # aborting a finished install over (say) a missing `luac` would be the
+        # worse trade. Per-stage results land in the install record, so a
+        # partial success is legible rather than a silent one.
+        DeckStep("session_bake", deck_session_bake.session_bake_step, critical=False),
         #
         # T12. `critical=False` is argued at length in deck_patches.py's
         # docstring (decision 2) -- it deliberately overrules

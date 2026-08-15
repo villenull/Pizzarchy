@@ -1,26 +1,64 @@
 # Steam Deck packages that are NEVER BUNDLED -- fetched over the network at
-# install time by configure_deck (T5-fork-plan.md §4.1).
+# install time, onto the target, by configure_deck's `pkgs` step
+# (T5-fork-plan.md §4.1).
 #
-# Nothing in this file goes into the offline mirror or into any install list.
-# It exists so that ONE build-time check can still ask about them:
-# deck-nvidia-dry-run.sh resolves `<what the ISO installs> + <this file>`
-# against the online repos, because docs/PROGRESS.md §3.8's failure is a
-# property of that combined resolution and of nothing the ISO carries. Leaving
-# these out of the question would make the guard green for the wrong reason.
+# 🔴 CONSUMER, NAMED, BECAUSE ITS ABSENCE WAS THE BUG.
 #
-# ⚠️ Adding a package here does NOT make it available offline. If a package
-# needs to be installable without a network it belongs in
-# deck-mirror.packages -- and then its licence has to permit redistribution,
-# which is the whole reason these two are here instead.
+#   INSTALL TIME (the one that matters):
+#     configs/airootfs/usr/share/omarchy-iso/orchestrator/deck_pkgs.py, running
+#     inside `configure_deck` after pacstrap. It reads this file from
+#     /usr/share/omarchy-iso/deck-fetch.packages on the LIVE ISO and runs
+#     `arch-chroot <target> pacman -S --needed` over its entries against the
+#     target's ONLINE repos. It records status + the pacman error tail in
+#     /var/log/omarchy-deck-install.json and leaves a first-boot unit behind
+#     when it could not finish.
+#
+#   BUILD TIME (asks about it; installs nothing):
+#     deck-nvidia-dry-run.sh resolves `<what the ISO installs> + <this file>`
+#     against the online repos, because docs/PROGRESS.md §3.8's NVIDIA
+#     provider failure is a property of that COMBINED resolution and of nothing
+#     the ISO carries on its own. Leaving these out of the question would make
+#     the guard green for the wrong reason.
+#     builder/build-iso.sh (via iso/overlay/patches/deck-packages.patch)
+#     refuses the build if this file is empty, and COPIES it into
+#     airootfs/usr/share/omarchy-iso/ -- without that copy the file exists only
+#     inside the build container and the install-time consumer above cannot
+#     see it at all. That copy is half of the P3.2 fix.
+#
+# From the day this file was written until 2026-08-15 the build-time reader was
+# the ONLY reader. Nothing installed a single entry, the installed Deck had no
+# Steam, gamescope came up with nothing to display, and the panel stayed black
+# through two complete boots while eleven install steps reported green:
+# docs/findings/P32-steam-never-installed.md.
+#
+# ⚠️ Adding a package here does NOT make it available offline, and an install
+# with no network will not get it. If a package must be installable without a
+# network it belongs in deck-mirror.packages + deck-install.packages -- and
+# then its licence has to permit redistribution, which is the whole reason the
+# one entry below is here instead.
 
-# Licenses: Proprietary, with no licence text shipped
-# (docs/findings/P16-redistribution-and-trademark.md §1). Bundling it into the
-# offline mirror would redistribute it; fetching it from Valve's own mirror at
-# install time does not. §4.1 decided fetch, not bundle.
-steamdeck-dsp
-
-# Steam Subscriber Agreement, and it is huge. Installers normally fetch it.
+# Steam Subscriber Agreement, and it is huge. Installers normally fetch it, and
+# the installer's S0 screen discloses on screen that it is downloaded from
+# Valve during setup. Bundling the client into the offline mirror would
+# redistribute it; that is a licensing question this project has deliberately
+# not taken on, so this stays a fetch even though its absence is the single
+# most visible failure a Deck can have (no Steam = no Gaming Mode = black
+# screen).
+#
 # It is also the package that makes §3.8 fire at all: `steam` is what depends
 # on the virtual vulkan-driver / lib32-vulkan-driver that pacman would
-# otherwise satisfy with the NVIDIA stack.
+# otherwise satisfy with the NVIDIA stack, which is why deck-install.packages
+# names vulkan-radeon AND lib32-vulkan-radeon.
+#
+# Measured on hardware 2026-08-15, repairing the broken install in place:
+# `pacman -S --needed steam` inside the target pulls 34 packages (steam
+# 1.0.0.87-1 plus its lib32 runtime), all from multilib, with no kernel,
+# bootloader or UKI involvement. Steam bootstrapped on the next boot and Gaming
+# Mode rendered.
+#
+# ⚠️ `steamdeck-dsp` used to be the second entry here. It moved to
+# deck-mirror.packages + deck-install.packages on 2026-08-15 (operator
+# decision): it is firmware, the machine needs it to have working audio at all,
+# and it now rides in the offline mirror the way linux-firmware-neptune always
+# has. Do not move `steam` after it.
 steam

@@ -1,0 +1,59 @@
+#
+# First-boot check that the packages the installer downloads actually reached
+# the installed system -- Steam above all.
+#
+# SHIPPED AS: /usr/share/omarchy-iso/deck/omarchy-deck-steam-first-boot.service
+# in the ISO; installed by `configure_deck`
+# (../orchestrator/deck_pkgs.py) to /etc/systemd/system/ on the target, with the
+# multi-user.target.wants symlink written in the same step.
+#
+# WHY A UNIT AND NOT A LOG LINE
+#
+# docs/findings/P32-steam-never-installed.md: the install log said eleven steps,
+# all green, on a Deck whose panel stayed black through two complete boots
+# because Steam was not installed. The install log scrolls past inside an
+# installer nobody re-reads, and the Deck has no terminal in normal use.
+# docs/tasks/T5-fork-plan.md §4.1 requirement (iii) asks for a first-boot unit
+# that TELLS THE USER; this is that unit, and it is the only one of the three
+# channels that exists on a running machine.
+#
+# ⚠️ ExecStart has NO leading `-`, and RemainAfterExit is NOT set. A `-` would
+# tell systemd to ignore the non-zero exit and the unit would report `active` on
+# a Deck with no Steam -- which is the whole condition it exists to make
+# visible. `systemctl --failed` is the channel here (same reasoning as
+# omarchy-deck-wifi-first-boot.service and
+# src/omarchy-deck-patches/omarchy-deck-patch-check.service).
+#
+# ⚠️ It is NOT `ConditionFirstBoot`. That condition is only true while
+# /etc/machine-id is unset, and the installer writes one -- so the unit would
+# never run at all. The script disables itself instead, the first time every
+# expected package is present, which also means it keeps checking across
+# reboots until someone fixes it. A user who installs Steam by hand gets a
+# clean `systemctl --failed` on the next boot without knowing this unit exists.
+#
+# ⚠️ NO network ordering, deliberately, and this is where it differs from the
+# Wi-Fi notice beside it. That unit waits for a connection because a connection
+# is what it is reporting on. This one reads the local pacman database and one
+# file on the local disk; both answers are already final when the filesystem is
+# up. Waiting for the network would delay the report by its timeout on exactly
+# the machines that have none -- which are the machines most likely to be
+# missing Steam.
+#
+# ⚠️ After=local-fs.target so /var/lib/omarchy-deck and /usr are mounted before
+# ConditionPathExists is evaluated on a system with a separate /var.
+#
+
+[Unit]
+Description=Report whether the packages the installer downloads reached this system
+Documentation=file:///var/lib/omarchy-deck/fetch-status
+ConditionPathExists=/var/lib/omarchy-deck/fetch-packages
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/omarchy-deck-steam-first-boot
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

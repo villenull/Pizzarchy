@@ -1,8 +1,8 @@
 diff --git i/builder/build-iso.sh w/builder/build-iso.sh
-index db8daa2..82341f8 100755
+index db8daa2..c0e085f 100755
 --- i/builder/build-iso.sh
 +++ w/builder/build-iso.sh
-@@ -104,6 +104,123 @@ if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
+@@ -104,6 +104,208 @@ if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
    LOCAL_OMARCHY_BUILD=1
  fi
  
@@ -30,6 +30,91 @@ index db8daa2..82341f8 100755
 +  echo "       this build would quietly produce a stock Omarchy ISO instead." >&2
 +  exit 1
 +fi
++
++# ===========================================================================
++# 🔴 EVERY DECK PACKAGE LIST MUST NAME A CONSUMER THAT INSTALLS IT.
++#
++# docs/findings/P32-steam-never-installed.md: `deck-fetch.packages` was
++# written, commented, maintained, unit-tested, read by a build guard -- and
++# read by NOTHING THAT INSTALLS ANYTHING. The shipped ISO produced a Deck with
++# no Steam, a black screen, and eleven green install steps saying otherwise.
++# `deck-mirror.packages` carried the same defect ("installed later", by nobody)
++# and cost the Neptune kernel and the audio DSP firmware.
++#
++# The general fix is this manifest: the set of lists that EXIST and the set of
++# lists something READS are declared once and checked BOTH WAYS. A new list
++# added without a consumer fails the build here instead of shipping as a
++# comment; a consumer whose list was deleted or renamed fails here too.
++#
++#   deck-install.packages  merged into omarchy-base.packages by seam S1 below;
++#                          pacstrap installs every entry onto the TARGET,
++#                          resolved against the offline mirror
++#   deck-mirror.packages   added to `all_packages` below; `pacman -Syw` puts
++#                          every entry in the OFFLINE MIRROR and the prune
++#                          keep-set holds it. Entries here that must also be
++#                          installed appear a second time, bare, in
++#                          deck-install.packages (the dual-entry pattern)
++#   deck-live.packages     appended to packages.x86_64 by seam S6 below;
++#                          mkarchiso installs every entry into the LIVE root
++#   deck-fetch.packages    copied into the live ISO below as
++#                          /usr/share/omarchy-iso/deck-fetch.packages and read
++#                          at INSTALL time by the orchestrator's deck_pkgs.py,
++#                          which installs every entry into the target over the
++#                          network. Also read at build time by
++#                          deck-nvidia-dry-run.sh, which only ASKS about it --
++#                          that is the reader that was mistaken for a consumer.
++#
++# ⚠️ This checks that a consumer is DECLARED, which is not the same as proving
++# one runs. The per-list emptiness refusals further down and
++# test/unit/test-deck-pkgs.py are the other half; nothing here can notice a
++# consumer that was deleted from the orchestrator.
++deck_known_lists=(deck-install deck-mirror deck-live deck-fetch)
++
++for deck_list in "${deck_known_lists[@]}"; do
++  if [[ ! -f "$deck_list_dir/$deck_list.packages" ]]; then
++    echo "ERROR: $deck_list_dir/$deck_list.packages is declared in this build's" >&2
++    echo "       consumer manifest but does not exist." >&2
++    echo "       Something below reads it. A missing file would make that reader" >&2
++    echo "       install nothing, silently, on the target -- which is exactly the" >&2
++    echo "       P3.2 defect (docs/findings/P32-steam-never-installed.md)." >&2
++    exit 1
++  fi
++done
++
++# The other direction, and the one that catches a NEW list: a *.packages file
++# in this directory that the manifest does not name is a list no consumer
++# reads. Refuse rather than ignore -- an ignored file is indistinguishable from
++# a working one right up until a Deck boots without what it promised.
++shopt -s nullglob
++for deck_list_path in "$deck_list_dir"/*.packages; do
++  deck_list_name=$(basename "$deck_list_path" .packages)
++  deck_list_known=0
++  # ⚠️ `if`, not `[[ ... ]] && x=y`: this script runs under `set -e`, and an
++  # && list whose last command is the FAILING test terminates the build. The
++  # same trap is documented in the Deck's first-boot scripts.
++  for deck_known in "${deck_known_lists[@]}"; do
++    if [[ $deck_list_name == "$deck_known" ]]; then
++      deck_list_known=1
++      break
++    fi
++  done
++  # ⚠️ `[[ $deck_list_known == 0 ]]`, not `((deck_list_known == 0))`. The
++  # arithmetic form names the variable straight after a `(`, which is command
++  # position to test/unit/test-iso-build.sh's patch-dependency scanner -- it
++  # then reports this patch as calling a shell function `deck_list_known` that
++  # nothing defines, and fails the build for a bug that does not exist.
++  if [[ $deck_list_known == 0 ]]; then
++    echo "ERROR: $deck_list_path has no consumer." >&2
++    echo "       Every Steam Deck package list must be named in deck_known_lists" >&2
++    echo "       in builder/build-iso.sh (iso/overlay/patches/deck-packages.patch)" >&2
++    echo "       AND be read by something that installs it. A list nobody reads is" >&2
++    echo "       a comment that looks like configuration; that is how the shipped" >&2
++    echo "       ISO came to have no Steam." >&2
++    exit 1
++  fi
++done
++shopt -u nullglob
++# ===========================================================================
 +
 +deck_pkgbuild_dir="$deck_list_dir/pkgbuilds"
 +if [[ ! -d $deck_pkgbuild_dir ]]; then
@@ -126,7 +211,7 @@ index db8daa2..82341f8 100755
  # Node.js binary for offline mise install.
  NODE_DIST_URL="https://nodejs.org/dist/latest"
  NODE_SHASUMS=$(curl -fsSL "$NODE_DIST_URL/SHASUMS256.txt")
-@@ -121,6 +238,46 @@ cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
+@@ -121,6 +323,46 @@ cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
  arch_packages=(linux-t2 git gum jq openssl plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
  printf '%s\n' "${arch_packages[@]}" >> "$build_cache_dir/packages.x86_64"
  
@@ -173,7 +258,7 @@ index db8daa2..82341f8 100755
  # The live ISO boots linux-t2 (see airootfs/etc/mkinitcpio.d/linux-t2.preset), so
  # stock linux is a second kernel nobody boots: ~147MB of ISO, plus its own archiso
  # initramfs, copied into both the ISO tree and the size-constrained FAT EFI image.
-@@ -164,6 +321,39 @@ else
+@@ -164,10 +406,71 @@ else
    setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
  fi
  
@@ -190,11 +275,18 @@ index db8daa2..82341f8 100755
 +# base_pkg_lists[0] can be a read-only bind mount (/omarchy-source, under
 +# --local-source), so the merged list is written to scratch and the array
 +# repointed rather than edited in place.
-+# $deck_list_dir is declared and checked once, up beside the seam-S4 block.
-+# Both lists are read inside command substitutions further down, where an empty
-+# grep would abort a subshell mid-stream and silently truncate the package set.
-+# Refuse now, out loud, instead.
-+for deck_list in deck-install deck-mirror; do
++# $deck_list_dir is declared and checked once, up beside the seam-S4 block, and
++# so is the consumer manifest that proves each of these files has a reader.
++# deck-install and deck-mirror are read inside command substitutions further
++# down, where an empty grep would abort a subshell mid-stream and silently
++# truncate the package set. Refuse now, out loud, instead.
++#
++# deck-fetch is here for a different reason with the same shape: it is not read
++# by this script at all -- it is COPIED into the live ISO below and read at
++# install time by deck_pkgs.py, hours later, on the user's machine. An empty
++# one would install nothing and there would be nothing left to notice it. That
++# is precisely the P3.2 failure, so the refusal belongs where it costs seconds.
++for deck_list in deck-install deck-mirror deck-fetch; do
 +  if ! grep -qv '^#\|^$' "$deck_list_dir/$deck_list.packages"; then
 +    echo "ERROR: $deck_list_dir/$deck_list.packages has no package entries" >&2
 +    echo "       (missing, empty, or entirely comments)." >&2
@@ -213,7 +305,32 @@ index db8daa2..82341f8 100755
  mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
  cp "${base_pkg_lists[0]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
  cp "${base_pkg_lists[1]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-other.packages"
-@@ -187,12 +377,40 @@ if [[ ! -f $setup_form ]]; then
+ 
++# --- Steam Deck: put the fetch list ON THE LIVE ISO -------------------------
++#
++# 🔴 THE MISSING HALF OF THE P3.2 BUG. `configs/deck/` is a build-container
++# path: `cp -r /configs/* "$build_cache_dir/"` at the top of this script copies
++# it into the archiso PROFILE, and mkarchiso only puts `airootfs/` into the
++# booted root. So deck-fetch.packages existed at build time, was read by
++# deck-nvidia-dry-run.sh at build time, and was NOT PRESENT AT ALL on the ISO
++# the installer runs from -- an install-time consumer could not have read it
++# even if one had been written.
++#
++# It ships next to omarchy-base.packages, the file _runtime_package_list
++# already reads from the same directory, so both package questions the
++# installer asks are answered out of one place. deck_pkgs.py's DECK_FETCH_LIST
++# is the other end of this path; changing the name here changes it there.
++#
++# Copied rather than symlinked or regenerated: it is small, it is the same
++# bytes the guard above checked for emptiness, and a copy cannot become a
++# dangling link inside a squashfs.
++cp "$deck_list_dir/deck-fetch.packages" \
++  "$build_cache_dir/airootfs/usr/share/omarchy-iso/deck-fetch.packages"
++
+ # The configurator's setup form comes from the runtime this ISO bundles, so the
+ # installer and the first-boot setup that finishes a deferred install can never
+ # disagree. A runtime predating the split ships no such file, which would leave
+@@ -187,12 +490,40 @@ if [[ ! -f $setup_form ]]; then
  fi
  cp "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"
  
@@ -254,7 +371,7 @@ index db8daa2..82341f8 100755
      grep -hv '^#\|^$' /builder/archinstall.packages
      # Always include the selected Omarchy packages so the target install can
      # find the runtime and companion packages in the offline mirror.
-@@ -213,6 +431,69 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+@@ -213,6 +544,69 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
    )
  fi
  
@@ -324,7 +441,7 @@ index db8daa2..82341f8 100755
  mkdir -p /tmp/offlinedb
  download_offline_packages() {
    pacman --config /configs/pacman-online-${OMARCHY_MIRROR}.conf --noconfirm -Syw \
-@@ -266,6 +547,36 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+@@ -266,6 +660,36 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
    done
  fi
  

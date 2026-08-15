@@ -97,6 +97,12 @@
 # .../amdgpu_bl0/brightness and .../status:white/led_brightness_multiplier
 # are mode 666, restamped each boot).
 #
+# ⚠️ `amdgpu_bl0` ABOVE IS A VERBATIM LOG QUOTE FROM ONE KERNEL, NOT A PATH THIS
+# SCRIPT MAY ASSUME. The same physical Deck enumerated the SAME panel as
+# `amdgpu_bl1` on stock `linux 7.1.8-arch1-3` (measured 2026-08-15, with no
+# amdgpu_bl0 present at all). The index is DRM enumeration order. Everything
+# below discovers the node -- see BACKLIGHT_GLOB and find_backlight.
+#
 # Note the two families resolve DIFFERENTLY, but BOTH land in /usr/bin:
 #   steamos-session-select        via PATH, and that PATH is only
 #                                 "/usr/bin:/bin" inside Steam's runtime
@@ -126,6 +132,66 @@
 # because the action would still amount to "this user may restart the display
 # manager", and a sudoers line saying exactly that is far easier to audit
 # than a polkit rule plus a helper. Revisit if this ships as a package.
+#
+# ===========================================================================
+# CHROOT MODE -- DECK_SESSION_CHROOT=1, and why this file grew one
+# ===========================================================================
+#
+# This script was written for a RUNNING Deck, reached over SSH. That is how it
+# was proven (sessions 15-26, every capability watched working on hardware) and
+# it is why the stages verify themselves by starting processes, asking systemd
+# what it parsed, and writing sysfs.
+#
+# 🔴 IT WAS ALSO NEVER RUN BY THE INSTALLER, and that is a shipped defect:
+# docs/findings/P32-steam-never-installed.md's general shape -- a component that
+# exists, is tested, and is wired into nothing. An ISO-installed Deck had no
+# "Switch to Desktop" row in Steam's power menu, no way back from the desktop,
+# and no target-side input mapper. Every one of those lives here.
+#
+# So `configure_deck`'s deck_session_bake step runs THIS FILE, unchanged, inside
+# the target via arch-chroot, one stage per invocation, with
+# DECK_SESSION_CHROOT=1. Not a Python re-implementation of it: a second copy of
+# this logic is the drift this project keeps paying for (see the two halves of
+# "return to Gaming Mode", and assert_return_action_agrees).
+#
+# WHAT A CHROOT IS NOT. There is no systemd manager to talk to, no D-Bus, no
+# session, no compositor, and no user to escalate from -- the process is already
+# root and `sudo` cannot be relied on (PAM, no tty, no audit socket). What a
+# chroot DOES have is the target's whole filesystem, its binaries, and -- via
+# arch-chroot's bind mounts -- the INSTALLING MACHINE's /proc, /sys, /dev and
+# /run. That last one is the trap: /sys is the live Deck's, not the target's,
+# and /run/user/<uid> may hold the INSTALLER's own compositor.
+#
+# THE THREE RULES THIS MODE FOLLOWS
+#
+#   1. FILE-LEVEL WORK IS DONE NOW. Everything that is "write a file, install a
+#      unit, create an enablement symlink, splice a dotfile" happens at install
+#      time. The goal is a Deck that switches sessions out of the box, not one
+#      that would if a first-boot service worked.
+#   2. WHAT CANNOT RUN IS DEFERRED **OUT LOUD**, through defer(), which prints a
+#      single greppable line naming what was skipped, why, and how to check it
+#      on the installed machine. There is no silent skip anywhere in this file
+#      and this mode does not introduce the first one (CLAUDE.md).
+#   3. THE NORMAL PATH IS UNTOUCHED. Every branch below is `if in_chroot`, and
+#      with DECK_SESSION_CHROOT unset this file behaves byte-for-byte as it did
+#      on the Deck. test/unit/test-deck-session-bake.sh drives the chroot half;
+#      the two existing suites keep driving the other one.
+#
+# 🔴 WHAT IS DEFERRED IS ALWAYS A **VERIFICATION**, NEVER AN ARTEFACT. Nothing
+# the installed system needs is left to first boot. The four deferred checks are
+# systemd's parse of the sddm drop-in, the timezone helper's round trip through
+# timedatectl, the lizard-mode node toggle, and the live-compositor readback of
+# the keyboard layout rule -- each of which needs a running system to ANSWER,
+# and none of which is needed to WRITE anything.
+#
+# ⚠️ THE ONE STAGE THAT MUST NOT BE BAKED is stage-desktop-settings, and it is
+# not a judgement call: three orchestrator steps (session_dconf, idle_policy,
+# mask_sleep_lock) already write its dconf, idle-policy and sleep-lock halves at
+# install time, and the site file they write carries no marker of ours, so
+# assert_ours_or_absent would -- correctly -- refuse. Measured on the operator's
+# Deck 2026-08-15: /etc/dconf/db/local.d/50-deck-desktop written 11:25 by the
+# installer. Its FOURTH half, the on-screen keyboard's XKB rule, is owned by
+# nothing else, which is why stage-osk-kb-layout exists. See BAKE_STAGES.
 #
 set -euo pipefail
 
@@ -581,10 +647,43 @@ readonly PRIV_WRITE_SUDOERS=/etc/sudoers.d/99-deck-priv-write
 readonly TIMEZONE_SUDOERS=/etc/sudoers.d/99-deck-set-timezone
 
 # The sysfs node stage-priv-write-helper verifies its write path against: the
-# exact one Steam moves for the brightness slider on this hardware, read from
-# Steam's own log (see this file's header). Named rather than repeated inline
-# so the stage and verify_priv_write_helper cannot drift apart.
-readonly DECK_BACKLIGHT=/sys/class/backlight/amdgpu_bl0/brightness
+# one Steam moves for the brightness slider. DISCOVERED at runtime, never
+# assumed -- see find_backlight, and read the two measurements below before
+# putting a literal back.
+#
+# 🔴 THE NODE INDEX IS ENUMERATION ORDER, NOT HARDWARE. Both of these are the
+# SAME physical panel on the SAME OLED Deck (Galileo):
+#
+#   /sys/class/backlight/amdgpu_bl0/brightness   Neptune kernel, read from
+#                                                Steam's own log (this file's
+#                                                header quotes it verbatim)
+#   /sys/class/backlight/amdgpu_bl1/brightness   stock linux 7.1.8-arch1-3,
+#                                                measured 2026-08-15 -- and
+#                                                there was NO amdgpu_bl0 at all
+#
+# `amdgpu_bl0` was a readonly constant here until that second measurement. What
+# it cost is worth stating, because it is subtler than "brightness broke": the
+# RENDERED HELPER was never wrong -- its whitelist is a PATTERN over
+# /sys/class/backlight/<one component>/brightness and it accepted bl1 the whole
+# time (verified on the Deck 2026-08-15: the installed helper wrote bl1 and
+# exited 0). What broke was this stage's own VERIFICATION. With a node that does
+# not exist, verify_priv_write_helper takes its "not present" arm and WARNS, so
+# the write path shipped unexercised on the one machine that has a panel -- the
+# check passing for the wrong reason, which is the failure class this project
+# exists to remove.
+#
+# WHY THE GLOB IS `amdgpu_bl*` AND NOT `*`. Discovery decides which node this
+# stage WRITES during verification; it is not the security boundary (that is the
+# helper's own pattern, which must stay wider because STEAM names the path, not
+# us). On a Deck the panel is always an amdgpu backlight, and a wider glob would
+# happily pick up an `intel_backlight` or a DDC-backed external monitor on a
+# developer's machine and write to it. Narrow here, bounded there.
+readonly BACKLIGHT_GLOB='/sys/class/backlight/amdgpu_bl*/brightness'
+# Where the candidates are looked for when the glob matches nothing, so that
+# "this machine has no backlight at all" and "this machine has one under a name
+# we do not know" can be told apart -- they are different findings and only the
+# second is a bug in this file.
+readonly BACKLIGHT_CLASS_DIR=/sys/class/backlight
 
 # Called by absolute path from the timezone helper's sudo line, because that is
 # the form omarchy-settings-dev's own sudoers rule matches (see
@@ -866,10 +965,97 @@ readonly -a INSTALL_STAGES=(
   stage-desktop-settings
 )
 
+# The stages the ISO's installer bakes into a target, in run order. Read out of
+# this file by deck_session_bake.py through `list-bake-stages`, so the list has
+# ONE home and it is next to the stages it names.
+#
+# It is INSTALL_STAGES with two deliberate differences:
+#
+#   - stage-desktop-settings is OUT. Three orchestrator steps (session_dconf,
+#     idle_policy, mask_sleep_lock) already write its dconf, idle-policy and
+#     sleep-lock halves at install time, from the same constants. Running this
+#     stage after them is not merely redundant: the site file they write carries
+#     no marker of ours, so assert_ours_or_absent refuses it -- correctly, and
+#     the whole stage would fail. Measured on the operator's Deck 2026-08-15
+#     (/etc/dconf/db/local.d/50-deck-desktop, written 11:25 by the installer).
+#   - stage-osk-kb-layout is IN, and it is the half of stage-desktop-settings
+#     that nothing else owns: the per-device XKB pin for the on-screen
+#     keyboard's uinput device. deck_input.py's docstring is explicit that this
+#     rule is deck-session.sh's to write and that its own block is a different
+#     one, so this is a division of labour that already exists on paper.
+#
+# The three opt-in stages stay opt-in here too, on their own arguments, which
+# chroot mode does not change: stage-default-session (deck_autologin.py already
+# writes and verifies the autologin drop-in -- a second writer of one file is
+# the drift this project pays for), stage-boot-default-gaming (arms a re-assert
+# at EVERY boot on a machine whose Gaming Mode nobody has yet watched start; it
+# is an operator decision, and its ordering check needs a live systemd), and
+# stage-power-button (rewires a hardware button; its own header refuses to be
+# armed by a bare run).
+readonly -a BAKE_STAGES=(
+  stage-preconditions
+  stage-session-select
+  stage-steam-hook
+  stage-update-stub
+  stage-timezone-helper
+  stage-priv-write-helper
+  stage-greeter-rotation
+  stage-sddm-resilience
+  stage-return-icon
+  stage-menu-row
+  stage-input-mapper
+  stage-lizard-mode
+  stage-osk-kb-layout
+)
+
 log()  { printf '[%s] %s\n' "$PROG" "$*"; }
 warn() { printf '[%s] WARNING: %s\n' "$PROG" "$*" >&2; }
 fail() { printf '[%s] ERROR: %s\n' "$PROG" "$*" >&2; exit 1; }
 usage_error() { printf '[%s] usage: %s\n' "$PROG" "$*" >&2; exit 2; }
+
+# --- chroot mode ------------------------------------------------------------
+#
+# Read the CHROOT MODE block in this file's header before touching anything
+# below. The short form: DECK_SESSION_CHROOT=1 says "you are inside arch-chroot,
+# as root, on a target that has never booted", and every branch it selects does
+# the file-level work anyway and defers only what needs a running system.
+CHROOT_MODE=0
+if [[ ${DECK_SESSION_CHROOT:-0} == 1 ]]; then
+  CHROOT_MODE=1
+fi
+readonly CHROOT_MODE
+
+in_chroot() { [[ $CHROOT_MODE -eq 1 ]]; }
+
+# 🔴 THE ONE OUTPUT SHAPE THE INSTALLER PARSES. deck_session_bake.py greps for
+# this prefix and copies every line into /var/log/omarchy-deck-install.json, so
+# a deferred check is a fact in the install record rather than a line in a log
+# nobody reads. Keep it one line and keep the prefix.
+#
+# ⚠️ This is NOT a way to skip something quietly. Every call site defers a
+# CHECK, never an artefact -- if you find yourself deferring a write, the
+# artefact is missing from the shipped image and defer() is hiding it.
+defer() { printf '[%s] DEFERRED (chroot): %s\n' "$PROG" "$*" >&2; }
+
+# Who the desktop user is.
+#
+# ${DECK_SESSION_USER} first, and only chroot mode ever sets it: inside
+# arch-chroot this process is root, there is no SUDO_USER, and $USER is root or
+# unset -- so every stage that resolves a user would fail with "cannot determine
+# the unprivileged user". The installer knows the answer (it created the
+# account, and deck_user.resolve_target_user CONFIRMS it against the target's
+# own /etc/passwd rather than trusting what archinstall was told), so it passes
+# it in. The two existing forms are unchanged and still come first off a Deck.
+desktop_user() { printf '%s' "${DECK_SESSION_USER:-${SUDO_USER:-${USER:-$(id -un)}}}"; }
+
+# A compositor runtime directory that cannot exist, handed to verify_osk_kb_layout
+# in chroot mode. NOT a way of skipping the check: that function's "no live
+# Hyprland" arm already warns loudly and names the command to run later, which is
+# exactly the right report here. What this avoids is the opposite mistake --
+# arch-chroot bind-mounts /run, so /run/user/<uid> inside the chroot is the
+# INSTALLER's, and a real hyprctl reload would be fired at the installer's own
+# session mid-install.
+readonly CHROOT_NO_HYPR_RUNTIME=/nonexistent/deck-session-chroot-has-no-compositor
 
 SUDO=""
 INTERACTIVE=1
@@ -884,7 +1070,16 @@ stage_preconditions() {
       fail "required tool '$tool' not found"
   done
 
-  if [[ $EUID -eq 0 ]]; then
+  if in_chroot; then
+    # Inside arch-chroot there is nothing to escalate FROM: the process is
+    # already root, and `sudo` there has no tty, no PAM session and no audit
+    # socket to rely on. A non-root chroot run is a caller bug, not a state to
+    # work around, so it stops here rather than half-installing as the wrong uid.
+    [[ $EUID -eq 0 ]] ||
+      fail "DECK_SESSION_CHROOT=1 but this process is EUID ${EUID}, not root. Chroot mode is entered only by the installer, through 'arch-chroot <target> ${PROG}.sh <stage>', which is always root -- there is no escalation path inside a chroot."
+    SUDO=""
+    log "chroot mode: running inside the install target as root, with no systemd manager, no D-Bus and no session"
+  elif [[ $EUID -eq 0 ]]; then
     SUDO=""
   else
     command -v sudo >/dev/null 2>&1 || fail "not root and sudo not found"
@@ -905,13 +1100,40 @@ stage_preconditions() {
   [[ -r /sys/class/dmi/id/product_name ]] && product=$(</sys/class/dmi/id/product_name)
   [[ -r /sys/class/dmi/id/sys_vendor ]]   && vendor=$(</sys/class/dmi/id/sys_vendor)
   if ! [[ ${product,,} =~ (steam\ deck|jupiter|galileo) || ${vendor,,} == *valve* ]]; then
-    fail "not Steam Deck hardware (product='${product:-?}' vendor='${vendor:-?}'). Refusing to rewrite session configuration."
+    if in_chroot; then
+      # 🔴 A WARNING AND NOT A REFUSAL, ONLY HERE, AND THE ARGUMENT IS NARROW.
+      # arch-chroot bind-mounts /sys, so this DMI reads the machine doing the
+      # installing -- which is the machine that will run the target. Refusing
+      # would be defensible; what it would actually cost is the whole automated
+      # QEMU install tier (CLAUDE.md's second testing tier), where nothing is a
+      # Deck and this phase would then be exercised by nobody but hardware.
+      # Everything the baked stages write is inert on a machine that is not a
+      # Deck -- and the one stage that is NOT inert on other hardware, the power
+      # button, keeps its own model gate and is not baked at all.
+      warn "this machine reports product='${product:-?}' vendor='${vendor:-?}', which is not Steam Deck hardware. Continuing because chroot mode is the installer's, and an ISO built for the Deck may legitimately be installed in a VM for testing -- but NOTHING below has been exercised on this hardware."
+    else
+      fail "not Steam Deck hardware (product='${product:-?}' vendor='${vendor:-?}'). Refusing to rewrite session configuration."
+    fi
   fi
   log "hardware: ${vendor:-unknown} ${product:-unknown}"
 
   # SDDM is the switching mechanism. Without it there is nothing to restart.
-  systemctl list-unit-files sddm.service --no-pager 2>/dev/null | grep -q sddm ||
-    fail "sddm.service not found. This script switches sessions by restarting the display manager and supports SDDM only (which is what Omarchy installs)."
+  if in_chroot; then
+    # `systemctl list-unit-files` asks the unit-file loader rather than the
+    # manager, but the target has never booted and this is the one precondition
+    # cheap enough to answer from the disk it is actually about. Same three
+    # directories systemd searches, in its own precedence order.
+    local sddm_unit="" ud
+    for ud in /etc/systemd/system /usr/local/lib/systemd/system /usr/lib/systemd/system; do
+      [[ -f "$ud/sddm.service" ]] && { sddm_unit="$ud/sddm.service"; break; }
+    done
+    [[ -n $sddm_unit ]] ||
+      fail "no sddm.service unit file anywhere on the target (looked in /etc/systemd/system, /usr/local/lib/systemd/system, /usr/lib/systemd/system). This script switches sessions by restarting the display manager and supports SDDM only, which is what Omarchy installs -- so an image without it cannot switch sessions at all."
+    log "display manager: ${sddm_unit}"
+  else
+    systemctl list-unit-files sddm.service --no-pager 2>/dev/null | grep -q sddm ||
+      fail "sddm.service not found. This script switches sessions by restarting the display manager and supports SDDM only (which is what Omarchy installs)."
+  fi
 
   # The Gaming Mode session must already exist -- we do not build one.
   # Checked by *file*, not by package, so a differently-packaged gamescope
@@ -1028,7 +1250,7 @@ stage_session_select() {
   # user inside the shim from $SUDO_USER would write User=root whenever the
   # shim is reached from a root context, i.e. a root graphical autologin.
   # The autologin user is a property of the machine, so decide it at install.
-  local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
+  local invoking_user; invoking_user=$(desktop_user)
   [[ -n $invoking_user && $invoking_user != root ]] ||
     fail "cannot determine the unprivileged user to autologin (got '${invoking_user}'). Re-run as that user with sudo, not as root directly."
 
@@ -1238,7 +1460,7 @@ EOF
 # being visible through bash's dynamic scoping would work when called from
 # there and blow up under `set -u` when called directly.
 render_restart_helper() {
-  local session_user=${1:-${SUDO_USER:-${USER:-$(id -un)}}}
+  local session_user=${1:-$(desktop_user)}
   cat <<EOF
 #!/usr/bin/env bash
 #
@@ -1715,7 +1937,7 @@ stage_timezone_helper() {
   #
   # The half this stage depends on survived, so nothing here breaks -- but the
   # dependency was real and it moved. See PROGRESS.md 5.22.
-  local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
+  local invoking_user; invoking_user=$(desktop_user)
   [[ -n $invoking_user && $invoking_user != root ]] ||
     fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
 
@@ -1746,6 +1968,29 @@ EOF
 # in "THE VERIFICATION SEAM" above verify_update_stub.
 verify_timezone_helper() {
   local helper=${1:-$TIMEZONE_HELPER}
+
+  if in_chroot; then
+    # `timedatectl show` is a D-Bus call to systemd-timedated. In a chroot there
+    # is no bus and no manager, so the round trip cannot be performed -- and
+    # running it against the INSTALLER's bus would be worse than not running it,
+    # because it would answer about the wrong machine.
+    #
+    # What CAN be exercised is the half that decides whether this file is safe
+    # to sit behind a sudo grant: every validation in it runs BEFORE any
+    # elevation, so the refusal path needs no timedatectl at all. That is run
+    # here, against the file that was just installed.
+    local rc=0
+    "$helper" ../../etc/shadow >/dev/null 2>&1 || rc=$?
+    [[ $rc -ne 0 ]] ||
+      fail "${helper} accepted a path-traversal timezone. It must validate against /usr/share/zoneinfo before elevating."
+    rc=0
+    "$helper" >/dev/null 2>&1 || rc=$?
+    [[ $rc -ne 0 ]] ||
+      fail "${helper} exited 0 with no argument at all; it must refuse rather than elevate on an empty timezone."
+    log "verified (chroot): the helper refuses a traversal argument and an empty one, both before it elevates"
+    defer "the timezone round trip (set the current zone, read it back) needs systemd-timedated on a live D-Bus, which a chroot has neither of. The helper and its sudoers grant are installed; the set path first runs when Steam's OOBE picker uses it. Confirm on the installed machine with: /usr/bin/steamos-polkit-helpers/steamos-set-timezone \"\$(timedatectl show -p Timezone --value)\""
+    return 0
+  fi
 
   # Verify by running it, not by trusting the write -- and verify against the
   # timezone the machine is ALREADY set to, so a passing test changes nothing.
@@ -1860,6 +2105,73 @@ EOF
 
 # ---------------------------------------------------------------------------
 
+# find_backlight [glob] [class-dir] -- print the panel's brightness node.
+#
+# 🔴 THIS IS A DISCOVERY, AND IT REPLACED A CONSTANT THAT WAS WRONG ON THE
+# OPERATOR'S OWN DECK. Read the BACKLIGHT_GLOB block above for the two
+# measurements (bl0 on Neptune, bl1 on stock linux 7.1.8-arch1-3, same panel).
+#
+# THREE OUTCOMES, ALL LOUD, and they are three because they are three different
+# facts about the machine -- collapsing them is how "the check did not run" got
+# mistaken for "the check passed":
+#
+#   exit 0  the node, on stdout. With more than one candidate the FIRST by
+#           version sort is taken and every candidate is named on stderr:
+#           deterministic beats plausible, and a human is told there was a
+#           choice rather than left to discover it.
+#   exit 1  ${BACKLIGHT_CLASS_DIR} holds nothing at all -- this machine has no
+#           backlight. On a dev box or in QEMU that is ordinary; the caller
+#           warns and skips the write check, which is what it did before.
+#   exit 2  there ARE backlights and none of them is an amdgpu one. On a Deck
+#           that is a real finding (the panel moved to a name this file does not
+#           know), so the caller FAILS rather than shrugging.
+#
+# ⚠️ NOTHING HERE LOGS TO STDOUT except the path. `log` writes to stdout and the
+# caller captures it, so an informational line printed with it would be read
+# back as part of the node's path.
+find_backlight() {
+  local pattern=${1:-$BACKLIGHT_GLOB}
+  local class_dir=${2:-$BACKLIGHT_CLASS_DIR}
+  local -a candidates=()
+  local p
+
+  # Deliberately unquoted: this expansion IS the glob. With no match bash leaves
+  # the pattern itself, which the -e test then drops -- so nullglob is not
+  # needed and this behaves the same whether or not a caller has set it.
+  for p in $pattern; do
+    [[ -e $p ]] && candidates+=("$p")
+  done
+
+  if [[ ${#candidates[@]} -eq 0 ]]; then
+    local -a others=()
+    if [[ -d $class_dir ]]; then
+      for p in "$class_dir"/*; do
+        [[ -e $p ]] && others+=("${p##*/}")
+      done
+    fi
+    if [[ ${#others[@]} -gt 0 ]]; then
+      printf '[%s] ERROR: %s\n' "$PROG" \
+        "no backlight matches ${pattern}, but ${class_dir} does carry: ${others[*]}. The panel is enumerated under a name this script does not know, so Gaming Mode's brightness slider cannot be verified against it. Add the name to BACKLIGHT_GLOB in ${PROG}.sh -- do not hardcode an index, it is DRM enumeration order (amdgpu_bl0 on Neptune, amdgpu_bl1 on stock linux 7.1.8, same Deck)." >&2
+      return 2
+    fi
+    printf '[%s] WARNING: %s\n' "$PROG" \
+      "no backlight anywhere under ${class_dir} (it is empty or absent). This machine has no panel backlight -- ordinary off a Deck, and not ordinary on one." >&2
+    return 1
+  fi
+
+  if [[ ${#candidates[@]} -gt 1 ]]; then
+    # sort -V, not plain sort: it orders bl2 before bl10, which byte order does
+    # not. The choice is arbitrary in the sense that nothing here can know which
+    # of two panels Steam will drive -- so it is made the SAME way every time,
+    # and said out loud.
+    mapfile -t candidates < <(printf '%s\n' "${candidates[@]}" | sort -V)
+    printf '[%s] WARNING: %s\n' "$PROG" \
+      "more than one backlight matches ${pattern}: ${candidates[*]}. Taking the first by version sort (${candidates[0]}) so this is deterministic, but nothing here knows which one Steam drives -- check it on the device with 'ls /sys/class/backlight'." >&2
+  fi
+
+  printf '%s' "${candidates[0]}"
+}
+
 stage_priv_write_helper() {
   # Tier 1 of the three-tier fallback documented in this file's header. See
   # that note before touching this: the point is NOT that brightness is broken
@@ -1873,6 +2185,14 @@ stage_priv_write_helper() {
   #   steamos-priv-write "/sys/class/leds/status:white/led_brightness_multiplier" "100"
   #   steamos-priv-write "/dev/drm_dp_aux0" ""
   #
+  # ⚠️ THE NODE NAME IN THAT FIRST LINE IS THE KERNEL'S, NOT OURS, AND IT MOVES.
+  # The same Deck's Steam logged `amdgpu_bl1` on stock linux 7.1.8-arch1-3
+  # (2026-08-15). That is precisely why the rendered helper matches a PATTERN
+  # over /sys/class/backlight/<one component>/brightness rather than one literal
+  # path -- Steam names the node, so the whitelist has to accept whichever name
+  # the kernel gave it, while staying anchored to that one subtree. Verified on
+  # hardware the same day: the installed helper accepted bl1 and wrote it.
+  #
   # The third is why this whitelists rather than writes what it is told: a DP
   # AUX channel is a display-link side band, Steam passes it an EMPTY value,
   # and what that does is not understood here. It is not whitelisted, so this
@@ -1881,10 +2201,35 @@ stage_priv_write_helper() {
   #
   # THE DESTINATION AND THE NODE IT IS VERIFIED AGAINST ARE PARAMETERS -- see
   # "THE VERIFICATION SEAM" above verify_update_stub. Production passes nothing
-  # and gets ${PRIV_WRITE_HELPER} and ${DECK_BACKLIGHT}.
+  # and gets ${PRIV_WRITE_HELPER} plus whatever find_backlight discovers.
   local helper=${1:-$PRIV_WRITE_HELPER}
-  local backlight=${2:-$DECK_BACKLIGHT}
+  local backlight=${2:-}
   assert_ours_or_absent "$helper" "a real SteamOS helper"
+
+  # ⚠️ RESOLVED HERE, NOT AS A ${2:-...} DEFAULT, and the reason is that this
+  # discovery can FAIL. `fail` inside a $( ) runs in a subshell, so a default of
+  # ${2:-$(find_backlight)} would print the diagnosis and then carry on with an
+  # empty value -- a loud message followed by a silent skip, which is worse than
+  # either. Resolving it as a statement lets each outcome be answered properly.
+  if [[ -z $backlight ]]; then
+    local blrc=0
+    backlight=$(find_backlight) || blrc=$?
+    case $blrc in
+      0) log "backlight: ${backlight} (discovered, not assumed)" ;;
+      1)
+        # No backlight on this machine at all. Not fatal: the helper is still
+        # worth installing, and verify_priv_write_helper's own "not present" arm
+        # already says out loud that the write path went unexercised. It is
+        # handed a whitelist-SHAPED path that cannot exist, so its non-numeric
+        # refusal is still exercised for the right reason rather than being
+        # refused earlier as an empty argument.
+        backlight="${BACKLIGHT_CLASS_DIR}/deck-session-no-backlight-here/brightness"
+        ;;
+      *)
+        fail "could not identify this machine's panel backlight (see the message above). Refusing to report stage-priv-write-helper as ok with its one write path unverified -- that is exactly how the amdgpu_bl0 constant survived: the check took its 'absent' arm and warned, on the only machine that has a panel."
+        ;;
+    esac
+  fi
 
   log "installing the steamos-priv-write helper: ${helper}"
   $SUDO install -d -m 0755 -o root -g root "$(dirname "$helper")" ||
@@ -1898,7 +2243,7 @@ stage_priv_write_helper() {
     fail "could not install ${helper}"
   rm -f "$tmp"
 
-  local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
+  local invoking_user; invoking_user=$(desktop_user)
   [[ -n $invoking_user && $invoking_user != root ]] ||
     fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
 
@@ -1940,7 +2285,11 @@ EOF
 # at all.
 verify_priv_write_helper() {
   local helper=${1:-$PRIV_WRITE_HELPER}
-  local bl=${2:-$DECK_BACKLIGHT}
+  # No constant default: the node is DISCOVERED (find_backlight) and the stage
+  # above resolves it before calling this. A default here would be a second,
+  # stale answer to the question the discovery exists to ask -- which is what
+  # the removed ${DECK_BACKLIGHT} was.
+  local bl=${2:?verify_priv_write_helper needs the backlight node to exercise}
 
   # Verify by running it against the real backlight, at its CURRENT value, so
   # a passing check leaves the screen exactly as it found it.
@@ -2284,6 +2633,26 @@ EOF
     fail "could not install ${SDDM_UNIT_DROPIN}"
   rm -f "$tmp"
 
+  if in_chroot; then
+    # There is no manager to reload and none to interrogate: the target has
+    # never booted. The drop-in is in the directory systemd reads at start, so
+    # the ARTEFACT is complete -- what cannot happen here is asking systemd what
+    # it PARSED, which is the check this stage otherwise leans on entirely.
+    #
+    # So it is re-read as FILE CONTENT, which is strictly weaker (a directive
+    # systemd rejects would still be present), and that weakness is stated in
+    # the deferral rather than papered over.
+    local key
+    for key in "StartLimitIntervalSec=0" "TimeoutStopSec=${SDDM_STOP_TIMEOUT}" "RestartSec=3"; do
+      $SUDO grep -qxF -- "$key" "$SDDM_UNIT_DROPIN" ||
+        fail "wrote ${SDDM_UNIT_DROPIN} but '${key}' is not in it on re-read. Without it a session switch can still leave the Deck with no display manager, which is the failure this stage exists to remove."
+    done
+    log "verified (file content): the drop-in carries StartLimitIntervalSec=0, TimeoutStopSec=${SDDM_STOP_TIMEOUT} and RestartSec=3"
+    defer "systemd's own parse of ${SDDM_UNIT_DROPIN} cannot be checked inside a chroot -- there is no manager to ask, so a directive systemd would reject reads as correct here. It applies at the target's first boot. Confirm on the installed machine with: systemctl show sddm -p StartLimitIntervalUSec -p TimeoutStopUSec -p RestartUSec"
+    log "stage-sddm-resilience: ok"
+    return 0
+  fi
+
   $SUDO systemctl daemon-reload || fail "systemctl daemon-reload failed"
 
   # Verify the values systemd ACTUALLY resolved. A drop-in in the right place
@@ -2479,7 +2848,9 @@ EOF
   # nothing. The first version of this check used that and warned on a target
   # that was demonstrably active -- a check failing for the wrong reason is as
   # bad as one passing for the wrong reason.
-  if systemctl --user list-units --all --no-legend "$MAPPER_WANTED_BY" 2>/dev/null | grep -q .; then
+  if in_chroot; then
+    defer "whether ${MAPPER_WANTED_BY} exists cannot be answered in a chroot -- it is a TEMPLATE INSTANCE uwsm creates at runtime, so it has no unit file on disk and no manager here has ever seen it. The unit is installed and enabled; if that target never appears, the mapper enables and never starts. Confirm in the first desktop session with: systemctl --user list-units --all | grep wayland-session"
+  elif systemctl --user list-units --all --no-legend "$MAPPER_WANTED_BY" 2>/dev/null | grep -q .; then
     log "verified: ${MAPPER_WANTED_BY} exists in this user manager"
   else
     warn "${MAPPER_WANTED_BY} is not known to this user manager. Over SSH with no graphical session that is normal; inside the desktop it means the unit will enable and never start -- check 'systemctl --user list-units --all | grep wayland-session'."
@@ -2487,6 +2858,22 @@ EOF
 
   $SUDO systemctl --global enable deck-input-mapper.service >/dev/null 2>&1 ||
     fail "could not enable deck-input-mapper.service for all users"
+
+  # 🔴 READ THE ENABLEMENT BACK, and only in chroot mode, because only there is
+  # `systemctl --global enable` doing something nobody has watched. It needs no
+  # manager -- with --global there is none to need, it just writes a .wants
+  # symlink -- but "exited 0" and "the symlink is there" are different claims,
+  # and an installed-but-not-enabled unit is silent in exactly the way this
+  # project keeps being bitten by. Off a Deck this is left alone: on a running
+  # system the next line's claim is already covered by the manager itself.
+  if in_chroot; then
+    local wants_dir wants_link
+    wants_dir=$(dirname "$MAPPER_UNIT")
+    wants_link="${wants_dir}/${MAPPER_WANTED_BY}.wants/${MAPPER_UNIT##*/}"
+    [[ -L $wants_link ]] ||
+      fail "'systemctl --global enable' exited 0 but ${wants_link} is not a symlink, so the mapper is installed and NOT enabled -- it would never start, and nothing would say so. That is the silent failure this project exists to remove."
+    log "verified: ${wants_link} -> $(readlink -- "$wants_link")"
+  fi
 
   log "verified: unit installed and enabled --global, wanted by ${MAPPER_WANTED_BY}"
   log "stage-input-mapper: ok"
@@ -2826,6 +3213,38 @@ verify_lizard_helper() {
   local helper=${1:-$LIZARD_HELPER}
   local node=${2:-$LIZARD_SYSFS}
 
+  if in_chroot; then
+    # 🔴 THE ONE DEFERRAL THAT IS ABOUT SAFETY RATHER THAN CAPABILITY, and it is
+    # the reason this branch is not "the node is missing, warn".
+    #
+    # arch-chroot bind-mounts /sys, so ${node} inside the chroot is the LIVE
+    # INSTALLING MACHINE's module parameter -- not the target's. The check below
+    # would therefore turn lizard mode OFF and then ON on a Deck that is at that
+    # moment running the installer's own deck-input-mapper, and `on` hands input
+    # back to the controller firmware, which swallows X, Y, L1, R1, STEAM and
+    # QAM. The window is short and the cost is the operator losing buttons in
+    # the middle of an install they cannot then drive. Nothing about the TARGET
+    # is learned in exchange: the target's hid_steam has never been loaded.
+    #
+    # What is exercised instead is the helper's argv contract, which needs no
+    # node and is what stands between a sudo grant and an arbitrary write.
+    local rc=0
+    "$helper" >/dev/null 2>&1 || rc=$?
+    [[ $rc -eq 2 ]] ||
+      fail "'${helper}' with no argument exited ${rc}, not 2. Its strict argv check is the second boundary in front of ${LIZARD_SUDOERS}, and it is not working."
+    rc=0
+    "$helper" sideways >/dev/null 2>&1 || rc=$?
+    [[ $rc -eq 2 ]] ||
+      fail "'${helper} sideways' exited ${rc}, not 2. An unrecognised verb must be refused, never guessed at -- both guesses end with a device nobody can drive."
+    rc=0
+    "$helper" on off >/dev/null 2>&1 || rc=$?
+    [[ $rc -eq 2 ]] ||
+      fail "'${helper} on off' exited ${rc}, not 2. Extra arguments must be refused: this file sits behind a sudo grant."
+    log "verified (chroot): the helper refuses no argument, an unknown verb and extra arguments, all with exit 2"
+    defer "lizard mode is NOT toggled at install time. /sys inside arch-chroot is the INSTALLING machine's, so exercising ${node} here would hand input back to the controller firmware while the installer's own mapper is running -- and would prove nothing about the target, whose hid_steam has never been loaded. The helper, its grant, its OnFailure unit and the mapper drop-in are all installed; the invariant takes effect the first time deck-input-mapper.service starts. Confirm on the installed machine with: sudo ${LIZARD_HELPER} off && cat ${LIZARD_SYSFS} && sudo ${LIZARD_HELPER} on"
+    return 0
+  fi
+
   # World-readable 0644, so this needs no privilege -- and reading it directly
   # rather than through ${SUDO} keeps the check honest on a machine where sudo
   # is the thing that is broken.
@@ -2957,7 +3376,7 @@ stage_lizard_mode() {
   # ExecStartPost= and ExecStopPost= run as the desktop user. Something has to
   # bridge that to a root-only sysfs write, and this is the same narrow-sudoers
   # tradeoff the header of this file already argues for ${SELECT_BIN}.
-  local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
+  local invoking_user; invoking_user=$(desktop_user)
   [[ -n $invoking_user && $invoking_user != root ]] ||
     fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
 
@@ -3016,7 +3435,18 @@ EOF
 
   # A drop-in on disk is not a drop-in systemd has read.
   local unit_name=${MAPPER_UNIT##*/}
-  if systemctl --user daemon-reload 2>/dev/null; then
+  if in_chroot; then
+    # No user manager exists on a target that has never booted, and the one the
+    # INSTALLER is running is not the one that will read this drop-in. Asking it
+    # anything would produce an answer about the wrong machine.
+    #
+    # The drop-in and the unit it belongs to were both written and read back
+    # above as files, and the four systemd-parse assertions below are the ones
+    # that cannot be made here. They are worth naming individually because they
+    # cover a real hole -- a '-' prefix would make a failure silent -- so the
+    # deferral says exactly which command re-runs them.
+    defer "systemd's parse of ${unit_name} (ExecStopPost=, OnFailure=, ${restore_name}'s LoadState and ExecStart=, and whether either was prefixed with '-') cannot be checked in a chroot: the target has no user manager and the installer's is a different machine's. All four files are installed. Confirm inside the first desktop session with: systemctl --user show ${unit_name} -p ExecStopPost -p OnFailure && systemctl --user show ${restore_name} -p LoadState -p ExecStart"
+  elif systemctl --user daemon-reload 2>/dev/null; then
     log "reloaded this user's systemd manager so ${unit_name} picks the drop-in up"
   else
     warn "could not reload this user's systemd manager. Over SSH with no session that is normal and the drop-in applies from the next desktop session; inside the desktop it means ${unit_name} is still running without its fallback."
@@ -3031,9 +3461,13 @@ EOF
   # across two files: ExecStopPost= covers the ordinary deaths, OnFailure= covers
   # the cgroup-wide SIGKILL that kills ExecStopPost=, and a fallback that is
   # only half parsed is a fallback with a hole nobody can see from the disk.
-  local parsed
-  parsed=$(systemctl --user show "$unit_name" -p ExecStopPost --value 2>/dev/null) || parsed=""
-  if [[ -z $parsed ]]; then
+  local parsed=""
+  if ! in_chroot; then
+    parsed=$(systemctl --user show "$unit_name" -p ExecStopPost --value 2>/dev/null) || parsed=""
+  fi
+  if in_chroot; then
+    : # already deferred above, with the exact command that re-runs these four
+  elif [[ -z $parsed ]]; then
     warn "this user's systemd manager cannot report ${unit_name}'s ExecStopPost=, so the drop-in and ${restore_name} were verified as FILE CONTENT only. Re-check inside a desktop session with 'systemctl --user show ${unit_name} -p ExecStopPost -p OnFailure'."
   else
     [[ $parsed == *"${LIZARD_HELPER} on"* ]] ||
@@ -3182,6 +3616,35 @@ EOF
 # this function.
 run_as_desktop_user() {
   local user=$1; shift
+
+  # 🔴 CHROOT MODE USES setpriv, NOT sudo, AND THAT IS NOT A PREFERENCE.
+  # Inside arch-chroot there is no tty, no PAM session, no logind and no audit
+  # socket; `sudo -u` there is a dependency on a stack the target has never
+  # started, and its failure mode is a write that does not happen. setpriv is
+  # util-linux, does no PAM at all, and is a straight setresuid/setresgid --
+  # which is exactly and only what this function needs. --clear-groups because
+  # inheriting root's supplementary groups into a "run as the desktop user" call
+  # would make the privilege drop a half-measure.
+  #
+  # Every call site passes ABSOLUTE paths, so nothing here depends on $HOME or
+  # the cwd changing with the uid.
+  if in_chroot; then
+    [[ $EUID -eq 0 ]] ||
+      fail "chroot mode expects to be root, and this process is EUID ${EUID}; refusing to pretend it can become ${user}"
+    command -v setpriv >/dev/null 2>&1 ||
+      fail "setpriv (util-linux) is not on the target, so nothing can be written as ${user} from inside the chroot. A root-owned file in their ~/.config would be worse than none."
+    local uid gid entry
+    entry=$(getent passwd "$user") ||
+      fail "no '${user}' in the target's passwd database, so nothing can be written as them"
+    uid=$(cut -d: -f3 <<<"$entry")
+    gid=$(cut -d: -f4 <<<"$entry")
+    [[ $uid =~ ^[0-9]+$ && $gid =~ ^[0-9]+$ ]] ||
+      fail "the target's passwd entry for '${user}' has a non-numeric uid/gid ('${uid}'/'${gid}'); refusing to guess who to become"
+    local rc=0
+    setpriv --reuid="$uid" --regid="$gid" --clear-groups -- "$@" || rc=$?
+    return $rc
+  fi
+
   if [[ -n $SUDO ]]; then
     "$SUDO" -u "$user" "$@"
   elif [[ $EUID -eq 0 ]]; then
@@ -3553,7 +4016,7 @@ stage_desktop_settings() {
   # entirely. Setting idle.lock has no effect on the sleep path and masking the
   # unit has no effect on the idle path. They are adjacent here because a reader
   # who fixes one and stops has fixed half a defect.
-  local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
+  local invoking_user; invoking_user=$(desktop_user)
   [[ -n $invoking_user && $invoking_user != root ]] ||
     fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
   local home
@@ -3635,14 +4098,14 @@ PY
   # Separate from the dconf input source above, and not a duplicate of it: that
   # one gives squeekboard a layout to DRAW, this one tells the compositor which
   # character our uinput device's keycodes mean.
-  local uid
-  uid=$(getent passwd "$invoking_user" | cut -d: -f3) ||
-    fail "could not resolve ${invoking_user}'s uid"
-  [[ $uid =~ ^[0-9]+$ ]] ||
-    fail "getent reported a non-numeric uid ('${uid}') for ${invoking_user}; the compositor's runtime directory cannot be located from it"
-
-  install_osk_kb_layout_rule "$invoking_user" "${home}/${HYPR_INPUT_LUA_REL}"
-  verify_osk_kb_layout "$invoking_user" "$uid" ${hypr_runtime:+"$hypr_runtime"}
+  #
+  # ⚠️ ITS OWN STAGE SINCE 2026-08-15, and called from here so a full run is
+  # unchanged. The extraction is not tidying: the ISO's installer bakes the
+  # session layer stage by stage, and the other three halves of THIS stage are
+  # already written at install time by configure_deck's session_dconf,
+  # idle_policy and mask_sleep_lock steps -- so the baked list needs this half
+  # WITHOUT them. See BAKE_STAGES.
+  stage_osk_kb_layout ${hypr_runtime:+"$hypr_runtime"}
 
   log "stage-desktop-settings: ok"
   log "NOTE: Omarchy re-reads shell.json live (FileView watchChanges), but the"
@@ -3656,6 +4119,65 @@ PY
   log "      A lock the user asks for (System menu, SUPER+CTRL+L) still works."
   log "      A unit already running in this session keeps running; the mask"
   log "      applies from the next graphical session on."
+}
+
+# ---------------------------------------------------------------------------
+
+# stage-osk-kb-layout -- pin OUR virtual keyboard, and only it, to `us`.
+#
+# WHY IT IS A STAGE OF ITS OWN. It was the fourth and last part of
+# stage-desktop-settings, and it is the only part of that stage the ISO's
+# installer can run: configure_deck's session_dconf, idle_policy and
+# mask_sleep_lock steps already write the other three at install time, from
+# these same constants, and the dconf site file they write carries no marker of
+# ours -- so a baked stage-desktop-settings would hit assert_ours_or_absent and
+# refuse, correctly. Nothing else anywhere writes this rule: deck_input.py
+# splices the SAME input.lua with different markers and its docstring is
+# explicit that kb_layout is deck-session.sh's to own.
+#
+# NOT in INSTALL_STAGES, because stage-desktop-settings calls it and running it
+# twice in one pass would be pointless work with a second chance to fail. It IS
+# in BAKE_STAGES.
+#
+# THE COMPOSITOR RUNTIME DIRECTORY IS A SEAM ($1), for the reason spelled out
+# above verify_osk_kb_layout: with it baked in, a unit-suite run on a developer's
+# own Hyprland box would reload THEIR desktop.
+stage_osk_kb_layout() {
+  local hypr_runtime=${1:-}
+
+  local invoking_user; invoking_user=$(desktop_user)
+  [[ -n $invoking_user && $invoking_user != root ]] ||
+    fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
+
+  local home
+  home=$(getent passwd "$invoking_user" | cut -d: -f6) ||
+    fail "could not resolve ${invoking_user}'s home directory"
+  [[ -n $home ]] || fail "empty home directory for ${invoking_user}"
+
+  local uid
+  uid=$(getent passwd "$invoking_user" | cut -d: -f3) ||
+    fail "could not resolve ${invoking_user}'s uid"
+  [[ $uid =~ ^[0-9]+$ ]] ||
+    fail "getent reported a non-numeric uid ('${uid}') for ${invoking_user}; the compositor's runtime directory cannot be located from it"
+
+  # 🔴 In a chroot the seam is pointed somewhere that cannot exist, ON PURPOSE.
+  # arch-chroot bind-mounts /run, so /run/user/${uid} in here is the INSTALLER's
+  # -- and verify_osk_kb_layout's live arm runs `hyprctl reload`. Left alone, an
+  # install would reload the compositor the operator is looking at. Its "no live
+  # Hyprland" arm is the honest report for a machine that has never booted, and
+  # it already names the command to check with later.
+  if in_chroot; then
+    hypr_runtime=$CHROOT_NO_HYPR_RUNTIME
+    defer "the keyboard-layout rule cannot be observed taking effect at install time -- it needs a live Hyprland, and the target has never booted. The rule is written to ${home}/${HYPR_INPUT_LUA_REL} and applies to ${invoking_user}'s first session. Confirm there with: hyprctl -j devices  -- '${OSK_HYPR_DEVICE}' must read layout '${OSK_KB_LAYOUT}' while every other keyboard keeps the session layout"
+  fi
+
+  install_osk_kb_layout_rule "$invoking_user" "${home}/${HYPR_INPUT_LUA_REL}"
+  verify_osk_kb_layout "$invoking_user" "$uid" ${hypr_runtime:+"$hypr_runtime"}
+
+  log "stage-osk-kb-layout: ok"
+  log "NOTE: the rule is PER DEVICE. Physical keyboards and the rest of the"
+  log "      desktop keep the session layout; only '${OSK_HYPR_DEVICE}' is"
+  log "      pinned to '${OSK_KB_LAYOUT}'."
 }
 
 # ---------------------------------------------------------------------------
@@ -3992,7 +4514,7 @@ stage_menu_row() {
   # Before anything is written: the two ways back must run the same command.
   assert_return_action_agrees
 
-  local invoking_user=${SUDO_USER:-${USER:-$(id -un)}}
+  local invoking_user; invoking_user=$(desktop_user)
   [[ -n $invoking_user && $invoking_user != root ]] ||
     fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
   local home
@@ -4839,7 +5361,13 @@ main() {
       log "Test first:  ${STEAM_SHIM} gamescope     (switches now, ends this session)"
       log "Then, once proven: ./${PROG}.sh stage-default-session"
       ;;
-    list-stages) printf '%s\n' "${INSTALL_STAGES[@]}" stage-audit-privileges stage-default-session stage-boot-default-gaming stage-power-button ;;
+    list-stages) printf '%s\n' "${INSTALL_STAGES[@]}" stage-osk-kb-layout stage-audit-privileges stage-default-session stage-boot-default-gaming stage-power-button ;;
+    # 🔴 THE INSTALLER'S OWN LIST, and it is printed rather than duplicated for
+    # one reason: deck_session_bake.py runs these stages one at a time inside
+    # arch-chroot, and a copy of this list in Python would be a second place for
+    # it to be wrong. The module asks the script; the script answers from
+    # BAKE_STAGES, which sits beside the stages themselves.
+    list-bake-stages) printf '%s\n' "${BAKE_STAGES[@]}" ;;
     -h|--help|help)
       cat <<EOF
 ${PROG}.sh -- two-way Gaming Mode <-> Desktop session switching for a Deck
@@ -4847,6 +5375,20 @@ ${PROG}.sh -- two-way Gaming Mode <-> Desktop session switching for a Deck
   ${PROG}.sh                        install everything except the default flip
   ${PROG}.sh <stage>                run one stage
   ${PROG}.sh list-stages            stage names, for CI
+  ${PROG}.sh list-bake-stages       the stages the ISO's installer bakes into a
+                                    target, in order. Read by the orchestrator's
+                                    deck_session_bake step, which runs each one
+                                    inside arch-chroot with DECK_SESSION_CHROOT=1
+
+ENVIRONMENT
+  DECK_SESSION_CHROOT=1             chroot mode: you are inside arch-chroot, as
+                                    root, on a target that has never booted.
+                                    Every stage does its file-level work and
+                                    prints a 'DEFERRED (chroot):' line for each
+                                    check that needs a running system. Read the
+                                    CHROOT MODE block at the top of this file.
+  DECK_SESSION_USER=<name>          who the desktop user is. Only chroot mode
+                                    sets it -- there is no SUDO_USER in there.
   ${PROG}.sh stage-audit-privileges report sudoers drop-ins that grant blanket
                                     root; fails if any do (release check, T6)
   ${PROG}.sh stage-default-session  make Gaming Mode the default (do this last)

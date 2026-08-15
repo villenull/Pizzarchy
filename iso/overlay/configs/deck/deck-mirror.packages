@@ -1,23 +1,42 @@
-# Steam Deck packages CARRIED IN THE OFFLINE MIRROR, but not installed by
-# pacstrap.
+# Steam Deck packages CARRIED IN THE OFFLINE MIRROR.
 #
 # These are added to build-iso.sh's `all_packages`, so `pacman -Syw` downloads
 # them into var/cache/omarchy/mirror/offline/ and prune-offline-mirror.sh keeps
-# them -- but they are NOT merged into the shipped omarchy-base.packages, so
-# nothing installs them at pacstrap time. The omarchy-deck package (T5-fork-plan
-# §3 seam S4) declares them and pulls them out of the mirror during
-# `configure_deck`.
+# them.
 #
-# Why the split exists, rather than putting everything in deck-install.packages:
+# 🔴 THIS FILE INSTALLS NOTHING. IT ONLY DECIDES WHICH BUILD IS CARRIED.
 #
-#  * `linux-neptune-*` is a KERNEL. Pacstrapping it makes limine-mkinitcpio-hook
-#    build a second UKI and gives limine-entry-tool a boot order to choose --
-#    that is boot-chain work, it is T1/T5f's, it is Opus-routed, and CLAUDE.md
-#    says do not touch the boot chain casually. Carrying it in the mirror costs
-#    nothing and is a hard prerequisite either way: the machine has to boot
-#    before it can fetch anything (§4.1).
+# The header that stood here until 2026-08-15 said "The omarchy-deck package
+# (T5-fork-plan §3 seam S4) declares them and pulls them out of the mirror
+# during `configure_deck`." **That was never implemented.** `omarchy-deck`
+# declares no such dependencies, `configure_deck` had no step that installed
+# anything, and the whole list was therefore inert: the ISO downloaded a
+# 350 MiB Neptune firmware package, an entire Valve kernel and Valve's
+# gamescope, shipped them uncompressed inside the squashfs, and installed none
+# of them. Measured on the first hardware boot ever produced by this project --
+# docs/findings/P32-steam-never-installed.md. The offline mirror is also GONE
+# after the install (it is bind-mounted for pacstrap and unmounted before
+# genfstab), so "installed later" had no later to happen in.
+#
+# THE RULE NOW, and every line below states which half it is:
+#
+#   here ONLY               carried and installed by NOBODY. Legitimate only
+#                           for something whose reader is named in the entry's
+#                           own comment (today: the -headers line, whose reader
+#                           is "nothing, deliberately").
+#   here AND, bare, in      the DUAL-ENTRY pattern. This file picks the build
+#   deck-install.packages   (and may repo-qualify to do it); that file makes
+#                           pacstrap install it, offline, on the target.
+#
+# Why entries live here at all rather than only in deck-install.packages:
+#
 #  * Repo-qualified names are legal here and illegal in deck-install.packages --
-#    this list is only ever resolved against the online repos.
+#    this list is only ever resolved against the online repos, that one is
+#    resolved twice against the single-repo offline mirror.
+#  * build-iso.sh strips the BARE form of every qualified entry here out of the
+#    online download list, so a `foo` in the install list and a `repo/foo` here
+#    do not reach `pacman -Syw` as a duplicate target. An identical bare/bare
+#    pair needs no stripping: `all_packages` is `sort -u`'d.
 #
 # ⚠️ Measured cost, 2026-08-12: adding this file plus deck-install.packages takes
 # the mirror from 1241 to 1283 package files, +544 MiB compressed. The offline
@@ -31,10 +50,53 @@
 # 611 matches src/omarchy-deck-kernel.sh's NEPTUNE_SERIES_DEFAULT. That file
 # explains why it is not simply "the newest": nothing newer has been validated
 # on hardware, and CLAUDE.md does not ship untested hardware claims. If the
-# series moves, move it in both places.
+# series moves, move it in all three places (here, deck-install.packages, and
+# src/omarchy-deck-kernel.sh).
+#
+# DUAL ENTRY, both of them: the bare names are in deck-install.packages as of
+# 2026-08-15, so pacstrap installs them from this mirror. Left BARE here rather
+# than qualified because P16's overlap audit measured no name collision for
+# either -- they exist only in jupiter-staging, so repo order cannot pick the
+# wrong build, and `sort -u` collapses the identical pair before `pacman -Syw`
+# ever sees it. (`gamescope` below is the opposite case and must be qualified.)
 linux-neptune-611
-linux-neptune-611-headers
 linux-firmware-neptune
+
+# 🔴 READER: NOBODY, ON PURPOSE. This is the one entry in this file that is
+# deliberately mirror-only, and the reasoning has to be written down or the
+# next reader will "fix" it into deck-install.packages.
+#
+# Kernel headers are only needed to BUILD modules against this kernel. Nothing
+# on the target does: `dkms`, `linux-headers` and every *-dkms package live in
+# omarchy-other.packages, which is the hardware-alternatives list -- carried in
+# the mirror, never installed, because `_runtime_package_list` reads
+# omarchy-base.packages and nothing else. Checked against the pinned runtime's
+# lists 2026-08-15: omarchy-base.packages (150 lines) contains no dkms, no
+# headers, and no module-building package at all.
+#
+# It stays in the mirror rather than being deleted because a Deck that later
+# wants a DKMS module has no other source for headers matching a Valve kernel,
+# and the cost is ~10 MiB against a 350 MiB firmware package sitting beside it.
+# If T5g's size gate ever needs the space, this is the first line to cut.
+linux-neptune-611-headers
+
+# --- Valve's audio DSP firmware ----------------------------------------------
+#
+# 🔴 REPO-QUALIFIED, and DUAL ENTRY with the bare `steamdeck-dsp` in
+# deck-install.packages -- exactly the gamescope pattern below. Qualifying is
+# what makes the build deterministic if Arch ever publishes a name collision,
+# and it makes build-iso.sh strip the bare form out of the online download list
+# so `pacman -Syw` gets one unambiguous target instead of two.
+#
+# It was in deck-fetch.packages until 2026-08-15 (T5-fork-plan.md §4.1 chose
+# fetch-not-bundle on redistribution grounds). Operator decision 2026-08-15
+# reversed that: same posture as linux-firmware-neptune, which has always been
+# carried. `steam` did NOT move and is still fetched.
+#
+# Verified against the live repo 2026-08-15: jupiter-staging carries
+# steamdeck-dsp-0.38-1-any.pkg.tar.zst; holo-staging is configured but carries
+# nothing this build names.
+jupiter-staging/steamdeck-dsp
 
 # --- Gaming Mode --------------------------------------------------------------
 #
@@ -48,7 +110,14 @@ linux-firmware-neptune
 #
 # Verified 2026-08-12: with the qualification, the resolved keep-set draws
 # exactly 4 packages from jupiter-staging -- this one and the three above --
-# and nothing else leaks in from Valve's mirror.
+# and nothing else leaks in from Valve's mirror. (That count is now 5:
+# jupiter-staging/steamdeck-dsp joined them 2026-08-15. Re-measure rather than
+# trusting either number after the next build.)
+#
+# DUAL ENTRY with the bare `gamescope` in deck-install.packages -- and it has
+# been since 2026-08-15, which is why gamescope is the ONE thing from this file
+# that reached the hardware. It is the template the rest of this list was
+# rebuilt on.
 jupiter-staging/gamescope
 
 # --- HUD ----------------------------------------------------------------------
@@ -57,5 +126,12 @@ jupiter-staging/gamescope
 # is NEWER than Valve's 0.8.3-4 and already ships /usr/bin/mangoapp, verified on
 # the Deck. Arch wins here because the Valve repos are last, which is what we
 # want -- do not "fix" these into jupiter-staging/ to match the line above.
+#
+# DUAL ENTRY as of 2026-08-15: the bare names are in deck-install.packages, so
+# pacstrap installs them. Until then they were carried and installed by nobody,
+# which meant Gaming Mode's performance overlay could never work --
+# src/deck-session.sh warns "mangoapp not found (install mangohud)" and
+# docs/PROGRESS.md records that the session references mangoapp but no package
+# pulls it. Bare in both files, so `sort -u` collapses the pair.
 mangohud
 lib32-mangohud

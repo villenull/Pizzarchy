@@ -641,6 +641,94 @@ fi
 build_log "staged the live on-screen keyboard: $LIVE_MAPPER_DEST (0755) + ${#LIVE_OSK_MODULES[@]} module(s) in $LIVE_OSK_LIB_DEST (${LIVE_OSK_MODULES[*]}), backend '$LIVE_MAPPER_BACKEND' as deck-form.sh asks for it"
 
 # ---------------------------------------------------------------------------
+# 5c. Stage the SESSION LAYER payload, for configure_deck's `session_bake`.
+#
+# Different question from 5b, and the two must not be confused. 5b puts the
+# on-screen keyboard in the LIVE ISO so the INSTALLER can be typed on. This
+# puts src/deck-session.sh and its runtime beside it so the ORCHESTRATOR can
+# run it INSIDE THE TARGET, which is what gives the installed Deck its
+# session-switching layer -- the "Switch to Desktop" row, the steamos-*
+# helpers, and the target-side mapper for Desktop Mode navigation.
+#
+# Its absence is a measured P1, not a hypothetical: the first hardware install
+# produced a Deck whose Steam power menu had no desktop row at all, whose
+# steamos-update call ENOENT'd into a user-facing modal, and whose brightness
+# slider had no privileged writer (docs/PROGRESS.md §5.32). Every one of those
+# capabilities already existed in deck-session.sh; nothing carried it onto the
+# ISO, so nothing could run it.
+#
+# DERIVED, not hand-listed, for the same reason 5b derives its paths: the
+# mapper's filename and the OSK module set are declared inside deck-session.sh
+# itself, and a second hand-kept copy here goes stale against a rename in
+# exactly the silent way this whole file is arranged to prevent.
+#
+# No profiledef.sh entry is needed here (unlike 5b): nothing in this payload is
+# executed from the live ISO. deck_session_bake.stage_payload() copies it into
+# the target and chmods it there, so archiso's --no-preserve=mode is harmless.
+# ---------------------------------------------------------------------------
+
+SESSION_SRC="$REPO_ROOT/src/deck-session.sh"
+SESSION_DEST_DIR=/usr/share/omarchy-iso/deck/session
+session_staged_dir="$SCRATCH_SRC/configs/airootfs$SESSION_DEST_DIR"
+
+[[ -f $SESSION_SRC ]] ||
+  build_fail "cannot stage the session layer: no ${SESSION_SRC#"$REPO_ROOT"/}. That script IS the session layer -- src/ is its single source of truth and configure_deck's session_bake step runs it inside the target. Without it the installed Deck has no way to reach Desktop Mode."
+
+# The mapper's filename, read from deck-session.sh's own constant rather than
+# repeated here. Same file, same name, one authority.
+SESSION_MAPPER_NAME=$(sed -n 's/^readonly MAPPER_SRC_NAME=\(.*\)$/\1/p' "$SESSION_SRC" | tr -d "\"'" | head -1)
+[[ -n $SESSION_MAPPER_NAME ]] ||
+  build_fail "cannot stage the session layer: no 'readonly MAPPER_SRC_NAME=<file>' in src/deck-session.sh. That constant names the mapper stage-input-mapper installs on the TARGET; refusing to guess it, because guessing wrong ships a session layer whose Desktop Mode navigation is missing and says so only on stderr."
+
+# The OSK module set, likewise read from deck-session.sh's own array. NOTE this
+# is the TARGET's set (all backends -- Desktop Mode runs a Wayland compositor),
+# which is deliberately WIDER than 5b's live set (tty only). Do not "simplify"
+# by sharing one list between them.
+session_osk_line=$(grep -m1 '^OSK_MODULES=(' "$SESSION_SRC") ||
+  build_fail "cannot stage the session layer: no 'OSK_MODULES=(' array in src/deck-session.sh. stage-input-mapper installs those modules on the target; without the list this step would stage a mapper whose keyboard cannot load."
+read -r -a SESSION_OSK_MODULES <<<"$(printf '%s' "$session_osk_line" | sed 's/^OSK_MODULES=(//; s/).*$//' | tr -d "\"'")"
+(( ${#SESSION_OSK_MODULES[@]} > 0 )) ||
+  build_fail "cannot stage the session layer: src/deck-session.sh's OSK_MODULES=( array is empty. An empty module set is not a valid answer here -- it would ship a target mapper with no keyboard at all."
+
+# 🔴 THE ARRAY IS NOT ALL LITERALS. Its first element is "$OSK_SRC_NAME", a
+# variable declared a few lines above it in the same file, so the text scrape
+# above yields the seven characters `$OSK_SRC_NAME` -- which is not a filename
+# and never will be. Resolve every `$NAME`/`${NAME}` element against a
+# `readonly NAME=` in the same file, and refuse anything still unresolved.
+#
+# Found by reading back what this step actually extracted rather than trusting
+# the sed. Left unresolved it would have aborted the build with "there is no
+# src/$OSK_SRC_NAME" -- loud, at least, which is the only reason it would not
+# have become another silent P32. Do not replace this with a literal list:
+# the whole point is that deck-session.sh stays the single authority.
+for session_osk_i in "${!SESSION_OSK_MODULES[@]}"; do
+  session_osk_raw=${SESSION_OSK_MODULES[$session_osk_i]}
+  [[ $session_osk_raw == \$* ]] || continue
+  session_osk_var=${session_osk_raw#\$}
+  session_osk_var=${session_osk_var#\{}
+  session_osk_var=${session_osk_var%\}}
+  session_osk_val=$(sed -n "s/^readonly ${session_osk_var}=\(.*\)$/\1/p" "$SESSION_SRC" | tr -d "\"'" | head -1)
+  [[ -n $session_osk_val ]] ||
+    build_fail "cannot stage the session layer: src/deck-session.sh's OSK_MODULES contains '$session_osk_raw' and this build cannot resolve it -- there is no 'readonly ${session_osk_var}=<file>' in that file. Refusing to stage a module set with an unexpanded variable in it."
+  SESSION_OSK_MODULES[session_osk_i]=$session_osk_val
+done
+
+install -Dm0644 "$SESSION_SRC" "$session_staged_dir/deck-session.sh" ||
+  build_fail "could not stage src/deck-session.sh into the airootfs at $SESSION_DEST_DIR"
+[[ -f "$REPO_ROOT/src/$SESSION_MAPPER_NAME" ]] ||
+  build_fail "cannot stage the session layer: src/deck-session.sh names $SESSION_MAPPER_NAME as the mapper and there is no src/$SESSION_MAPPER_NAME."
+install -Dm0644 "$REPO_ROOT/src/$SESSION_MAPPER_NAME" "$session_staged_dir/$SESSION_MAPPER_NAME" ||
+  build_fail "could not stage src/$SESSION_MAPPER_NAME into the airootfs at $SESSION_DEST_DIR"
+for session_osk_module in "${SESSION_OSK_MODULES[@]}"; do
+  [[ -f "$REPO_ROOT/src/$session_osk_module" ]] ||
+    build_fail "cannot stage the session layer: src/deck-session.sh's OSK_MODULES names $session_osk_module and there is no src/$session_osk_module. Either the array is stale or the module was renamed without it."
+  install -Dm0644 "$REPO_ROOT/src/$session_osk_module" "$session_staged_dir/$session_osk_module" ||
+    build_fail "could not stage src/$session_osk_module into the airootfs at $SESSION_DEST_DIR"
+done
+
+build_log "staged the session layer: $SESSION_DEST_DIR/{deck-session.sh,$SESSION_MAPPER_NAME} + ${#SESSION_OSK_MODULES[@]} OSK module(s) (${SESSION_OSK_MODULES[*]}), for configure_deck's session_bake step"
+
+# ---------------------------------------------------------------------------
 # 6. The guards. 6.1 already ran above (it gates which env vars reach Docker
 #    at all, so it has to run before this point). 6.3 is structural -- it is
 #    the scratch PACMAN_CACHE_DIR set up in step 2 and the absence, anywhere
@@ -1145,6 +1233,177 @@ grep -q 'deck-live\.packages' "$LIVE_PATCHED_BUILDER" ||
   build_fail "guard 6.7: nothing in the patched builder/build-iso.sh reads configs/deck/deck-live.packages, so its entries reach neither packages.x86_64 nor the offline mirror. The list exists, the guard above is satisfied by it, and the ISO carries none of it -- a check passing for the wrong reason. iso/overlay/patches/deck-packages.patch (seam S6) is what appends it; it has probably been dropped or rebased away."
 
 build_log "guard 6.7 OK: the live root carries $LIVE_MAPPER_DEST (executable, and declared 0755 in profiledef.sh so mkarchiso's --no-preserve=mode copy cannot strip it), ${#LIVE_OSK_MODULES[@]} OSK module(s) for backend '$LIVE_MAPPER_BACKEND' in $LIVE_OSK_LIB_DEST, and ${#LIVE_PACKAGE_NAMES[@]} live package(s) build-iso.sh installs (${LIVE_PACKAGE_NAMES[*]})"
+
+# ---------------------------------------------------------------------------
+# Guard 6.8 -- a package list nothing installs from is a comment.
+#
+# docs/findings/P32-steam-never-installed.md, point 3 of its fix outline: "a
+# guard that a list with no consumer is an error. The general defect is that a
+# package list can exist, be maintained, be unit-tested, and install nothing."
+#
+# That is not hypothetical. `steam` and `steamdeck-dsp` sat in
+# configs/deck/deck-fetch.packages, correctly spelled, documented, and covered
+# by a unit suite. Nothing installed them. The ISO shipped, the installer's own
+# record reported ELEVEN GREEN STEPS, the QEMU install harness scored 18/18,
+# and the Deck booted to a black panel because /usr/lib/steam did not exist.
+# The only thing in the whole repo that ever opened that file was
+# configs/deck/deck-nvidia-dry-run.sh, which reads it to ask the NVIDIA
+# question (docs/PROGRESS.md §3.8) and installs precisely nothing.
+#
+# Guard 6.7 (d) asks this of ONE list -- deck-live.packages, against the
+# patched builder. This asks it of EVERY list in configs/deck/, DERIVED from
+# the directory listing rather than from three names written here, because "a
+# fourth list nobody remembered to wire up" is the shape of the bug itself.
+#
+# --- WHAT COUNTS AS A CONSUMER, AND WHY THE SCOPE IS DRAWN HERE ------------
+#
+# In scope -- the two places code that actually installs can live:
+#
+#   builder/           what runs inside the container: mkarchiso's live
+#                      pacstrap (packages.x86_64), the offline mirror's
+#                      `pacman -Syw` download list, and the merge into the
+#                      shipped omarchy-base.packages that the TARGET's own
+#                      pacstrap and the dashboard's denominator both read.
+#   configs/airootfs/  what the live ISO carries and runs -- the install
+#                      orchestrator (usr/share/omarchy-iso/orchestrator/)
+#                      included. A list installed AT INSTALL TIME, over the
+#                      network, is consumed from here.
+#
+# Out of scope, and each exclusion is the entire point of this guard:
+#
+#   configs/deck/ itself. That is where the lists live -- and where their
+#     pre-flight CHECKER lives. deck-nvidia-dry-run.sh reads
+#     deck-fetch.packages; reading a list to ask a question ABOUT it is not
+#     installing it. Counting that read would have made this guard green on
+#     the exact tree that shipped a Deck with no Steam.
+#   this script. iso/bin/build reads deck-live.packages forty lines up -- as a
+#     CHECK. A guard that accepts its own read as proof of a consumer is
+#     circular, and would pass the same shape it exists to catch.
+#
+# ⚠️ THE LIMITATION, STATED RATHER THAN PAPERED OVER. Inside those two
+# directories this guard CANNOT tell an installer from a checker: it matches
+# the file's NAME, not what is done with it. A checker moved into builder/
+# would satisfy it. What the scope does buy is that a checker has to live
+# where the installing code lives -- a far smaller hiding place than "anywhere
+# in the repo" -- and the failure below NAMES every out-of-scope reader it
+# found, so nobody has to guess what was discounted or why.
+#
+# Matches inside comments do not count, either. The patched build-iso.sh
+# carries a three-line comment naming the other three lists side by side; a
+# list mentioned only in that prose would otherwise pass on the strength of
+# being documented, which is exactly how deck-fetch.packages felt safe.
+#
+# ⚠️ "Comment" here means a line whose first non-blank character is '#' --
+# shell and Python line comments, which is what both consumer directories are
+# written in. A list named ONLY inside a Python docstring (no '#', and the
+# orchestrator modules open with long ones) would still count as a reference.
+# Narrowing that would mean parsing Python from bash; the honest trade is to
+# say so here rather than to imply a precision this does not have.
+# ---------------------------------------------------------------------------
+
+DECK_LIST_DIR="$SCRATCH_SRC/configs/deck"
+[[ -d $DECK_LIST_DIR ]] ||
+  build_fail "guard 6.8 cannot run: no configs/deck/ in the overlaid tree. That directory holds every Deck package list; without it this guard has no subject, and a guard with no subject is not a passing guard. The overlay rsync in step 4 should have put it there."
+
+mapfile -t DECK_PACKAGE_LISTS < <(
+  find "$DECK_LIST_DIR" -maxdepth 1 -type f -name '*.packages' -printf '%f\n' | LC_ALL=C sort
+)
+(( ${#DECK_PACKAGE_LISTS[@]} > 0 )) ||
+  build_fail "guard 6.8 cannot run: configs/deck/ holds no *.packages files at all. This build installs Deck packages from those lists, so zero of them means the overlay is wrong or this derivation went stale -- not that there is nothing to check."
+
+DECK_CONSUMER_DIRS=("$SCRATCH_SRC/builder" "$SCRATCH_SRC/configs/airootfs")
+for deck_consumer_dir in "${DECK_CONSUMER_DIRS[@]}"; do
+  [[ -d $deck_consumer_dir ]] ||
+    build_fail "guard 6.8 cannot run: no ${deck_consumer_dir#"$SCRATCH_SRC"/}/ in the overlaid tree. That is one of the two places a package list's consumer can live, and searching only the other one would report a missing consumer as a missing directory's fault -- or, worse, report a pass. Upstream moved it, or the overlay clobbered it."
+done
+
+# deck_list_readers <filename> <dir>...
+# Prints "<path-relative-to-the-tree>:<line>" for every NON-COMMENT line under
+# the given directories that names <filename>. A line whose first non-blank
+# character is '#' is prose about a list, not a use of one -- see the comment
+# block above for the specific three-line comment that makes this necessary.
+#
+# Split in bash rather than with awk on purpose: `awk` on Arch is a SYMLINK to
+# gawk, and test/unit/test-iso-build.sh builds its no-docker PATH out of
+# `find -type f`, which does not follow symlinks. An awk in here parses
+# perfectly, shellchecks clean, and silently produces nothing under the unit
+# suite -- a guard that passes for the wrong reason, in the guard whose whole
+# subject is checks that pass for the wrong reason.
+deck_list_readers() {
+  local needle=$1
+  shift
+  local dir hit path rest lineno text
+  for dir in "$@"; do
+    [[ -d $dir ]] || continue
+    while IFS= read -r hit; do
+      path=${hit%%:*}
+      rest=${hit#*:}
+      lineno=${rest%%:*}
+      text=${rest#*:}
+      text=${text#"${text%%[![:space:]]*}"}
+      if [[ $text == '#'* ]]; then
+        continue
+      fi
+      printf '%s:%s\n' "${path#"$SCRATCH_SRC/"}" "$lineno"
+    done < <(grep -rnF --binary-files=without-match -- "$needle" "$dir" 2>/dev/null || true)
+  done
+}
+
+deck_orphan_lists=()
+deck_consumer_report=()
+for deck_list in "${DECK_PACKAGE_LISTS[@]}"; do
+  mapfile -t deck_readers < <(deck_list_readers "$deck_list" "${DECK_CONSUMER_DIRS[@]}")
+  if (( ${#deck_readers[@]} == 0 )); then
+    deck_orphan_lists+=("$deck_list")
+  else
+    deck_consumer_report+=("$deck_list <- ${deck_readers[0]} (${#deck_readers[@]} non-comment reference(s))")
+  fi
+done
+
+if (( ${#deck_orphan_lists[@]} > 0 )); then
+  # For the diagnosis only: who DOES read these, outside the consumer scope.
+  # Handing the reader that list is the difference between "wire it up" and an
+  # hour spent arguing with a guard about a file they know something opens.
+  deck_orphan_detail=()
+  for deck_list in "${deck_orphan_lists[@]}"; do
+    mapfile -t deck_elsewhere < <(
+      deck_list_readers "$deck_list" "$DECK_LIST_DIR" | grep -v "^configs/deck/$deck_list:" || true
+    )
+    if (( ${#deck_elsewhere[@]} > 0 )); then
+      deck_orphan_detail+=("$deck_list -- read ONLY by: ${deck_elsewhere[*]} (a checker, not an installer)")
+    else
+      deck_orphan_detail+=("$deck_list -- read by nothing at all, anywhere in the overlaid tree")
+    fi
+  done
+
+  build_fail "guard 6.8: ${#deck_orphan_lists[@]} of ${#DECK_PACKAGE_LISTS[@]} package list(s) in configs/deck/ have NO CONSUMER. Nothing in builder/ or configs/airootfs/ reads them, so nothing installs them.
+
+$(printf '    %s\n' "${deck_orphan_detail[@]}")
+
+  A package list nothing reads is a comment. It can be written, reviewed,
+  maintained, unit-tested and shipped, and the machine that boots off this ISO
+  is exactly as if the file had never existed. That is not a theory: it is
+  docs/findings/P32-steam-never-installed.md -- eleven green install steps,
+  18/18 in the QEMU harness, and a Deck with no /usr/lib/steam showing a black
+  panel, because the only thing that ever opened deck-fetch.packages was a
+  dry-run checker.
+
+  WHAT COUNTS as a consumer here: a non-comment reference to the list's name in
+  builder/ (the container's own scripts -- the live pacstrap, the offline
+  mirror's download list, the merge into omarchy-base.packages) or in
+  configs/airootfs/ (what the live ISO carries and runs, the install
+  orchestrator included).
+
+  WHAT DOES NOT: a reference from another file in configs/deck/ -- that is
+  where the lists' own pre-flight checkers live, and reading a list to ask a
+  question about it installs nothing -- or a reference from iso/bin/build,
+  which is this guard.
+
+  Wire the list into something that installs it, or delete the list. Do not
+  satisfy this by adding a reference from a checker."
+fi
+
+build_log "guard 6.8 OK: all ${#DECK_PACKAGE_LISTS[@]} package list(s) in configs/deck/ are read by something that installs -- ${deck_consumer_report[*]}"
 
 # ---------------------------------------------------------------------------
 # Guard 6.5 -- the payload audit (T5-fork-plan.md §6.5, specified in §5.4).

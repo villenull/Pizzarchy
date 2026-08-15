@@ -253,6 +253,12 @@ make_fixture() {
   chmod +x "$root/src/deck-input-mapper.py"
   printf '%s' "$FIXTURE_OSK_LAYOUT_PY" >"$root/src/deck_osk_layout.py"
   printf '%s' "$FIXTURE_OSK_TTY_PY" >"$root/src/deck_osk_tty.py"
+  # The TARGET's OSK module set is WIDER than the live ISO's: step 5b stages
+  # only the tty backend deck-form.sh asks for, while step 5c stages every
+  # module in deck-session.sh's OSK_MODULES because Desktop Mode runs a Wayland
+  # compositor. The fixture symlinks the real deck-session.sh (below), so its
+  # array is the real one and the wayland module has to exist here too.
+  printf '"""Stand-in for src/deck_osk_wayland.py."""\n' >"$root/src/deck_osk_wayland.py"
   mkdir -p "$root/iso/overlay/configs/airootfs/usr/share/omarchy-iso" \
            "$root/iso/overlay/configs/deck"
   printf '%s' "$FIXTURE_DECK_FORM_SH" \
@@ -2582,5 +2588,208 @@ grep -q 'deck-live\.packages' "$ISO_ROOT/overlay/patches/deck-packages.patch" ||
   fail "deck-packages.patch still appends the live package list to packages.x86_64" \
     "Without that hunk the list reaches neither the live root nor the offline mirror."
 pass "the real repo's deck-form.sh ($real_mapper_bin, backend '$real_backend'), src/ modules, deck-live.packages and deck-packages.patch all agree"
+
+# ===========================================================================
+# 25. Guard 6.8 -- a package list nothing installs from is a comment.
+#
+# 🔴 THE REGRESSION THIS SECTION EXISTS FOR ALREADY SHIPPED, TWICE IN A DAY.
+# `steam` and `steamdeck-dsp` lived in configs/deck/deck-fetch.packages,
+# correctly spelled, documented at length, and read by exactly one thing in the
+# repo: deck-nvidia-dry-run.sh, which asks the NVIDIA question about them and
+# installs nothing. The ISO shipped, the install record reported eleven green
+# steps, the QEMU harness scored 18/18, and the Deck showed a black panel
+# because /usr/lib/steam did not exist
+# (docs/findings/P32-steam-never-installed.md).
+#
+# Guard 6.7 (d) asks "is deck-live.packages consumed?" of the patched builder,
+# by substring, comments included. 6.8 asks it of EVERY list in configs/deck/,
+# derived from the directory, over non-comment lines only, against the two
+# directories where installing code can live (builder/, configs/airootfs/).
+#
+# Each case below proves the guard FIRES, or proves a specific thing does NOT
+# count as a consumer. A guard of this shape is only worth having if the
+# false-satisfaction routes are pinned:
+#
+#   25a  a real consumer in builder/ AND one in the orchestrator both count
+#   25b  🔴 read by a sibling CHECKER only -- the exact P32 tree
+#   25c  read by nothing at all, anywhere
+#   25d  🔴 named only in a COMMENT in the builder -- which also proves
+#        iso/bin/build's own read (guard 6.7's, forty lines up) does not count
+#   25e  the derivation is the directory listing, not three names
+#
+# ⚠️ NOT COVERED HERE, on purpose: 6.8's own "cannot run" refusals (no
+# configs/deck/, no *.packages in it, a missing consumer directory). Guard 6.7
+# and guard 6.4a both run FIRST and check narrower versions of the same
+# preconditions -- deck-live.packages, builder/build-iso.sh, the orchestrator
+# directory -- so every fixture that would reach 6.8's refusals dies on theirs
+# with a different (also correct) message. The refusals stay in bin/build for
+# the day that ordering changes; they are unreachable from here, and claiming
+# to have tested them would be worse than saying so.
+# ===========================================================================
+
+# deck_list_fixture <root> <basename> <content>
+# Adds a package list to a fixture's overlay. Named deliberately after the real
+# lists (deck-fetch.packages), because the whole point is the shape of the file
+# that shipped.
+deck_list_fixture() {
+  local root=$1 name=$2 body=$3
+  mkdir -p "$root/iso/overlay/configs/deck"
+  printf '%s' "$body" >"$root/iso/overlay/configs/deck/$name"
+}
+
+# --- 25a. the positive case, both consumer scopes, and its denominator -----
+
+f68="$work/f68"
+make_fixture "$f68"
+deck_list_fixture "$f68" deck-fetch.packages '# fetched over the network at install time
+steam
+'
+# The consumer is an orchestrator module -- the install-time half of the scope,
+# and the shape T5's fetch step takes: it runs on the target, not in the
+# container, so nothing in builder/ would ever name this list.
+mkdir -p "$f68/iso/overlay/configs/airootfs/usr/share/omarchy-iso/orchestrator"
+printf 'FETCH_LIST = "/usr/share/omarchy-iso/deck/deck-fetch.packages"\n' \
+  >"$f68/iso/overlay/configs/airootfs/usr/share/omarchy-iso/orchestrator/deck_pkgs.py"
+run_build "$f68"
+[[ $BUILD_OUT == *"docker is required"* ]] ||
+  fail "a fixture whose every package list has a consumer reaches the docker step" "$BUILD_OUT"
+[[ $BUILD_OUT == *"guard 6.8 OK"* ]] || fail "guard 6.8 logs success on a well-formed tree" "$BUILD_OUT"
+# The denominator: a guard that checked one list would also say OK.
+[[ $BUILD_OUT == *"all 2 package list(s)"* ]] ||
+  fail "guard 6.8 says how many lists it checked, so a derivation that found one cannot look like a pass" "$BUILD_OUT"
+[[ $BUILD_OUT == *"deck-live.packages <- builder/build-iso.sh"* ]] ||
+  fail "the success line names the builder consumer it found for the live list" "$BUILD_OUT"
+[[ $BUILD_OUT == *"deck-fetch.packages <- configs/airootfs/usr/share/omarchy-iso/orchestrator/deck_pkgs.py"* ]] ||
+  fail "the success line names the ORCHESTRATOR consumer -- install-time consumption counts, not just container-time" "$BUILD_OUT"
+pass "guard 6.8 passes when every configs/deck list is read by something that installs, and names each consumer it found"
+
+# --- 25b. 🔴 the exact P32 tree: read by a checker, installed by nothing ----
+
+f69="$work/f69"
+make_fixture "$f69"
+deck_list_fixture "$f69" deck-fetch.packages '# fetched over the network at install time
+steamdeck-dsp
+steam
+'
+# The pre-flight checker, in configs/deck/ beside the list, exactly where the
+# real deck-nvidia-dry-run.sh lives and doing exactly what it does: reading the
+# list to ask a question, installing nothing.
+# shellcheck disable=SC2016 # the unexpanded $LIST_DIR IS the fixture: this is
+# a verbatim copy of the real checker's own line, not a path being built here.
+printf '#!/usr/bin/env bash\nFETCH_LIST="$LIST_DIR/deck-fetch.packages"\nresolve_only "$FETCH_LIST"\n' \
+  >"$f69/iso/overlay/configs/deck/deck-nvidia-dry-run.sh"
+run_build "$f69"
+[[ $BUILD_STATUS -eq 1 ]] ||
+  fail "a package list with no installer must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"guard 6.8:"* ]] || fail "the refusal is guard 6.8's" "$BUILD_OUT"
+[[ $BUILD_OUT == *"deck-fetch.packages -- read ONLY by:"* ]] ||
+  fail "the refusal NAMES the orphaned list" "$BUILD_OUT"
+[[ $BUILD_OUT == *"configs/deck/deck-nvidia-dry-run.sh:"* ]] ||
+  fail "the refusal names the checker that DOES read it, with its line -- otherwise the reader argues with the guard about a file they know something opens" "$BUILD_OUT"
+[[ $BUILD_OUT == *"a checker, not an installer"* ]] ||
+  fail "the refusal gives the RIGHT diagnosis: reading is not installing" "$BUILD_OUT"
+[[ $BUILD_OUT == *"1 of 2 package list(s)"* ]] ||
+  fail "the refusal says how many of how many, so a guard that checked one list cannot hide" "$BUILD_OUT"
+[[ $BUILD_OUT != *"docker is required"* ]] ||
+  fail "it must stop before docker -- six gigabytes later is not the place to learn this" "$BUILD_OUT"
+pass "🔴 guard 6.8 fires on the exact tree that shipped a Deck with no Steam: a list its own checker reads and nothing installs"
+
+# --- 25c. read by nothing at all, anywhere ---------------------------------
+#
+# Distinguished from 25b in the MESSAGE, because the two need different fixes:
+# 25b's reader is a checker that must not be promoted into a consumer, 25c's
+# list is simply dead.
+f70="$work/f70"
+make_fixture "$f70"
+deck_list_fixture "$f70" deck-orphan.packages '# nothing has ever read this
+some-package
+'
+run_build "$f70"
+[[ $BUILD_STATUS -eq 1 ]] ||
+  fail "a list read by nothing must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"deck-orphan.packages -- read by nothing at all"* ]] ||
+  fail "a list with no reader anywhere is reported as such, not as 'read only by a checker'" "$BUILD_OUT"
+[[ $BUILD_OUT == *"Wire the list into something that installs it, or delete the list"* ]] ||
+  fail "the refusal says what to do about it" "$BUILD_OUT"
+pass "a package list nothing anywhere reads is refused, and reported differently from one a checker reads"
+
+# --- 25d. 🔴 a mention in a COMMENT is not a consumer ----------------------
+#
+# Two false-satisfaction routes closed by one fixture:
+#
+#   * the patched build-iso.sh really does carry a three-line comment naming
+#     the other lists side by side (deck-packages.patch, seam S6). A list
+#     mentioned only in that prose must not pass on the strength of being
+#     documented -- which is precisely how deck-fetch.packages felt safe;
+#   * iso/bin/build ITSELF reads deck-live.packages, in guard 6.7, as a check.
+#     Guard 6.7 (d)'s own `grep -q deck-live\.packages` over the builder is
+#     satisfied by the comment below, so 6.7 passes here. If bin/build's read
+#     counted as a consumer, or if comments counted, this fixture would build.
+#     It must not: the guard would then be citing itself.
+f71="$work/f71"
+make_fixture "$f71"
+printf '#!/bin/bash\n# reads deck-live.packages, honest (it does not)\necho fixture build-iso.sh ran\n' \
+  >"$f71/iso/upstream/builder/build-iso.sh"
+refresh_fixture_upstream "$f71" 'builder that only mentions the live list in a comment'
+run_build "$f71"
+[[ $BUILD_STATUS -eq 1 ]] ||
+  fail "a list named only in a comment must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"guard 6.7 OK"* ]] ||
+  fail "guard 6.7's substring check is satisfied by the comment -- that is the premise of this case" "$BUILD_OUT"
+[[ $BUILD_OUT == *"deck-live.packages -- read by nothing at all"* ]] ||
+  fail "guard 6.8 discounts the comment AND its own read in bin/build, and says the list has no consumer" "$BUILD_OUT"
+pass "🔴 a comment naming a list is not a consumer, and iso/bin/build's own guard-6.7 read of it does not count either"
+
+# --- 25e. the subject is the DIRECTORY, not a list of names ----------------
+#
+# The failure this closes: a guard hard-coding "deck-install, deck-mirror,
+# deck-live, deck-fetch" is green the day someone adds a fifth list, which is
+# the same defect one level up. Three new lists, one consumed, two not; both
+# unconsumed ones must be named.
+f72="$work/f72"
+make_fixture "$f72"
+deck_list_fixture "$f72" deck-alpha.packages 'alpha-package
+'
+deck_list_fixture "$f72" deck-beta.packages 'beta-package
+'
+deck_list_fixture "$f72" deck-gamma.packages 'gamma-package
+'
+printf '#!/bin/bash\ngrep -hv "^#" /configs/deck/deck-live.packages >>packages.x86_64\ngrep -hv "^#" /configs/deck/deck-beta.packages >>packages.x86_64\n' \
+  >"$f72/iso/upstream/builder/build-iso.sh"
+refresh_fixture_upstream "$f72" 'builder consuming two of four lists'
+run_build "$f72"
+[[ $BUILD_STATUS -eq 1 ]] || fail "two unconsumed lists must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"2 of 4 package list(s)"* ]] ||
+  fail "the guard's subject is every *.packages in the directory, and it counts them" "$BUILD_OUT"
+[[ $BUILD_OUT == *"deck-alpha.packages"* && $BUILD_OUT == *"deck-gamma.packages"* ]] ||
+  fail "EVERY orphan is named, not just the first -- one fix per build is how the second one survives" "$BUILD_OUT"
+[[ $BUILD_OUT != *"deck-beta.packages --"* ]] ||
+  fail "the consumed list must not be reported as an orphan" "$BUILD_OUT"
+pass "guard 6.8 derives its subject from configs/deck/ itself and reports every orphan it finds, not just the first"
+
+# --- 25f. the real repo still has the shape this section fixtures ----------
+#
+# ⚠️ DELIBERATELY NOT ASSERTED HERE: that every real list currently HAS a
+# consumer. On this commit deck-fetch.packages does not -- that is the open P1
+# (docs/findings/P32-steam-never-installed.md), and guard 6.8 fails the real
+# build today, on purpose. Asserting it here would either encode the bug as
+# expected or leave this suite red for reasons a unit tier cannot fix.
+real_deck_dir="$ISO_ROOT/overlay/configs/deck"
+[[ -d $real_deck_dir ]] || fail "iso/overlay/configs/deck/ exists -- guard 6.8's subject"
+mapfile -t real_deck_lists < <(find "$real_deck_dir" -maxdepth 1 -type f -name '*.packages' -printf '%f\n' | LC_ALL=C sort)
+(( ${#real_deck_lists[@]} >= 3 )) ||
+  fail "the real tree carries the Deck package lists this section fixtures" \
+    "found ${#real_deck_lists[@]} (${real_deck_lists[*]:-<none>}); if they moved, guard 6.8's subject moved with them"
+# The checker exclusion is only worth having while a checker really is sitting
+# in that directory reading a list. The day it stops, the exclusion is dead
+# weight and this says so.
+real_dry_run="$real_deck_dir/deck-nvidia-dry-run.sh"
+[[ -f $real_dry_run ]] ||
+  fail "configs/deck/deck-nvidia-dry-run.sh exists" \
+    "guard 6.8 excludes configs/deck/ from its consumer scope BECAUSE that checker lives there; with it gone the exclusion needs re-arguing, not keeping"
+grep -q '\.packages' "$real_dry_run" ||
+  fail "deck-nvidia-dry-run.sh still reads a package list" \
+    "the exclusion in guard 6.8 exists for exactly this read; if it is gone, say so in the guard rather than leaving a rule nothing needs"
+pass "the real repo carries ${#real_deck_lists[@]} deck package list(s) (${real_deck_lists[*]}) and the checker whose read guard 6.8 refuses to count"
 
 printf '\nall iso-build tests passed\n'
