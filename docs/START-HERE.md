@@ -29,11 +29,13 @@ work without waiting for further instruction.**
 >
 > ### What is LEFT (verify, don't trust — check the tree)
 >
-> 1. **The pin+build change** (submodule bump to `174dd82`, `iso/{RUNTIME,UPSTREAM,PKGS}`,
->    and `iso/bin/build` `edge`→`stable` + `omarchy-dev`→`omarchy`). Check `git log`
->    for whether session 27 landed it — it was attempted all-or-nothing, gated on
->    `test/unit/test-iso-build.sh` + shellcheck staying green. If NOT landed, the
->    exact edits are enumerated in `docs/findings/T9-stable-pin.md` "What this breaks".
+> 1. **The pin+build change is on branch `stable-rebase-pin` (commit `5aaed0e`), NOT
+>    on `main`** — kept off main because `test/unit/test-iso-build.sh` fixtures still
+>    encode the old `omarchy-dev`/`setup-system` names. The submodule bump to `174dd82`
+>    (which auto-fixes the one BREAKS-US row) + pins + channel/package settings are all
+>    verified-clean on that branch. **The precise finish line — the fixture refactor
+>    (Path A vs B, one operator decision), then the real ISO rebuild — is
+>    `docs/findings/T9-stable-rebase-remaining.md`.** This is Opus work.
 > 2. **The Deck update itself** — operator-present, §6 of PROGRESS. Run
 >    `P36-deck-stable-update-runbook.md`. ⚠️ edge→stable replaces `omarchy-dev` with
 >    `omarchy` via a pacman conflict, and 5 migrations call `sudo` — **`ssh -t`, not

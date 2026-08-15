@@ -2999,8 +2999,14 @@ pacman to remove `omarchy-dev` (conflict). A headless `omarchy-update` over SSH
 can hang on any of these — the Deck runbook uses `ssh -t` + primed sudo for
 exactly this.
 
-**State at session-27 close:** the hardware-free analysis + records are done and
-committed. The Deck update itself is operator-present (runbook ready). See §6.
+**State at session-27 close:** the analysis + records + runbook are on `main`.
+The pin+build change (submodule → `174dd82`, pins, `edge`→`stable`,
+`omarchy-dev`→`omarchy`) is verified-clean but lives on branch
+**`stable-rebase-pin`** (`5aaed0e`), kept off `main` because
+`test/unit/test-iso-build.sh` fixtures still encode the old `-dev`/`setup-system`
+names. Finish line — the fixture refactor (Path A vs B is the one operator
+decision) + the real ISO rebuild — is `docs/findings/T9-stable-rebase-remaining.md`.
+The Deck update itself is operator-present (runbook ready). See §6.
 
 ---
 
