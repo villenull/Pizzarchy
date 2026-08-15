@@ -3333,6 +3333,50 @@ cannot catch either**: it flags a package list entry with no installer, and this
 gap is a third, unstated limitation — prose asserting a consumer that no single
 line names.
 
+### 5.34 🆕 THE OSK DRAWS ON HARDWARE — and four defects only hardware could show (session 28, operator test in progress)
+
+**The headline is a pass.** `docs/PROGRESS.md` §5.33a listed "the OSK actually
+*draws* on a real tty and binds to a real controller" as unproven and
+QEMU-unanswerable. **It draws, and it binds.** Photographed on the Wi-Fi
+passphrase screen and the user-account screen. P32's biggest P1 is fixed on
+hardware, not just in a VM.
+
+Four defects came with it. **None blocks an install** — the operator was told to
+keep testing and batch them. Fixes deferred to one parallel round.
+
+**D1 🔴 the reserved-username check is DEAD, and has been since it was written.**
+`deck-form.sh:749` sets `DECK_RESERVED_USERNAMES_VAR=RESERVED_USERNAMES` and
+`deck_form_load_reserved_usernames` does `declare -p` on it expecting a bash
+**array**. Upstream's vendored `setup-form.sh:82` defines
+`OMARCHY_RESERVED_USERNAMES` — **different name, and a regex STRING, not an
+array.** So `deck_form_username_reserved` returns 1 for every input. And because
+our override replaces `omarchy_prompt_username` wholesale, upstream's own regex
+check at its line 111 never runs either: *both* checks are gone, and a user named
+`root` is accepted. The comment at `deck-form.sh:739` states the variable name
+was **"(INFERRED, NOT READ this session)"** and says *"Verify the real name
+against the vendored copy before this ships."* It shipped unverified. The
+loud-degradation design is what surfaced it — this is the warning working.
+
+**D2 🐞 `DECK_OSK_BIND_DEADLINE=5` (`deck-form.sh:229`) is too short on real
+hardware, and the warning is never retracted.** The mapper binds later than 5 s;
+we do not kill it on deadline expiry, so it comes up anyway and a *false*
+"did not report bound within 5s -- this prompt runs WITHOUT it" is left on the
+screen next to a working keyboard. **QEMU structurally could not catch this**:
+with no gamepad the bind never happens, so the message was always true there.
+Whatever the new deadline is, the retraction matters as much as the number.
+
+**D3 🐞 the keyboard is far too small on a 7" panel.** `Layer.width` 16 ×
+`KEY_CELL = 5` (`src/deck_osk_tty.py:138`) = 80 columns at the console's default
+8×16 font. **Coupled, not a one-line fix:** a larger console font is the real
+win (it enlarges every installer screen, not just the OSK) but gives *fewer*
+columns, so `KEY_CELL` must shrink with it. 5→3 appears to fit — `cell_text`
+draws highlighted as `[` + `label.center(w-2)` + `]`, which at w=3 is `[q]`, the
+same width as plain. Any change here must respect `write_at`'s `console_cols`
+guard and `rows_on_screen`'s wrap argument.
+
+**D4 🐞 the OSK flickers.** `write_at` rewrites every row with `\x1b[K` between a
+cursor save/restore on each repaint. Rate is unmeasured — measure before fixing.
+
 ---
 
 ## 6. Blocked on human
