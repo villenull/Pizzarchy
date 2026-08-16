@@ -1651,9 +1651,9 @@ pass "the tail of the list is Rescan then Stop, in that order"
 # reaches what the user actually sees.
 secured_row=$(LC_ALL=C command grep -F "My Home Network" "$work/rows.txt")
 open_row=$(LC_ALL=C command grep -F "OpenGuest" "$work/rows.txt")
-[[ $secured_row == *$'\360\237\224\222'* ]] ||
+[[ $secured_row == *"$DECK_NET_SECURED_GLYPH"* ]] ||
   fail "a secured (psk) network's row must carry the lock glyph" "got: $secured_row"
-[[ $open_row != *$'\360\237\224\222'* ]] ||
+[[ $open_row != *"$DECK_NET_SECURED_GLYPH"* ]] ||
   fail "an open network's row must NOT carry the lock glyph" "got: $open_row"
 pass "the lock glyph is present for secured networks and absent for open ones"
 
@@ -1732,7 +1732,7 @@ echo "--- S1 the cancel-fallback and menu decisions (mutation targets) ---------
   fail "the OLD Skip row's text must have no special meaning left anywhere -- a half-removed row that still maps to an action is worse than one that was never removed"
 [[ $(deck_form_net_choice_action "$DECK_NET_RESCAN_ROW") == rescan ]] ||
   fail "the Rescan row must map to rescan"
-[[ $(deck_form_net_choice_action $'\360\237\224\222 My Home Network') == connect ]] ||
+[[ $(deck_form_net_choice_action "${DECK_NET_SECURED_GLYPH}My Home Network") == connect ]] ||
   fail "an ordinary network row must map to connect"
 pass "network-list choice mapping: cancel redraws (never acts), Stop/Rescan/network map correctly"
 
@@ -2563,7 +2563,7 @@ pass "B/Esc on the network list REDRAWS (never acts, and never falls into Stop),
 # --- §5 row 4: wrong passphrase, bounded at 3 tries ---
 printf 'wrong1\nwrong2\nwrong3\nwrong4\n' >"$work/pass.q"
 S1_INPUT_QUEUE="$work/pass.q" S1_CONNECT_RC=1 \
-  s1_run wrongpw $'\360\237\224\222 My Home Network' "$DECK_NET_STOP_ROW" "Power off"
+  s1_run wrongpw "${DECK_NET_SECURED_GLYPH}My Home Network" "$DECK_NET_STOP_ROW" "Power off"
 [[ $s1_rc -eq 143 ]] || fail "three wrong passphrases must end back at the list, not stuck" "rc=$s1_rc"
 LC_ALL=C grep -qF "That didn't work -- check the password" "$work/s1-wrongpw/say.log" ||
   fail "§5's exact retry sentence must be shown" "$(s1_say wrongpw)"
@@ -2581,7 +2581,7 @@ pass "§5: a wrong passphrase re-prompts with the right sentence and is bounded 
 printf 'C0rrect horse!\n' >"$work/pass-ok.q"
 printf 'wlan0 UP 192.168.1.50/24\n' >"$work/ip-ok"
 S1_INPUT_QUEUE="$work/pass-ok.q" S1_IP_OUTPUT="$work/ip-ok" \
-  s1_run happy $'\360\237\224\222 My Home Network'
+  s1_run happy "${DECK_NET_SECURED_GLYPH}My Home Network"
 [[ $s1_rc -eq 0 ]] || fail "a successful join must return 0" "rc=$s1_rc; $(cat "$work/s1-happy/stderr")"
 # A4: assert on what the command RECEIVED, not on the screen.
 LC_ALL=C grep -qF -- "--passphrase C0rrect horse! station wlan0 connect My Home Network" "$work/s1-happy/iwctl.log" ||
@@ -2616,7 +2616,7 @@ pass "an open network joins with no passphrase prompt and stages an unsecured ke
 printf 'C0rrect horse!\n' >"$work/pass-dhcp.q"
 printf 'wlan0 UP 169.254.9.9/16\n' >"$work/ip-linklocal"
 S1_INPUT_QUEUE="$work/pass-dhcp.q" S1_IP_OUTPUT="$work/ip-linklocal" \
-  s1_run nodhcp $'\360\237\224\222 My Home Network' "Pick another network" "$DECK_NET_STOP_ROW" "Power off"
+  s1_run nodhcp "${DECK_NET_SECURED_GLYPH}My Home Network" "Pick another network" "$DECK_NET_STOP_ROW" "Power off"
 [[ $s1_rc -eq 143 ]] || fail "a DHCP failure must be recoverable, not fatal" "rc=$s1_rc"
 LC_ALL=C grep -qF "never handed out an address" "$work/s1-nodhcp/say.log" ||
   fail "§5: an association with no DHCP must be reported as a failure, not as success" "$(s1_say nodhcp)"
@@ -2644,7 +2644,7 @@ pass "§5: associated-but-no-DHCP is a failure with a recovery menu, never a rec
 # --- the DHCP menu's own three answers, driven for real ---
 printf 'pw1\npw2\n' >"$work/pass-retry.q"
 S1_INPUT_QUEUE="$work/pass-retry.q" S1_IP_OUTPUT="$work/ip-linklocal" \
-  s1_run dhcpretry $'\360\237\224\222 My Home Network' "Try again" "Pick another network" "$DECK_NET_STOP_ROW" "Power off"
+  s1_run dhcpretry "${DECK_NET_SECURED_GLYPH}My Home Network" "Try again" "Pick another network" "$DECK_NET_STOP_ROW" "Power off"
 [[ $s1_rc -eq 143 ]] || fail "the DHCP menu must always end somewhere reachable" "rc=$s1_rc"
 retries=$(LC_ALL=C command grep -c 'connect' "$work/s1-dhcpretry/iwctl.log")
 [[ $retries -eq 2 ]] ||
@@ -2664,7 +2664,7 @@ printf 'C0rrect horse!\n' >"$work/pass-portal.q"
 printf 'wlan0 UP 10.0.0.9/24\n' >"$work/ip-portal"
 rm -rf "$work/s1-portal"; mkdir -p "$work/s1-portal"
 printf 'Y\n' >"$work/s1-lizard"
-printf '%s\n%s\n%s\n%s\n' $'\360\237\224\222 My Home Network' "Pick another network" "$DECK_NET_STOP_ROW" "Power off" >"$work/s1-portal/choose.q"
+printf '%s\n%s\n%s\n%s\n' "${DECK_NET_SECURED_GLYPH}My Home Network" "Pick another network" "$DECK_NET_STOP_ROW" "Power off" >"$work/s1-portal/choose.q"
 : >"$work/s1-portal/iwctl.log"; : >"$work/s1-portal/gum.log"
 env "${s1_env[@]}" \
     DECK_CURL_BIN="$work/bin-portal/curl" \
@@ -2741,7 +2741,7 @@ cat >"$work/networks-8021x.raw" <<EOF
 EOF
 rm -rf "$work/s1-corp"; mkdir -p "$work/s1-corp"
 printf 'Y\n' >"$work/s1-lizard"
-printf '%s\n%s\n%s\n' $'\360\237\224\222 CorpNet' "$DECK_NET_STOP_ROW" "Power off" >"$work/s1-corp/choose.q"
+printf '%s\n%s\n%s\n' "${DECK_NET_SECURED_GLYPH}CorpNet" "$DECK_NET_STOP_ROW" "Power off" >"$work/s1-corp/choose.q"
 : >"$work/s1-corp/iwctl.log"; : >"$work/s1-corp/gum.log"
 env "${s1_env[@]}" \
     IWCTL_NETWORKS="$work/networks-8021x.raw" \
@@ -2801,7 +2801,7 @@ pass "a hostile SSID reaches iwctl raw, the screen sanitised, and S5 sanitised -
 printf '<EMPTY>\nC0rrect horse!\n' >"$work/pass-empty.q"
 printf 'wlan0 UP 10.0.0.7/24\n' >"$work/ip-empty"
 S1_INPUT_QUEUE="$work/pass-empty.q" S1_IP_OUTPUT="$work/ip-empty" \
-  s1_run emptypw $'\360\237\224\222 My Home Network'
+  s1_run emptypw "${DECK_NET_SECURED_GLYPH}My Home Network"
 [[ $s1_rc -eq 0 ]] || fail "an empty passphrase must re-prompt, then succeed on the real one" "rc=$s1_rc"
 LC_ALL=C grep -qF "No password entered" "$work/s1-emptypw/say.log" ||
   fail "an empty passphrase must be reported and re-prompted, not submitted" "$(s1_say emptypw)"

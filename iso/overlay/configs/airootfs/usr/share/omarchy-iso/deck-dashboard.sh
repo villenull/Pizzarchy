@@ -125,23 +125,58 @@ deck_dashboard_die()  { printf '[%s] ERROR: %s\n' "$DECK_DASHBOARD_PROG" "$*" >&
 # (docs/tasks/T4a-dashboard-screens.md §3); the unit suite checks it again,
 # in bytes, so a future edit cannot silently regrow past it.
 #
-# ⚠️ OPEN ITEM, NOT RESOLVED HERE (T4a §3's own flag, carried forward
-# unchanged): the STEAM+X / STEAM-button / QAM chords named below are a
-# src/deck-input-mapper.py / src/deck-session.sh question this file does not
-# own. If Desktop Mode's real chord set ends up different from what these
-# entries assume, they must be re-checked against whatever that layer
-# actually ships -- not left here on faith just because they read plausibly.
+# ✅ THE OPEN ITEM ABOVE IS NOW CLOSED -- and it was right to worry.
+#
+# T4a §3 flagged that these entries named chords "on faith just because they
+# read plausibly", and asked for them to be re-checked against what the input
+# layer actually ships. Done 2026-08-16, against src/deck-input-mapper.py and
+# against the live Deck over SSH. FOUR OF THE NINE WERE FALSE:
+#
+#   "Steam and Gaming Mode are always one button press away"
+#       Gaming Mode is THREE presses: QAM, System, Gaming Mode. It is a
+#       `system.gaming` row (deck-session.sh writes it into
+#       ~/.config/omarchy/extensions/omarchy-menu.jsonc) and the dotted id
+#       nests it under System. The operator caught this one on hardware.
+#   "Press the STEAM button, then Power, to switch between Gaming and Desktop"
+#       Same error, different route, and STEAM is not even the button.
+#   "The STEAM button opens the Omarchy menu for apps, settings, and more"
+#       STEAM is `omarchy-menu toggle apps` -- the APPS menu. The Omarchy
+#       menu is QAM (`omarchy-menu toggle`). This had the two swapped.
+#   "Use the QAM (... button) for quick settings and volume"
+#       QAM opens the Omarchy menu. There is no separate quick-settings panel.
+#
+#   "Both trackpads act as a mouse" was half true and is now precise: the
+#   pointer comes from the RIGHT pad only (POINTER_AXES / POINTER_CLICK_HALF).
+#   R2/L2 were correct -- TRIGGER_BUTTON_MAP is BTN_TR2 -> BTN_LEFT,
+#   BTN_TL2 -> BTN_RIGHT.
+#
+# Update and Style > Theme were CONFIRMED, not assumed: both are real rows in
+# /usr/share/omarchy/default/omarchy/omarchy-menu.jsonc on the installed Deck
+# (`update`, `style.theme`).
+#
+# 🔴 THE RULE THAT WOULD HAVE CAUGHT THESE EARLIER. Every entry here must name
+# a chord or a menu path that some OTHER file actually implements. This file
+# implements none of them, so an entry is only ever as true as the last time
+# somebody checked it against that file. If you add one, cite where it lives.
 # shellcheck disable=SC2034  # read by upstream's own current_tip(), not in this file
 tips=(
-  "Steam and Gaming Mode are always one button press away"
-  "The STEAM + X chord opens the on-screen keyboard in Desktop Mode"
-  "The STEAM button opens the Omarchy menu for apps, settings, and more"
-  "Use the QAM (... button) for quick settings and volume"
-  "Both trackpads act as a mouse in Desktop Mode -- R2 clicks, L2 right-clicks"
+  # deck-input-mapper.py: OSK_CHORD_HOLD (BTN_MODE) + OSK_CHORD_PRESS (BTN_NORTH)
+  "STEAM + X opens the on-screen keyboard in Desktop Mode"
+  # deck-input-mapper.py: CLOSE_WINDOW_ARGV, hl.dsp.window.close()
+  "STEAM + Y closes the window you are looking at"
+  # deck-input-mapper.py:35,38 -- `omarchy-menu toggle apps` vs `toggle`
+  "The STEAM button opens the apps menu; QAM opens the Omarchy menu"
+  # deck-session.sh writes the system.gaming row; System is where it nests
+  "Back to Gaming Mode: press QAM, choose System, then Gaming Mode"
+  # deck-input-mapper.py: POINTER_CLICK_HALF, TRIGGER_BUTTON_MAP
+  "The right trackpad is the mouse -- R2 left-clicks, L2 right-clicks"
   "A controller works everywhere in Desktop Mode, not just in games"
+  # omarchy-menu.jsonc: the `update` root row
   "Keep the system fresh with Update in the Omarchy menu"
+  # omarchy-menu.jsonc: the `style.theme` row
   "Switch themes from Style > Theme in the Omarchy menu"
-  "Press the STEAM button, then Power, to switch between Gaming and Desktop Mode"
+  # deck-session.sh: stage-power-button
+  "The power button suspends the Deck, in Gaming Mode and on the desktop"
 )
 
 # ===========================================================================

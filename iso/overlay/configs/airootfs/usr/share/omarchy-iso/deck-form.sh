@@ -1348,6 +1348,25 @@ readonly DECK_NET_RESCAN_ROW="Rescan"
 # that would still work, and that promise was the defect.
 readonly DECK_NET_STOP_ROW="Stop the install"
 
+# What marks a secured network in the list.
+#
+# 🔴 THIS WAS U+1F512 🔒 AND THE CONSOLE CANNOT DRAW IT. Confirmed by looking
+# at the screen: docs/images/install-02-wifi.png, captured from the shipping
+# ISO, shows a solid box in front of every secured SSID. The Linux console font
+# has no glyph for an astral-plane emoji and substitutes the missing-character
+# box, so the row said "there is something here" and nothing more. It still
+# distinguished secured from open, which is exactly why it survived -- every
+# test asserted the BYTES were present, and the bytes were present. None of
+# them could see that the pixels were a box.
+#
+# ASCII, deliberately: this list is drawn on a bare tty by the installer,
+# before any font or locale work the installed system might do. A marker that
+# depends on the console font being anything in particular is the bug again.
+#
+# Open networks carry no marker. The asymmetry is the point -- the eye is
+# meant to catch the ones that will ask for a password.
+readonly DECK_NET_SECURED_GLYPH='* '
+
 # Where a wireless interface is DETECTED. §5's own detection column says
 # "`ip -br link` has no wireless device" -- ⚠️ that is not something
 # `ip -br link` can answer: it prints NAME/STATE/MAC/flags and says nothing
@@ -1513,7 +1532,7 @@ deck_form_build_network_rows() {
   while IFS=$'\t' read -r ssid security signal; do
     [[ -n $ssid ]] || continue
     safe_ssid=$(deck_form_sanitize_ssid "$ssid")
-    if [[ $security == open ]]; then glyph=""; else glyph=$'\360\237\224\222 '; fi
+    if [[ $security == open ]]; then glyph=""; else glyph=$DECK_NET_SECURED_GLYPH; fi
     printf '%s%s\n' "$glyph" "$safe_ssid"
   done <"$parsed"
   printf '%s\n' "$DECK_NET_RESCAN_ROW"
