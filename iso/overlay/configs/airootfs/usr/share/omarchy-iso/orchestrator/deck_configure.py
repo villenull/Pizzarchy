@@ -88,6 +88,7 @@ def deck_steps() -> list[DeckStep]:
         deck_patches,
         deck_pkgs,
         deck_rotation,
+        deck_steam_bootstrap,
         deck_steam_seed,
         deck_session_bake,
         deck_session_settings,
@@ -113,6 +114,28 @@ def deck_steps() -> list[DeckStep]:
         # section, the phase prints, and omarchy-deck-steam-first-boot.service
         # says so on the machine itself and stays in `systemctl --failed`.
         DeckStep("pkgs", deck_pkgs.fetch_packages_step, critical=False),
+        # P34. Runs Valve's own updater INSIDE the target during the install,
+        # so the client is already installed and current at first boot.
+        # Measured: first boot goes from the 2m03s of black panel §5.35
+        # photographed to 1.66s ("Nothing to do -> Verification complete"), at
+        # a cost of ~84s here, behind a progress line.
+        #
+        # 🔴 AFTER `pkgs` (which installs steam and its lib32 deps) and BEFORE
+        # `steam_seed`. The updater WRITES ~/.steam/registry.vdf -- it merges
+        # rather than clobbers, so neither order is fatal, but running first
+        # makes the seed the last writer: if this step is killed while Valve is
+        # saving that file, the seed rewrites it whole.
+        #
+        # ⚠️ THE UPDATER'S EXIT CODE IS WORTHLESS. With no DNS it logs "Steam
+        # needs to be online to update" -- the exact modal §5.35 photographed --
+        # and exits 0. The step asserts the produced marker instead, the way
+        # deck_pkgs asserts the installed package.
+        #
+        # critical=False, and every give-up path keeps the bytes that landed,
+        # so the floor is today's behaviour: first boot downloads what is
+        # missing. It cannot be worse than not running -- which is the bar the
+        # removed pre-warm failed when it hung an install past its own budget.
+        DeckStep("steam_bootstrap", deck_steam_bootstrap.steam_bootstrap_step, critical=False),
         # P34. Answers Steam's OOBE stage 1 from the SYSTEM LOCALE
         # (`locale_config.sys_lang`), so the user is not asked to choose a
         # region minutes after our own screen asked for a timezone.
