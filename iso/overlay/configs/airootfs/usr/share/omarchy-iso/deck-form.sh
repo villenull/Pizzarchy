@@ -707,7 +707,7 @@ deck_form_text_prompt() {
 readonly -a DECK_S0_LINES=(
   "This installs Omarchy on your Steam Deck and erases the internal drive."
   "It includes proprietary firmware from AMD and Valve (graphics, Wi-Fi, Bluetooth, audio DSP) -- the Deck does not work without it."
-  "Steam and the audio DSP firmware are downloaded from Valve during setup."
+  "Steam is downloaded from Valve during setup; everything else is already on this USB stick."
 )
 readonly DECK_S0_PROMPT_LINE="Press A to begin"
 
@@ -1304,6 +1304,14 @@ omarchy_prompt_hostname() { deck_form_hostname_body; }
 readonly DECK_NET_SKIP_ROW="Skip -- set up Wi-Fi later"
 readonly DECK_NET_RESCAN_ROW="Rescan"
 
+# The "no" label on the offline gate (P33 L1). The gate is only ever reached
+# from a path that HAS a network list behind it (the Skip row, and the Skip
+# entry inside a post-association failure menu), so there is exactly one of
+# these -- offering "go back to the network list" where no list was ever drawn
+# is the kind of button that teaches a user the screen is lying to them, which
+# is why the no-hardware and dead-iwd paths get deck_form_offline_note instead.
+readonly DECK_NET_BACK_TO_LIST_ROW="Go back to the network list"
+
 # Where a wireless interface is DETECTED. §5's own detection column says
 # "`ip -br link` has no wireless device" -- ⚠️ that is not something
 # `ip -br link` can answer: it prints NAME/STATE/MAC/flags and says nothing
@@ -1341,6 +1349,17 @@ readonly DECK_NET_PORTAL_EXPECT="NetworkManager is online"
 readonly DECK_NET_STATE_DIR_DEFAULT=/root
 readonly DECK_NET_STAGED_NMCONNECTION=deck-wifi.nmconnection
 readonly DECK_NET_OUTCOME_FILE=deck-wifi-outcome
+
+# 🔴 THE DEFAULT CURSOR ON THE "no network at all" CONFIRM (P33 L1).
+# Same constant-and-reason shape as DECK_DISK_CONFIRM_DEFAULT below, and for
+# the same reason: `gum confirm` with no --default flag starts on the
+# AFFIRMATIVE, and here the affirmative is the choice that produces a Deck
+# with no Steam and a black panel (docs/findings/P32-steam-never-installed.md
+# -- "identical to a dead one -- black, no messages, not even a cursor").
+# The dangerous answer is never the default, and keeping it as its own named
+# constant makes a mutation that drops or flips it a one-line, directly
+# assertable change.
+readonly DECK_NET_OFFLINE_CONFIRM_DEFAULT=false
 
 deck_form_strip_ansi() {
   # ESC [ ... <letter> -- the CSI form iwctl's own colouring uses.
@@ -1669,21 +1688,259 @@ deck_form_net_failure_action_for() {
   esac
 }
 
-# --- §5's consequence text, stated on S1's skip and again on S5 -------------
+# ===========================================================================
+# §5's consequence text, and the gate in front of it (P33 L1)
+# ===========================================================================
 #
-# "That text is not decoration -- it is docs/tasks/T5-fork-plan.md §4.1's
-# requirement (i) rendered." Kept as one function with no side effects so
-# both call sites draw the SAME words and a [U] test can assert them
-# without a terminal (the deck_form_s0_text pattern).
+# 🔴 WHAT CHANGED, 2026-08-16, AND WHY THE OLD TEXT WAS A DEFECT IN ITSELF.
+# It read:
+#
+#   "Without a network the install still completes, but the audio DSP firmware
+#    and Steam are not downloaded. Speakers will sound thin and Gaming Mode
+#    will have no Steam until the Deck is connected."
+#
+# Two things wrong with that, both measured rather than argued:
+#
+#  1. THE DSP HALF IS NO LONGER TRUE. `steamdeck-dsp` was moved out of
+#     configs/deck/deck-fetch.packages into deck-mirror.packages +
+#     deck-install.packages on 2026-08-15 (operator decision; read this
+#     session out of deck-fetch.packages' own ⚠️ note and confirmed present in
+#     both other lists). It now rides in the OFFLINE MIRROR, so an offline
+#     install gets it and the speakers are fine. `steam` is the only entry
+#     left in the fetch list, and it stays online on Steam Subscriber
+#     Agreement grounds, which is not negotiable.
+#     ⚠️ The identical stale claim is still in DECK_S0_LINES above
+#     ("Steam and the audio DSP firmware are downloaded from Valve during
+#     setup"). It is NOT fixed here because
+#     test/vm/vm-installer-screens-test.sh asserts that sentence verbatim and
+#     this file's owner does not own that suite -- reported instead.
+#
+#  2. "Gaming Mode will have no Steam" MASSIVELY understates the outcome.
+#     docs/findings/P32-steam-never-installed.md, on hardware: with no Steam,
+#     gamescope starts with nothing to display and the panel stays black --
+#     "identical to a dead one -- black, no messages, not even a cursor." The
+#     operator lost an evening to exactly that screen. A user reading the old
+#     sentence would picture Gaming Mode minus one icon. They get a device
+#     that looks bricked.
+#
+# 🔴 AND THE TEXT WAS EFFECTIVELY INVISIBLE. On every path it was `say`n and
+# then the flow returned straight into the next screen, whose first act is
+# `clear_logo` (a full `\033[H\033[2J`). The consequence was wiped before
+# anyone could read it. That is why the offline path now ENDS ON A SCREEN THE
+# USER HAS TO ANSWER rather than on three lines of prose in flight.
+#
+# ---------------------------------------------------------------------------
+# THE QUESTION IS "IS THERE ANY NETWORK?", NOT "DID YOU CONFIGURE WI-FI?"
+# ---------------------------------------------------------------------------
+#
+# ⚠️ DO NOT turn this into "you may not skip Wi-Fi".
+# orchestrator/deck_pkgs.py's own DECISION 2 is explicit, and it is right: a
+# Deck on a dock's ethernet legitimately records `wifi status=skipped` and is
+# perfectly fine, and refusing to proceed "would silently deny that machine
+# its Steam on the strength of an answer about the radio". So the gate below
+# DETECTS the real state instead of asking, and only the machine that has no
+# network by ANY route is made to confirm.
+#
+# The detection is deliberately built out of parts this file already had, and
+# both are already unit-tested against fixtures:
+#   - deck_form_has_ipv4, applied to `ip -4 -br addr show` with NO device
+#     filter, i.e. every interface. It already excludes 169.254/16 (which is
+#     what the kernel hands out when DHCP FAILED) and 127/8, so "has an
+#     address" cannot go green on the two non-answers.
+#   - deck_form_wifi_portal_check, NetworkManager's own connectivity endpoint,
+#     so the installer and the installed system agree about what "online"
+#     means.
+readonly DECK_NET_VERDICT_DEFAULT=offline
+
+# deck_form_addr_present
+# True when ANY interface holds a routable IPv4 address -- ethernet on a dock,
+# a USB adapter, a tethered phone, or wlan0 itself. Deliberately not filtered
+# to a device: the whole point is that the answer must not be about the radio.
+deck_form_addr_present() {
+  local ip_bin=${DECK_IP_BIN:-ip} out
+  out=$("$ip_bin" -4 -br addr show 2>/dev/null) || out=""
+  deck_form_has_ipv4 "$out"
+}
+
+# deck_form_net_probe -> online | portal | unreachable | unchecked
+#
+# deck_form_wifi_portal_check collapses "curl is missing" and "the probe ran
+# and failed" into one `unreachable`, which is right for ITS caller (both mean
+# "do not claim online") and wrong for this one: "we could not look" and "we
+# looked and there was nothing there" must not produce the same screen.
+#
+# ✅ MEASURED, so `unchecked` should never fire on a real ISO: `curl` is not in
+# archiso releng's packages.x86_64, but `git` IS in build-iso.sh's
+# `arch_packages` (its line 121) and `pacman -Si git` lists `curl` as a hard
+# Depends On. Read on the dev machine 2026-08-16, not assumed. The branch is
+# kept anyway -- a dependency is not a guarantee, and the alternative is this
+# function lying about a check it never made.
+deck_form_net_probe() {
+  local curl_bin=${DECK_CURL_BIN:-curl}
+  if ! command -v "$curl_bin" >/dev/null 2>&1; then
+    deck_form_warn "no '$curl_bin' in the live environment -- whether this network reaches the internet was NOT checked"
+    printf 'unchecked\n'
+    return 0
+  fi
+  deck_form_wifi_portal_check
+}
+
+# deck_form_network_verdict_for <has-addr:0|1> <probe-verdict>
+#   -> online | unproven | offline
+#
+# 🔴 THE ADDRESS DECIDES WHETHER THE USER IS STOPPED; THE PROBE ONLY DECIDES
+# WHAT THE SCREEN SAYS. That split is the whole design, and it is what keeps
+# the dock-ethernet Deck frictionless:
+#
+#   * no routable address anywhere  -> `offline`. There is no network by any
+#     route. This is the ONLY verdict that demands an explicit confirmation,
+#     and it is a fact about the machine, not an answer the user gave.
+#   * an address, and the probe confirmed the internet -> `online`. One line,
+#     no press, straight on. A dock user must not be interrogated.
+#   * an address, but the probe did not confirm (a captive portal, an
+#     unreachable endpoint, or no curl to look with) -> `unproven`. There IS a
+#     network; we cannot promise it reaches Valve. The consequence is stated
+#     in full, and the confirm defaults to Continue, because stopping a
+#     machine that has a working link on the strength of a probe we could not
+#     complete is the deck_pkgs.py DECISION 2 mistake in a different costume.
+deck_form_network_verdict_for() {
+  local has_addr=$1 probe=$2
+  if [[ $has_addr != 1 ]]; then
+    printf 'offline\n'
+    return 0
+  fi
+  case $probe in
+    online) printf 'online\n' ;;
+    *)      printf 'unproven\n' ;;
+  esac
+}
+
+# deck_form_network_verdict -- the [V] half: gathers, then delegates.
+# The probe is SKIPPED when there is no address, and that is not an
+# optimisation: with no routable address the probe cannot succeed, and running
+# it would spend curl's 5 s timeout on every offline install to learn nothing.
+deck_form_network_verdict() {
+  local has_addr=0 probe=skipped
+  deck_form_addr_present && has_addr=1
+  [[ $has_addr == 1 ]] && probe=$(deck_form_net_probe)
+  deck_form_network_verdict_for "$has_addr" "$probe"
+}
+
+# The consequence itself. Four lines, no side effects, one copy -- so every
+# call site draws the SAME words and a [U] test can assert them without a
+# terminal (the deck_form_s0_text pattern this file already uses).
+# ⚠️ Line length is load-bearing, not style: the console is 160 columns and
+# `say` pads left by (160-81)/2 = 39, so a line over 121 columns WRAPS and
+# silently costs a row. docs/PROGRESS.md §5.40 is what a row overrun does on
+# this hardware -- it pushed the username and password prompts off the screen
+# and shipped. test/unit/test-deck-form.sh asserts the width and the row
+# budget for both screens below.
 deck_form_wifi_offline_text() {
-  printf '%s\n' "Without a network the install still completes, but the audio DSP firmware and Steam are not downloaded."
-  printf '%s\n' "Speakers will sound thin and Gaming Mode will have no Steam until the Deck is connected."
-  printf '%s\n' "Wi-Fi can be set up from Desktop Mode afterwards."
+  printf '%s\n' "Steam is downloaded during setup, so with no network it is NOT installed."
+  printf '%s\n' "A Deck with no Steam boots to a BLACK SCREEN -- no Gaming Mode, no message, nothing to press."
+  printf '%s\n' "It is not broken. It looks exactly like it is."
+  printf '%s\n' "Wi-Fi can be set up from Desktop Mode afterwards, and Steam installed from there."
 }
 
 deck_form_wifi_offline_notice() {
   local line
   while IFS= read -r line; do say "$line"; done < <(deck_form_wifi_offline_text)
+}
+
+# deck_form_offline_headline <verdict>
+# One sentence naming the state that was DETECTED. Split out so S1's gate and
+# S5's recap cannot drift into describing the same machine two ways.
+deck_form_offline_headline() {
+  case ${1:-$DECK_NET_VERDICT_DEFAULT} in
+    online)
+      printf '%s\n' "This Deck already has a network connection, so Steam will still be downloaded." ;;
+    unproven)
+      printf '%s\n' "This Deck has a network address, but the internet could not be confirmed." ;;
+    *)
+      printf '%s\n' "No network was found -- no Wi-Fi, and nothing on a dock or a USB adapter either." ;;
+  esac
+}
+
+# deck_form_offline_detect
+# Runs the detection ONCE and remembers it in the global DECK_NET_VERDICT, so
+# S5 can recap the SAME state without re-probing on every redraw of a screen
+# that loops -- a 5 s curl per redraw would be a new bug in the name of fixing
+# one. Echoes the verdict as well, so callers do not have to read the global.
+deck_form_offline_detect() {
+  local verdict
+  verdict=$(deck_form_network_verdict)
+  # shellcheck disable=SC2034  # read by deck_final_summary, deliberately global
+  DECK_NET_VERDICT=$verdict
+  printf '%s\n' "$verdict"
+}
+
+# deck_form_offline_note
+#
+# The NON-BLOCKING half: state what was detected and carry on. Used on the two
+# paths where the user made no choice at all -- there is no Wi-Fi hardware, or
+# iwd would not start.
+#
+# 🔴 WHY THESE TWO PATHS ARE NOT GATED, DECIDED DELIBERATELY.
+#  1. There is nothing to decide. With no radio and no iwd there is no network
+#     list to go back to and no Wi-Fi to join; a confirm would be a question
+#     whose only real answer is "yes".
+#  2. ⚠️ IT WOULD BREAK BOTH QEMU TIERS, WHICH ARE NOT THIS FILE'S TO FIX.
+#     Every QEMU run takes this path (no wlan0 in a VM -- see
+#     test/vm/vm-installer-screens-test.sh's own note), and both harnesses
+#     cross the greeter with a SINGLE `ret` that must land on "Select keyboard
+#     layout". An extra screen there turns the cheap tier red -- or worse,
+#     hangs it: `gum confirm --default=false` was MEASURED (session 23, cited
+#     in vm-install-controller-test.sh) NOT to accept Enter as the affirmative,
+#     so a bare Enter would answer "go back" and loop forever. A stuck job that
+#     reports nothing is strictly worse than a failure.
+#  3. The consequence is still put in front of the user, and on a screen they
+#     have to answer: S5 recaps the same detected verdict and the same
+#     consequence text immediately above its "Ready to install?" gate.
+deck_form_offline_note() {
+  local verdict
+  verdict=$(deck_form_offline_detect)
+  say "$(deck_form_offline_headline "$verdict")"
+  [[ $verdict == online ]] && return 0
+  deck_form_wifi_offline_notice
+  return 0
+}
+
+# deck_form_offline_gate <back-label>
+#
+# The BLOCKING half, and the operator's actual request: the screen that stands
+# between "the user pressed Skip on the network list" and the rest of the
+# install. Returns 0 to continue, 1 to go back to the list.
+#
+# 🔴 It draws its own full screen (clear_logo) rather than appending under the
+# network list. Appending is what made the old notice unreadable: the list has
+# already consumed most of the console, so the text landed at the bottom and
+# the next screen's clear_logo erased it before anyone could read it.
+deck_form_offline_gate() {
+  local back_label=${1:-"Go back"} verdict
+  verdict=$(deck_form_offline_detect)
+
+  if [[ $verdict == online ]]; then
+    # Frictionless, on purpose. Nothing to confirm: this machine HAS a
+    # network, it just is not Wi-Fi.
+    say "$(deck_form_offline_headline online)"
+    return 0
+  fi
+
+  clear_logo
+  echo
+  say --foreground 1 "$(deck_form_offline_headline "$verdict")"
+  deck_form_wifi_offline_notice
+  echo
+
+  if [[ $verdict == unproven ]]; then
+    gum confirm --affirmative "Continue" --negative "$back_label" \
+      --default=true "Continue without Wi-Fi?" && return 0
+    return 1
+  fi
+
+  gum confirm --affirmative "Install anyway, with no Steam" --negative "$back_label" \
+    --default="$DECK_NET_OFFLINE_CONFIRM_DEFAULT" "Continue with no network at all?" && return 0
+  return 1
 }
 
 # ===========================================================================
@@ -2084,7 +2341,11 @@ deck_form_wifi_screen() {
 
   if ! iface=$(deck_form_wifi_iface); then
     say "No Wi-Fi hardware found -- continuing offline."
-    deck_form_wifi_offline_notice
+    # Non-blocking: the user chose nothing here, there is nothing to go back
+    # to, and this is the path every QEMU run takes. See
+    # deck_form_offline_note's own block for the full argument. S5 is where
+    # this machine's user has to acknowledge the consequence.
+    deck_form_offline_note
     deck_form_wifi_record_outcome "$state_dir" no-hardware ""
     return 0
   fi
@@ -2094,7 +2355,7 @@ deck_form_wifi_screen() {
     # §5: "Same, with the unit's status line shown. Never swallow."
     say --foreground 1 "The Wi-Fi service (iwd) would not start -- continuing offline."
     [[ -n $iwd_status ]] && say "$iwd_status"
-    deck_form_wifi_offline_notice
+    deck_form_offline_note
     deck_form_wifi_record_outcome "$state_dir" iwd-failed ""
     return 0
   fi
@@ -2118,8 +2379,11 @@ deck_form_wifi_screen() {
       redraw) continue ;;
       rescan) continue ;;
       skip)
+        # 🔴 The outcome is recorded only AFTER the gate has been answered.
+        # Recording `skipped` first and then offering a way back would leave
+        # a record saying the user gave up on a run where they did not.
+        deck_form_offline_gate "$DECK_NET_BACK_TO_LIST_ROW" || continue
         say "Continuing without Wi-Fi."
-        deck_form_wifi_offline_notice
         deck_form_wifi_record_outcome "$state_dir" skipped ""
         rm -f "$parsed" "$rows"
         return 0
@@ -2151,8 +2415,12 @@ deck_form_wifi_screen() {
         return 0
         ;;
       2)
+        # Same gate as the Skip row, and for the same reason: this is the
+        # other way a user leaves S1 without Wi-Fi (the "Skip" entry inside a
+        # post-association failure menu). A gate on only one of the two would
+        # be a gate with a hole in it.
+        deck_form_offline_gate "$DECK_NET_BACK_TO_LIST_ROW" || continue
         say "Continuing without Wi-Fi."
-        deck_form_wifi_offline_notice
         deck_form_wifi_record_outcome "$state_dir" skipped ""
         rm -f "$parsed" "$rows"
         return 0
@@ -2598,6 +2866,59 @@ readonly DECK_WIFI_NOT_CONNECTED="Not connected"
 readonly DECK_SUMMARY_DESKTOP=Omarchy
 readonly DECK_SUMMARY_BOOT="Gaming Mode"
 
+# ===========================================================================
+# S5's pre-reboot warning (P33 L2) -- "the deck will reboot, just wait"
+# ===========================================================================
+#
+# Operator request, 2026-08-16, after watching a real first boot:
+# "can we add a warning in the step right before the reboot that the deck will
+#  reboot and to just wait the two mins etc."
+#
+# 🔴 THE NUMBERS ARE MEASURED, NOT ROUNDED UP FOR COMFORT.
+# docs/PROGRESS.md §5.35, read off Steam's own
+# ~/.local/share/Steam/logs/bootstrap_log.txt on the installed Deck:
+#
+#   15:08:15  Steam launches (-gamepadui), "Downloading Update..."
+#   15:09:51  "Extracting package..."
+#   15:10:14  "Update complete, launching..."
+#   15:10:18  the new client starts          => 2m03s of black panel
+#
+# and `systemd-analyze` on the same machine says the BOOT is 39.168 s with
+# plymouth-quit at 659 ms. So the two minutes are Steam unpacking itself, not
+# a slow boot, and nothing can paint in that window today: the cmdline is
+# `quiet splash loglevel=0 systemd.show_status=false vt.global_cursor_default=0`.
+# "About two minutes" and "about 40 seconds" below are those two measurements.
+#
+# ⚠️ WHERE THIS *SHOULD* LIVE, AND WHY IT DOES NOT. The literal last screen
+# before the reboot is S7 -- `render_finish` / `reboot_prompt`, which live in
+# `omarchy-install-dashboard`, overridden in
+# /usr/share/omarchy-iso/deck-dashboard.sh. That is a SEPARATE PROCESS this
+# file is never sourced into (see the S8 block above: defining a name here
+# that only the dashboard calls is dead code on a real ISO). S5 is the last
+# screen `configurator` -- and therefore this file -- owns, so the warning is
+# given here, immediately above the point of no return. Putting a second copy
+# on S7 is a one-line addition to deck-dashboard.sh's `render_finish`, which
+# already carries a custom line, and it is reported rather than done because
+# this file's owner does not own that file.
+readonly -a DECK_S5_REBOOT_LINES=(
+  "When the install finishes the Deck reboots on its own."
+  "The first boot then sits on a BLACK SCREEN for about two minutes while Steam unpacks itself."
+  "That is normal. Don't turn me off -- just wait."
+  "After that it starts in Gaming Mode, and every later boot takes about 40 seconds."
+)
+
+# Split out for the same reason as deck_form_s0_text: asserted on the
+# function's own output, not on a screenshot.
+deck_form_reboot_notice_text() {
+  local line
+  for line in "${DECK_S5_REBOOT_LINES[@]}"; do printf '%s\n' "$line"; done
+}
+
+deck_form_reboot_notice() {
+  local line
+  while IFS= read -r line; do say "$line"; done < <(deck_form_reboot_notice_text)
+}
+
 # deck_form_summary_rows
 # Prints "Field,Value" CSV rows -- upstream's own `user_step` table
 # convention (`gum table -s ","`) -- built from the SAME globals
@@ -2664,10 +2985,24 @@ deck_final_summary() {
     # §5: the offline consequence is "stated once, on S1's skip and again
     # on S5". This is the S5 half. Keyed on the same global the Wi-Fi row
     # above is built from, so the sentence and the row can never disagree.
+    #
+    # P33 L1: it now recaps the state S1 DETECTED (DECK_NET_VERDICT) rather
+    # than assuming "no SSID" means "no network" -- a Deck on a dock's
+    # ethernet has no SSID and is perfectly fine, and telling that user their
+    # Deck will boot black would be a false statement on the last screen
+    # before the install. An unset verdict means S1 never ran (this screen is
+    # reachable on its own from `user_step`'s recap loop), and the safe
+    # reading of "we do not know" is the warning, not the reassurance.
     if [[ -z ${DECK_WIFI_SSID:-} ]]; then
-      deck_form_wifi_offline_notice
+      local net_verdict=${DECK_NET_VERDICT:-$DECK_NET_VERDICT_DEFAULT}
+      say --foreground 3 "$(deck_form_offline_headline "$net_verdict")"
+      [[ $net_verdict == online ]] || deck_form_wifi_offline_notice
       echo
     fi
+    # P33 L2. Unconditional -- every install reboots, and the two-minute black
+    # panel is not conditional on anything the screens above decided.
+    deck_form_reboot_notice
+    echo
     if gum confirm --affirmative "Install" --negative "Go back" --default=true "Ready to install?"; then
       return 0
     fi

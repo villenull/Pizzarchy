@@ -654,8 +654,14 @@ assert "S0 discloses the erase warning" \
   screens::marker_present "$(extract 00-greeter)" "This installs Omarchy on your Steam Deck and erases the internal drive."
 assert "S0 discloses the proprietary-firmware dependency" \
   screens::marker_present "$(extract 00-greeter)" "It includes proprietary firmware from AMD and Valve"
-assert "S0 discloses that Steam/DSP firmware download during setup" \
-  screens::marker_present "$(extract 00-greeter)" "Steam and the audio DSP firmware are downloaded from Valve during setup."
+# 🔴 THE DSP HALF OF THIS CLAIM WENT FALSE ON 2026-08-15 and this assertion is
+# what kept it on screen: `steamdeck-dsp` moved into deck-mirror.packages +
+# deck-install.packages that day, so it is pacstrapped OFFLINE and is not
+# downloaded from anywhere. `steam` is the only entry left in
+# deck-fetch.packages. A test that pins user-facing prose has to move when the
+# prose stops being true, or it enforces the lie.
+assert "S0 discloses that Steam downloads during setup, and that nothing else does" \
+  screens::marker_present "$(extract 00-greeter)" "Steam is downloaded from Valve during setup; everything else is already on this USB stick."
 
 log "--- guard 1 (advance-and-vanish) at every transition ------------------"
 assert "S0->kb-list advance-and-vanish" \

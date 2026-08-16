@@ -142,7 +142,21 @@ pop_queue() {   # <queue-file> -> prints the popped line, status 1 if dry
 }
 
 case "$sub" in
-  confirm) exit "${FAKE_GUM_CONFIRM_RC:-0}" ;;
+  confirm)
+    # A queue, for exactly the reason the choose queue below has one: P33 L1
+    # puts a confirm INSIDE S1's loop, so a fake that answers "no" forever
+    # spins the screen forever and the failure mode is a killed suite that
+    # reports nothing. One scripted exit status per call; when it runs dry the
+    # answer falls back to FAKE_GUM_CONFIRM_RC and a marker is logged, so a
+    # test that relied on the queue can assert it was never over-run.
+    if [[ -n ${FAKE_GUM_CONFIRM_QUEUE:-} ]]; then
+      if line=$(pop_queue "$FAKE_GUM_CONFIRM_QUEUE"); then
+        exit "$line"
+      fi
+      printf 'CONFIRM-QUEUE-EXHAUSTED\n' >>"${FAKE_GUM_LOG:-/dev/null}"
+    fi
+    exit "${FAKE_GUM_CONFIRM_RC:-0}"
+    ;;
   choose)
     if [[ -n ${FAKE_GUM_CHOOSE_QUEUE:-} ]]; then
       if line=$(pop_queue "$FAKE_GUM_CHOOSE_QUEUE"); then
@@ -1767,13 +1781,35 @@ pass "portal verdict distinguishes online / portal / unreachable (three outcomes
 echo "--- S1 offline consequence text (§5, stated on skip AND on S5) ----------"
 
 offline=$(deck_form_wifi_offline_text)
-LC_ALL=C grep -qF "audio DSP firmware and Steam are not downloaded" <<<"$offline" ||
+LC_ALL=C grep -qF "Steam is downloaded during setup" <<<"$offline" ||
   fail "§5's consequence text must name what is not downloaded"
-LC_ALL=C grep -qF "Gaming Mode will have no Steam" <<<"$offline" ||
-  fail "§5's consequence text must name the Gaming Mode consequence"
+# 🔴 P33 L1. "Gaming Mode will have no Steam" used to be the whole
+# consequence, and it is not what the machine does: with no Steam, gamescope
+# starts with nothing to display and the panel stays black --
+# docs/findings/P32-steam-never-installed.md, on hardware, "identical to a
+# dead one -- black, no messages, not even a cursor". A user who reads
+# "Gaming Mode will have no Steam" pictures a missing icon; they get a device
+# that looks bricked. The words BLACK SCREEN are the assertion.
+LC_ALL=C grep -qF "BLACK SCREEN" <<<"$offline" ||
+  fail "the consequence text must say the Deck boots to a BLACK SCREEN -- 'Gaming Mode will have no Steam' understates a device that looks dead"
 LC_ALL=C grep -qF "Desktop Mode afterwards" <<<"$offline" ||
   fail "§5's consequence text must say Wi-Fi can be set up later"
-pass "the offline consequence text carries all three of §5's clauses"
+# ⚠️ The DSP claim is GONE and must stay gone. `steamdeck-dsp` moved out of
+# deck-fetch.packages into deck-mirror.packages + deck-install.packages on
+# 2026-08-15, so it rides in the OFFLINE MIRROR: an offline install gets it,
+# and telling the user their speakers will sound thin is now a false
+# statement on a screen. Asserted against the real package lists rather than
+# against a memory of the decision, so re-introducing either one goes red.
+fetch_list="$REPO_ROOT/iso/overlay/configs/deck/deck-fetch.packages"
+[[ -f $fetch_list ]] || fail "cannot find deck-fetch.packages -- this cross-check is broken, not the code"
+if LC_ALL=C command grep -qx 'steamdeck-dsp' "$fetch_list"; then
+  fail "steamdeck-dsp is back in deck-fetch.packages -- the offline consequence text must name the audio DSP again"
+fi
+LC_ALL=C grep -qiF "DSP" <<<"$offline" &&
+  fail "the offline text claims the audio DSP is not downloaded, but steamdeck-dsp is in the OFFLINE MIRROR (deck-mirror.packages + deck-install.packages) -- an offline install gets it" "$offline"
+LC_ALL=C grep -qiF "sound thin" <<<"$offline" &&
+  fail "the offline text still promises thin speakers; steamdeck-dsp ships in the offline mirror"
+pass "the offline consequence text names the BLACK SCREEN, names the recovery, and no longer makes the (now false) DSP claim"
 
 echo "--- S1 wireless-interface detection (sysfs, not a name pattern) ----------"
 
@@ -2046,8 +2082,19 @@ env "${s1_env[@]}" DECK_NET_SYSFS="$work/net-none" \
     timeout 20 bash "$work/s1-boot.sh" >/dev/null 2>&1 || fail "S1 must return 0 with no Wi-Fi hardware -- it must never block the install (this is also every QEMU run)"
 LC_ALL=C grep -qF "No Wi-Fi hardware found" "$work/s1-nohw/say2.log" ||
   fail "S1 must SAY that no Wi-Fi hardware was found" "$(cat "$work/s1-nohw/say2.log")"
-LC_ALL=C grep -qF "audio DSP firmware and Steam are not downloaded" "$work/s1-nohw/say2.log" ||
+LC_ALL=C grep -qF "with no network it is NOT installed" "$work/s1-nohw/say2.log" ||
   fail "the no-hardware path must state §5's offline consequence, not just skip silently"
+# 🔴 P33 L1: AND IT MUST NOT ASK ANYTHING HERE. The user chose nothing on this
+# path, there is no network list to go back to -- and this is the path EVERY
+# QEMU run takes (no wlan0 in a VM). Both VM harnesses cross the greeter with
+# a single `ret` that must land on "Select keyboard layout"
+# (test/vm/vm-installer-screens-test.sh's own advance_and_vanish), so a screen
+# inserted here turns the cheap tier red, or hangs it: `gum confirm
+# --default=false` was measured NOT to accept Enter as the affirmative, so a
+# bare Enter would answer "go back" and loop forever. The acknowledgement for
+# this machine happens on S5, which is a gate the user has to cross anyway.
+LC_ALL=C grep -qF "confirm" "$work/s1-nohw/gum.log" &&
+  fail "the no-hardware path must NOT add a confirm -- every QEMU run takes it, and both VM harnesses expect one keypress from the greeter to land on the keyboard screen" "$(cat "$work/s1-nohw/gum.log")"
 LC_ALL=C grep -qxF "status=no-hardware" "$work/s1-nohw/$DECK_NET_OUTCOME_FILE" ||
   fail "the no-hardware path must record its outcome" "$(cat "$work/s1-nohw/$DECK_NET_OUTCOME_FILE")"
 pass "§5: no Wi-Fi hardware -> S1 returns 0, says so, states the consequence, records no-hardware"
@@ -2069,11 +2116,251 @@ s1_run skip "$DECK_NET_SKIP_ROW"
 [[ $s1_rc -eq 0 ]] || fail "the Skip row must complete the screen" "rc=$s1_rc"
 LC_ALL=C grep -qxF "status=skipped" "$work/s1-skip/$DECK_NET_OUTCOME_FILE" ||
   fail "Skip must record the skipped outcome" "$(s1_out skip)"
-LC_ALL=C grep -qF "audio DSP firmware and Steam are not downloaded" "$work/s1-skip/say.log" ||
+LC_ALL=C grep -qF "with no network it is NOT installed" "$work/s1-skip/say.log" ||
   fail "§5: the consequence must be stated on S1's skip"
 [[ ! -e "$work/s1-skip/$DECK_NET_STAGED_NMCONNECTION" ]] ||
   fail "Skip must not stage a NetworkManager profile"
 pass "§5: Skip -> completes, states the consequence, records skipped, stages nothing"
+
+# ===========================================================================
+# P33 L1 -- the offline gate, driven end-to-end through the real screen
+# ===========================================================================
+#
+# The operator's question was "the install doesn't work without wifi ... should
+# we add a flag on the wifi setup step to make this clear?" -- and the answer
+# that matters is that a machine on a dock's ethernet must NOT be flagged
+# (orchestrator/deck_pkgs.py DECISION 2: refusing to proceed there "would
+# silently deny that machine its Steam on the strength of an answer about the
+# radio"). So there are two assertions here, not one, and the second is the
+# one that keeps the fix honest.
+
+# --- (a) Skip with NO network anywhere: the confirm must actually be asked,
+#         and its cursor must start on the safe answer ---
+LC_ALL=C grep -qF "confirm" "$work/s1-skip/gum.log" ||
+  fail "Skip with no network must ask an explicit confirm -- the user must not default into a Deck that boots black" "$(cat "$work/s1-skip/gum.log")"
+LC_ALL=C grep -qF -- "--default=$DECK_NET_OFFLINE_CONFIRM_DEFAULT" "$work/s1-skip/gum.log" ||
+  fail "the offline confirm must pass --default=$DECK_NET_OFFLINE_CONFIRM_DEFAULT explicitly; gum confirm with no --default starts on the AFFIRMATIVE, which here is the dangerous answer" "$(cat "$work/s1-skip/gum.log")"
+[[ $DECK_NET_OFFLINE_CONFIRM_DEFAULT == false ]] ||
+  fail "DECK_NET_OFFLINE_CONFIRM_DEFAULT must be false -- the dangerous choice is never the default (the DECK_DISK_CONFIRM_DEFAULT precedent)"
+LC_ALL=C grep -qF "$DECK_NET_BACK_TO_LIST_ROW" "$work/s1-skip/gum.log" ||
+  fail "the gate reached from the network list must offer a way back TO the list"
+pass "P33 L1: Skip with no network at all -> an explicit confirm, cursor on the safe answer, with a way back"
+
+# --- (b) declining the gate returns to the list, and the run does NOT record
+#         `skipped` on the pass where the user changed their mind ---
+printf '1\n0\n' >"$work/gate-confirm.q"
+export FAKE_GUM_CONFIRM_QUEUE="$work/gate-confirm.q"
+s1_run gateback "$DECK_NET_SKIP_ROW" "$DECK_NET_SKIP_ROW"
+unset FAKE_GUM_CONFIRM_QUEUE
+[[ $s1_rc -eq 0 ]] || fail "declining the offline gate must return to the list, not fail the screen" "rc=$s1_rc"
+LC_ALL=C grep -qF "CONFIRM-QUEUE-EXHAUSTED" "$work/s1-gateback/gum.log" &&
+  fail "the gate was asked more times than this test scripted -- the loop is not doing what this case claims" "$(cat "$work/s1-gateback/gum.log")"
+[[ $(LC_ALL=C command grep -c '^choose' "$work/s1-gateback/gum.log") -eq 2 ]] ||
+  fail "'Go back' on the offline gate must redraw the network list exactly once more" "$(cat "$work/s1-gateback/gum.log")"
+LC_ALL=C grep -qxF "status=skipped" "$work/s1-gateback/$DECK_NET_OUTCOME_FILE" ||
+  fail "accepting the gate on the second pass must still record status=skipped"
+pass "P33 L1: 'Go back' on the offline gate returns to the network list; the outcome is recorded only once the gate is accepted"
+
+# --- (c) 🔴 THE ONE THAT KEEPS IT HONEST: a Deck with ethernet and real
+#         internet skips Wi-Fi with NO confirm at all ---
+#
+# The shared s1_env points DECK_CURL_BIN at a path that does not exist (every
+# other case wants "the probe could not run"), so this case builds the screen's
+# environment itself with a curl that answers and an `ip` that reports a wired
+# address. Detection, not an answer the user gave.
+mkdir -p "$work/bin-online"
+cat >"$work/bin-online/curl" <<CURLOK
+#!/usr/bin/env bash
+printf '%s\n' "$DECK_NET_PORTAL_EXPECT"
+exit 0
+CURLOK
+chmod +x "$work/bin-online/curl"
+printf 'lo  UNKNOWN 127.0.0.1/8\nenp0s20u1 UP 192.168.7.31/24\n' >"$work/ip-eth"
+rm -rf "$work/s1-ethernet"; mkdir -p "$work/s1-ethernet"
+printf 'Y\n' >"$work/s1-lizard"
+printf '%s\n' "$DECK_NET_SKIP_ROW" >"$work/s1-ethernet/choose.q"
+: >"$work/s1-ethernet/iwctl.log"; : >"$work/s1-ethernet/gum.log"
+eth_rc=0
+env "${s1_env[@]}" \
+    DECK_CURL_BIN="$work/bin-online/curl" \
+    DECK_FORM_PATH="$DECK_FORM_SH" \
+    DECK_NET_STATE_DIR="$work/s1-ethernet" \
+    DECK_TEST_SAY_LOG="$work/s1-ethernet/say.log" \
+    IWCTL_LOG="$work/s1-ethernet/iwctl.log" \
+    FAKE_GUM_LOG="$work/s1-ethernet/gum.log" \
+    FAKE_GUM_CHOOSE_QUEUE="$work/s1-ethernet/choose.q" \
+    IP_ADDR_OUTPUT="$work/ip-eth" \
+    timeout 40 bash "$work/s1-boot.sh" >/dev/null 2>&1 || eth_rc=$?
+[[ $eth_rc -eq 0 ]] || fail "an ethernet Deck skipping Wi-Fi must complete S1" "rc=$eth_rc"
+LC_ALL=C grep -qF "confirm" "$work/s1-ethernet/gum.log" &&
+  fail "🔴 an ethernet Deck was made to confirm a warning about having no network. deck_pkgs.py DECISION 2: a Deck on a dock's ethernet legitimately records status=skipped and must not be denied its Steam on the strength of an answer about the radio" "$(cat "$work/s1-ethernet/gum.log")"
+LC_ALL=C grep -qF "with no network it is NOT installed" "$work/s1-ethernet/say.log" &&
+  fail "an ethernet Deck must not be told its Deck will boot black -- that is a false statement about that machine" "$(cat "$work/s1-ethernet/say.log")"
+LC_ALL=C grep -qF "already has a network connection" "$work/s1-ethernet/say.log" ||
+  fail "the ethernet case must SAY why it is not warning -- silence here is indistinguishable from the detection never running" "$(cat "$work/s1-ethernet/say.log")"
+LC_ALL=C grep -qxF "status=skipped" "$work/s1-ethernet/$DECK_NET_OUTCOME_FILE" ||
+  fail "the ethernet case still records status=skipped -- deck_pkgs.py reads that vocabulary and must see it unchanged"
+pass "P33 L1: a Deck with ethernet and internet skips Wi-Fi with NO confirm, no false warning, and the same status=skipped record"
+
+# --- (d) the middle case: an address, but the internet could not be
+#         confirmed. The consequence is still stated in full -- but the
+#         cursor starts on Continue, because stopping a machine that has a
+#         working link on the strength of a probe we could not complete is
+#         deck_pkgs.py DECISION 2's mistake wearing a different hat. ---
+rm -rf "$work/s1-unproven"; mkdir -p "$work/s1-unproven"
+printf 'Y\n' >"$work/s1-lizard"
+printf '%s\n' "$DECK_NET_SKIP_ROW" >"$work/s1-unproven/choose.q"
+: >"$work/s1-unproven/iwctl.log"; : >"$work/s1-unproven/gum.log"
+unp_rc=0
+env "${s1_env[@]}" \
+    DECK_FORM_PATH="$DECK_FORM_SH" \
+    DECK_NET_STATE_DIR="$work/s1-unproven" \
+    DECK_TEST_SAY_LOG="$work/s1-unproven/say.log" \
+    IWCTL_LOG="$work/s1-unproven/iwctl.log" \
+    FAKE_GUM_LOG="$work/s1-unproven/gum.log" \
+    FAKE_GUM_CHOOSE_QUEUE="$work/s1-unproven/choose.q" \
+    IP_ADDR_OUTPUT="$work/ip-eth" \
+    timeout 40 bash "$work/s1-boot.sh" >/dev/null 2>&1 || unp_rc=$?
+[[ $unp_rc -eq 0 ]] || fail "the unproven-network case must complete S1" "rc=$unp_rc"
+LC_ALL=C grep -qF "internet could not be confirmed" "$work/s1-unproven/say.log" ||
+  fail "an unconfirmed probe must be described as unconfirmed, not as 'no network' -- there IS a link" "$(cat "$work/s1-unproven/say.log")"
+LC_ALL=C grep -qF "with no network it is NOT installed" "$work/s1-unproven/say.log" ||
+  fail "the unproven case must still state the consequence in full -- it may well be the offline case"
+LC_ALL=C grep -qF -- "--default=true" "$work/s1-unproven/gum.log" ||
+  fail "the unproven case's confirm must default to Continue -- a machine with a working link must not be stopped by a probe we could not complete" "$(cat "$work/s1-unproven/gum.log")"
+pass "P33 L1: an address with no confirmable internet states the consequence in full, but defaults to Continue"
+
+echo "--- P33 L1: the network verdict, as a truth table ------------------------"
+
+# 🔴 THE ADDRESS DECIDES WHETHER THE USER IS STOPPED. The probe only decides
+# what the screen says. Driving this as a table is the point: the failure this
+# whole change exists to prevent is a machine being classified wrongly, and a
+# classification bug is invisible in every end-to-end assertion above.
+[[ $(deck_form_network_verdict_for 0 online)      == offline  ]] ||
+  fail "no routable address is 'offline' whatever the probe claims -- a probe cannot be online on a machine with no address, so believing it would be believing a broken fake over the kernel"
+[[ $(deck_form_network_verdict_for 0 unreachable) == offline  ]] || fail "no address + unreachable probe is offline"
+[[ $(deck_form_network_verdict_for 0 skipped)     == offline  ]] || fail "no address, probe not run at all, is offline"
+[[ $(deck_form_network_verdict_for 1 online)      == online   ]] || fail "an address plus a confirmed probe is online"
+[[ $(deck_form_network_verdict_for 1 portal)      == unproven ]] ||
+  fail "a captive portal is 'unproven', NOT 'online' -- pacman cannot fetch steam through a sign-in page"
+[[ $(deck_form_network_verdict_for 1 unreachable) == unproven ]] || fail "an address with an unreachable probe is unproven"
+[[ $(deck_form_network_verdict_for 1 unchecked)   == unproven ]] ||
+  fail "an address with NO probe available must be 'unproven' -- claiming online on a check that never ran is the silent-success class CLAUDE.md forbids"
+pass "the network verdict is a 3-value table keyed on the ADDRESS, with the probe refining only the wording"
+
+# The address side, against deck_form_has_ipv4's own two traps.
+cat >"$work/bin-net/ip-eth" <<'IPETH'
+#!/usr/bin/env bash
+cat "${IP_ADDR_OUTPUT:-/dev/null}"
+IPETH
+chmod +x "$work/bin-net/ip-eth"
+printf 'lo UNKNOWN 127.0.0.1/8\nwlan0 UP 169.254.7.9/16\n' >"$work/ip-linklocal"
+IP_ADDR_OUTPUT="$work/ip-linklocal" DECK_IP_BIN="$work/bin-net/ip-eth" deck_form_addr_present &&
+  fail "a 169.254/16 link-local address is what the kernel hands out when DHCP FAILED -- counting it as a network is the exact false success deck_form_has_ipv4 exists to refuse"
+printf 'lo UNKNOWN 127.0.0.1/8\n' >"$work/ip-loonly"
+IP_ADDR_OUTPUT="$work/ip-loonly" DECK_IP_BIN="$work/bin-net/ip-eth" deck_form_addr_present &&
+  fail "loopback alone is not a network"
+IP_ADDR_OUTPUT="$work/ip-eth" DECK_IP_BIN="$work/bin-net/ip-eth" deck_form_addr_present ||
+  fail "a routable address on a wired interface must read as a network -- this is the dock case"
+pass "address detection ignores loopback and link-local, and finds a wired address on ANY interface (not just wlan0)"
+
+# The probe must distinguish "could not look" from "looked and found nothing".
+probe=$(DECK_CURL_BIN="$work/bin-net/curl-missing" deck_form_net_probe 2>/dev/null)
+[[ $probe == unchecked ]] ||
+  fail "a missing curl must report 'unchecked', not 'unreachable' -- 'we could not look' and 'we looked and there was nothing' must not produce the same screen" "got: $probe"
+warn=$(DECK_CURL_BIN="$work/bin-net/curl-missing" deck_form_net_probe 2>&1 >/dev/null)
+[[ -n $warn ]] || fail "a check that did not happen must SAY so (CLAUDE.md: never silently swallow a failure)"
+[[ $(DECK_CURL_BIN="$work/bin-online/curl" deck_form_net_probe) == online ]] ||
+  fail "a curl that returns NetworkManager's expected body must read as online"
+pass "the probe reports 'unchecked' loudly when it could not run, and 'online' when it did"
+
+# ===========================================================================
+# P33 L1 + L2 -- THE ROW BUDGET. docs/PROGRESS.md §5.40 is why this exists.
+# ===========================================================================
+#
+# 🔴 A change that ate rows pushed the username and password prompts OFF THE
+# SCREEN and shipped to hardware. Nobody costed the rows. This section costs
+# them, for both screens this round adds.
+#
+# The console is 50 rows x 160 columns -- MEASURED on the live ISO
+# (docs/PROGRESS.md §7). Do NOT re-derive it from the framebuffer; that
+# arithmetic has been wrong twice, once on each axis.
+DECK_CONSOLE_ROWS=50
+DECK_CONSOLE_COLS=160
+# The logo: 10 lines, widest line 81 columns. Measured 2026-08-16 with `wc -l`
+# and an awk max-length pass over the real
+# ~/.cache/omarchy-deck/p32-build/runtime-src/logo.txt (the file `clear_logo`
+# reads as $OMARCHY_PATH/logo.txt). clear_logo draws it through
+# `gum style --padding "1 0 0 $PADDING_LEFT"`, so it costs its 10 lines plus
+# one row of top padding.
+LOGO_LINES=10
+LOGO_COLS=81
+LOGO_ROWS=$((LOGO_LINES + 1))
+# `say` is `gum style --padding "0 0 0 $PADDING_LEFT"`, and configurator's own
+# measure_terminal sets PADDING_LEFT=(TERM_WIDTH - LOGO_WIDTH)/2. So the text
+# column budget is what is left of the console after that indent -- a line
+# longer than this WRAPS, and a wrapped line silently costs an extra row.
+PADDING_LEFT=$(( (DECK_CONSOLE_COLS - LOGO_COLS) / 2 ))
+SAY_WIDTH=$(( DECK_CONSOLE_COLS - PADDING_LEFT ))
+[[ $SAY_WIDTH -eq 121 ]] ||
+  fail "the say() text budget arithmetic moved: expected 160-((160-81)/2)=121 columns" "got $SAY_WIDTH"
+
+check_width() {   # <label> <text-producing-command...>
+  local label=$1; shift
+  local line n
+  while IFS= read -r line; do
+    n=${#line}
+    [[ $n -le $SAY_WIDTH ]] ||
+      fail "$label: a line is $n columns, over the ${SAY_WIDTH}-column say() budget -- it WRAPS and costs an extra row (docs/PROGRESS.md §5.40)" "$line"
+  done < <("$@")
+}
+check_width "the offline consequence text" deck_form_wifi_offline_text
+check_width "the pre-reboot notice" deck_form_reboot_notice_text
+for v in online unproven offline; do
+  check_width "the offline headline ($v)" deck_form_offline_headline "$v"
+done
+pass "every line of both new screens fits the ${SAY_WIDTH}-column say() budget -- none of them wrap"
+
+# --- S1's offline gate, worst case (the `offline` verdict draws the most) ---
+offline_lines=$(deck_form_wifi_offline_text | LC_ALL=C command grep -c .)
+[[ $offline_lines -ge 3 ]] || fail "the offline consequence text lost lines -- is it still saying what it must?"
+# clear_logo + echo + headline + the consequence + echo + gum confirm.
+# gum confirm draws its question and a row of buttons; 3 is generous.
+GUM_CONFIRM_ROWS=3
+gate_rows=$(( LOGO_ROWS + 1 + 1 + offline_lines + 1 + GUM_CONFIRM_ROWS ))
+[[ $gate_rows -le $DECK_CONSOLE_ROWS ]] ||
+  fail "S1's offline gate needs $gate_rows rows on a ${DECK_CONSOLE_ROWS}-row console" "logo=$LOGO_ROWS text=$offline_lines confirm=$GUM_CONFIRM_ROWS"
+
+# --- S5, the worst case: the table, the offline recap AND the reboot notice ---
+# gum table -p borders a 10-row table as: top rule, header, header rule, 10
+# data rows, bottom rule.
+# DECK_LSBLK_BIN=/bin/true: this counts ROWS, and deck_form_disk_label emits
+# exactly one line whether or not lsblk told it a size, so no fake disk table
+# is needed here.
+summary_rows=$(username=u password=p hostname=h timezone=t keyboard=us \
+               disk=/dev/nvme0n1 encrypt_installation=false \
+               DECK_LSBLK_BIN=/bin/true deck_form_summary_rows |
+               LC_ALL=C command grep -c .)
+TABLE_ROWS=$(( summary_rows + 3 ))   # header rule x2 + top/bottom, minus the header line already counted
+reboot_lines=$(deck_form_reboot_notice_text | LC_ALL=C command grep -c .)
+s5_rows=$(( LOGO_ROWS + 1 + TABLE_ROWS + 1 + 1 + offline_lines + 1 + reboot_lines + 1 + GUM_CONFIRM_ROWS ))
+[[ $s5_rows -le $DECK_CONSOLE_ROWS ]] ||
+  fail "S5 needs $s5_rows rows on a ${DECK_CONSOLE_ROWS}-row console -- §5.40 is what happens when a screen overruns: the prompts go off the panel and ship" \
+       "logo=$LOGO_ROWS table=$TABLE_ROWS offline=$offline_lines reboot=$reboot_lines confirm=$GUM_CONFIRM_ROWS"
+pass "row budget: S1's offline gate = $gate_rows rows, S5 at its fullest = $s5_rows rows, both inside the measured ${DECK_CONSOLE_ROWS}-row console"
+
+echo "--- P33 L2: the pre-reboot notice ---------------------------------------"
+
+reboot_text=$(deck_form_reboot_notice_text)
+LC_ALL=C grep -qF "reboots on its own" <<<"$reboot_text" ||
+  fail "L2: the notice must say the Deck reboots by itself"
+LC_ALL=C grep -qF "two minutes" <<<"$reboot_text" ||
+  fail "L2: the notice must give the MEASURED duration -- docs/PROGRESS.md §5.35, 15:08:15 -> 15:10:18 is 2m03s of black panel while Steam unpacks its own update"
+LC_ALL=C grep -qF "BLACK SCREEN" <<<"$reboot_text" ||
+  fail "L2: the notice must say the screen goes black -- 'the Deck looks switched off' is the whole reason this screen exists"
+LC_ALL=C grep -qF "Don't turn me off" <<<"$reboot_text" ||
+  fail "L2: the operator asked for this in these words ('something to tell users like don't turn me off. steam is unpacking'), and the splash elsewhere already uses them"
+pass "L2: the pre-reboot notice says it reboots, says the panel goes black for the measured two minutes, and says don't turn me off"
 
 # --- the cancel fallback, driven for real: B on the list REDRAWS ---
 s1_run cancel "<CANCEL>" "<CANCEL>" "$DECK_NET_RESCAN_ROW" "$DECK_NET_SKIP_ROW"
@@ -2862,18 +3149,50 @@ unset DECK_WIFI_SSID 2>/dev/null || true
 FAKE_GUM_CONFIRM_RC=0 DECK_TEST_SAY_LOG="$work/s5-say.log" \
 DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" PATH="$work/bin-fakegum:$PATH" \
   deck_final_summary >/dev/null
-LC_ALL=C grep -qF "audio DSP firmware and Steam are not downloaded" "$work/s5-say.log" ||
+LC_ALL=C grep -qF "with no network it is NOT installed" "$work/s5-say.log" ||
   fail "§5: S5 must restate the offline consequence when no network was joined" "$(cat "$work/s5-say.log")"
+LC_ALL=C grep -qF "No network was found" "$work/s5-say.log" ||
+  fail "with DECK_NET_VERDICT unset (S1 never ran) S5 must take the SAFE reading -- 'we do not know' is the warning, not the reassurance" "$(cat "$work/s5-say.log")"
 
 DECK_WIFI_SSID="MyHomeNetwork"
 : >"$work/s5-say2.log"
 FAKE_GUM_CONFIRM_RC=0 DECK_TEST_SAY_LOG="$work/s5-say2.log" \
 DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" PATH="$work/bin-fakegum:$PATH" \
   deck_final_summary >/dev/null
-LC_ALL=C grep -qF "audio DSP firmware and Steam are not downloaded" "$work/s5-say2.log" &&
+LC_ALL=C grep -qF "with no network it is NOT installed" "$work/s5-say2.log" &&
   fail "S5 must NOT show the offline consequence when a network WAS joined -- a warning that always fires is noise, not information"
 unset DECK_WIFI_SSID
 pass "S5 restates §5's offline consequence exactly when no network was joined, and not otherwise"
+
+# 🔴 P33 L1, the S5 half of the ethernet case. "No SSID" is NOT "no network",
+# and this is the LAST screen before the install -- telling a dock user their
+# Deck will boot to a black panel would be a false statement at the worst
+# possible moment.
+: >"$work/s5-say3.log"
+DECK_NET_VERDICT=online
+FAKE_GUM_CONFIRM_RC=0 DECK_TEST_SAY_LOG="$work/s5-say3.log" \
+DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" PATH="$work/bin-fakegum:$PATH" \
+  deck_final_summary >/dev/null
+LC_ALL=C grep -qF "with no network it is NOT installed" "$work/s5-say3.log" &&
+  fail "S5 must not warn about a black screen on a machine S1 detected as online (no SSID, but a working wired network)" "$(cat "$work/s5-say3.log")"
+LC_ALL=C grep -qF "already has a network connection" "$work/s5-say3.log" ||
+  fail "S5 must still say WHY it is not warning, so 'detected online' and 'the check never ran' are distinguishable on screen" "$(cat "$work/s5-say3.log")"
+unset DECK_NET_VERDICT
+pass "P33 L1: S5 recaps the DETECTED network state, so an ethernet Deck is not warned about a black screen it will not have"
+
+echo "--- P33 L2: S5 carries the pre-reboot warning on every path --------------"
+
+# Unconditional: every install reboots, and the two-minute black panel is not
+# conditional on anything the screens above decided. Asserted on BOTH the
+# offline and the connected run's logs, because "shown only when offline" is
+# exactly the kind of accidental coupling a single-case test would miss.
+for log in "$work/s5-say.log" "$work/s5-say2.log" "$work/s5-say3.log"; do
+  LC_ALL=C grep -qF "Don't turn me off" "$log" ||
+    fail "S5 must carry the pre-reboot warning on every path, including $log" "$(cat "$log")"
+  LC_ALL=C grep -qF "two minutes" "$log" ||
+    fail "S5's pre-reboot warning must give the measured duration on every path ($log)"
+done
+pass "L2: the pre-reboot warning is on the last screen deck-form.sh owns, on every path through it"
 
 # ===========================================================================
 # S6: the kernel -- linux-neptune-611 ONLY, and the ordering that makes it work
