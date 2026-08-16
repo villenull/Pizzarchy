@@ -1,7 +1,7 @@
 # Pizzarchy: Omarchy on your Steam Deck
 
 **Hot and ready in about twenty minutes — one bootable USB, no keyboard, and
-Gaming Mode stays exactly as it was.**
+Gaming Mode is unchanged. Easy as pie.**
 
 One bootable USB installs a full Arch + [Omarchy](https://omarchy.org) system on
 a Steam Deck — hardware-optimized, driven entirely by the Deck's buttons and
