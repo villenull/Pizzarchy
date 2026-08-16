@@ -38,6 +38,15 @@ install step makes things *worse* rather than merely failing:
    `processes_rooted_in` to refuse a target of `/`, which would otherwise match
    every process on the installer.
 
+6. 🔴 **It must not be a chroot, and the failure must arrive explained.** Added
+   2026-08-16 after the first hardware install ran this step and it *failed*
+   with a bare `exit_code: 71` and one line of output. Measured cause: the
+   kernel refuses `unshare(CLONE_NEWUSER)` to any chrooted process, Valve's
+   launcher hard-gates on a working user namespace, and `arch-chroot` is a
+   chroot. §2 now requires the entry to pivot rather than chroot; §10 requires
+   the reason a launcher refused to start to reach the record and the console,
+   because on that install it reached neither.
+
 ⚠️ §9's registry check is a **MERGE GATE**. This agent does not own
 `deck_configure.py`; the registry line is added when this work is merged. Until
 then that one check is red ON PURPOSE and its failure message says so. Do not
@@ -193,9 +202,28 @@ def make_target(
     return target
 
 
+def make_live(name: str = "live", *, tools: bool = True) -> pathlib.Path:
+    """A fake live (installer) root.
+
+    🔴 It carries `unshare` and `pivot_root` because the step now enters the
+    target with those instead of `arch-chroot` -- a chroot cannot run Valve's
+    launcher at all (see the module docstring). Pass `tools=False` for the
+    target-less-installer case.
+    """
+    live = tmpdir(name)
+    for rel in dsb.LIVE_TOOL_RELS:
+        path = live / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if tools:
+            path.write_text("x")
+        elif path.exists():
+            path.unlink()
+    return live
+
+
 def run_step(ctx, runner, live=None, budget=dsb.BUDGET_SECS):
     """bootstrap_steam with the console captured, so 'loud' is assertable."""
-    live = live or tmpdir("live")
+    live = live or make_live()
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         record = dsb.bootstrap_steam(ctx, live, runner=runner, budget_secs=budget)
@@ -207,15 +235,31 @@ class RecordingRunner:
     child left behind, so every branch of the step is drivable with no
     subprocess and no network."""
 
-    def __init__(self, *, marker=None, exit_code=0, reason=dsb.STOP_EXITED, cached=0):
+    def __init__(
+        self,
+        *,
+        marker=None,
+        exit_code=0,
+        reason=dsb.STOP_EXITED,
+        cached=0,
+        launcher_log=None,
+    ):
         self.marker = marker
         self.exit_code = exit_code
         self.reason = reason
         self.cached = cached
+        # What `steam.sh` wrote to console-linux.txt before it gave up. On the
+        # 2026-08-16 hardware failure this file held the entire diagnosis and
+        # nothing read it.
+        self.launcher_log = launcher_log
         self.calls: list[list[str]] = []
 
     def __call__(self, argv, home_on_target, record, *, budget_secs=dsb.BUDGET_SECS, output_path=None):
         self.calls.append(list(argv))
+        if self.launcher_log is not None:
+            log = home_on_target / dsb.LAUNCHER_LOG_REL
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text(self.launcher_log)
         pkg = home_on_target / dsb.PACKAGE_DIR_REL
         pkg.mkdir(parents=True, exist_ok=True)
         if self.cached:
@@ -259,6 +303,18 @@ check("deferred: status", record["status"], dsb.STATUS_DEFERRED)
 check("deferred: nothing was executed", runner.calls, [])
 check_in("deferred: the error says what first boot does", "First boot", record["error"])
 
+# 🔴 The live side has to be able to enter the target WITHOUT a chroot. If it
+# cannot, the honest answer is to skip: running the command anyway is running a
+# command measured to exit 71.
+target = make_target("no-container")
+runner = RecordingRunner()
+record, out = run_step(FakeCtx(target), runner, live=make_live("live-bare", tools=False))
+check("no unshare/pivot_root on the live system: status", record["status"], dsb.STATUS_NO_CONTAINER)
+check("no unshare/pivot_root: nothing was executed", runner.calls, [])
+check_in("...and the error names the user namespace", "user namespace", record["error"])
+check_in("...and says what first boot does", "First boot", record["error"])
+check_true("...and it is printed", "Steam client bootstrap:" in out)
+
 # A home the installer never made is a failure, not a crash.
 target = make_target("no-home", make_home=False)
 runner = RecordingRunner()
@@ -272,8 +328,43 @@ print("\n== 2. the command and the environment ==")
 # ===========================================================================
 
 argv = dsb.bootstrap_command("/mnt", 1000, 1000, "/home/deck", "deck")
-check("runs inside the target", argv[:2], ["arch-chroot", "/mnt"])
-check("becomes the user with setpriv, not sudo", argv[2], "setpriv")
+
+# 🔴 THE HARDWARE DEFECT, AS A TEST. 2026-08-16: this step ran on the Deck and
+# exited 71. 71 is `steam.sh`:511 -- `steam-runtime-check-requirements` -- and
+# the reason it failed was reproduced off hardware: the kernel refuses
+# `unshare(CLONE_NEWUSER)` to any chrooted process (`current_chrooted()`), so
+# `bwrap` cannot run, so Valve's launcher refuses to start. That is true on
+# every kernel with every sysctl, so this is not a regression guard, it is a
+# structural one: if `arch-chroot` ever comes back, the step is dead again.
+check("it is NOT a chroot -- a chroot cannot run Valve's launcher", "arch-chroot" in argv, False)
+check("it enters the target with unshare", argv[0], "unshare")
+for flag in ("--mount", "--pid", "--fork", "--propagation", "private"):
+    check_in(f"the namespace carries {flag}", flag, argv[: argv.index("/bin/sh")])
+# 🔴 pid 1 in a pid namespace ignores an unhandled SIGTERM even from an
+# ancestor, so without this the first of stop_process_group's two signals is a
+# no-op. Not decoration: it is what makes the polite stop mean anything.
+check_in("the namespace's init dies with unshare", "--kill-child", argv)
+_script_at = argv.index("-c") + 1
+check("it runs this module's own entry script", argv[_script_at], dsb.ENTER_SCRIPT)
+check("the target is the script's argument", argv[_script_at + 2], "/mnt")
+check_in("the entry pivots into the target", "pivot_root . .", dsb.ENTER_SCRIPT)
+# Comments stripped: the word appears in them, explaining why it is not used.
+ENTER_CODE = "\n".join(
+    line for line in dsb.ENTER_SCRIPT.splitlines() if not line.lstrip().startswith("#")
+)
+check("the entry script never chroots", "chroot" in ENTER_CODE, False)
+# arch-chroot bound these; they are ours now, so they are asserted here.
+# 🔴 Measured 2026-08-16: pivot_root onto an INHERITED mount fails with
+# "Invalid argument"; onto the same path after a self-rbind it succeeds. The
+# installer's target is an inherited mount, so this line is the fix working.
+check_in('the entry binds the target onto itself first', 'mount --rbind "$t" "$t"', dsb.ENTER_SCRIPT)
+for needed in ("mount -t proc", "/etc/resolv.conf", "$t/dev", "$t/tmp", "set -eu"):
+    check_in(f"the entry provides {needed}", needed, dsb.ENTER_SCRIPT)
+check(
+    "becomes the user with setpriv, not sudo, once inside",
+    argv[argv.index("setpriv") - 1],
+    "/mnt",
+)
 check_in("passes the uid", "--reuid=1000", argv)
 check_in("passes the gid", "--regid=1000", argv)
 check_in("clears supplementary groups", "--clear-groups", argv)
@@ -787,6 +878,102 @@ else:
         "     between the 'pkgs' and 'steam_seed' entries. This check is red on "
         "purpose until then."
     )
+
+
+# ===========================================================================
+print("\n== 10. the failure has to arrive explained (the 2026-08-16 defect) ==")
+# ===========================================================================
+
+# 🔴 VERBATIM from the failing install's `/var/log/omarchy-deck-install.json`:
+#
+#     "exit_code": 71
+#     "output": "bin_steam.sh[1]: Setting up Steam content in /home/deck/..."
+#
+# One line, and it was the line printed BEFORE the failure. `steam.sh` opens
+# srt-logger over its own stderr before it runs any check, so from that point
+# everything it says lands in console-linux.txt -- including the one sentence
+# that named the cause. This suite now requires that sentence to reach both the
+# record and the console.
+REAL_LAUNCHER_LOG = (
+    "[2026-08-16 15:02:01] steam.sh[1]: Running Steam on arch rolling 64-bit\n"
+    "[2026-08-16 15:02:01] steam.sh[1]: STEAM_RUNTIME is enabled automatically\n"
+    "[2026-08-16 15:02:02] setup.sh[9]: Updating Steam runtime environment...\n"
+    "[2026-08-16 15:02:03] steam.sh[1]: Error: Steam now requires user namespaces "
+    "to be enabled.\n"
+)
+
+target = make_target("launcher-log")
+runner = RecordingRunner(marker=None, exit_code=71, launcher_log=REAL_LAUNCHER_LOG)
+record, out = run_step(FakeCtx(target), runner)
+check("exit 71 with no manifest: status", record["status"], dsb.STATUS_INCOMPLETE)
+check("exit 71: the exit code is kept", record["exit_code"], 71)
+check_true("the launcher's own log reaches the record", record["launcher_log"])
+check_in(
+    "and the record names the reason Valve gave",
+    "user namespaces",
+    " | ".join(record["launcher_errors"]),
+)
+check_true(
+    "and it is PRINTED, not just filed",
+    "Valve's launcher said:" in out and "user namespaces" in out,
+)
+# ⚠️ The degradation promise must survive the new detail: it is the sentence
+# that tells a support reader nothing was broken.
+check_in("the error still promises the floor", "Nothing was made worse", record["error"])
+check_in("...and still says first boot finishes", "first boot", record["error"].lower())
+
+# A run that worked still records the log, because "it worked" and "it did not"
+# are read out of the same field and an empty one would be ambiguous.
+target = make_target("launcher-log-ok")
+runner = RecordingRunner(
+    marker="steam_client_steamdeck_stable_ubuntu12.installed",
+    cached=4096,
+    launcher_log="[..] steam.sh[1]: Steam client's requirements are satisfied\n",
+)
+record, out = run_step(FakeCtx(target), runner)
+check("installed: status", record["status"], dsb.STATUS_INSTALLED)
+# The record has to stay readable: the entry script is 2 KB of shell.
+check_in("the recorded command elides the script body", "<ENTER_SCRIPT>", record["command"])
+check("...and is one line", "\n" in record["command"], False)
+check_in("...while still naming the target and the user", "--reuid=1000", record["command"])
+check_true("installed: the launcher log is recorded too", record["launcher_log"])
+check_true(
+    "installed: nothing is reported as a warning",
+    "Valve's launcher said:" not in out,
+)
+
+# The pure readers, driven directly.
+lh = tmpdir("launcher-logs") / "home"
+(lh / dsb.FALLBACK_LAUNCHER_LOG_REL).parent.mkdir(parents=True, exist_ok=True)
+(lh / dsb.FALLBACK_LAUNCHER_LOG_REL).write_text("fallback")
+check("the fallback launcher log path is read", dsb.read_launcher_log_tail(lh), "fallback")
+(lh / dsb.LAUNCHER_LOG_REL).parent.mkdir(parents=True, exist_ok=True)
+(lh / dsb.LAUNCHER_LOG_REL).write_text("canonical")
+check("the canonical launcher log wins", dsb.read_launcher_log_tail(lh), "canonical")
+check("a home with no launcher log reads empty", dsb.read_launcher_log_tail(tmpdir("nolog3")), "")
+check("...and sizes 0", dsb.launcher_log_size(tmpdir("nolog3")), 0)
+check("the launcher log size is the whole file", dsb.launcher_log_size(lh), len("canonical"))
+
+# 🔴 The filter keeps the sentence that matters and drops 4 000 lines of
+# progress, which is the difference between a record you can act on and one you
+# have to be at the machine to use.
+picked = dsb.notable_lines(
+    "Downloading update (1 of 2 KB)...\n" * 50
+    + "Error: Steam now requires user namespaces to be enabled.\n"
+)
+check("the filter drops progress noise", len(picked), 1)
+check_in("the filter keeps the error", "user namespaces", picked[0])
+check("the filter is bounded", len(dsb.notable_lines("Error: x\n" * 100)), dsb.MAX_NOTABLE_LINES)
+check("an empty log yields nothing", dsb.notable_lines(""), [])
+
+# 🔴 The stall watchdog has to be able to see a run that is working but has not
+# reached the updater yet: `steam.sh` writes console-linux.txt for seconds
+# before `package/` or bootstrap_log.txt exist at all.
+sig_home = tmpdir("sig") / "home"
+(sig_home / dsb.LAUNCHER_LOG_REL).parent.mkdir(parents=True, exist_ok=True)
+(sig_home / dsb.LAUNCHER_LOG_REL).write_text("x" * 4096)
+check("progress is visible before the updater starts", dsb.launcher_log_size(sig_home), 4096)
+check("...while the updater's own log is still absent", dsb.log_size(sig_home), 0)
 
 
 # ===========================================================================

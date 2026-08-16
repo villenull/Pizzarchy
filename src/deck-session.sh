@@ -5328,6 +5328,7 @@ Icon=input-gaming
 Terminal=false
 Categories=Game;
 Keywords=steam;gaming;gamescope;deck;
+NoDisplay=true
 EOF
 }
 
@@ -5335,6 +5336,24 @@ stage_return_icon() {
   # A .desktop entry is the shell-agnostic half of "return to Gaming Mode":
   # every launcher on every shell reads /usr/share/applications, so this works
   # identically on Omarchy 3.x (waybar-era) and on 4.0's Quickshell rewrite.
+  #
+  # 🔴 NoDisplay=true SINCE 2026-08-16, AND IT IS THE POINT OF THIS ENTRY NOW.
+  # Operator, from hardware: "Gaming Mode" was listed in the Apps menu, between
+  # Foot and Google Contacts, because the apps provider enumerates
+  # /usr/share/applications -- so this file and stage-menu-row's row were TWO
+  # visible ways back, in two different menus. Moving the menu row to
+  # system.gaming did not touch this one; they are separate artefacts and the
+  # first fix missed it.
+  #
+  # The trade, stated plainly rather than discovered later: NoDisplay removes
+  # this from EVERY launcher list, including search, so it is no longer a
+  # human-discoverable fallback if stage-menu-row fails. It remains installed
+  # and exec'able by desktop-id, and the ${RETURN_ACTION} it names is still the
+  # one shared constant both halves agree on -- so this stays the place the
+  # action is defined, not a second UI.
+  #
+  # If the menu row ever stops being the primary route, drop NoDisplay rather
+  # than adding a third way back.
   #
   # Icon=input-gaming, and both halves of that are deliberate.
   #

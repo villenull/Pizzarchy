@@ -148,6 +148,126 @@ throwaway ``$HOME``\\ s and reading ``bootstrap_log.txt`` back.
    ``xterm``. On a machine with no display server that is the difference
    between an error line and a hung dialog.
 
+🔴 WHY ``arch-chroot`` CANNOT RUN THIS AT ALL -- THE HARDWARE FAILURE, EXPLAINED
+================================================================================
+
+The first hardware install to carry this step **failed**, and the record said
+only::
+
+    exit_code: 71
+    output:    bin_steam.sh[1]: Setting up Steam content in /home/deck/...
+
+71 appears **exactly once** in Valve's entire client tree: ``steam.sh``:511,
+which runs ``steam-runtime-check-requirements`` and exits with its status when
+that status is 71. Reproduced verbatim on the dev machine, 2026-08-16, with the
+real binary out of the real bootstrap tarball::
+
+    chroot <tree> setpriv --reuid=1000 ... -- steam-runtime-check-requirements
+    -> CHECK_REQ_EXIT=71
+    -> "Steam now requires user namespaces to be enabled."
+
+And the A/B that names the cause, same kernel, same namespace, same uid, same
+binary, one difference::
+
+    outside a chroot, uid 1000:  bwrap --bind / / true   -> 0
+    INSIDE  a chroot, uid 1000:  bwrap --bind / / true   -> 1
+        "bwrap: No permissions to create a new namespace"
+    inside  a chroot, as root:   bwrap --bind / / true   -> 0   (root needs none)
+
+    inside a chroot, uid 1000:   unshare -U true -> "Operation not permitted"
+
+🔴 **This is a kernel rule, not a configuration.** ``create_user_ns()`` refuses
+outright when ``current_chrooted()`` -- a process whose root directory is not
+the root of its mount namespace may never create a user namespace, on any
+kernel, with any sysctl. Valve's launcher hard-gates on a working user
+namespace. Therefore **no unprivileged process inside any ``chroot`` can ever
+run Valve's launcher**, and ``arch-chroot`` is a ``chroot``. Nothing about the
+Deck, the live ISO, DNS or the 32-bit loader was involved: the target had all
+of them and the run never reached the network.
+
+Two candidates were tested and disproved rather than assumed: DNS (the run
+never got as far as a download -- ``package_bytes`` was 0 and the phase was
+``none``), and the 32-bit path (``check_requirements`` runs a **64-bit** binary
+and dies before the 32-bit updater is ever executed; the loader check below
+stays, because it is still the right check for a different failure).
+
+WHAT REPLACED IT: A PRIVATE MOUNT NAMESPACE AND ``pivot_root``
+--------------------------------------------------------------
+
+``ENTER_SCRIPT`` below does what ``arch-chroot`` does -- ``/proc``, ``/sys``,
+``/dev``, ``/run``, ``/tmp`` and the live ``/etc/resolv.conf`` -- and then
+enters the target with ``pivot_root`` instead of ``chroot``, inside
+``unshare --mount --pid --fork``. After a ``pivot_root`` the target IS the root
+of the mount namespace, so ``current_chrooted()`` is false and the user
+namespace is allowed.
+
+⚠️ It bind-mounts the target onto itself first, and that line is load-bearing
+rather than idiomatic. Measured 2026-08-16: ``pivot_root`` onto a mount the
+namespace **inherited** failed with ``Invalid argument``, and onto the same path
+after ``mount --rbind "$t" "$t"`` it succeeded. Container runtimes do the same
+thing for the same reason. ``--rbind`` and not ``--bind``, so a target with a
+separate ``/boot`` or ``/home`` keeps them.
+
+Measured end to end on the dev machine, 2026-08-16:
+
+* ``chroot``-shaped entry, uid 1000: ``bwrap`` refused, ``check-requirements``
+  exited **71** -- the hardware failure, reproduced off hardware.
+* ``pivot_root``-shaped entry, uid 1000: ``bwrap`` **ok**, and a full
+  ``/usr/bin/steam -steamdeck -gamepadui`` run logged
+  ``steam.sh[1]: Steam client's requirements are satisfied``, reached
+  ``Verification complete`` and **exited 0**.
+
+⚠️ ``steam.sh[1]`` -- pid 1. That is the tell that the hardware record was in a
+pid namespace too (``arch-chroot`` forks into one), and it is why this module
+keeps ``--pid --fork``: killing a namespace's init kills everything in it, which
+is a stronger guarantee than the ``/proc`` sweep ever gave.
+
+⚠️ **AND IT COSTS THE SWEEP ITS SIGHT -- SAID HERE RATHER THAN LEFT TO BE
+DISCOVERED.** ``processes_rooted_in`` reads ``/proc/<pid>/root`` and matches it
+against the target. Measured 2026-08-16: for a process that has ``pivot_root``\
+ed into a mount held only in its own namespace, that link reads ``/`` from
+outside, not ``/mnt``. So the sweep will now normally report **nothing**, and
+``stragglers: []`` in the record means "none seen", not "none possible". What
+replaces it is not weaker: every descendant is inside one pid namespace whose
+init is our direct child, ``--kill-child`` ties that init's life to
+``unshare``'s, and ``stop_process_group`` ends in ``SIGKILL`` to the group --
+which an ancestor namespace can always deliver. The sweep is kept because it
+still catches anything that somehow escaped into the installer's own view, and
+because deleting a check to make a report look clean is the wrong direction.
+
+⚠️ Two side effects of dropping ``arch-chroot``, both deliberate:
+
+* **The mounts are ours now, and they are private.** They live in the
+  namespace, so they disappear when it does -- there is no teardown to get
+  wrong and no mount left on the target for the installer's final ``umount``
+  to trip over.
+* **DNS is ours now.** ``arch-chroot`` bind-mounts the live
+  ``/etc/resolv.conf`` over the target's, which is what made ``deck_pkgs``'
+  ``pacman -Sy`` resolve. ``ENTER_SCRIPT`` does the same thing, following one
+  level of symlink exactly as ``arch-chroot`` does, and **says so on stderr**
+  when it cannot -- which lands in the record's ``output``.
+
+🔴 AND THE DIAGNOSTIC WAS SWALLOWED TWICE -- FIXED HERE
+=======================================================
+
+The message that would have named the cause in one line was thrown away by two
+mechanisms stacked:
+
+1. ``show_message`` returns early because we set
+   ``XDG_CURRENT_DESKTOP=gamescope`` (measurement 8). It still calls ``log_e``
+   first, so the text survives -- but only on stderr.
+2. By then ``steam.sh`` has re-opened stderr through ``srt-logger`` into
+   ``~/.local/share/Steam/logs/console-linux.txt`` (its ``maybe_open_log``, run
+   *before* ``check_requirements``). So our captured stdout keeps exactly one
+   line, the one printed before the logger existed -- which is precisely the
+   single line the hardware record carried.
+
+``CLAUDE.md`` forbids swallowing a failure, so ``console-linux.txt`` is now read
+and recorded: ``launcher_log`` carries its tail and ``launcher_errors`` carries
+the lines that name a problem. On the failing install those fields would have
+read ``Error: Steam now requires user namespaces to be enabled.`` and this
+would have been a five-minute diagnosis instead of a session.
+
 THE BOUND -- WHY A STALL IS IMPOSSIBLE, NOT MERELY BUDGETED
 ===========================================================
 
@@ -231,14 +351,28 @@ silently does not happen.
 WHAT IS STILL UNVERIFIED
 ========================
 
-* **The ``arch-chroot`` half.** Everything above was measured with ``env -i``
-  and with ``bwrap``; the dev machine has no root, so
-  ``arch-chroot <target> setpriv ... /usr/bin/steam`` has not itself been run.
-  What is untested is the wrapper, not the payload: DNS inside ``arch-chroot``
-  is already exercised by ``deck_pkgs``' ``pacman -Sy`` in the networked QEMU
-  suite, and ``setpriv`` inside it by ``deck-session.sh``'s chroot mode.
-* **Hardware.** No install has yet run this step on the Deck. The acceptance is
-  a first boot that reaches Gaming Mode in seconds, and the record's
+* ⚠️ **``ENTER_SCRIPT`` as root, on the live ISO.** The dev machine has no
+  root, so the sequence was measured inside a user namespace (which grants the
+  same capabilities over the same syscalls) rather than as real uid 0. What was
+  measured there is the part that decides: ``pivot_root`` succeeds, the user
+  namespace is then allowed, ``check_requirements`` passes, and a run against an
+  already-bootstrapped home completed and exited 0. What is **not** measured is
+  the resolv.conf branch against a real freshly-pacstrapped ``/etc/resolv.conf``,
+  and ``mount -t proc`` as real root. Both fail loudly (``set -eu``, stderr into
+  the record's ``output``) rather than quietly.
+* ⚠️ **A COLD 491 MiB download through ``ENTER_SCRIPT``**, and the reason is
+  worth writing down so nobody re-runs it: inside that same user namespace a
+  cold bootstrap wedges after ``CProcessEnvironmentManager is ready`` and never
+  writes ``bootstrap_log.txt``. Measured **with the entry script and without
+  it** -- a plain ``setpriv``/``env -i`` run in the same namespace wedges
+  identically, while the same command outside the namespace downloads 493 MiB
+  and exits 0. So it is the unprivileged uid mapping, not this module, and the
+  entry script is neither exonerated nor implicated by a cold run here. On a
+  real installer the child is a real uid 1000 under real root, which is the
+  shape that worked.
+* **Hardware.** The 2026-08-16 install ran this step and it failed for the
+  reason above; the fix has not yet run on the Deck. The acceptance is
+  unchanged: a first boot that reaches Gaming Mode in seconds, and the record's
   ``installed_manifest`` field naming ``steam_client_steamdeck_stable_ubuntu12``.
 * **How long it takes on the operator's connection.** 491 MiB is 491 MiB
   wherever the wait is placed; this step moves it behind a progress line instead
@@ -298,6 +432,17 @@ LOADER_32_REL = "usr/lib/ld-linux.so.2"
 # happen.
 SETPRIV_REL = "usr/bin/setpriv"
 
+# --- what has to be on the LIVE side before this can run --------------------
+
+# 🔴 The two tools that replace `arch-chroot`. Both are util-linux, which is in
+# `base`, so on any sane ISO they are there -- and they are checked anyway,
+# because §5.38's lesson is that "the package provides it" is not a measurement
+# of the machine. Checked on the LIVE root, unlike everything above: they run
+# before the pivot, from the installer's own filesystem.
+UNSHARE_REL = "usr/bin/unshare"
+PIVOT_ROOT_REL = "usr/bin/pivot_root"
+LIVE_TOOL_RELS = (UNSHARE_REL, PIVOT_ROOT_REL)
+
 # --- the target user's side -------------------------------------------------
 
 STEAM_DIR_REL = ".local/share/Steam"
@@ -307,6 +452,16 @@ LOG_REL = f"{STEAM_DIR_REL}/logs/bootstrap_log.txt"
 # missing. Watched as well so the first seconds of a broken run are still
 # legible.
 FALLBACK_LOG_REL = "Steam/logs/bootstrap_log.txt"
+
+# 🔴 THE LAUNCHER'S OWN LOG, AND THE REASON THIS MODULE READS IT.
+# `bootstrap_log.txt` is written by Valve's *updater*. Everything `steam.sh`
+# itself says -- including every `show_message` and therefore every reason it
+# refuses to start -- goes to stderr, which `steam.sh` has already redirected
+# into this file via `srt-logger` before it does any of its checks. The
+# 2026-08-16 hardware failure died in `steam.sh`, so `bootstrap_log.txt` was
+# empty and the whole diagnosis was in here, unread. See the module docstring.
+LAUNCHER_LOG_REL = f"{STEAM_DIR_REL}/logs/console-linux.txt"
+FALLBACK_LAUNCHER_LOG_REL = "Steam/logs/console-linux.txt"
 
 # 🔴 THE OUTCOME ASSERTION. Written by the updater only after `Update complete`,
 # so its presence means the client is genuinely installed and its absence means
@@ -397,6 +552,19 @@ PHASE_LINES = (
     "Verifying installation...",
 )
 
+# 🔴 Lines out of `console-linux.txt` worth lifting into the record verbatim.
+# Deliberately broad and deliberately capped: the point is that the NEXT
+# failure arrives with its own explanation attached rather than as a bare exit
+# code, and a support reader can only act on Valve's own words. `Error:` is
+# `show_message`'s own prefix (steam.sh:105-119), which is what carried
+# "Steam now requires user namespaces to be enabled." off the failing install.
+NOTABLE_LOG_RE = re.compile(
+    r"(Error:|Warning:|requirements|user namespaces|Couldn't|Cannot |Failed |"
+    r"not writable|Permission denied|No such file|internal error)",
+    re.IGNORECASE,
+)
+MAX_NOTABLE_LINES = 8
+
 # deck_wifi's vocabulary (S1's, via src/deck-form.sh). Used ONLY to classify a
 # failure, never to skip the attempt -- deck_pkgs.py decision 2's reason: a Deck
 # on a dock's ethernet legitimately records `skipped`.
@@ -411,6 +579,8 @@ NO_NETWORK_WIFI_STATUSES = ("skipped", "no-hardware", "iwd-failed")
 #   skipped-deferred     defer_provisioning: no account, so no home to bootstrap
 #   skipped-no-steam     the target has no Steam bootstrap tarball
 #   skipped-no-multilib  the target cannot execute a 32-bit binary
+#   skipped-no-container the live ISO has no unshare/pivot_root, so the target
+#                        cannot be entered in a way Valve's launcher can run in
 #   skipped-no-space     not enough free space on the target
 #   failed               the child could not be started at all
 #   error                written by deck_configure's registry on an unforeseen
@@ -421,6 +591,7 @@ STATUS_INCOMPLETE = "incomplete"
 STATUS_DEFERRED = "skipped-deferred"
 STATUS_NO_STEAM = "skipped-no-steam"
 STATUS_NO_MULTILIB = "skipped-no-multilib"
+STATUS_NO_CONTAINER = "skipped-no-container"
 STATUS_NO_SPACE = "skipped-no-space"
 STATUS_FAILED = "failed"
 
@@ -455,21 +626,117 @@ def child_env(home: str, user: str) -> dict:
     return env
 
 
+# 🔴 THE ENTRY, AND WHY IT IS NOT `arch-chroot`. Read "WHY arch-chroot CANNOT
+# RUN THIS AT ALL" in the module docstring first: the kernel refuses
+# `unshare(CLONE_NEWUSER)` to any chrooted process, Valve's launcher hard-gates
+# on a working user namespace, and that is the whole of the 2026-08-16 exit 71.
+#
+# `set -eu` and no `|| true` on anything load-bearing: CLAUDE.md's "never
+# silently swallow a failure". A failed mount aborts with mount(8)'s own
+# message on stderr, which `spawn()` has pointed at a file, which the record
+# copies into `output`. The one thing that is allowed to continue is the
+# resolv.conf bind, and it prints why.
+ENTER_SCRIPT = r"""
+set -eu
+t=$1
+shift
+
+# 🔴 The target, bind-mounted onto itself. This is the container runtimes' own
+# first move and it is not decoration: `pivot_root` needs its new root to be a
+# mount it is allowed to pivot onto, and a mount this namespace *inherited* can
+# be refused (EINVAL) where one it *created* is not. Measured: pivoting onto an
+# inherited mount failed, onto a freshly made one succeeded. Recursive, so a
+# target with a separate /boot or /home keeps them.
+mount --rbind "$t" "$t"
+
+# What arch-chroot provides. `-t proc`, not a bind of the live /proc: this run
+# has its own pid namespace (--pid --fork), and a bind would show it the
+# installer's process table instead of its own.
+mount -t proc proc "$t/proc"
+mount --rbind /sys "$t/sys"
+mount --rbind /dev "$t/dev"
+mount --rbind /run "$t/run"
+mount -t tmpfs -o mode=1777,nosuid,nodev tmp "$t/tmp"
+
+# DNS. arch-chroot binds the live resolv.conf over the target's and that is
+# what makes pacman resolve in deck_pkgs; without it Valve's updater reaches
+# nothing and reports "Steam needs to be online to update." One level of
+# symlink, exactly as arch-chroot handles it. Never fatal, always explained.
+if [ -e /etc/resolv.conf ]; then
+	rc="$t/etc/resolv.conf"
+	if [ -L "$rc" ]; then
+		link=$(readlink "$rc")
+		case "$link" in
+		/*) rc="$t$link" ;;
+		*) rc="$t/etc/$link" ;;
+		esac
+	fi
+	if [ ! -f "$rc" ]; then
+		mkdir -p "$(dirname "$rc")" 2>/dev/null || true
+		: >"$rc" 2>/dev/null || true
+	fi
+	if ! mount --bind /etc/resolv.conf "$rc" 2>/dev/null; then
+		echo "deck-steam-bootstrap: could not bind /etc/resolv.conf onto $rc --" \
+			"Valve's updater may not be able to resolve its CDN" >&2
+	fi
+else
+	echo "deck-steam-bootstrap: the live system has no /etc/resolv.conf --" \
+		"Valve's updater may not be able to resolve its CDN" >&2
+fi
+
+# 🔴 pivot_root, not chroot. After this the target IS the root of this mount
+# namespace, so the kernel's current_chrooted() test is false and an
+# unprivileged user namespace is allowed. `pivot_root . .` is the container
+# runtimes' form and needs no scratch directory in the target; the old root
+# ends up stacked at the same point and is detached immediately.
+cd "$t"
+pivot_root . .
+umount -l .
+cd /
+exec "$@"
+"""
+
+
 def bootstrap_command(target, uid: int, gid: int, home: str, user: str) -> list[str]:
     """The exact argv this step runs.
 
-    ``arch-chroot`` for ``deck_patches.chroot_command``'s reasons: the launcher,
-    the 32-bit loader, the bootstrap tarball and the user's home are all inside
-    the target, and every absolute path the updater writes into
-    ``~/.steam/*`` has to be a path the *installed* system will resolve. Run
-    from the live side it would bootstrap the ISO.
+    Inside the target for ``deck_patches.chroot_command``'s reasons: the
+    launcher, the 32-bit loader, the bootstrap tarball and the user's home are
+    all in there, and every absolute path the updater writes into ``~/.steam/*``
+    has to be a path the *installed* system will resolve. Run from the live side
+    it would bootstrap the ISO.
 
-    ``env -i`` inside the chroot as well as a built environment out here:
-    ``arch-chroot`` passes its own environment through, so without it the
-    installer's variables would reach the updater.
+    🔴 But **not** via ``arch-chroot``, and that is not a preference: a chroot
+    makes Valve's launcher fail, measured, with the exit code the first hardware
+    install recorded. ``ENTER_SCRIPT`` under ``unshare --mount --pid --fork``
+    reproduces ``arch-chroot``'s mounts and then enters with ``pivot_root``.
+
+    ``env -i`` inside as well as a built environment out here: ``unshare``
+    passes its own environment through, so without it the installer's variables
+    would reach the updater.
     """
     return [
-        "arch-chroot",
+        "unshare",
+        "--mount",
+        "--pid",
+        "--fork",
+        # 🔴 `--kill-child` is the pid namespace's answer to the straggler
+        # problem, and it is not optional here. Inside a pid namespace the
+        # process we exec becomes pid 1, and pid_namespaces(7) says an unhandled
+        # SIGTERM is IGNORED by a namespace's init even when it comes from an
+        # ancestor -- so `stop_process_group`'s polite first signal would do
+        # nothing on its own. This makes `unshare`'s own death (which SIGTERM
+        # does cause) SIGKILL the namespace's init, and killing a namespace's
+        # init kills everything in it. `stop_process_group`'s SIGKILL is still
+        # the backstop; this just means the first signal is not a no-op.
+        "--kill-child",
+        "--propagation",
+        "private",
+        "--",
+        "/bin/sh",
+        "-c",
+        ENTER_SCRIPT,
+        "deck-steam-bootstrap",
         str(target),
         "setpriv",
         f"--reuid={uid}",
@@ -538,6 +805,61 @@ def read_log_tail(home_on_target: Path, limit: int = 64 * 1024) -> str:
         except OSError:
             continue
     return ""
+
+
+def read_launcher_log_tail(home_on_target: Path, limit: int = 64 * 1024) -> str:
+    """The tail of ``console-linux.txt`` -- ``steam.sh``'s own output.
+
+    🔴 This is the file the 2026-08-16 hardware failure was hiding in. Valve's
+    launcher redirects its stderr into it through ``srt-logger`` *before* it
+    runs any of its checks, so from that moment on everything it says about why
+    it will not start goes here and nowhere else. Reading only the updater's
+    ``bootstrap_log.txt`` leaves a failure that never reached the updater
+    looking like a bare exit code, which is exactly what happened.
+    """
+    for rel in (LAUNCHER_LOG_REL, FALLBACK_LAUNCHER_LOG_REL):
+        path = home_on_target / rel
+        try:
+            size = path.stat().st_size
+            with open(path, "rb") as handle:
+                if size > limit:
+                    handle.seek(size - limit)
+                return handle.read().decode("utf-8", "replace")
+        except OSError:
+            continue
+    return ""
+
+
+def launcher_log_size(home_on_target: Path) -> int:
+    """Bytes in ``console-linux.txt``, for the no-progress watchdog.
+
+    Part of the progress signature as well as of the record: ``steam.sh`` spends
+    its first seconds updating the Steam runtime and writing *here*, before
+    ``package/`` or ``bootstrap_log.txt`` exist at all. Without this the
+    watchdog is blind to a run that is working but has not reached the updater.
+    """
+    for rel in (LAUNCHER_LOG_REL, FALLBACK_LAUNCHER_LOG_REL):
+        try:
+            return (home_on_target / rel).stat().st_size
+        except OSError:
+            continue
+    return 0
+
+
+def notable_lines(text: str) -> list[str]:
+    """The lines of a log that name a problem, newest last, capped.
+
+    Not a summary and not a diagnosis: a filter, so that the one line Valve
+    printed about why it refused to start reaches
+    ``/var/log/omarchy-deck-install.json`` instead of being 4 000 lines above
+    whatever the tail happened to catch.
+    """
+    hits = [
+        line.strip()
+        for line in (text or "").splitlines()
+        if line.strip() and NOTABLE_LOG_RE.search(line)
+    ]
+    return [sanitize_text(line, limit=MAX_LINE_CHARS) for line in hits[-MAX_NOTABLE_LINES:]]
 
 
 def log_size(home_on_target: Path) -> int:
@@ -817,7 +1139,7 @@ def run_bootstrap(
     deadline = started + budget_secs
     last_change = started
     last_report = started
-    last_signature = (0, 0)
+    last_signature = (0, 0, 0)
     marker_since: float | None = None
     projection_checked = False
     reason = STOP_EXITED
@@ -831,7 +1153,15 @@ def run_bootstrap(
 
             now = clock()
             log_text = read_log_tail(home_on_target)
-            signature = (package_bytes(package_dir), log_size(home_on_target))
+            # Three signals, not two: `steam.sh` writes console-linux.txt for
+            # seconds before `package/` or bootstrap_log.txt exist, and a
+            # watchdog that cannot see that is blind exactly while the runtime
+            # is being set up.
+            signature = (
+                package_bytes(package_dir),
+                log_size(home_on_target),
+                launcher_log_size(home_on_target),
+            )
             if signature != last_signature:
                 last_signature = signature
                 last_change = now
@@ -953,6 +1283,9 @@ def bootstrap_steam(ctx, live_root=LIVE_ROOT, *, runner=None, budget_secs: int =
         "stragglers": [],
         "phase": None,
         "output": None,
+        # 🔴 The two fields the 2026-08-16 failure needed and did not have.
+        "launcher_log": None,
+        "launcher_errors": [],
         "error": None,
         "warnings": [],
     }
@@ -1039,6 +1372,25 @@ def _bootstrap(ctx, target: Path, live_root, record: dict, warnings: list[str], 
         )
         return
 
+    missing_live = [
+        rel for rel in LIVE_TOOL_RELS if not (Path(live_root) / rel).exists()
+    ]
+    if missing_live:
+        # 🔴 Not a nicety. `chroot` is the one way of entering the target that
+        # provably cannot work here (see the docstring), so if the live system
+        # cannot do the pivot there is nothing to fall back to -- and saying
+        # that is better than running a command that is known to exit 71.
+        record["status"] = STATUS_NO_CONTAINER
+        record["error"] = sanitize_text(
+            "the live system is missing " + ", ".join("/" + rel for rel in missing_live)
+            + " -- Valve's launcher refuses to start inside a chroot (it needs a user "
+            "namespace, which the kernel denies to any chrooted process), and without "
+            "these the target cannot be entered any other way. First boot behaves as it "
+            "does today.",
+            limit=400,
+        )
+        return
+
     record["wifi_status"] = read_wifi_status(live_root)
 
     # --- the idempotent path ------------------------------------------------
@@ -1084,7 +1436,13 @@ def _bootstrap(ctx, target: Path, live_root, record: dict, warnings: list[str], 
 
     # --- run it -------------------------------------------------------------
     argv = bootstrap_command(target, user.uid, user.gid, user.home, user.name)
-    record["command"] = " ".join(argv)
+    # The entry script is ~2 KB of shell and comments; spelling it out here
+    # would bury the part of the record a human reads (who it ran as, with what
+    # flags, against what target) under it. The script itself is in this file,
+    # under one name, which is where a reader should go for it.
+    record["command"] = " ".join(
+        "<ENTER_SCRIPT>" if part == ENTER_SCRIPT else part for part in argv
+    )
 
     info(
         f"Installing Steam's client update into {user.name}'s home now, so the first boot "
@@ -1119,6 +1477,14 @@ def _bootstrap(ctx, target: Path, live_root, record: dict, warnings: list[str], 
     record["beta"] = _read_beta(target, user)
     record["phase"] = sanitize_text(_phase(read_log_tail(home_on_target)) or "", limit=MAX_LINE_CHARS) or None
 
+    # 🔴 THE DIAGNOSTIC, KEPT. Everything `steam.sh` says about why it refused
+    # to start is in console-linux.txt and nowhere else -- see the module
+    # docstring. Recorded whatever happened, because a run that "worked" and a
+    # run that did not are read out of the same file.
+    launcher_text = read_launcher_log_tail(home_on_target)
+    record["launcher_log"] = summarize_output(launcher_text) or None
+    record["launcher_errors"] = notable_lines(launcher_text)
+
     owned, _, own_warning = root_owned_under(home_on_target / STEAM_DIR_REL)
     record["root_owned"] = [sanitize_text(p, limit=MAX_LINE_CHARS) for p in owned]
     if own_warning:
@@ -1144,6 +1510,15 @@ def _bootstrap(ctx, target: Path, live_root, record: dict, warnings: list[str], 
         return
 
     record["status"] = STATUS_INCOMPLETE
+
+    # 🔴 And they are PRINTED, not merely filed. The record survives to the
+    # booted machine, but an operator watching an install sees only what
+    # `error()` writes -- and "exit 71" on its own is what cost this project a
+    # session. `error` itself is left exactly as it was: its closing sentence is
+    # the degradation promise and nothing may push it out of a 400-char field.
+    for line in record["launcher_errors"]:
+        warnings.append("Valve's launcher said: " + line)
+
     record["error"] = sanitize_text(
         _incomplete_reason(reason, record)
         + " Nothing was made worse: Steam downloads only what is missing, so the first boot "
