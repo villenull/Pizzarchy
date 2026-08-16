@@ -3582,6 +3582,75 @@ button suspending AND waking to something usable — this Deck has never been
 suspended**; and Wi-Fi/audio/gamescope still up without Valve's firmware, which
 is now a regression check rather than a discovery.
 
+### 5.40 🔴 THE CONSOLE FONT WAS A REGRESSION — reverted after one hardware boot (2026-08-16)
+
+P33's A3 pinned `latarcyrheb-sun32` (16×32) to make the installer readable.
+**Measured on the panel, it made it unusable.**
+
+| | columns | rows |
+|---|---|---|
+| default 8×16 | 160 | **50** |
+| latarcyrheb-sun32 | 80 | **25** |
+
+The columns were the intended half. **The ROWS were not, and nobody costed
+them.** 25 rows cannot hold the Omarchy logo, a prompt and a 7-row keyboard at
+once, so on hardware the logo filled the screen, the keyboard's top rows drew
+over each other, and **the username and password prompts were pushed off-screen
+entirely** — a `CLAUDE.md` violation (a screen you cannot read is a screen you
+cannot complete without a keyboard), and strictly worse than the small font it
+was meant to fix. Operator verdict: *"I prefer the sizing for the install menu
+that we had before. The only thing I would have changed was the keyboard being
+too small."*
+
+The comment that shipped claimed *"16×32 gives 50 columns and 40 rows where 8×16
+gave 100 and 80"* — **both figures wrong, on both axes.** That arithmetic came
+from the P33 plan, where the column half had *already been corrected once*
+(§5.39, Agent B). The correction was applied to the plan and to Agent B's brief
+and never propagated into Agent A's. A number corrected in one place and left
+standing in another is the same defect this project keeps paying for.
+
+**The font was never what fixed the keyboard.** `deck_osk_tty.py` now derives
+its cell width from the real column count, so at the DEFAULT font it draws **160
+columns instead of the old hardcoded 80** — twice as wide, at the sizing the
+operator wanted. The two changes were independent; only one of them was needed.
+
+`DECK_CONSOLE_FONT` is now empty and `deck_form_pin_console_font` returns early
+on empty, **before** the tty branch. Without that guard it would `setfont ""` on
+the real console and warn on every prompt — and **the unit suite structurally
+cannot catch it**, because it has no VT and returns at the tty guard. Found by
+reading the code, not by a test; now asserted.
+
+**Still open after this boot** (operator, 2026-08-16): the keyboard **still
+flickers** on hardware. Agent B measured the *drive* (erase-to-EOL 1250→25 per
+second of pad motion) and was explicit that panel behaviour was unverifiable
+off-hardware. That measurement stands; it simply was not sufficient. Re-check
+after the font revert, since row-budget overlap may have been part of what was
+seen.
+
+### 5.41 A sixth upstream patch was written, then dropped for lack of evidence
+
+Two P33 builds died on `invalid or corrupted package (checksum)` for files that
+are **not corrupt** — downloaded three times, byte-identical, valid zstd. The
+diagnosis: we COMPILE `omarchy-dev`/`omarchy-settings-dev` from `iso/RUNTIME`'s
+pinned commit while upstream PUBLISHES a package with the identical
+pkgver-pkgrel. Populating the offline mirror leaves upstream's copy in the
+scratch pacman cache; mkarchiso reads that cache first, then validates it
+against the db `repo-add` just wrote from *our* build.
+
+A patch was written to evict cache entries that disagree with the mirror
+(comparing by content, never by name). The third build succeeded — but it
+**evicted 0 files**, so the fix is unattributed and the two prior failures
+remain unexplained. `test-iso-build.sh` caps the overlay at **five** patches and
+says raising it *"is a decision, not a fix"*; with no evidence the patch did
+anything, that argument could not be made, so it was dropped rather than the
+budget raised. Recorded here so the diagnosis is not lost: **if this recurs,
+reinstate it with the failure as evidence and raise the budget deliberately.**
+
+⚠️ Also learned: `iso/bin/build`'s positional argument is **not** the scratch
+root. All three builds used `~/.cache/omarchy-deck/iso-build` regardless of what
+was passed, so the "always build in a fresh scratch dir" precaution (§5.33a) was
+never actually in effect for any of them.
+
 ---
 
 ## 6. Blocked on human
