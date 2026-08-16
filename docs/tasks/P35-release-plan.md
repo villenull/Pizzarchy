@@ -24,9 +24,57 @@ before announcing anywhere, and say plainly in the README meanwhile that a
 prebuilt image is coming. The README must not imply a general audience it cannot
 yet serve.
 
-**The hosting problem is concrete:** GitHub caps release assets at **2 GB per
+**The hosting problem is concrete:** GitHub caps release assets at **2 GiB per
 file**; the ISO is **6,485,413,888 B (6.04 GiB)**. So a hosted image needs split
-archives, an external mirror, or a torrent. None is hard; none is free.
+archives, an external mirror, or a torrent.
+
+## Hosting — DECIDED 2026-08-16
+
+**Internet Archive for the ISO, linked from a GitHub Release that carries the
+checksum and the build instructions.** Free, permanent, no size limit, no egress
+bill, and it auto-generates a torrent alongside direct HTTP so both exist without
+running anything. The GitHub Release stays the front door: tag, notes, sha256,
+build instructions, and a link out to the image.
+
+Chosen because it needs **no new engineering** and cannot produce a surprise
+bill if the project gets attention. It also does not foreclose anything — adding
+a smaller image later changes nothing about where these live.
+
+Rejected, with reasons:
+
+* **GitHub Releases, split into ~4 parts.** Free and keeps everything in one
+  place, but a general Deck owner meets `cat`/reassembly and a second checksum
+  at exactly the moment they are least tolerant of friction. Wrong cost for the
+  chosen audience.
+* **Cloudflare R2.** Genuinely good — 10 GB free storage and **zero egress** —
+  and the right answer if more control is ever wanted. Needs an account and
+  setup that Archive does not, for no benefit today.
+* **Torrent only.** No seeders means a dead download. A small project will not
+  have them.
+
+⚠️ **Publish the checksum in the GitHub Release, not only beside the image.**
+The release is the thing under our control; the mirror is not. A user who
+downloads from Archive must be able to verify against a number that lives here.
+
+### The size lever, for later — a netinstall variant
+
+**4.7 GB of the 6.1 GB ISO is the offline package mirror** (1,291 packages,
+measured 2026-08-16). **77% of what is being hosted exists so the install works
+with no network at all.**
+
+A netinstall image would be roughly **1.4 GB** — under GitHub's 2 GiB cap, so it
+could ship as a **single release asset with no external host and no splitting**,
+and it would become the default download for the chosen audience.
+
+⚠️ **This is real work, not a build flag.** The offline mirror is load-bearing:
+the installer resolves against it twice (`deck-mirror.packages`' own header), it
+is bind-mounted for pacstrap and unmounted before genfstab, and "fully offline"
+is in the repo's own description. A netinstall path would need a supported
+resolve-against-live-repos mode **and its own QEMU coverage**. Scope it properly
+before promising it.
+
+Ordering: ship the offline image on Archive first, add netinstall later if the
+download friction turns out to matter.
 
 ## Already true, and it changes the docs question
 
