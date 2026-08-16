@@ -49,6 +49,7 @@ UNIT="$PKG_DIR/omarchy-deck-patch-check.service"
 FIXTURE="$REPO_ROOT/test/fixtures/t12-omarchy-f0020448ca87"
 QML_REL="shell/plugins/lock/Service.qml"
 LIMINE_REL="default/limine/limine.conf"
+FOOT_REL="default/foot/screensaver.ini"
 BROKEN_SENTINEL='@@T12-DELIBERATELY-BROKEN-QML@@'
 
 pass() { printf 'ok - %s\n' "$1"; }
@@ -171,6 +172,8 @@ grep -qE '^    interval: 5000$' "$FIXTURE/$QML_REL" ||
 if grep -qE '^interface_rotation:' "$FIXTURE/$LIMINE_REL"; then
   fail "the fixture is unpatched upstream limine.conf" "it already carries interface_rotation"
 fi
+grep -qE '^font=.*:size=18$' "$FIXTURE/$FOOT_REL" ||
+  fail "the fixture is unpatched upstream screensaver.ini" "no 'size=18' in $FIXTURE/$FOOT_REL"
 pass "the fixture is upstream's content, not a pre-patched copy"
 
 # --- 1. clean apply ---------------------------------------------------------
@@ -191,7 +194,13 @@ if grep -qE '^    interval: 5000$' "$root/$QML_REL"; then
 fi
 [[ $(grep -cE '^interface_rotation: 90$' "$root/$LIMINE_REL") -eq 1 ]] ||
   fail "the limine template carries interface_rotation: 90 exactly once" "$(cat "$root/$LIMINE_REL")"
-pass "both shipped patches apply cleanly to the real pinned upstream tree"
+[[ $(status_of 0030-screensaver-font-fits-panel.patch) == ok ]] || fail "0030 is ok" "$(cat "$state")"
+[[ $(grep -cE '^font=JetBrainsMono Nerd Font:size=14$' "$root/$FOOT_REL") -eq 1 ]] ||
+  fail "the screensaver terminal font is size=14 exactly once" "$(cat "$root/$FOOT_REL")"
+if grep -qE '^font=.*:size=18$' "$root/$FOOT_REL"; then
+  fail "the old size=18 is gone" "still present"
+fi
+pass "all three shipped patches apply cleanly to the real pinned upstream tree"
 
 # The patch must be surgical. 1 line changed in a 471-line file, 1 added in a
 # 20-line one: a patch that rewrote the file wholesale would still satisfy the
@@ -202,12 +211,16 @@ qml_changed=$(diff -U0 "$FIXTURE/$QML_REL" "$root/$QML_REL" | grep -cE '^[+-][^+
 limine_changed=$(diff -U0 "$FIXTURE/$LIMINE_REL" "$root/$LIMINE_REL" | grep -cE '^[+-][^+-]' || true)
 [[ $limine_changed -eq 1 ]] ||
   fail "0020 adds exactly one line" "$limine_changed +/- lines"
-pass "the patches are surgical: 1 line changed in Service.qml, 1 added in limine.conf"
+foot_changed=$(diff -U0 "$FIXTURE/$FOOT_REL" "$root/$FOOT_REL" | grep -cE '^[+-][^+-]' || true)
+[[ $foot_changed -eq 2 ]] ||
+  fail "0030 changes exactly one line" "$foot_changed +/- lines"
+pass "the patches are surgical: 1 line changed in Service.qml, 1 added in limine.conf, 1 changed in screensaver.ini"
 
 # --- 2. idempotence ---------------------------------------------------------
 
 qml_sha_after_first=$(sha_of "$root/$QML_REL")
 limine_sha_after_first=$(sha_of "$root/$LIMINE_REL")
+foot_sha_after_first=$(sha_of "$root/$FOOT_REL")
 run_applier "$root" "$PATCH_DIR"
 [[ $rc -eq 0 ]] || fail "a second run exits 0" "rc=$rc
 $out"
@@ -217,6 +230,8 @@ $out"
   fail "the second run changes nothing in Service.qml" "sha moved"
 [[ $(sha_of "$root/$LIMINE_REL") == "$limine_sha_after_first" ]] ||
   fail "the second run changes nothing in limine.conf" "sha moved"
+[[ $(sha_of "$root/$FOOT_REL") == "$foot_sha_after_first" ]] ||
+  fail "the second run changes nothing in screensaver.ini" "sha moved"
 run_applier "$root" "$PATCH_DIR"
 [[ $rc -eq 0 && $(sha_of "$root/$QML_REL") == "$qml_sha_after_first" ]] ||
   fail "a third run is still a no-op" "rc=$rc"
@@ -593,7 +608,12 @@ root=$(new_root)
 run_applier "$root" "$PATCH_DIR"
 jq -e . "$state" >/dev/null || fail "patch-state.json is valid JSON" "$(cat "$state")"
 [[ $(jq -r '.schema' "$state") == 1 ]] || fail "the state file declares its schema" "$(cat "$state")"
-[[ $(jq -r '.patches | length' "$state") -eq 2 ]] || fail "the state file has a row per patch" "$(cat "$state")"
+# Derived from the shipped set, not a literal: the point is "a row per patch",
+# and a hard-coded 2 turned that into "exactly two patches exist" the first time
+# a third one shipped.
+shipped_patches=$(find "$PATCH_DIR" -name '*.patch' | wc -l)
+[[ $(jq -r '.patches | length' "$state") -eq "$shipped_patches" ]] ||
+  fail "the state file has a row per patch ($shipped_patches shipped)" "$(cat "$state")"
 if jq -e '.patches[] | select(.requirement == "" or .requirement == null)' "$state" >/dev/null; then
   fail "every patch row names its owning requirement" "a stale-Deck reader must learn WHICH requirement is off"
 fi
@@ -713,11 +733,43 @@ grep -qF 'qmllint: shell/plugins/lock/Service.qml' "$m10" ||
   fail "0010 lints the QML it edits" "$(cat "$m10")"
 pass "0010 asserts both directions of the literal and lints the result"
 
+# --- 16b. the runtime patch budget -----------------------------------------
+#
+# `docs/findings/T12-upstream-patch-seam.md` §3.5 set this at **≤ 2 runtime
+# patches, and a third has to argue for itself**. Every patch here is a standing
+# rebase liability against a repo that moves several times a day, and
+# `pacman -Qkk omarchy-dev` reports each patched file as altered.
+#
+# 🔴 RAISED TO 3 ON 2026-08-16, and here is the third patch's argument, because
+# §3.5 asks for one rather than forbidding one:
+#
+#   0030-screensaver-font-fits-panel sizes the screensaver terminal's font so
+#   Omarchy's own 81-column logo fits the Deck's 1024-logical-px-wide panel. At
+#   upstream's size=18 the terminal is 71 columns and the O and the Y are cut
+#   off (operator, from hardware, 2026-08-16).
+#
+#   THERE IS NO NON-PATCH SEAM FOR IT. `omarchy-launch-screensaver` runs
+#   `foot --config="$OMARCHY_PATH/default/foot/screensaver.ini"`, and foot's
+#   --config REPLACES the user config rather than layering over it -- so
+#   ~/.config/foot/foot.ini is never consulted and an orchestrator module
+#   writing under $HOME cannot reach this setting at all. $OMARCHY_PATH is
+#   /usr/share/omarchy (default/bash/env-bootstrap:14), which omarchy-dev owns
+#   and reverts silently on upgrade with no .pacnew -- measurement M2, the exact
+#   reason this seam exists. A hand-edit would be the silent-revert failure
+#   CLAUDE.md forbids; this applier is the only mechanism that makes it loud.
+#
+#   ITS REBASE LIABILITY IS THE SMALLEST OF THE THREE: a 7-line INI whose only
+#   moving part is one integer, versus a 551-line QML file that has already
+#   moved under 0010 twice.
+#
+# ⚠️ 4 IS NOT AUTOMATICALLY NEXT. The budget is a pressure valve, not a
+# ratchet: a fourth patch argues from ≤ 3 exactly as this one argued from ≤ 2,
+# and "the last one got in" is not an argument.
 n_patches=$(find "$PATCH_DIR" -name '*.patch' | wc -l)
-[[ $n_patches -le 2 ]] ||
-  fail "the runtime patch budget is 2 (T12 finding §3.5)" \
-    "$n_patches patches -- a third has to argue for itself in the task file first; each one is a standing rebase liability against a repo that moves several times a day"
-pass "$n_patches shipped patches, each with a well-formed .meta, within the budget of 2"
+[[ $n_patches -le 3 ]] ||
+  fail "the runtime patch budget is 3 (T12 finding §3.5, raised from 2 on 2026-08-16)" \
+    "$n_patches patches -- a fourth has to argue for itself in the task file first; each one is a standing rebase liability against a repo that moves several times a day"
+pass "$n_patches shipped patches, each with a well-formed .meta, within the budget of 3"
 
 # --- 17. the container e2e exists and is wired to the same payload ----------
 

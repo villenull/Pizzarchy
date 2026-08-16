@@ -15,6 +15,11 @@ context lines would let a patch pass here and reject on the device.
     sha256 3f0a265a09f7957e8f5d74666595d3136ec64899c414426190460f9e2098e701
   default/limine/limine.conf          20 lines
     sha256 282f055fdd439301c2249fc3ca579d88621080c8c4df150d6a15555b7c8581df
+  default/foot/screensaver.ini         7 lines
+    sha256 053150146bccb101eb2f14e0622376cff4d62563c3b1a16ae7dd8668be7ac51c
+    Added 2026-08-16 for patch 0030-screensaver-font-fits-panel. Last touched
+    upstream at 7debca9f477500d650187a8a160b871bb31c38e9, which is BEFORE the
+    pin, so this file is at f0020448 like the other two.
 
 Replaces test/fixtures/t12-omarchy-6d7826d (the beta-2/edge pin), retired
 2026-08-15 with the 4.0.0 stable rebase. What actually moved between the two:

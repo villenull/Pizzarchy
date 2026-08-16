@@ -1,0 +1,104 @@
+# 0030-screensaver-font-fits-panel -- metadata and post-conditions.
+#
+# WHY THIS PATCH EXISTS
+#
+# Operator, from hardware, 2026-08-16: *"the screensaver in desktop mode appears
+# clipped. as if it were meant for a bigger screen so then the O and Y of
+# omarchy can't be seen."*
+#
+# The screensaver is `ttfx` rendering ~/.config/omarchy/branding/screensaver.txt
+# inside a fullscreen terminal. The art is UPSTREAM'S OWN logo.txt, copied to
+# that path by omarchy-upgrade-to-quattro:1972, and it is **81 columns wide**
+# (measured: `max(len(line))` over the pinned checkout's logo.txt at
+# basecamp/omarchy@f0020448ca87; the "O" occupies columns 0-9 and the "Y"
+# columns 70-80 -- exactly the two letters the operator lost).
+#
+# THE TERMINAL IS foot, AND THAT IS MEASURED, NOT ASSUMED. Two independent
+# readings agree:
+#   * default/xdg-terminal-exec/hyprland-xdg-terminals.list names `foot.desktop`
+#     and nothing else, and omarchy-launch-screensaver picks the terminal with
+#     `xdg-terminal-exec --print-id`;
+#   * `hyprctl -j clients` read off this Deck 2026-08-12 with the screensaver
+#     actually playing reported {"class":"org.omarchy.screensaver",
+#     "title":"foot","fullscreen":2} -- transcribed in
+#     src/deck-input-mapper.py:1754.
+# install/omarchy-base.packages:42 carries `foot`; alacritty, ghostty and kitty
+# are not installed on the target at all.
+#
+# THE ARITHMETIC, and why 18 cannot work on this panel
+#
+# eDP-1 is 800x1280 physical, `transform: 3`, `scale: 1.25` (docs/PROGRESS.md
+# §5.37 / line 3449), so a fullscreen window's LOGICAL width is 1024 px --
+# not 1280. `o.window("org.omarchy.screensaver", { fullscreen = true })` in
+# default/hypr/apps/system.lua is what makes it fullscreen.
+#
+# JetBrainsMono Nerd Font is 1000 units/em with a 600-unit advance on every
+# glyph the art uses -- U+2588/U+2584/U+2580 and space all measure 600
+# (read from JetBrainsMonoNerdFont-Regular.ttf with fontTools). A terminal cell
+# is therefore 0.6 em wide, so:
+#
+#     columns ~= 1024 / (size_pt * 96/72 * 0.6) = 1280 / size_pt
+#
+# 🔴 THE SCALE FACTOR CANCELS, so this holds whether foot uses the fractional
+# scale (1.25) or falls back to integer scaling (2): the buffer and the font
+# grow by the same factor, and the column count depends only on the LOGICAL
+# width. That is what makes this number safe to pin.
+#
+#     size=18 -> 71 columns   art needs 81 -> 10 columns lost, 5 per side
+#     size=16 -> 80 columns   still one short
+#     size=15 -> 85 columns   fits, 4 spare
+#     size=14 -> 91 columns   fits, 10 spare        <- this patch
+#
+# 71 columns is also the reading that MATCHES THE SYMPTOM and no other does:
+# 5 columns off each side takes exactly half the O and half the Y. Integer-2
+# scaling without the cancellation would have cost 37 columns (four letters);
+# no scaling at all would have given 91 and clipped nothing.
+#
+# ⚠️ THE `wait_for_terminal_resize` RACE IS NOT THE CAUSE, and was checked
+# rather than assumed. omarchy-screensaver's own comment warns that ttfx
+# measures the terminal once at startup and that an 80x24 pty paints into the
+# corner. But an 80-column canvas would clip the 81-column art by ONE column,
+# not by half of two letters, and the observed art is centred rather than
+# cornered. The race would make the bug worse; it cannot produce it. Do not
+# "fix" the font and the race together and then not know which one mattered.
+#
+# WHY 14 AND NOT 15. 15 fits with 4 columns to spare, which is inside the
+# rounding noise: foot derives the cell width through fcft/FreeType at an
+# integer pixel size, and one pixel either way moves the cell from 15 to 16 and
+# the column count from 85 to 80 -- back under the art. 14 survives that (a
+# 15 px cell still yields 85 columns) and also clears 80 columns, which is
+# `omarchy-transcode-ascii`'s DEFAULT --width -- so custom branding produced
+# the documented way keeps fitting too.
+#
+# ⚠️ SCOPE: foot only, deliberately. default/alacritty/screensaver.toml and
+# omarchy-launch-screensaver's `--font-size=18` for ghostty and kitty carry the
+# same 18 and would have the same bug, but none of those three terminals is on
+# the target and patching a file nothing reads is drift surface for no measured
+# benefit. If the Deck's terminal ever changes, this patch changes with it.
+#
+# ⚠️ NOT VERIFIED ON HARDWARE. The Deck was mid-install when this was written
+# and sshd was gone; nobody has seen the result on a panel. What IS verified is
+# that the patch applies to the pin, that the arithmetic above is measured from
+# the real font file and the real art file, and that the terminal is foot.
+#
+# ⚠️ NOT AN LCD CLAIM. The numbers above come from the OLED's eDP-1 as read on
+# this Deck. The LCD model is not tested and nothing here asserts it works
+# (CLAUDE.md). A smaller screensaver font cannot break an untested panel worse
+# than an oversized one, but that is a tolerance argument, not a test result.
+#
+# No qmllint post-condition: this is a foot INI, not QML. The applier requires
+# at least one post-condition per patch, and the assert_counts below are it.
+
+requirement: docs/tasks/P33-fix-round.md (screensaver clipping, operator 2026-08-16) / docs/PROGRESS.md §5.37
+description: size the screensaver terminal font so Omarchy's 81-column logo fits the Deck's 1024-logical-px-wide panel
+target: default/foot/screensaver.ini
+
+# Exactly once, and exactly this value. Twice would mean a previous run appended
+# rather than patched.
+assert_count: default/foot/screensaver.ini|^font=JetBrainsMono Nerd Font:size=14$|1
+# Nothing left at 16 or above. 1280/16 = 80 columns, one short of the 81-column
+# art -- so any size in that range is the bug, whoever wrote it. Written as a
+# range rather than as `size=18` so an upstream retune to 17, 20 or 24 is caught
+# too: 0020's history is that upstream retunes literals and a patch pinned to
+# one literal stops meaning anything.
+assert_count: default/foot/screensaver.ini|^font=.*:size=(1[6-9]|[2-9][0-9]|[0-9]{3,})$|0

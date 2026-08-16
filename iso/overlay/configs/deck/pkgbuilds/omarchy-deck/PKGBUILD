@@ -150,8 +150,10 @@ source=('README'
   '0010-lock-blank-timer-20s.patch'
   '0010-lock-blank-timer-20s.meta'
   '0020-limine-interface-rotation.patch'
-  '0020-limine-interface-rotation.meta')
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+  '0020-limine-interface-rotation.meta'
+  '0030-screensaver-font-fits-panel.patch'
+  '0030-screensaver-font-fits-panel.meta')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 # The one place the patch payload's destination is written down. The applier's
 # own DEFAULT_PATCH_DIR is /usr/share/omarchy-deck/patches and deck_patches.py's
@@ -238,4 +240,8 @@ package() {
     "$pkgdir/$_patchdir/0020-limine-interface-rotation.patch"
   install -Dm644 "$srcdir/0020-limine-interface-rotation.meta" \
     "$pkgdir/$_patchdir/0020-limine-interface-rotation.meta"
+  install -Dm644 "$srcdir/0030-screensaver-font-fits-panel.patch" \
+    "$pkgdir/$_patchdir/0030-screensaver-font-fits-panel.patch"
+  install -Dm644 "$srcdir/0030-screensaver-font-fits-panel.meta" \
+    "$pkgdir/$_patchdir/0030-screensaver-font-fits-panel.meta"
 }
