@@ -1,6 +1,6 @@
 # Pizzarchy: Omarchy on your Steam Deck
 
-One bootable USB installs [Omarchy](https://omarchy.org) on your Steam Deck with no keyboard/mouse required. Feels exactly like SteamOS except the desktop is Omarchy. Installation is driven entirely by the Deck's buttons and trackpads.
+One bootable USB installs [Omarchy](https://omarchy.org) on your Steam Deck with no keyboard/mouse required. Feels exactly like SteamOS except the desktop is Omarchy with a Steam-like on-screen keyboard (bring it up using STEAM+X). Installation is driven entirely by the Deck's buttons and trackpads.
 
 **Hot and ready in about twenty minutes! Easy as Pizza(rchy) pie.**
 
@@ -30,7 +30,7 @@ image — see [Recovery](#recovery).
 
 **Gaming Mode.** Same gamescope session, same library, same controller behaviour.
 
-**Desktop.** Full Omarchy: Hyprland, Waybar, the whole environment, tuned for the Deck's panel and gamepad.
+**Desktop.** Full Omarchy: Hyprland, Waybar, the whole environment, tuned for the Deck's panel and gamepad. Press STEAM+X to bring up the on-screen keyboard.
 
 **Install from the Deck.** Every screen is A / B / D-pad / trackpads, including typing your Wi-Fi password on an on-screen keyboard drawn right on the console.
 
