@@ -12,7 +12,23 @@ Gaming Mode, play. The difference is **Desktop Mode**, which now drops you into 
 real Omarchy/Hyprland desktop — with a button to come straight back.
 
 > _**[ IMAGE — hero: the Deck in hand, running the Omarchy desktop ]**_
-> `docs/images/hero-desktop.jpg`
+> `docs/images/hero-desktop.png`
+
+---
+
+## What you need
+
+| | |
+|---|---|
+| **A Steam Deck OLED** | Verified on OLED. **Not tested on the LCD model.** |
+| **A USB stick, 8 GB or larger** | [Ventoy](https://www.ventoy.net) is the tested path |
+| **An internet connection** | **Required during install.** Steam is downloaded from Valve as part of setup, and the installer will not continue without a connection. Wi-Fi or a dock's ethernet both work. |
+| **About twenty minutes** | And a Deck you are willing to erase — see below |
+
+⚠️ **This wipes the device.** It is not dual-boot, and there is no undo inside
+the installer. Back up anything you care about, including saves that are not on
+Steam Cloud. Getting back to stock SteamOS means Valve's official recovery
+image — see [Recovery](#recovery).
 
 ---
 
@@ -29,9 +45,9 @@ gamepad.
 trackpads, including typing your Wi-Fi password on an on-screen keyboard drawn
 right on the console.
 
-**Offline by default.** The ISO carries a complete package mirror, so the
-install itself never needs a network. Wi-Fi is there to fetch Steam and save you
-doing it afterwards.
+**It boots straight into Gaming Mode.** Steam is installed *and updated* during
+setup, so the first boot is a boot — not a long wait on a black screen wondering
+whether it worked.
 
 > _**[ IMAGE — Omarchy desktop, full screenshot ]**_ `docs/images/desktop.png`
 >
@@ -41,38 +57,32 @@ doing it afterwards.
 
 ---
 
-## Before you start
-
-**Verified on the OLED Steam Deck. Not tested on the LCD model.**
-
-⚠️ **This wipes the device.** It is not dual-boot. Back up anything you care
-about, including saves that are not on Steam Cloud. Returning to stock SteamOS
-means Valve's official recovery image — see [Recovery](#recovery).
-
----
-
 ## Install
 
 1. **Get the image.**
 
    > _**[ LINK — Internet Archive download + sha256 ]**_
 
-2. **Write it to a USB stick.** [Ventoy](https://www.ventoy.net) is the tested
-   path — copy the `.iso` onto the Ventoy partition and you are done.
+2. **Write it to a USB stick.** With Ventoy, copy the `.iso` onto the Ventoy
+   partition — that is the whole step.
 
 3. **Boot it.** Hold **Volume Down + Power** until the boot menu appears, then
    pick the USB stick.
 
-4. **Follow the screens.** Language, Wi-Fi, account, disk. Then it installs.
+4. **Follow the screens.** Keyboard layout, Wi-Fi, your account, then the disk.
+   Everything is buttons and trackpads.
 
-> Ventoy's own menu draws rotated 90° on the Deck's panel. That is Ventoy, not
-> this project, and it clears the moment our ISO starts.
+5. **Wait.** It reboots on its own when it is finished, and comes up in Gaming
+   Mode.
+
+> Ventoy's own boot menu draws rotated 90° on the Deck's panel. That is Ventoy,
+> not this project, and it clears the moment our ISO starts.
 
 > _**[ IMAGE — greeter / "press A to begin" ]**_ `docs/images/install-01-greeter.png`
 >
 > _**[ IMAGE — Wi-Fi network list ]**_ `docs/images/install-02-wifi.png`
 >
-> _**[ IMAGE — the on-screen keyboard, photographed on the panel ]**_ `docs/images/install-03-osk.jpg`
+> _**[ IMAGE — the on-screen keyboard ]**_ `docs/images/install-03-osk.png`
 >
 > _**[ IMAGE — disk confirmation, "Yes, erase and install" ]**_ `docs/images/install-04-confirm.png`
 >
@@ -97,15 +107,15 @@ means Valve's official recovery image — see [Recovery](#recovery).
 | | |
 |---|---|
 | Kernel | Valve's Neptune kernel, the same one SteamOS runs |
-| Boot | Limine, with a Gaming Mode default |
-| Gaming Mode | gamescope, stock behaviour, Steam preinstalled |
+| Boot | Limine, booting to Gaming Mode by default |
+| Gaming Mode | gamescope, stock behaviour, Steam already installed and up to date |
 | Desktop Mode | Omarchy / Hyprland, reachable from the Steam menu |
 | Touchscreen | works in Desktop Mode |
 | Suspend / wake | power button |
 | Display | brightness control, correct panel rotation |
 | Audio | speakers and headphones, Valve's DSP |
 | Wi-Fi | in the installer and on the installed system |
-| Controller | full navigation, plus an on-screen keyboard for text |
+| Controller | full navigation, plus an on-screen keyboard for text entry |
 
 ---
 
@@ -121,10 +131,10 @@ iso/bin/build
 
 The finished `.iso` lands in the build's `release/` directory with its sha256.
 
-The build refuses to proceed if any of its nine guards fail. Those check things
-like *"the on-screen keyboard is actually executable in the live image"* and
-*"no package list is carried without something that installs it"* — both real
-bugs that shipped once, and are not allowed to ship again.
+The build refuses to proceed if any of its guards fail. Those check things like
+*"the on-screen keyboard is actually executable in the live image"* and *"no
+package list is carried without something that installs it"* — both real bugs
+that shipped once, and are not allowed to ship again.
 
 ---
 
@@ -142,8 +152,8 @@ cat /var/log/omarchy-deck-install.json
 ## Recovery
 
 This install replaces SteamOS. To go back, use **Valve's official Steam Deck
-Recovery Image** — see `docs/RECOVERY.md` for the exact steps, including
-restoring the stock partition layout.
+Recovery Image** — see [`docs/RECOVERY.md`](docs/RECOVERY.md) for the exact
+steps, including restoring the stock partition layout.
 
 ---
 
@@ -154,6 +164,12 @@ form layer over the install screens, an input mapper that turns the gamepad into
 keyboard events (including an on-screen keyboard drawn on the console), Valve's
 Neptune kernel and audio DSP, and a session layer that preserves gamescope while
 adding a route to the Omarchy desktop.
+
+The ISO carries a complete package mirror — around 1,300 packages — so the
+system itself installs from the USB stick rather than over the network. That is
+why the install is quick and does not fall over on a slow connection. The
+internet requirement is for **Steam specifically**, which is downloaded from
+Valve during setup rather than redistributed here.
 
 | Path | What lives there |
 |---|---|
