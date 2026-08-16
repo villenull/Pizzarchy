@@ -38,7 +38,7 @@ image — see [Recovery](#recovery).
 
 **Boots straight into Gaming Mode.** Steam is installed *and updated* during setup.
 
-![Desktop Mode: Omarchy and Hyprland on the Deck's own panel](docs/images/desktop.png)
+![Desktop Mode: the Omarchy menu, and the way back to Gaming Mode](docs/images/desktop.png)
 
 ---
 
