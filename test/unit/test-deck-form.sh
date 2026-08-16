@@ -510,18 +510,32 @@ pass "deck_form_pin_console_font is a no-op off a virtual console (same guard as
 
 : >"$work/sf.log"
 DECK_FORM_TTY_OVERRIDE=/dev/tty1 FAKE_SETFONT_LOG="$work/sf.log" \
-  PATH="$FONT_PATH" deck_form_pin_console_font ||
+  PATH="$FONT_PATH" deck_form_pin_console_font ter-probe-font ||
   fail "the font pin must succeed on a virtual console with a working setfont"
-[[ $(cat "$work/sf.log") == "$DECK_CONSOLE_FONT" ]] ||
-  fail "the font pin must load exactly DECK_CONSOLE_FONT" "got: $(cat "$work/sf.log")"
-pass "deck_form_pin_console_font loads DECK_CONSOLE_FONT ('$DECK_CONSOLE_FONT') on a virtual console"
+[[ $(cat "$work/sf.log") == "ter-probe-font" ]] ||
+  fail "the font pin must load exactly the font it was given" "got: $(cat "$work/sf.log")"
+pass "deck_form_pin_console_font loads the font it is given on a virtual console"
+
+# 🔴 AND THE SHIPPING DEFAULT PINS NOTHING. DECK_CONSOLE_FONT is empty (see its
+# own comment: 16x32 halved the Deck's rows from 50 to 25 and pushed the
+# username/password prompts off-screen). Without the empty-guard this would run
+# `setfont ""` on the real console and warn on EVERY prompt.
+: >"$work/sf.log"
+out=$(DECK_FORM_TTY_OVERRIDE=/dev/tty1 FAKE_SETFONT_LOG="$work/sf.log" \
+      PATH="$FONT_PATH" deck_form_pin_console_font 2>&1) ||
+  fail "the default (empty) font pin must return 0"
+[[ ! -s "$work/sf.log" ]] ||
+  fail "an empty DECK_CONSOLE_FONT must not exec setfont at all" "$(cat "$work/sf.log")"
+[[ -z $out ]] ||
+  fail "an empty DECK_CONSOLE_FONT must be SILENT -- a warning on every prompt is noise on the screens that matter" "got: $out"
+pass "the shipping default (DECK_CONSOLE_FONT empty) execs no setfont and says nothing"
 
 # 🔴 NEVER FATAL -- and this is the rule that DIFFERS from the keymap's. A
 # wrong keymap silently substitutes characters in a masked password field; a
 # missing font only means the screen stays small. "A prompt with a small font
 # beats no prompt."
 out=$(DECK_FORM_TTY_OVERRIDE=/dev/tty1 FAKE_SETFONT_FAIL=71 \
-      PATH="$FONT_PATH" deck_form_pin_console_font 2>&1) ||
+      PATH="$FONT_PATH" deck_form_pin_console_font ter-probe-font 2>&1) ||
   fail "a failed setfont must NOT be fatal -- the screen still has to be drawn"
 LC_ALL=C grep -qF "ERROR reading font file" <<<"$out" ||
   fail "a failed font pin must forward setfont's OWN message rather than swallowing it" "got: $out"
@@ -533,7 +547,22 @@ pass "a failed font pin returns 0, warns loudly, and forwards setfont's own stde
 # base (it is what provides loadkeys) and ships this file, so A3 needs no new
 # package -- but only if the NAME is right. Checked against this machine's own
 # kbd when it has one; loudly not-run otherwise, never silently skipped.
-if [[ -d /usr/share/kbd/consolefonts ]]; then
+if [[ -z $DECK_CONSOLE_FONT ]]; then
+  # 🔴 EMPTY IS THE SHIPPING VALUE as of 2026-08-16, and this branch asserts
+  # that rather than skipping. Pinning latarcyrheb-sun32 took the Deck's
+  # console from 160x50 to 80x25 -- it halved the ROWS as well as the columns,
+  # and 25 rows cannot hold the logo, a prompt and a 7-row keyboard at once, so
+  # the username and password prompts went off-screen on real hardware. The
+  # keyboard's size was fixed instead by deck_osk_tty.py deriving its cell
+  # width from the real column count, which needs no font change at all.
+  #
+  # If someone sets this again, the OTHER branch runs and checks the name --
+  # but the thing that actually has to be checked is the ROW budget on the
+  # tallest screen, and no unit test here can see that. Measure it on a panel.
+  deck_form_pin_console_font >/dev/null 2>&1 ||
+    fail "an empty DECK_CONSOLE_FONT must still return 0 -- the font pin is never fatal"
+  pass "DECK_CONSOLE_FONT is empty (shipping default): no font is pinned and the console keeps 8x16 / 160x50"
+elif [[ -d /usr/share/kbd/consolefonts ]]; then
   font_hits=$(find /usr/share/kbd/consolefonts -maxdepth 1 -name "${DECK_CONSOLE_FONT}.*" | wc -l)
   [[ $font_hits -gt 0 ]] ||
     fail "DECK_CONSOLE_FONT='$DECK_CONSOLE_FONT' is not in /usr/share/kbd/consolefonts on this machine -- if kbd does not ship it, the ISO needs a package it does not currently install"

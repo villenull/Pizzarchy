@@ -322,13 +322,37 @@ readonly DECK_CONSOLE_KEYMAP=us
 # `latarcyrheb-sun16` the console already defaults to, so no glyph that
 # rendered before stops rendering.
 #
-# 16x32 gives 50 columns and 40 rows where 8x16 gave 100 and 80. FEWER, not
-# more -- that is the coupling docs/PROGRESS.md §5.34 D3 flags: the on-screen
-# keyboard must fit the console it is given rather than assume 80 columns.
-# That is deliberately NOT solved here (P33 Agent B owns `deck_osk_tty.py` and
-# is making the grid derive its width from the real column count). This file
-# only has to not lie about what it did, and to never make the font fatal.
-readonly DECK_CONSOLE_FONT=latarcyrheb-sun32
+# 🔴 DISABLED 2026-08-16 AFTER MEASURING IT ON THE PANEL. Set empty = no font
+# is pinned and the console keeps its 8x16 default. The machinery below stays
+# (tested, and correct if a future font is ever wanted); only the value is off.
+#
+# ⚠️ THE ARITHMETIC THAT USED TO STAND HERE WAS WRONG ON BOTH AXES. It claimed
+# "16x32 gives 50 columns and 40 rows where 8x16 gave 100 and 80". The Deck's
+# console is 1280x800 in its own frame (`fbcon=rotate:1`), so the real numbers
+# are:
+#
+#     8x16                160 cols x 50 rows     (what we had, and keep)
+#     latarcyrheb-sun32    80 cols x 25 rows     (what this pinned)
+#
+# It halved BOTH axes. 25 rows cannot hold the Omarchy logo, a prompt and a
+# 7-row keyboard at once, so on hardware the greeter's logo filled the screen,
+# the keyboard's top rows drew over each other, and THE USERNAME AND PASSWORD
+# PROMPTS WERE PUSHED OFF THE SCREEN ENTIRELY -- strictly worse than the small
+# font it was meant to fix, and a `CLAUDE.md` violation (a screen you cannot
+# read is a screen you cannot complete without a keyboard). Photographed by the
+# operator, 2026-08-16; verdict: "I prefer the sizing for the install menu that
+# we had before. The only thing I would have changed was the keyboard being
+# too small."
+#
+# 🔴 AND THE FONT WAS NEVER WHAT FIXED THE KEYBOARD. `deck_osk_tty.py`'s grid
+# now derives its cell width from the real column count (P33 Agent B), so at
+# the DEFAULT font it renders 160 columns wide instead of the old hardcoded 80
+# -- twice the width, at the sizing the operator asked to keep. The font pin
+# was a second, independent change that only cost rows.
+#
+# Before setting this to anything again: count the ROWS, not just the columns,
+# and check the tallest screen still fits.
+readonly DECK_CONSOLE_FONT=
 
 # deck_form_console_tty
 # Upstream's own guard, kept verbatim in spirit: `loadkeys` only means
@@ -399,6 +423,14 @@ deck_form_pin_console_keymap() {
 deck_form_pin_console_font() {
   local font=${1:-$DECK_CONSOLE_FONT}
   local tty_name err rc=0
+  # 🔴 EMPTY MEANS "PIN NOTHING", and it must return BEFORE the tty branch.
+  # DECK_CONSOLE_FONT is empty in shipping builds (see its own comment). Left
+  # unguarded this would run `setfont ""` on the Deck's real console, fail, and
+  # print the "could not set the console font" warning on EVERY prompt --
+  # noise on the exact screens the operator has to read. The unit suite cannot
+  # catch that: it has no VT, so it returns at the tty guard below and never
+  # reaches the exec. Found by reading, not by a test.
+  [[ -n $font ]] || return 0
   tty_name=$(deck_form_console_tty)
   if [[ $tty_name != /dev/tty* ]]; then
     # Same guard as the keymap: `setfont` addresses a Linux virtual console,
