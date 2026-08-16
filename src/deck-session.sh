@@ -774,9 +774,32 @@ readonly STEAM_WAIT_DROPIN="/etc/systemd/user/${STEAM_LAUNCHER_UNIT}.d/50-deck-w
 # that worked was ONE second after the failure, so almost any bound closes the
 # race, and the number's real job is to be a ceiling on a Deck that will never
 # come online. 20 s is well under the ~120 s Steam then spends updating, so on a
-# connected Deck it costs nothing and on a disconnected one it costs 20 s once.
+# connected Deck it costs nothing. ⚠️ It is NOT what a networkless Deck pays --
+# that is `-x`'s job, not this number's, and the difference matters because this
+# wait runs at EVERY Gaming Mode start and not only the first. Read the note
+# above render_steam_wait_online.
 readonly STEAM_WAIT_SECONDS=20
+# Phase 1's ceiling. Separate from the one above because it bounds a DIFFERENT
+# question -- "has NetworkManager finished its startup pass yet" -- which on this
+# hardware is already true by the time Gaming Mode starts (graphical.target at
+# 20.25 s, PROGRESS.md 5.35) and so normally costs nothing.
+readonly STEAM_WAIT_STARTUP_SECONDS=5
 readonly NM_ONLINE_BIN=/usr/bin/nm-online
+
+# 🔴 THE ONE CHANNEL THAT SURVIVES THE FIRST BOOT.
+#
+# Both artefacts in this section run ONCE, during the two minutes nobody can
+# see, and P33 shipped both reporting only to the journal. That was measurably
+# the wrong choice: PROGRESS.md 5.35 recorded that `journalctl --list-boots` on
+# the installed Deck showed **only boot 0** -- the first boot was never
+# captured -- so the stage's own advice ("confirm on the first boot with
+# journalctl --user -u ...") was unanswerable at the moment it mattered, and the
+# splash's failure on 2026-08-16 left no trace anywhere.
+#
+# So every branch of both scripts also appends one timestamped line to a FILE in
+# the desktop user's home. It is readable in Desktop Mode with a text editor, by
+# a person with no terminal and no SSH, after any number of reboots.
+readonly FIRST_BOOT_LOG_REL=.local/state/deck-session/first-boot.log
 
 # 🆕 E1 -- THE "DON'T TURN ME OFF" SPLASH.
 #
@@ -807,6 +830,24 @@ readonly SPLASH_IMAGE=/usr/local/share/deck-session/steam-first-boot.png
 # about to draw. Written BEFORE anything is displayed, deliberately -- a splash
 # that crashes must not get a second attempt at every boot forever.
 readonly SPLASH_MARKER_REL=.local/state/deck-session/steam-first-boot-shown
+# 🔴 THE MARKER IS STAMPED WITH THIS, AND THAT IS WHY THE FIX IS TESTABLE AT ALL.
+#
+# P33's marker held only a date, and it was written before the attempt (see
+# above -- that ordering is deliberate and is kept). The consequence was not
+# noticed until hardware: the 2026-08-16 boot drew nothing, wrote the marker
+# anyway, and thereby disabled the feature on that Deck **for ever**. Any fix
+# shipped afterwards would have been untestable without a human deleting a
+# dotfile by hand, on a device with no keyboard.
+#
+# So the marker records WHICH implementation had its one attempt. A marker whose
+# first field is not this string -- including every P33 marker, which starts
+# with a date -- is treated as belonging to a different implementation, and this
+# one gets its own single attempt. The safety property is unchanged: one attempt
+# per implementation, never one per boot.
+#
+# ⚠️ BUMP THIS when the splash changes in a way that deserves another attempt on
+# a Deck that has already run it. Do not bump it for a comment.
+readonly SPLASH_ATTEMPT_ID=p34-1
 # Seconds. The measured update was 123 s end to end; this is that with room and
 # a hard stop. It is a CEILING, not a duration -- the normal exit is Steam's UI
 # appearing.
@@ -2901,9 +2942,44 @@ EOF
 # ExecStartPre= on the unit that starts Steam. A non-zero exit there means
 # Gaming Mode does not start -- i.e. a Wi-Fi problem would be converted into an
 # unusable Deck, which is a far worse defect than the error modal this exists to
-# remove. So the outcome is REPORTED (every branch logs, to the journal, by
-# name) and never propagated. That is not "silently swallowing a failure": the
-# failure is loud, it just is not fatal, because being fatal here is wrong.
+# remove. So the outcome is REPORTED (every branch logs, to the journal AND to
+# ~/${FIRST_BOOT_LOG_REL}, by name) and never propagated. That is not "silently
+# swallowing a failure": the failure is loud, it just is not fatal, because being
+# fatal here is wrong.
+#
+# 🔴 WHY THIS IS NOT `nm-online -s`, WHICH IS WHAT P33 SHIPPED AND WHY IT DID
+# NOTHING. From nm-online(1), verbatim:
+#
+#     -s | --wait-for-startup
+#       Wait for NetworkManager startup to complete, rather than waiting for
+#       network connectivity specifically. [...] **After startup has completed,
+#       nm-online -s will just return immediately, regardless of the current
+#       network state.**
+#
+# NetworkManager reaches "startup complete" early in boot; graphical.target on
+# this Deck is at 20.25 s (PROGRESS.md 5.35). So by the time Steam is started the
+# condition `-s` tests is long since true, the ExecStartPre= returns 0 in
+# milliseconds, and **no wait happens at all** -- which is exactly what the
+# 2026-08-16 hardware boot showed: the drop-in was installed and Steam still hit
+# "Steam needs to be online to update." `-s` was chosen to avoid burning the
+# whole timeout on a networkless Deck, and it does avoid that; it just also
+# avoids doing the job.
+#
+# The shape that keeps both properties is two phases:
+#
+#   1. `-s -t ${STEAM_WAIT_STARTUP_SECONDS}` -- has NM finished trying? Normally
+#      already true, so normally free. Its job is to make phase 2's answer
+#      meaningful rather than premature.
+#   2. `-x -t ${STEAM_WAIT_SECONDS}` -- wait for ACTUAL connectivity, but `-x`
+#      ("Exit immediately if NetworkManager is not running or connecting") is the
+#      escape hatch that `-s` was standing in for: a Deck with no network at all
+#      is not connecting, so it returns at once instead of burning 20 s at every
+#      Gaming Mode start. A Deck that IS connecting gets waited for, which is the
+#      one-second race PROGRESS.md 5.35 measured.
+#
+# ⚠️ `-x` is checked at runtime rather than assumed: if this nm-online does not
+# have it, phase 2 says so and Steam starts anyway. Unverified on the target's
+# NetworkManager -- see the report for the command that settles it.
 render_steam_wait_online() {
   cat <<EOF
 #!/usr/bin/env bash
@@ -2921,25 +2997,48 @@ ${INSTALL_MARKER}
 # so it is never reached at all. See the constants block in ${PROG}.sh.
 set -uo pipefail
 
-say() { printf 'deck-steam-wait-online: %s\n' "\$1" >&2; }
+# Two destinations, on purpose. The journal is the convenient one; the file is
+# the one that still exists on the next boot -- the FIRST boot's journal was not
+# retained on this hardware (PROGRESS.md 5.35), which is how P33's outcome here
+# came to be unknowable. Failing to open the file is itself only a warning: this
+# script's contract is that it exits 0 no matter what.
+log_file="\${HOME:-/home/\$(id -un)}/${FIRST_BOOT_LOG_REL}"
+mkdir -p "\$(dirname "\$log_file")" 2>/dev/null || true
+say() {
+  printf 'deck-steam-wait-online: %s\n' "\$1" >&2
+  printf '%s deck-steam-wait-online: %s\n' "\$(date -Iseconds)" "\$1" >>"\$log_file" 2>/dev/null || true
+}
 
 if [[ ! -x ${NM_ONLINE_BIN} ]]; then
   say "${NM_ONLINE_BIN} is not installed, so connectivity cannot be waited for. Steam starts now; if this machine has no network yet it may show 'Steam needs to be online to update.' once and recover on its own retry."
   exit 0
 fi
 
-# -s: wait for NetworkManager to finish activating its startup connections,
-#     rather than for a connection to exist. On a Deck with no configured
-#     network that completes promptly instead of burning the whole timeout,
-#     which is the trap this is written around.
-# -q: no output of its own; every line here is ours and carries this tag.
-# -t: the ceiling, in seconds.
+# Phase 1 -- has NetworkManager finished trying? Normally already true, so
+# normally instant. -q: no output of its own; every line here is ours.
+startup_rc=0
+${NM_ONLINE_BIN} -q -s -t ${STEAM_WAIT_STARTUP_SECONDS} || startup_rc=\$?
+[[ \$startup_rc -eq 0 ]] ||
+  say "NetworkManager had not finished its startup pass within ${STEAM_WAIT_STARTUP_SECONDS}s (nm-online -s exited \${startup_rc}); waiting for connectivity anyway"
+
+# Phase 2 -- the one that does the work. NOT -s: read the note above
+# render_steam_wait_online for why -s is a no-op here by nm-online's own
+# documented behaviour.
+started=\$(date +%s)
 rc=0
-${NM_ONLINE_BIN} -q -s -t ${STEAM_WAIT_SECONDS} || rc=\$?
+${NM_ONLINE_BIN} -q -x -t ${STEAM_WAIT_SECONDS} || rc=\$?
+waited=\$(( \$(date +%s) - started ))
+
 if [[ \$rc -eq 0 ]]; then
-  say "network is up; starting Steam"
+  say "connectivity confirmed after \${waited}s; starting Steam"
+elif [[ \$rc -eq 2 ]]; then
+  # 2 is nm-online's "unknown or unspecified error", which is also what it exits
+  # with on an option it does not understand. Named rather than lumped in with
+  # "offline", because the two want different fixes and this script is the only
+  # thing that will ever have seen the difference.
+  say "nm-online exited 2 after \${waited}s -- an error, not an answer (an unsupported -x on this NetworkManager would look exactly like this). Starting Steam ANYWAY. Check with: ${NM_ONLINE_BIN} -x -t 1; echo \\\$?"
 else
-  say "nm-online exited \${rc} within ${STEAM_WAIT_SECONDS}s -- this machine is not online yet. Starting Steam ANYWAY, on purpose: a Deck with no Wi-Fi must still reach Gaming Mode. Steam may show 'Steam needs to be online to update.' once."
+  say "nm-online exited \${rc} after \${waited}s -- this machine is not online. Starting Steam ANYWAY, on purpose: a Deck with no Wi-Fi must still reach Gaming Mode. Steam may show 'Steam needs to be online to update.' once."
 fi
 exit 0
 EOF
@@ -2973,13 +3072,38 @@ ${INSTALL_MARKER}
 # anything here, and the three-bounds note above render_steam_splash.
 set -uo pipefail
 
-say() { printf 'deck-steam-splash: %s\n' "\$1" >&2; }
+# Two destinations, on purpose -- see the identical note in the wait helper.
+# The 2026-08-16 hardware boot drew nothing and left NOTHING to read: the unit's
+# journal was in a boot that was never retained. Whatever this does next time, it
+# says so in a file that outlives the boot.
+log_file="\${HOME:-/home/\$(id -un)}/${FIRST_BOOT_LOG_REL}"
+mkdir -p "\$(dirname "\$log_file")" 2>/dev/null || true
+say() {
+  printf 'deck-steam-splash: %s\n' "\$1" >&2
+  printf '%s deck-steam-splash: %s\n' "\$(date -Iseconds)" "\$1" >>"\$log_file" 2>/dev/null || true
+}
 
 marker="\${HOME:-/home/\$(id -un)}/${SPLASH_MARKER_REL}"
 
-# ONCE. Later boots reach Gaming Mode in ~39 s and there is nothing to cover.
+# ONCE PER IMPLEMENTATION. Later boots reach Gaming Mode in ~39 s and there is
+# nothing to cover, so a splash that ran must not run again -- but a marker left
+# by a DIFFERENT build must not silence this one for ever either. That is not
+# hypothetical: it is what P33's date-only marker did to this Deck on
+# 2026-08-16. Read the SPLASH_ATTEMPT_ID note in ${PROG}.sh.
 if [[ -e \$marker ]]; then
-  exit 0
+  seen=""
+  read -r seen _ <"\$marker" 2>/dev/null || true
+  if [[ -z \$seen ]]; then
+    # Present but empty or unreadable. We cannot tell which implementation ran,
+    # so we assume one did: this whole design would rather miss a message than
+    # cover a Gaming Mode that is about to draw.
+    say "\${marker} exists but could not be read; treating the splash as already shown"
+    exit 0
+  fi
+  if [[ \$seen == ${SPLASH_ATTEMPT_ID} ]]; then
+    exit 0
+  fi
+  say "\${marker} records attempt '\${seen}', not '${SPLASH_ATTEMPT_ID}' -- a different splash from the one that already ran, so this one gets its own single attempt"
 fi
 
 # 🔴 WRITTEN BEFORE ANYTHING IS DRAWN. If displaying the splash is what breaks
@@ -2988,22 +3112,40 @@ fi
 # the cost of being wrong in the other is a Deck that covers its own screen at
 # every start.
 mkdir -p "\$(dirname "\$marker")" 2>/dev/null || true
-date -Iseconds >"\$marker" 2>/dev/null || say "could not write \${marker}; the splash may be shown again next boot"
+printf '%s %s\n' "${SPLASH_ATTEMPT_ID}" "\$(date -Iseconds)" >"\$marker" 2>/dev/null ||
+  say "could not write \${marker}; the splash may be shown again next boot"
 
-[[ -r ${SPLASH_IMAGE} ]] || { say "${SPLASH_IMAGE} is missing; showing nothing"; exit 0; }
-[[ -x ${SPLASH_VIEWER} ]] || { say "${SPLASH_VIEWER} is missing; showing nothing"; exit 0; }
+[[ -r ${SPLASH_IMAGE} ]] || { say "FAILED: ${SPLASH_IMAGE} is missing; showing nothing. Re-run 'deck-session.sh stage-steam-first-run' on this machine to draw and install it."; exit 0; }
+[[ -x ${SPLASH_VIEWER} ]] || { say "FAILED: ${SPLASH_VIEWER} is missing; showing nothing. Install the 'imv' package."; exit 0; }
 
 # Draw INSIDE gamescope, not beside it. gamescope publishes its nested
 # compositor's socket as GAMESCOPE_WAYLAND_DISPLAY in the session environment
 # file steam-launcher.service also reads; WAYLAND_DISPLAY at this point is the
 # OUTER session's, and a client on that one would be behind gamescope's own
 # fullscreen surface where nobody would ever see it.
+#
+# 🔴 AND IF IT IS NOT SET, SAY SO AND STOP. P33 fell through this branch in
+# silence, which on the target means /usr/bin/imv (a two-line wrapper: Wayland if
+# WAYLAND_DISPLAY is set, X11 otherwise) execs imv-x11 against a DISPLAY that a
+# user unit does not have, dies in under a second, and leaves a black panel and
+# no explanation. A missing session environment is a real, diagnosable state --
+# EnvironmentFile= is prefixed '-' precisely so it cannot fail the unit -- and it
+# must be named rather than guessed at from the outside.
 if [[ -n \${GAMESCOPE_WAYLAND_DISPLAY:-} ]]; then
   export WAYLAND_DISPLAY=\$GAMESCOPE_WAYLAND_DISPLAY
+  say "drawing on gamescope's nested display (WAYLAND_DISPLAY=\${WAYLAND_DISPLAY})"
+else
+  say "FAILED: GAMESCOPE_WAYLAND_DISPLAY is not set, so there is no compositor to draw on and no way to tell one from the outer session. %t/gamescope-environment was missing or did not contain it. Showing nothing."
+  exit 0
 fi
 
-${SPLASH_VIEWER} -f -x ${SPLASH_IMAGE} &
+# 🔴 THE VIEWER'S OWN OUTPUT GOES IN THE LOG, NOT THE JOURNAL. This is the line
+# that says "Failed to connect to Wayland display" or "Unsupported image format"
+# -- the single most useful sentence there is when nothing appears -- and P33
+# sent it somewhere that did not survive the boot.
+${SPLASH_VIEWER} -f -x ${SPLASH_IMAGE} >>"\$log_file" 2>&1 &
 viewer=\$!
+started=\$(date +%s)
 say "showing ${SPLASH_IMAGE} (pid \${viewer}) until ${SPLASH_STEAM_READY_PROC} appears, or ${SPLASH_MAX_SECONDS}s, whichever comes first"
 
 # The deadline is computed once, up front, so nothing inside the loop can push
@@ -3013,7 +3155,22 @@ reason="deadline"
 while [[ \$(date +%s) -lt \$deadline ]]; do
   # The viewer died on its own (no compositor, unsupported image, killed).
   # Nothing left to take down, and no reason to keep counting.
-  kill -0 "\$viewer" 2>/dev/null || { reason="the viewer exited"; viewer=""; break; }
+  #
+  # 🔴 AND HOW LONG IT LASTED IS THE WHOLE DIAGNOSIS. A viewer that ran for two
+  # minutes handed over to Steam; a viewer that was gone in four seconds never
+  # drew a frame, and that is the case P33 shipped with no way to tell apart --
+  # both were reported as the neutral "the viewer exited". Its own stderr is
+  # immediately above this line in the same file.
+  if ! kill -0 "\$viewer" 2>/dev/null; then
+    alive=\$(( \$(date +%s) - started ))
+    if [[ \$alive -lt 5 ]]; then
+      reason="FAILED: the viewer exited after \${alive}s without drawing -- read the ${SPLASH_VIEWER} line above this one for why"
+    else
+      reason="the viewer exited after \${alive}s"
+    fi
+    viewer=""
+    break
+  fi
   if pgrep -x ${SPLASH_STEAM_READY_PROC} >/dev/null 2>&1; then
     # A short settle so the message does not vanish a frame before Steam's own
     # first frame lands, which would read as a flicker rather than a handover.
@@ -3125,7 +3282,8 @@ EOF
 
   $SUDO grep -qxF -- "ExecStartPre=${STEAM_WAIT_ONLINE_BIN}" "$STEAM_WAIT_DROPIN" ||
     fail "wrote ${STEAM_WAIT_DROPIN} but 'ExecStartPre=${STEAM_WAIT_ONLINE_BIN}' is not in it on re-read, so Steam would still start before the network and show the update error on first run"
-  log "verified: ${STEAM_LAUNCHER_UNIT} waits up to ${STEAM_WAIT_SECONDS}s for connectivity, then starts regardless"
+  log "verified: ${STEAM_LAUNCHER_UNIT} waits up to ${STEAM_WAIT_STARTUP_SECONDS}s for NetworkManager's startup"
+  log "          pass and then up to ${STEAM_WAIT_SECONDS}s for real connectivity, and starts regardless"
 
   # --- E1: the splash -------------------------------------------------------
   #
@@ -3148,6 +3306,19 @@ EOF
     fail "could not install ${SPLASH_IMAGE}"
   rm -f "$out"
   log "drew ${SPLASH_IMAGE} (${SPLASH_IMAGE_SIZE}, gamescope's landscape logical output)"
+
+  # 🔴 CHECKED HERE, NOT ONLY AT FIRST BOOT. The splash script checks its viewer
+  # too and degrades correctly, but it does that once, in the two minutes nobody
+  # is watching, on a machine whose first-boot journal is not retained
+  # (PROGRESS.md 5.35). Install time is the moment a missing viewer can still be
+  # reported to somebody who can act on it -- and it lands in
+  # /var/log/omarchy-deck-install.json, which survives.
+  #
+  # A warning, not a failure: everything else in this stage is still worth
+  # installing, and imv arriving later (it is in Omarchy's own base list) makes
+  # the splash work with no further action.
+  [[ -x $SPLASH_VIEWER ]] ||
+    warn "${SPLASH_VIEWER} is not on this target, so the splash will install but draw nothing on the first boot. It is line 60 of Omarchy's own omarchy-base.packages, so this means that package set did not land. Install 'imv'."
 
   assert_ours_or_absent "$SPLASH_BIN" "another package's helper"
   assert_ours_or_absent "$SPLASH_UNIT" "another package's unit"
@@ -3201,8 +3372,13 @@ EOF
   $SUDO grep -qE '^RuntimeMaxSec=' "$SPLASH_UNIT" ||
     fail "wrote ${SPLASH_UNIT} without RuntimeMaxSec=. That is the bound systemd enforces when the script cannot enforce its own, and without it a wedged splash is a permanently black-with-text panel -- worse than the defect it replaces."
 
-  $SUDO systemctl --global enable "$SPLASH_UNIT_NAME" >/dev/null 2>&1 ||
-    fail "could not enable ${SPLASH_UNIT_NAME} for all users"
+  # The error is CAPTURED, not discarded. '>/dev/null 2>&1 || fail' throws away
+  # the one sentence that says which of a dozen things went wrong -- and this
+  # file's own hard constraint is that a failure is never silent. The stdout
+  # half is still dropped; it is only the success chatter.
+  local enable_err
+  enable_err=$($SUDO systemctl --global enable "$SPLASH_UNIT_NAME" 2>&1 >/dev/null) ||
+    fail "could not enable ${SPLASH_UNIT_NAME} for all users: ${enable_err:-systemctl said nothing}"
 
   if in_chroot; then
     # Same readback stage-input-mapper does, for the same reason: --global
@@ -3212,14 +3388,22 @@ EOF
     [[ -L $wants_link ]] ||
       fail "'systemctl --global enable' exited 0 but ${wants_link} is not a symlink, so the splash is installed and would never run"
     log "verified: ${wants_link} -> $(readlink -- "$wants_link")"
-    defer "whether the splash actually DRAWS cannot be checked at install time -- it needs a running gamescope session, and the target has never booted. It is installed, enabled for gamescope-session.target, and bounded three ways so it cannot outlive Steam. Confirm on the first boot with: journalctl --user -u ${SPLASH_UNIT_NAME} -b"
+    # 🔴 THE DEFERRAL NAMES A FILE, NOT A JOURNAL. P33's version said "confirm
+    # with journalctl --user -u ... -b" and that advice could not be followed:
+    # the installed Deck's persistent journal held only boot 0 (PROGRESS.md
+    # 5.35), so the first boot -- the only one this runs on -- was already gone
+    # by the time anyone asked. Both scripts now append to a file in the user's
+    # home instead, readable in Desktop Mode with no terminal and no SSH.
+    defer "whether the splash actually DRAWS cannot be checked at install time -- it needs a running gamescope session, and the target has never booted. It is installed, enabled for gamescope-session.target, and bounded three ways so it cannot outlive Steam. After the first boot, read ~/${FIRST_BOOT_LOG_REL} -- every branch of both first-run scripts writes one timestamped line there, and a line beginning 'FAILED:' names the cause."
   fi
 
   log "stage-steam-first-run: ok"
-  log "NOTE: the splash is shown ONCE, on the first Gaming Mode session, and is"
-  log "      bounded at ${SPLASH_MAX_SECONDS}s by the script, $((SPLASH_MAX_SECONDS + 30))s by systemd, and by the"
-  log "      session itself. Its marker is ~/${SPLASH_MARKER_REL};"
-  log "      remove that file to see it again."
+  log "NOTE: the splash is shown ONCE per implementation (${SPLASH_ATTEMPT_ID}), on the"
+  log "      first Gaming Mode session, and is bounded at ${SPLASH_MAX_SECONDS}s by the script,"
+  log "      $((SPLASH_MAX_SECONDS + 30))s by systemd, and by the session itself. Its marker is"
+  log "      ~/${SPLASH_MARKER_REL}; remove that file to see it again."
+  log "      What it did lands in ~/${FIRST_BOOT_LOG_REL}, which"
+  log "      survives the boot the journal did not."
 }
 
 # ---------------------------------------------------------------------------
@@ -6371,7 +6555,9 @@ Stages also cover Gaming Mode / display defects (PROGRESS.md 5.11, 5.14, 5.15):
                            the ~2 minutes it then spends updating itself behind
                            a black panel. Both degrade to today's behaviour --
                            the wait always exits 0, and the splash is bounded
-                           three ways so it cannot outlive Steam.
+                           three ways so it cannot outlive Steam. Both write
+                           every outcome to ~/${FIRST_BOOT_LOG_REL},
+                           because the first boot's journal is not retained.
   stage-greeter-rotation   rotates the SDDM greeter for the Deck's panel.
                            The user's desktop needs a matching transform in
                            ~/.config/hypr/monitors.lua; the Limine menu and

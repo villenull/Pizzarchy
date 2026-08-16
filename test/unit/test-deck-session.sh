@@ -2094,10 +2094,39 @@ grep -q 'Starting Steam ANYWAY' <<<"$SFR_OUT" ||
   fail_test "and it says it is proceeding regardless" "$SFR_OUT"
 grep -qE -- "-t ${STEAM_WAIT_SECONDS}" "$nm_args" ||
   fail_test "the bound really reached nm-online" "captured: $(cat "$nm_args")"
+# 🔴 THE DEFECT P33 SHIPPED, ASSERTED AS A BEHAVIOUR AND NOT AS A STRING.
+#
+# P33 waited with `nm-online -s` ALONE. From nm-online(1): "After startup has
+# completed, nm-online -s will just return immediately, regardless of the current
+# network state." NetworkManager reaches startup-complete early in boot and
+# graphical.target on this Deck is at 20.25 s, so the condition was always
+# already true and the wait was a no-op -- which is what the 2026-08-16 hardware
+# boot showed: the drop-in was installed and Steam still hit "Steam needs to be
+# online to update."
+#
+# So the requirement is: at least one nm-online invocation that does NOT pass -s,
+# because that is the only kind that can wait for connectivity. The -s call may
+# stay (it is phase 1, and it is what makes phase 2's answer meaningful) but it
+# may not be the only one.
+mapfile -t nm_calls <"$nm_args"
+[[ ${#nm_calls[@]} -ge 2 ]] ||
+  fail_test "the wait makes more than one nm-online call" \
+    "captured ${#nm_calls[@]}: $(cat "$nm_args"). One call can only answer one of 'has NM finished trying' and 'is this machine online', and P33 answered the wrong one."
+connectivity_calls=0
+for call in "${nm_calls[@]}"; do
+  [[ " $call " == *" -s "* ]] && continue
+  connectivity_calls=$((connectivity_calls + 1))
+done
+[[ $connectivity_calls -ge 1 ]] ||
+  fail_test "🔴 at least one nm-online call waits for CONNECTIVITY, not just for NM's startup" \
+    "every call passed -s, and nm-online(1) says -s returns immediately once startup has completed 'regardless of the current network state'. That is P33's defect: an installed drop-in that waits for nothing. captured:"$'\n'"$(cat "$nm_args")"
+grep -qE -- '(^| )-x( |$)' "$nm_args" ||
+  fail_test "and the connectivity wait has the networkless escape hatch" \
+    "without -x ('Exit immediately if NetworkManager is not running or connecting') a Deck with no network burns the whole ${STEAM_WAIT_SECONDS}s at EVERY Gaming Mode start -- the trap -s was standing in for. captured:"$'\n'"$(cat "$nm_args")"
 grep -qE -- '-s' "$nm_args" ||
-  fail_test "it waits for NM STARTUP, not for a connection to exist" \
-    "without -s a networkless Deck burns the whole timeout; with it, NM finishing its startup attempts is enough. captured: $(cat "$nm_args")"
-pass "nm-online failing: exits 0, says it is proceeding, and really passed -q -s -t ${STEAM_WAIT_SECONDS}"
+  fail_test "phase 1 still asks whether NM finished trying" \
+    "without it, a Deck whose Wi-Fi has not yet begun activating reads as 'not connecting' and -x returns at once -- the race reopens. captured: $(cat "$nm_args")"
+pass "🔴 nm-online failing: exits 0, says it is proceeding, and made ${#nm_calls[@]} calls of which ${connectivity_calls} waits for connectivity rather than only for startup"
 
 # (c) the happy path.
 cat >"$nm_stub" <<'NMSTUB'
@@ -2106,9 +2135,35 @@ exit 0
 NMSTUB
 SFR_RC=0
 SFR_OUT=$(NM_ARGS="$nm_args" "$wait_stubbed" 2>&1) || SFR_RC=$?
-[[ $SFR_RC -eq 0 ]] && grep -q 'network is up' <<<"$SFR_OUT" ||
+[[ $SFR_RC -eq 0 ]] && grep -q 'connectivity confirmed' <<<"$SFR_OUT" ||
   fail_test "the connected case reports the connection" "rc=${SFR_RC}"$'\n'"$SFR_OUT"
 pass "nm-online succeeding: exits 0 and reports the connection"
+
+# (d) nm-online present but rejecting an option -- exit 2, which is what it
+#     returns for "unknown or unspecified error" AND for an option it does not
+#     understand. -x is not verified on the target's NetworkManager, so the one
+#     state that would tell us must not be reported as "you are offline".
+cat >"$nm_stub" <<'NMSTUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$NM_ARGS"
+exit 2
+NMSTUB
+SFR_RC=0
+SFR_OUT=$(NM_ARGS="$nm_args" "$wait_stubbed" 2>&1) || SFR_RC=$?
+[[ $SFR_RC -eq 0 ]] ||
+  fail_test "an nm-online ERROR still exits 0" "rc=${SFR_RC}"$'\n'"$SFR_OUT"
+grep -q 'an error, not an answer' <<<"$SFR_OUT" ||
+  fail_test "and is reported as an error rather than as 'offline'" \
+    "the two want different fixes, and this script is the only thing that will ever have seen the difference:"$'\n'"$SFR_OUT"
+pass "nm-online exiting 2: exits 0 and names it an error, not an offline machine"
+
+# The wait writes where the first boot can still be read from. §5.35 measured
+# that this Deck's persistent journal held only boot 0, so a first-run script
+# that reports only to the journal reports to nobody.
+grep -q "$FIRST_BOOT_LOG_REL" "$wait_sh" ||
+  fail_test "the wait leaves a record that outlives the boot" \
+    "it does not mention ~/${FIRST_BOOT_LOG_REL}, so its outcome is journal-only -- and the one boot it runs on is the one whose journal was not retained"
+pass "the wait also appends to ~/${FIRST_BOOT_LOG_REL}, which survives the boot"
 
 # --- E1: the splash comes down ---------------------------------------------
 splash_sh="$sfr_work/splash"
@@ -2154,6 +2209,9 @@ chmod +x "$sfr_bin/pgrep"
 splash_home="$sfr_work/home"
 viewer_mark="$sfr_work/viewer.mark"
 
+# GAMESCOPE_WAYLAND_DISPLAY is set for every run that is meant to DRAW, because
+# the script now refuses to draw without it -- see the (e) case below, which is
+# the one that checks the refusal.
 run_splash() {   # run_splash <deadline> [READY=1]
   local script; script=$(splash_variant "$1")
   rm -rf "$splash_home"; mkdir -p "$splash_home"
@@ -2161,6 +2219,7 @@ run_splash() {   # run_splash <deadline> [READY=1]
   SPLASH_RC=0
   SPLASH_SECONDS=$SECONDS
   SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$viewer_mark" READY="${2:-}" \
+    GAMESCOPE_WAYLAND_DISPLAY=gamescope-0 \
     PATH="$sfr_bin:$PATH" timeout 60 "$script" 2>&1) || SPLASH_RC=$?
   SPLASH_ELAPSED=$((SECONDS - SPLASH_SECONDS))
 }
@@ -2219,6 +2278,112 @@ SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/third.mark" \
 grep -q 'showing nothing' <<<"$SPLASH_OUT" ||
   fail_test "and it says so" "$SPLASH_OUT"
 pass "a missing image degrades to today's black screen, loudly, with exit 0"
+
+# (e) 🔴 NO COMPOSITOR TO DRAW ON. P33 fell through this branch in SILENCE: the
+#     `if [[ -n ${GAMESCOPE_WAYLAND_DISPLAY:-} ]]` had no else, so a session
+#     environment that did not load meant /usr/bin/imv (a wrapper that picks
+#     Wayland only when WAYLAND_DISPLAY is set) execing imv-x11 against a DISPLAY
+#     a user unit does not have, dying instantly, and leaving a black panel and
+#     no explanation. That is one of the shapes the 2026-08-16 boot could have
+#     had, and it was indistinguishable from every other one.
+: >"$splash_image"
+script=$(splash_variant 120)
+rm -rf "$splash_home"; mkdir -p "$splash_home"
+SPLASH_RC=0
+SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/fourth.mark" \
+  PATH="$sfr_bin:$PATH" timeout 30 "$script" 2>&1) || SPLASH_RC=$?
+[[ $SPLASH_RC -eq 0 ]] ||
+  fail_test "no compositor is not a failed unit" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
+grep -q 'GAMESCOPE_WAYLAND_DISPLAY is not set' <<<"$SPLASH_OUT" ||
+  fail_test "🔴 a missing session environment is NAMED, not fallen through" \
+    "P33 was silent here and the failure was unattributable. got:"$'\n'"$SPLASH_OUT"
+[[ ! -s $sfr_work/fourth.mark ]] ||
+  fail_test "and no viewer is started at all" \
+    "starting one against the OUTER session puts it behind gamescope's fullscreen surface, where it is invisible AND still has to be killed"
+pass "🔴 no GAMESCOPE_WAYLAND_DISPLAY: says so by name, starts no viewer, exits 0"
+
+# (f) 🔴 THE VIEWER DIES IMMEDIATELY -- the shape a real "nothing was drawn"
+#     takes, and the one P33 reported as the neutral "the viewer exited".
+dying_viewer="$sfr_work/dying-imv"
+cat >"$dying_viewer" <<'DSTUB'
+#!/usr/bin/env bash
+printf 'started\n' >"$VIEWER_MARK"
+printf 'Failed to connect to Wayland display\n' >&2
+exit 1
+DSTUB
+chmod +x "$dying_viewer"
+script="$sfr_work/splash-dying"
+sed -e "s|${SPLASH_VIEWER}|${dying_viewer}|g" \
+    -e "s|${SPLASH_IMAGE}|${splash_image}|g" \
+    "$splash_sh" >"$script"
+chmod +x "$script"
+rm -rf "$splash_home"; mkdir -p "$splash_home"
+SPLASH_RC=0
+SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/fifth.mark" \
+  GAMESCOPE_WAYLAND_DISPLAY=gamescope-0 \
+  PATH="$sfr_bin:$PATH" timeout 60 "$script" 2>&1) || SPLASH_RC=$?
+[[ $SPLASH_RC -eq 0 ]] ||
+  fail_test "a viewer that dies instantly is not a failed unit" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
+grep -q 'FAILED: the viewer exited' <<<"$SPLASH_OUT" ||
+  fail_test "🔴 a viewer that never drew a frame is reported as a FAILURE" \
+    "a viewer that ran for two minutes handed over to Steam; one that was gone in a second drew nothing. P33 called both 'the viewer exited'. got:"$'\n'"$SPLASH_OUT"
+
+# 🔴 AND THE VIEWER'S OWN REASON IS IN THE FILE. This is the single most useful
+# sentence when nothing appears, and P33 sent it to a journal that was not kept.
+splash_log="$splash_home/$FIRST_BOOT_LOG_REL"
+[[ -s $splash_log ]] ||
+  fail_test "the splash leaves a record that outlives the boot" "expected ${splash_log}"
+grep -q 'Failed to connect to Wayland display' "$splash_log" ||
+  fail_test "🔴 and the VIEWER's own stderr is in it" \
+    "without it the file says the viewer died and not why. got:"$'\n'"$(cat "$splash_log")"
+grep -q 'FAILED' "$splash_log" ||
+  fail_test "and the failure is greppable in the file, not only on stderr" "$(cat "$splash_log")"
+pass "🔴 A VIEWER THAT NEVER DREW IS A NAMED FAILURE, and its own stderr is in ~/${FIRST_BOOT_LOG_REL}"
+
+# (g) 🔴 A MARKER FROM A DIFFERENT IMPLEMENTATION DOES NOT SILENCE THIS ONE.
+#     P33's marker held only a date and was written before the attempt, so the
+#     boot that drew nothing disabled the feature on that Deck for ever -- any
+#     fix would have been untestable without a human deleting a dotfile by hand,
+#     on a device with no keyboard.
+marker="$splash_home/$SPLASH_MARKER_REL"
+[[ -s $marker ]] || fail_test "the marker is written" "expected ${marker}"
+read -r marker_id _ <"$marker"
+[[ $marker_id == "$SPLASH_ATTEMPT_ID" ]] ||
+  fail_test "the marker records WHICH implementation ran" \
+    "first field is '${marker_id}', expected '${SPLASH_ATTEMPT_ID}'. Without it, 'has this splash run' cannot be distinguished from 'has A splash run'."
+# A P33-shaped marker: a bare date, exactly what is on the operator's Deck now.
+date -Iseconds >"$marker"
+SPLASH_RC=0
+SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/sixth.mark" \
+  GAMESCOPE_WAYLAND_DISPLAY=gamescope-0 \
+  PATH="$sfr_bin:$PATH" timeout 60 "$script" 2>&1) || SPLASH_RC=$?
+grep -q 'gets its own single attempt' <<<"$SPLASH_OUT" ||
+  fail_test "🔴 a P33 marker (a bare date) does not suppress this splash" \
+    "this is the state the operator's Deck is in RIGHT NOW: a marker written by a splash that drew nothing. If it suppresses the fix, the fix cannot be tested. got:"$'\n'"$SPLASH_OUT"
+[[ -s $sfr_work/sixth.mark ]] ||
+  fail_test "and it really attempted to draw" "no viewer was started"
+# ...and having attempted, it must not attempt again.
+SPLASH_RC=0
+SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/seventh.mark" \
+  GAMESCOPE_WAYLAND_DISPLAY=gamescope-0 \
+  PATH="$sfr_bin:$PATH" timeout 30 "$script" 2>&1) || SPLASH_RC=$?
+[[ $SPLASH_RC -eq 0 && -z $SPLASH_OUT ]] ||
+  fail_test "one attempt per implementation, not one per boot" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
+[[ ! -s $sfr_work/seventh.mark ]] ||
+  fail_test "and the second boot starts no viewer" "the ~39 s boots would be covered again"
+pass "🔴 ONE ATTEMPT PER IMPLEMENTATION: a P33-era marker yields exactly one retry, and then none"
+
+# An unreadable marker is treated as "already shown", because the bias of this
+# whole design is to miss a message rather than to cover a Gaming Mode.
+: >"$marker"
+SPLASH_RC=0
+SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/eighth.mark" \
+  GAMESCOPE_WAYLAND_DISPLAY=gamescope-0 \
+  PATH="$sfr_bin:$PATH" timeout 30 "$script" 2>&1) || SPLASH_RC=$?
+[[ $SPLASH_RC -eq 0 && ! -s $sfr_work/eighth.mark ]] ||
+  fail_test "an empty marker does not become a splash at every boot" \
+    "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
+pass "an unreadable marker reads as 'already shown' -- the safe direction"
 
 # --- the wording is the requirement ----------------------------------------
 #
