@@ -3537,6 +3537,51 @@ The bake's other twelve stages reported `ok`, and `session_bake.status` is
 `partial` — the loud-degradation design working: it named the failed stage and
 said the machine would still reach Gaming Mode, which is exactly what happened.
 
+### 5.39 ✅ P33 — seven defects fixed, 350 MiB cut, and six agents each corrected the plan (session 28)
+
+Six parallel agents over disjoint files (`docs/tasks/P33-fix-round.md`), commit
+`4caf26f`. **Every one of them corrected something the plan asserted**, which is
+the result worth recording — the briefs said *measure, don't infer*, and each
+agent's biggest contribution was refusing an instruction and proving why.
+
+| | the plan said | measurement said |
+|---|---|---|
+| **C** | bind `SUPER+W`'s classic bareword dispatcher | it resolves to `nil` on Hyprland 0.56.2; Omarchy binds `hl.dsp.window.close()` in Lua, and the bareword appears **nowhere** under `/usr/share/omarchy/`. **The plan document itself was turning `test-hyprctl-syntax.sh` red.** |
+| **D** | bind the touch device to the output so the transform applies | **binding does not rotate anything** — read from `src/managers/input/Touch.cpp`, where the monitor transform appears nowhere. The fix is `input:touchdevice:transform`, a libinput calibration matrix. `[[Auto]]` is a commented-out `// FIXME:` and does not autodetect. |
+| **B** | 800×1280 → 100 columns at 8×16, 50 at 16×32 | **wrong by an axis.** With `fbcon=rotate:1` the horizontal side is 1280 px, and §7 had *already measured* `50 160`. So the pair is **160 and 80** — and the OSK has been drawing its fixed 80 columns on a 160-column console, **half the screen**. Also: "5→3 appears to fit" checked `cell_text`, not `display_label`'s budget; `Enter` and `Backspace` both truncate at cell 3. |
+| **A** | raise the 5 s deadline | derived **35 s** from the mapper's own `NO_PAD_GRACE_SECONDS = 30.0` — any deadline below 30 can expire on a mapper about to succeed — and added a cross-file gate. |
+| **E** | verify brightness after moving discovery to first boot | there was **no accept line at all**, so §5.33a's stated acceptance criterion (*"a `steamos-priv-write` accept line in the journal"*) had been **unmeetable since it was written**. Added one. |
+| **F** | cut the firmware | cut it, and wrote the **per-line consumer rule** that `P32-neptune-firmware-placement.md` §5 proposed but never implemented. |
+
+**The P32 shape nearly shipped again, inside the fix for P32.** Agent B's
+adaptive grid was written, unit-tested, documented — and **inert**, because
+`_osk_draw` read the console width one line *after* rendering and passed it to
+nothing. Caught by B flagging a file it did not own rather than by any test.
+
+**Two more wrong-kernel reads found by E's twelve-stage audit** beyond D10:
+`stage-power-button`'s scans of `/run/udev/rules.d` and `/run/systemd/logind.conf.d`
+(arch-chroot bind-mounts those *from the live ISO*), and `stage-input-mapper`'s
+`/dev/uinput` probe, which tested the ISO's node as root and so could only ever
+pass. **The rule now written into `deck-session.sh`:** firmware-derived facts
+(DMI, ACPI/platform `ID_PATH`s) read the same on both kernels; **driver-assigned
+names and indices, udev's runtime database, and anything under `/run` do not.**
+`stage-lizard-mode` had this right all along and is the precedent the backlight
+should have followed.
+
+**The sleep-lock hazard from §5.24 is closed, by checking rather than assuming:**
+`mask_sleep_lock` runs before `session_bake`, and
+`/etc/systemd/user/omarchy-sleep-lock.service -> /dev/null` is present on the
+installed Deck, so arming `HandlePowerKey=suspend` cannot raise the unanswerable
+lock.
+
+⚠️ **Still hardware-only, and the operator's to close:** the OSK legible and
+flicker-free on the panel; a tap landing where the finger is (if wrong, it is
+wrong by a quarter turn and the only other value is `1`); STEAM+Y closing a
+window; the splash drawing **and exiting**; no Steam update modal; **the power
+button suspending AND waking to something usable — this Deck has never been
+suspended**; and Wi-Fi/audio/gamescope still up without Valve's firmware, which
+is now a regression check rather than a discovery.
+
 ---
 
 ## 6. Blocked on human
