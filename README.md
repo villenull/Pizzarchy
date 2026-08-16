@@ -78,14 +78,14 @@ whether it worked.
 > Ventoy's own boot menu draws rotated 90° on the Deck's panel. That is Ventoy,
 > not this project, and it clears the moment our ISO starts.
 
-> _**[ IMAGE — greeter / "press A to begin" ]**_ `docs/images/install-01-greeter.png`
->
+![The first screen: what this does, and what it erases](docs/images/install-01-greeter.png)
+
 > _**[ IMAGE — Wi-Fi network list ]**_ `docs/images/install-02-wifi.png`
+
+![The on-screen keyboard, drawn on the console and driven by the trackpads](docs/images/install-03-osk.png)
 >
-> _**[ IMAGE — the on-screen keyboard ]**_ `docs/images/install-03-osk.png`
->
-> _**[ IMAGE — disk confirmation, "Yes, erase and install" ]**_ `docs/images/install-04-confirm.png`
->
+![The point of no return. The cursor starts on "No, go back"](docs/images/install-04-confirm.png)
+
 > _**[ IMAGE — install progress ]**_ `docs/images/install-05-progress.png`
 
 ---
