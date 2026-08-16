@@ -43,9 +43,7 @@ doing it afterwards.
 
 ## Before you start
 
-**Verified on the OLED Steam Deck.** LCD Decks are untested and not claimed. If
-you have one and try this, [tell us what happens](#reporting-a-bug) — that is how
-it gets supported.
+**Verified on the OLED Steam Deck. Not tested on the LCD model.**
 
 ⚠️ **This wipes the device.** It is not dual-boot. Back up anything you care
 about, including saves that are not on Steam Cloud. Returning to stock SteamOS
@@ -138,10 +136,6 @@ already carries a per-step status:
 ```bash
 cat /var/log/omarchy-deck-install.json
 ```
-
-**If you have an LCD Deck**, say so explicitly and include that file plus
-`uname -r`. LCD support is not claimed today, and real reports are what would
-change that.
 
 ---
 
