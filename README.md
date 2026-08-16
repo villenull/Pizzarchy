@@ -6,7 +6,7 @@ Gaming Mode is unchanged. Easy as Pizza(rchy) pie.**
 One bootable USB installs [Omarchy](https://omarchy.org) on your Steam Deck with no keyboard/mouse required. Installation is driven entirely by the Deck's buttons and
 trackpads.
 
-Afterwards, the Deck behaves like it always did as turning your Deck on lands you in Gaming Mode. The difference is **Desktop Mode**, which now drops you into an Omarchy/Hyprland desktop. Use the QAM button and menu to go back to Gaming Mode.
+Afterwards, the Deck behaves like it always did as turning your Deck on lands you in Gaming Mode and power button puts the Deck to sleep/wake. The difference is **Desktop Mode**, which now drops you into an Omarchy/Hyprland desktop. Use the QAM button and menu to go back to Gaming Mode.
 
 > _**[ IMAGE — hero: the Deck in hand, running the Omarchy desktop ]**_
 > `docs/images/hero-desktop.png`
@@ -31,20 +31,13 @@ image — see [Recovery](#recovery).
 
 ## What you get
 
-**Gaming Mode, untouched.** Same gamescope session, same library, same
-controller behaviour. Nothing about playing games changes.
+**Gaming Mode.** Same gamescope session, same library, same controller behaviour.
 
-**A real desktop, one button away.** Not a stripped shell — full Omarchy:
-Hyprland, Waybar, the whole environment, tuned for the Deck's panel and
-gamepad.
+**Desktop.** Full Omarchy: Hyprland, Waybar, the whole environment, tuned for the Deck's panel and gamepad.
 
-**An install you can do on the couch.** Every screen is A / B / D-pad /
-trackpads, including typing your Wi-Fi password on an on-screen keyboard drawn
-right on the console.
+**Install from the Deck.** Every screen is A / B / D-pad / trackpads, including typing your Wi-Fi password on an on-screen keyboard drawn right on the console.
 
-**It boots straight into Gaming Mode.** Steam is installed *and updated* during
-setup, so the first boot is a boot — not a long wait on a black screen wondering
-whether it worked.
+**Boots straight into Gaming Mode.** Steam is installed *and updated* during setup.
 
 ![Desktop Mode: Omarchy and Hyprland running on the Deck's own panel](docs/images/desktop.png)
 
@@ -60,20 +53,15 @@ whether it worked.
 
    > _**[ LINK — Internet Archive download + sha256 ]**_
 
-2. **Write it to a USB stick.** With Ventoy, copy the `.iso` onto the Ventoy
-   partition — that is the whole step.
+2. **Write it to a USB stick.** With Ventoy, copy the `.iso` onto the Ventoy partition.
 
-3. **Boot it.** Hold **Volume Down + Power** until the boot menu appears, then
-   pick the USB stick.
+3. **Boot it.** Hold **Volume Down + Power** until the boot menu appears, then pick the USB stick.
 
 4. **Follow the screens.** Keyboard layout, Wi-Fi, your account, then the disk.
-   Everything is buttons and trackpads.
 
-5. **Wait.** It reboots on its own when it is finished, and comes up in Gaming
-   Mode.
+5. **Wait.** Reboots when finished, and comes up in Gaming Mode.
 
-> Ventoy's own boot menu draws rotated 90° on the Deck's panel. That is Ventoy,
-> not this project, and it clears the moment our ISO starts.
+> Ventoy's own boot menu draws rotated 90° on the Deck's panel.
 
 ![The first screen: what this does, and what it erases](docs/images/install-01-greeter.png)
 
@@ -119,7 +107,7 @@ whether it worked.
 
 ## Building it yourself
 
-Needs Docker and about 40 minutes. The build is fully scripted.
+Needs Docker and ~40 minutes. The build is scripted.
 
 ```bash
 git clone --recursive https://github.com/villenull/Pizzarchy
@@ -129,17 +117,13 @@ iso/bin/build
 
 The finished `.iso` lands in the build's `release/` directory with its sha256.
 
-The build refuses to proceed if any of its guards fail. Those check things like
-*"the on-screen keyboard is actually executable in the live image"* and *"no
-package list is carried without something that installs it"* — both real bugs
-that shipped once, and are not allowed to ship again.
+Build refuses to proceed if any of its guards fail.
 
 ---
 
 ## Reporting a bug
 
-Open an issue. The most useful thing you can attach is the install record, which
-already carries a per-step status:
+Open an issue. The most useful thing you can attach is the install record, which already carries a per-step status:
 
 ```bash
 cat /var/log/omarchy-deck-install.json
@@ -149,25 +133,15 @@ cat /var/log/omarchy-deck-install.json
 
 ## Recovery
 
-This install replaces SteamOS. To go back, use **Valve's official Steam Deck
-Recovery Image** — see [`docs/RECOVERY.md`](docs/RECOVERY.md) for the exact
-steps, including restoring the stock partition layout.
+This install replaces SteamOS. To go back, use **Valve's official Steam Deck Recovery Image** — see [`docs/RECOVERY.md`](docs/RECOVERY.md) for the exact steps, including restoring the stock partition layout.
 
 ---
 
 ## How it works
 
-A fork of Omarchy's own installer with a Steam Deck overlay: a controller-driven
-form layer over the install screens, an input mapper that turns the gamepad into
-keyboard events (including an on-screen keyboard drawn on the console), Valve's
-Neptune kernel and audio DSP, and a session layer that preserves gamescope while
-adding a route to the Omarchy desktop.
+A fork of Omarchy's own installer with a Steam Deck overlay: a controller-driven form layer over the install screens, an input mapper that turns the gamepad into keyboard events (including an on-screen keyboard drawn on the console), Valve's Neptune kernel and audio DSP, and a session layer that preserves gamescope while adding a route to the Omarchy desktop.
 
-The ISO carries a complete package mirror — around 1,300 packages — so the
-system itself installs from the USB stick rather than over the network. That is
-why the install is quick and does not fall over on a slow connection. The
-internet requirement is for **Steam specifically**, which is downloaded from
-Valve during setup rather than redistributed here.
+The ISO carries a complete package mirror — around 1,300 packages — so the system itself installs from the USB stick rather than over the network. That is why the install is quick and does not fall over on a slow connection. The internet requirement is for **Steam specifically**, which is downloaded from Valve during setup rather than redistributed here.
 
 | Path | What lives there |
 |---|---|
@@ -178,25 +152,19 @@ Valve during setup rather than redistributed here.
 | `test/vm/` | QEMU suites: install harness, kernel/hook/idempotency, gamepad |
 | `docs/` | Design docs, research findings, and the full engineering record |
 
-`docs/PROGRESS.md` is the working notebook. It records every measurement — and
-every wrong diagnosis that a later measurement corrected. It is deliberately
-public.
+`docs/PROGRESS.md` is the working notebook.
 
 ---
 
 ## Prior art
 
-`28allday/deckshift`, `omarchy-deck-iso` and `omasteam` are the closest
-neighbours, and **none of them target Steam Deck hardware** — they run
-Deck-*style* gaming mode on generic PCs. Bazzite and ChimeraOS solve Deck
-hardware, but not Omarchy.
+`28allday/deckshift`, `omarchy-deck-iso` and `omasteam` are the closest neighbors. Bazzite and ChimeraOS solve Deck hardware, but not Omarchy.
 
 ---
 
 ## Contributing
 
-`docs/START-HERE.md` is the entry point, and `docs/ROADMAP.md` has the plan. If
-you are using Claude Code, the whole opening prompt is:
+`docs/START-HERE.md` is the entry point, and `docs/ROADMAP.md` has the plan. If you are using Claude Code, the whole opening prompt is:
 
 ```
 Read docs/START-HERE.md and begin.
@@ -206,9 +174,6 @@ Read docs/START-HERE.md and begin.
 
 ## License and affiliation
 
-**An independent project. Not affiliated with, endorsed by, or supported by
-Basecamp or Valve.** "Omarchy" and "Steam Deck" are used descriptively, to say
-what this installs and what it runs on.
+**An independent project. Not affiliated with, endorsed by, or supported by Basecamp or Valve.** "Omarchy" and "Steam Deck" are used descriptively, to say what this installs and what it runs on.
 
-MIT — see [LICENSE](LICENSE). Omarchy, SteamOS, gamescope, and Valve's kernel
-and firmware packages are covered by their own licenses.
+MIT — see [LICENSE](LICENSE). Omarchy, SteamOS, gamescope, and Valve's kernel and firmware packages are covered by their own licenses.
