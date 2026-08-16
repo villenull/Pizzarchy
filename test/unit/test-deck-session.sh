@@ -2695,4 +2695,164 @@ grep -q 'FAIL: ' "$fbv_work/home/$FIRST_BOOT_LOG_REL" ||
     "$(cat "$fbv_work/home/$FIRST_BOOT_LOG_REL")"
 pass "all four runs' verdicts are in ~/${FIRST_BOOT_LOG_REL}, failures included"
 
+# ===========================================================================
+# 13. first-boot-verify's power-button check -- TAGS is not CURRENT_TAGS
+# ===========================================================================
+#
+# 🔴 THIS SECTION EXISTS BECAUSE THE CHECK WAS UNFALSIFIABLE AND NOTHING SAW IT.
+#
+# udev keeps two tag lists. TAGS is CUMULATIVE -- every tag the device has ever
+# carried, and `TAG-=` never takes anything out of it. CURRENT_TAGS is what the
+# latest uevent left in place, and it is what systemd-logind's tag filter
+# matches on. The verifier read TAGS, so 70-power-switch.rules adding the tag
+# was enough to make it conclude "the rule did NOT untag" on a machine where the
+# rule had worked perfectly -- and its response to that verdict is to DELETE the
+# logind drop-in.
+#
+# Observed on the operator's Deck 2026-08-16, on an install from our own ISO:
+#
+#   first-boot-verify[804]: FAIL: the power-button udev rule did NOT untag:
+#     acpi-PNP0C0C:00 acpi-LNXPWRBN:00 ... has been REMOVED
+#
+# while `udevadm info -q property` on the same machine showed the two ACPI nodes
+# with TAGS=:power-switch: and NO CURRENT_TAGS line at all, the surviving i8042
+# node with both, and logind logging exactly ONE 'Power key pressed short' per
+# press. The rule had worked. Every boot deleted the drop-in anyway, so the
+# power button was one reboot away from doing nothing at all.
+#
+# Run, not read: the same render-and-redirect harness as §12, plus a udevadm
+# stub answering from a fixture directory.
+
+fbv_pb="$work/first-boot-verify-power"
+mkdir -p "$fbv_pb/bin" "$fbv_pb/home" "$fbv_pb/dev/input" "$fbv_pb/udev-db" \
+         "$fbv_pb/root$(dirname "$POWER_LOGIND_DROPIN")"
+
+printf '#!/bin/sh\nexit 0\n' >"$fbv_pb/bin/logger"
+chmod +x "$fbv_pb/bin/logger"
+
+# Read-only `info --query=property --name <node>` and nothing else. Every other
+# udevadm verb MUTATES the running system's device state, and on this developer
+# machine it would mutate the developer's.
+cat >"$fbv_pb/bin/udevadm" <<'STUB_UDEVADM'
+#!/usr/bin/env bash
+set -uo pipefail
+[[ ${1-} == info ]] || {
+  printf 'udevadm stub: refusing verb "%s" -- only read-only `info` is allowed here\n' "${1-}" >&2
+  exit 97
+}
+name="" want=0
+for a in "$@"; do
+  if [[ $want -eq 1 ]]; then name=$a; want=0; continue; fi
+  [[ $a == --name ]] && want=1
+done
+[[ -n $name ]] || { printf 'udevadm stub: no --name given\n' >&2; exit 1; }
+f="${FAKE_UDEV_DB:?the suite must set a udev property fixture directory}/${name##*/}"
+[[ -f $f ]] || exit 1
+cat "$f"
+STUB_UDEVADM
+chmod +x "$fbv_pb/bin/udevadm"
+
+# pb_node <node> <id-path> <sticky yes|no> <current yes|no>
+#
+# The two lists are independent on purpose: "sticky yes, current no" is the
+# state a WORKING `TAG-=` leaves behind, and it is the one the old check called
+# a failure.
+pb_node() {
+  local n=$1 id=$2 sticky=$3 current=$4
+  : >"$fbv_pb/dev/input/$n"
+  {
+    printf 'DEVNAME=/dev/input/%s\n' "$n"
+    printf 'ID_PATH=%s\n' "$id"
+    printf 'ID_INPUT_KEY=1\n'
+    [[ $sticky != yes ]]  || printf 'TAGS=:%s:seat:\n' "$POWER_UDEV_TAG"
+    [[ $current != yes ]] || printf 'CURRENT_TAGS=:%s:seat:\n' "$POWER_UDEV_TAG"
+  } >"$fbv_pb/udev-db/$n"
+}
+
+sed -e "s#user_home=\$(getent passwd testuser 2>/dev/null | cut -d: -f6)#user_home=${fbv_pb}/home#" \
+    -e "s#runuser -u testuser -- bash -c#bash -c#" \
+    -e "s#${MAPPER_BIN}#${fbv_pb}/root${MAPPER_BIN}#g" \
+    -e "s#${MAPPER_UNIT}#${fbv_pb}/root${MAPPER_UNIT}#g" \
+    -e "s#${MAPPER_GLOBAL_WANTS}#${fbv_pb}/root${MAPPER_GLOBAL_WANTS}#g" \
+    -e "s#${OSK_LIB_DIR}#${fbv_pb}/root${OSK_LIB_DIR}#g" \
+    -e "s#${PRIV_WRITE_HELPER}#${fbv_pb}/root${PRIV_WRITE_HELPER}#g" \
+    -e "s#${POWER_LOGIND_DROPIN}#${fbv_pb}/root${POWER_LOGIND_DROPIN}#g" \
+    -e 's#/dev/input/event\*#'"${fbv_pb}"'/dev/input/event*#' \
+    "$fbv_work/verify.raw" >"$fbv_pb/verify"
+chmod +x "$fbv_pb/verify"
+bash -n "$fbv_pb/verify" ||
+  fail_test "the redirected power-button verifier is still valid bash"
+
+pb_dropin="$fbv_pb/root$POWER_LOGIND_DROPIN"
+pb_arm() { printf '[Login]\nHandlePowerKey=%s\n' "$POWER_KEY_ACTION" >"$pb_dropin"; }
+pb_run() {
+  FAKE_UDEV_DB="$fbv_pb/udev-db" PATH="$fbv_pb/bin:$PATH" bash "$fbv_pb/verify" 2>&1
+}
+
+# State A: no drop-in. The stage never ran here, so there is nothing to check
+# and nothing to fail -- the same contract every other check in this script
+# keeps.
+rm -f "$pb_dropin"
+pb_out=$(pb_run) && pb_rc=0 || pb_rc=$?
+grep -q 'no power-button rule to verify' <<<"$pb_out" ||
+  fail_test "a machine where stage-power-button never ran is a 'note', not a failure" "$pb_out"
+pass "no logind drop-in -> a note, and the power-button check draws no conclusion"
+
+# 🔴 State B: THE REGRESSION. The rule worked -- the ACPI nodes keep the sticky
+# TAGS they can never lose and carry no CURRENT_TAGS -- and the keeper is
+# currently tagged. This MUST pass, and the drop-in MUST survive.
+pb_arm
+pb_node event0 acpi-PNP0C0C:00        yes no
+pb_node event1 acpi-PNP0C0D:00        yes yes    # the Lid Switch, untouched
+pb_node event2 acpi-LNXPWRBN:00       yes no
+pb_node event4 platform-i8042-serio-0 yes yes    # the real key -- KEPT
+pb_out=$(pb_run) && pb_rc=0 || pb_rc=$?
+[[ $pb_rc -eq 0 ]] ||
+  fail_test "a Deck whose udev rule WORKED passes the power-button check" \
+    "the ACPI nodes carry the cumulative TAGS every tagged device keeps forever and no CURRENT_TAGS."$'\n'"Reading TAGS here makes the check unfalsifiable -- and its answer to a failure is to delete the"$'\n'"drop-in, so it disarmed the power button on every boot of the operator's Deck. Output:"$'\n'"$pb_out"
+[[ -f $pb_dropin ]] ||
+  fail_test "the drop-in survives a machine where the rule worked" \
+    "${pb_dropin} was deleted; the next boot has HandlePowerKey=ignore and the power button does nothing"
+grep -q 'ok: power button' <<<"$pb_out" ||
+  fail_test "the passing verdict names the power button" "$pb_out"
+pass "🔴 sticky TAGS with no CURRENT_TAGS -- the state a WORKING 'TAG-=' leaves -- passes, and the drop-in is not deleted"
+
+# State C: the rule genuinely did not apply. CURRENT_TAGS still lists the tag on
+# an ACPI node, so logind really is watching two sources and the next press
+# really would suspend twice. Fail, and disarm.
+pb_arm
+pb_node event2 acpi-LNXPWRBN:00 yes yes
+pb_out=$(pb_run) && pb_rc=0 || pb_rc=$?
+[[ $pb_rc -ne 0 ]] ||
+  fail_test "an ACPI node still in CURRENT_TAGS FAILS the power-button check" "$pb_out"
+grep -q 'did NOT untag' <<<"$pb_out" ||
+  fail_test "the failure says the rule did not untag" "$pb_out"
+grep -q 'acpi-LNXPWRBN:00' <<<"$pb_out" ||
+  fail_test "the failure names which node is still tagged" "$pb_out"
+[[ ! -f $pb_dropin ]] ||
+  fail_test "the drop-in is REMOVED when the duplicate is genuinely live" \
+    "leaving it armed is the re-suspend loop this whole design exists to avoid"
+pass "an ACPI node still in CURRENT_TAGS fails, names the node, and disarms the handler"
+
+grep -q "${HYPR_BINDINGS_LUA_REL}" <<<"$pb_out" ||
+  fail_test "the disarm verdict says the Desktop Mode menu bind is still removed" \
+    "with the handler gone AND Omarchy's ${POWER_MENU_BIND_KEY} bind unbound, the power button does"$'\n'"nothing at all in Desktop Mode -- the operator has to be told where to undo the second half. Output:"$'\n'"$pb_out"
+pass "and points at ~/${HYPR_BINDINGS_LUA_REL}, because disarming alone now leaves the button inert in Desktop Mode"
+
+# State D: the keeper lost its current tag. logind is watching nothing, so the
+# button is dead -- a defect, but deleting the drop-in cannot improve it and
+# would only hide which change caused it.
+pb_arm
+pb_node event2 acpi-LNXPWRBN:00       yes no
+pb_node event4 platform-i8042-serio-0 yes no
+pb_out=$(pb_run) && pb_rc=0 || pb_rc=$?
+[[ $pb_rc -ne 0 ]] ||
+  fail_test "a machine with no surviving tagged KEY_POWER source FAILS the check" "$pb_out"
+grep -q "no device carries ID_PATH=${POWER_KEEP_ID_PATH}" <<<"$pb_out" ||
+  fail_test "the failure names the node that should have survived" "$pb_out"
+[[ -f $pb_dropin ]] ||
+  fail_test "the drop-in is LEFT in place when the keeper is missing" \
+    "removing it cannot make a dead button work and would hide the cause"
+pass "a missing keeper fails loudly and leaves the drop-in alone, so the cause stays visible"
+
 echo "all deck-session.sh tests passed"

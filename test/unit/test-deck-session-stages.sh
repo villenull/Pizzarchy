@@ -589,6 +589,10 @@ STUB_TIMEDATECTL
 #   FAKE_HYPR_DEVICES        the device list, i.e. which keyboard reads what
 #   FAKE_HYPR_GLOBAL_LAYOUT  the session's own layout, which is what makes
 #                            "did this leak session-wide?" answerable at all
+#   FAKE_HYPR_POWER_SENTINEL the same as FAKE_HYPR_SENTINEL, for the OTHER
+#                            block -- bindings.lua's power-key unbind
+#   FAKE_HYPR_BINDS          the keybinding list, i.e. whether anything still
+#                            answers XF86PowerOff after the unbind
 cat >"$stub_bin/hyprctl" <<'STUB_HYPRCTL'
 #!/usr/bin/env bash
 set -uo pipefail
@@ -612,19 +616,42 @@ case ${args[0]-} in
     ;;
   eval)
     # Not a Lua interpreter. It asserts the PROBE is the shape that can fail --
-    # a probe that stopped naming the sentinel, or stopped raising, would be a
+    # a probe that stopped naming a sentinel, or stopped raising, would be a
     # check that cannot fail, and this stub refuses to bless one.
+    #
+    # TWO sentinels reach here, from two different blocks in two different user
+    # dotfiles, so the stub dispatches on which one the probe names rather than
+    # accepting "any DECK_ global": a probe that named the WRONG sentinel would
+    # otherwise pass while asserting nothing about its own block.
     code=${args[1]-}
-    [[ $code == *DECK_OSK_KB_LAYOUT* && $code == *error\(* ]] || {
-      printf 'hyprctl stub: eval probe does not assert the sentinel: %s\n' "$code" >&2
+    [[ $code == *error\(* ]] || {
+      printf 'hyprctl stub: eval probe does not raise, so it cannot fail: %s\n' "$code" >&2
       exit 98
     }
-    if [[ ${FAKE_HYPR_SENTINEL:-us} != us ]]; then
-      # The real shape, measured on the Deck: 'error: ...' on stderr, exit 7.
-      printf 'error: [string "..."]:1: DECK_OSK_KB_LAYOUT is not "us"\n' >&2
-      exit 7
-    fi
+    case $code in
+      *DECK_OSK_KB_LAYOUT*)
+        if [[ ${FAKE_HYPR_SENTINEL:-us} != us ]]; then
+          # The real shape, measured on the Deck: 'error: ...' on stderr, exit 7.
+          printf 'error: [string "..."]:1: DECK_OSK_KB_LAYOUT is not "us"\n' >&2
+          exit 7
+        fi
+        ;;
+      *DECK_POWER_MENU_UNBOUND*)
+        if [[ ${FAKE_HYPR_POWER_SENTINEL:-set} != set ]]; then
+          printf 'error: [string "..."]:1: DECK_POWER_MENU_UNBOUND is not set\n' >&2
+          exit 7
+        fi
+        ;;
+      *)
+        printf 'hyprctl stub: eval probe names no known sentinel: %s\n' "$code" >&2
+        exit 98
+        ;;
+    esac
     printf 'ok\n'
+    exit 0
+    ;;
+  binds)
+    printf '%s\n' "${FAKE_HYPR_BINDS?the suite must set a keybinding list}"
     exit 0
     ;;
   devices)
@@ -829,6 +856,33 @@ grep -q '\${1:-' <<<"$osk_stage_body" ||
   fail_test "stage_desktop_settings does not name /run/user itself" \
     "the default belongs to the verifier; a copy here is a second path the argument cannot override"
 pass "stage_desktop_settings forwards a runtime-directory seam and names no /run/user path of its own"
+
+# The SECOND compositor verifier, added with the power-key unbind, and it
+# reloads a live session exactly the same way. The developer machine this suite
+# runs on has a live Hyprland socket under /run/user/1000, so a stage that baked
+# the path in would reload the operator's own desktop from a unit test -- which
+# is not hypothetical: it is what §9d did before this gate existed.
+power_seam_body=$(declare -f verify_power_menu_unbind) ||
+  fail_test "verify_power_menu_unbind exists in deck-session.sh" \
+    "without it the power-key unbind ships unverified, and §9d cannot keep the check off a real compositor"
+# shellcheck disable=SC2016  # a grep PATTERN matching a literal ${3:-...}.
+grep -q '\${3:-' <<<"$power_seam_body" ||
+  fail_test "verify_power_menu_unbind takes the compositor runtime directory as \$3" \
+    "no '\${3:-...}' in its body, so this suite could not keep 'hyprctl reload' away from a real session"
+[[ $(grep -c '/run/user' <<<"$power_seam_body") -eq 1 ]] ||
+  fail_test "verify_power_menu_unbind names /run/user exactly once, as \$3's default" \
+    "a second mention means some path ignores the argument:"$'\n'"${power_seam_body}"
+pass "verify_power_menu_unbind takes the compositor runtime directory from \$3 and names /run/user only as its default"
+
+power_stage_body=$(declare -f stage_power_button)
+# shellcheck disable=SC2016  # same: the literal text, not this shell's $1.
+grep -q '\${1:-' <<<"$power_stage_body" ||
+  fail_test "stage_power_button passes a runtime-directory seam through" \
+    "without it §9d would drive the real compositor no matter what verify_power_menu_unbind accepts"
+! grep -q '/run/user' <<<"$power_stage_body" ||
+  fail_test "stage_power_button does not name /run/user itself" \
+    "the default belongs to the verifier; a copy here is a second path the argument cannot override"
+pass "stage_power_button forwards a runtime-directory seam and names no /run/user path of its own"
 
 # The stage's SECOND seam, the sleep-lock mask. Same two halves: it has to
 # accept $2, and it must not name /etc/systemd/user itself -- that default
@@ -1397,6 +1451,17 @@ read -r -d '' HYPR_DEVICES_GOOD <<'JSON' || true
               {"name":"deck-input-mapper-virtual-keyboard","layout":"us"}]}
 JSON
 export FAKE_HYPR_DEVICES="$HYPR_DEVICES_GOOD"
+
+# A keybinding list with our unbind already applied: Omarchy's other binds are
+# still there and nothing names XF86PowerOff. §9d flips it to the "still bound"
+# shape to prove the check can fail. The `key`/`modmask` field names are the
+# ones the real hyprctl emits -- read off the Deck 2026-08-16.
+read -r -d '' HYPR_BINDS_GOOD <<'JSON' || true
+[{"modmask":64,"key":"SPACE","dispatcher":"__lua"},
+ {"modmask":0,"key":"XF86AudioLowerVolume","dispatcher":"__lua"},
+ {"modmask":64,"key":"ESCAPE","dispatcher":"__lua"}]
+JSON
+export FAKE_HYPR_BINDS="$HYPR_BINDS_GOOD"
 
 seed_shell_json() {
   mkdir -p "$FAKE_HOME/.config/omarchy"
@@ -3260,7 +3325,7 @@ power_install_line() {   # power_install_line <destination>
 # --- the happy path --------------------------------------------------------
 
 power_reset
-run_stage_body stage_power_button
+run_stage_body stage_power_button "$hypr_dead"
 ok_rc 0 "stage-power-button installs cleanly on a Deck that enumerates its power button the way the measurement recorded"
 
 ok_file "$POWER_UDEV_RULE" "the udev rule is installed"
@@ -3325,27 +3390,143 @@ power_undo_rule=$(grep -nF -- "rm -f ${POWER_UDEV_RULE}" "$work/stage.out" | hea
     "the reverse order puts the duplicate KEY_POWER press back underneath a live HandlePowerKey=suspend. Got the drop-in at output line ${power_undo_conf} and the rule at ${power_undo_rule}."$'\n'"$(out)"
 pass "the printed undo is ordered handler-first, which is the only order that is safe at every point in between"
 
-# --- the consequence, corrected against a real hardware measurement --------
+# --- the THIRD artefact: Omarchy's own power-key bind ----------------------
 #
-# First written as a PREDICTION: with the duplicate gone, Omarchy's
-# XF86PowerOff bind would fire once and the System menu would stay open
-# behind the suspend. MEASURED wrong on 2026-08-12
-# (docs/findings/T13-power-button-and-sleep.md §9.6): removing the udev
-# power-switch tag changes what LOGIND watches, not what the COMPOSITOR
-# sees -- Hyprland's bind still reads both presses off its own input layer,
-# so the menu still toggles open-then-shut exactly as before. What changed
-# is only that suspend can now win the race and cut the flash short. The
-# operator saw a split-second flash, not a stuck-open menu -- n=1, so the
-# text says "may still", not a guarantee either way. That bind is still a
-# user config file and not this stage's to change, so it still offers the
-# unbind as an optional, cosmetic fix.
-ok_in_out 'hl.unbind("XF86PowerOff")' \
-  "the stage prints the one-line OPTIONAL fix for Omarchy's power-key menu bind, which it deliberately does not touch"
-ok_in_out "SYSTEM-MENU FLASH" \
-  "and describes the measured mechanism (the compositor still sees both presses) rather than the earlier, measured-wrong prediction that the menu would stay open"
+# 🔴 THE DEFECT THIS SECTION EXISTS FOR, and its history is a warning about
+# assertions that pin the wrong thing.
+#
+# Omarchy binds XF86PowerOff to `omarchy-menu toggle system`. Removing the udev
+# power-switch tag does NOT touch that: the tag is what LOGIND filters on, and
+# libinput hands the compositor every device on the seat regardless. So one
+# physical press stays TWO XF86PowerOff events at the compositor -- the real key
+# on platform-i8042-serio-0, then the ACPI notify -- and `toggle` opens the menu
+# and closes it again.
+#
+# MEASURED on the operator's Deck 2026-08-16 by replaying both sources through
+# uinput 165 ms apart with logind's handle-power-key blocked, so only the
+# compositor could answer: openlayer>>omarchy-menu at 17:00:18.379,
+# closelayer>>omarchy-menu at 17:00:18.493. 114 ms of System menu per press.
+# A single synthetic event in the same harness left the menu OPEN instead,
+# which is the same mechanism seen from the other side.
+#
+# This block used to assert the stage PRINTED `hl.unbind("XF86PowerOff")` as an
+# optional cosmetic fix. The advice was right and printing it was not the fix:
+# the flash shipped in every image for as long as it stayed a suggestion. The
+# stage now installs it, so the assertion asserts the file.
+power_bindings_lua="${FAKE_HOME}/${HYPR_BINDINGS_LUA_REL}"
+[[ -f $power_bindings_lua ]] ||
+  fail_test "the stage writes ${HYPR_BINDINGS_LUA_REL}" \
+    "missing: ${power_bindings_lua}"$'\n'"stderr: $(err)"
+pass "the stage installs the unbind into the desktop user's ${HYPR_BINDINGS_LUA_REL}"
+
+grep -qxF -- "hl.unbind(\"${POWER_MENU_BIND_KEY}\")" "$power_bindings_lua" ||
+  fail_test "the installed block calls hl.unbind on ${POWER_MENU_BIND_KEY}" \
+    "a block that names the key without unbinding it is a comment. File:"$'\n'"$(cat "$power_bindings_lua")"
+pass "the installed block unbinds ${POWER_MENU_BIND_KEY}, the key Omarchy binds to its System menu"
+
+for power_marker in "$POWER_BIND_RULE_BEGIN" "$POWER_BIND_RULE_END"; do
+  grep -qxF -- "$power_marker" "$power_bindings_lua" ||
+    fail_test "the installed file carries the marker line '${power_marker}'" \
+      "without both markers a re-run appends a second copy instead of replacing its own. File:"$'\n'"$(cat "$power_bindings_lua")"
+done
+pass "the block is delimited at both ends, so a re-run replaces it instead of appending"
+
+grep -qxF "${POWER_BIND_SENTINEL} = true" "$power_bindings_lua" ||
+  fail_test "the installed block sets ${POWER_BIND_SENTINEL}, the global the live check asserts on" \
+    "without it a discarded bindings.lua is indistinguishable from a loaded one. File:"$'\n'"$(cat "$power_bindings_lua")"
+pass "the block's last line sets ${POWER_BIND_SENTINEL}, so a compositor that discarded the file can be told apart from one that loaded it"
+
+# 🔴 A rival bind is NOT an acceptable substitute for the unbind: two binds on
+# one key both fire, so binding it to something inert would replace one handler
+# with two. Only removal removes the flash.
+! grep -qE '^[[:space:]]*(hl\.bind|o\.bind)\(' "$power_bindings_lua" ||
+  fail_test "the block binds nothing of its own to ${POWER_MENU_BIND_KEY}" \
+    "Hyprland fires every bind on a key; a rival bind adds a handler instead of removing one. File:"$'\n'"$(cat "$power_bindings_lua")"
+pass "the block only unbinds -- it does not add a rival bind, which would leave two handlers on one key"
+
+ok_in_out "NO LONGER FLASHES THE SYSTEM MENU" \
+  "the stage reports the flash as fixed, and says by what mechanism, instead of offering the fix as advice"
+
+# The user's own bindings survive. This file is where Omarchy tells people to
+# put personal keybindings, so a rewrite rather than a splice would silently
+# delete them.
+power_reset
+mkdir -p "$(dirname "$power_bindings_lua")"
+printf '%s\n' 'o.bind("SUPER + SHIFT + R", "SSH", "alacritty -e ssh your-server")' \
+  >"$power_bindings_lua"
+run_stage_body stage_power_button "$hypr_dead"
+ok_rc 0 "the stage completes against a bindings.lua that already has the user's own bindings in it"
+grep -qF 'alacritty -e ssh your-server' "$power_bindings_lua" ||
+  fail_test "the user's own bindings survive the splice" \
+    "this is the file Omarchy hands users for personal keybindings; losing them is the worst outcome here. File:"$'\n'"$(cat "$power_bindings_lua")"
+pass "the user's own bindings in ${HYPR_BINDINGS_LUA_REL} survive byte-for-byte"
+
+# A half-removed previous block cannot be spliced safely -- guessing where it
+# ended would eat whatever followed.
+power_reset
+mkdir -p "$(dirname "$power_bindings_lua")"
+printf '%s\nhl.unbind("X")\n' "$POWER_BIND_RULE_BEGIN" >"$power_bindings_lua"
+run_stage_body stage_power_button "$hypr_dead"
+ok_failed "a start marker with no end marker stops the stage"
+ok_in_err "could not splice" "the failure names the splice rather than reporting a generic write error"
+
+# No compositor: the unbind is on disk and NOT observed working. Saying so is
+# the requirement -- a rule nobody has seen work is not a rule that works.
+power_reset
+run_stage_body stage_power_button "$hypr_dead"
+ok_in_err "has NOT been observed working" \
+  "with no live compositor the stage says the unbind is unverified instead of reporting success"
+
+# --- the live branch, against the stub compositor --------------------------
+power_hypr_live="$work/hypr-runtime-live-power"
+rm -rf "$power_hypr_live"; mkdir -p "$power_hypr_live/hypr/deadbeef_1"
+python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' \
+  "$power_hypr_live/hypr/deadbeef_1/.socket.sock" ||
+  fail_test "the suite can create a fake compositor socket" "python3 could not bind an AF_UNIX socket"
+
+power_reset
+run_stage_body stage_power_button "$power_hypr_live"
+ok_rc 0 "with a live compositor and nothing bound to ${POWER_MENU_BIND_KEY}, the stage completes"
+ok_in_out "the whole unbind block executed" "the sentinel assertion is reported as a verification, not assumed"
+ok_in_out "binds ${POWER_MENU_BIND_KEY}" "and the keybinding list is read back, which is the observable the flash comes from"
+ok_called "hyprctl reload config-only" "it reloads the config before reading the bindings back"
+ok_before "hyprctl reload config-only" "hyprctl -j binds" "the reload happens BEFORE the keybinding list is read"
+
+# The sentinel gone: Hyprland discarded bindings.lua. A failure, not a warning.
+export FAKE_HYPR_POWER_SENTINEL=absent
+power_reset
+run_stage_body stage_power_button "$power_hypr_live"
+ok_failed "a compositor without the sentinel fails the stage"
+ok_in_err "did not run to the end" "the failure says the BLOCK did not complete, which is what a discarded bindings.lua looks like"
+unset FAKE_HYPR_POWER_SENTINEL
+
+# 🔴 The sentinel set and the key still bound. This is the failure a sentinel
+# alone cannot see -- our block ran and something still answers the key -- and
+# it is exactly the state the operator reported, so it must fail loudly.
+export FAKE_HYPR_BINDS='[{"modmask":0,"key":"XF86PowerOff","dispatcher":"__lua"}]'
+power_reset
+run_stage_body stage_power_button "$power_hypr_live"
+ok_failed "a compositor that still binds ${POWER_MENU_BIND_KEY} fails the stage"
+ok_in_err "still name ${POWER_MENU_BIND_KEY}" \
+  "the failure reports that the key is STILL bound, rather than trusting the sentinel and calling it done"
+ok_in_err "will still flash" "and names the symptom the operator would see"
+export FAKE_HYPR_BINDS="$HYPR_BINDS_GOOD"
+
+# An empty bind list is a list worth drawing no conclusion from -- "no binds at
+# all" must not read as "our key is gone".
+export FAKE_HYPR_BINDS='[]'
+power_reset
+run_stage_body stage_power_button "$power_hypr_live"
+ok_failed "an empty keybinding list fails rather than passing as 'nothing binds our key'"
+ok_in_err "no keybindings at all" "and says the list was empty, rather than reporting the unbind as verified"
+export FAKE_HYPR_BINDS="$HYPR_BINDS_GOOD"
 
 # --- idempotency -----------------------------------------------------------
-run_stage_body stage_power_button
+power_reset
+run_stage_body stage_power_button "$hypr_dead"
+ok_rc 0 "a first run on a clean fixture succeeds"
+run_stage_body stage_power_button "$hypr_dead"
+run_stage_body stage_power_button "$hypr_dead"
 ok_rc 0 "a second run succeeds -- assert_ours_or_absent recognises both files as ours"
 ok_line "$POWER_LOGIND_DROPIN" "HandlePowerKey=suspend" "and the drop-in still reads correctly after the re-run"
 
@@ -3353,7 +3534,7 @@ ok_line "$POWER_LOGIND_DROPIN" "HandlePowerKey=suspend" "and the drop-in still r
 power_reset
 mkdir -p "$root/etc/udev/rules.d"
 printf 'ACTION=="add", TAG+="somebody-else"\n' >"$root$POWER_UDEV_RULE"
-run_stage_body stage_power_button
+run_stage_body stage_power_button "$hypr_dead"
 ok_failed "a foreign udev rule at ${POWER_UDEV_RULE} stops the stage"
 grep -qF "somebody-else" "$root$POWER_UDEV_RULE" ||
   fail_test "the foreign udev rule is left exactly as it was" "it was overwritten anyway"
@@ -3362,7 +3543,7 @@ ok_absent "$POWER_LOGIND_DROPIN" "and nothing else was written -- the refusal ha
 
 power_reset
 printf '[Login]\nHandlePowerKey=poweroff\n' >"$root$POWER_LOGIND_DROPIN"
-run_stage_body stage_power_button
+run_stage_body stage_power_button "$hypr_dead"
 ok_failed "a foreign logind drop-in at ${POWER_LOGIND_DROPIN} stops the stage"
 ok_absent "$POWER_UDEV_RULE" \
   "and the udev rule is NOT written first -- both ownership checks run before either write, so a refusal leaves no half-configured machine"
@@ -3377,7 +3558,7 @@ ok_absent "$POWER_UDEV_RULE" \
 # software. CLAUDE.md forbids claiming support for hardware nobody tested.
 power_reset
 printf 'Jupiter\n' >"$root/sys/class/dmi/id/product_name"
-run_stage_body stage_power_button
+run_stage_body stage_power_button "$hypr_dead"
 ok_failed "stage-power-button refuses to run on a Jupiter (LCD) Deck"
 ok_in_err "Jupiter" "the refusal names the model it found"
 ok_in_err "$POWER_MODEL" "and the model every measurement behind the stage was taken on"
@@ -3388,7 +3569,7 @@ ok_absent "$POWER_LOGIND_DROPIN" "neither file, on a model that was never measur
 
 power_reset
 rm -f "$root/sys/class/dmi/id/product_name"
-run_stage_body stage_power_button
+run_stage_body stage_power_button "$hypr_dead"
 ok_failed "an unreadable product_name stops the stage rather than being treated as a match"
 ok_in_err "model is unknown" "and says the model could not be determined, instead of guessing"
 
@@ -3398,7 +3579,7 @@ ok_in_err "model is unknown" "and says the model could not be determined, instea
 # at all. Neither shows up in an install log.
 power_reset
 rm -f "$root/dev/input/event4" "$FAKE_UDEV_DB/event4"
-run_stage_body stage_power_button
+run_stage_body stage_power_button "$hypr_dead"
 ok_failed "a machine with no ${POWER_KEEP_ID_PATH} node stops the stage"
 ok_in_err "SINGLE SOURCE" \
   "the refusal explains that untagging the ACPI buttons without it leaves logind watching no power switch at all"
@@ -3408,7 +3589,7 @@ ok_absent "$POWER_UDEV_RULE" "and nothing is written"
 
 power_reset
 power_node event4 platform-i8042-serio-0 untagged
-run_stage_body stage_power_button
+run_stage_body stage_power_button "$hypr_dead"
 ok_failed "a ${POWER_KEEP_ID_PATH} node that is present but NOT tagged stops the stage too"
 ok_in_err "SINGLE SOURCE" \
   "presence is not the property that matters -- logind only watches what carries the tag"
@@ -3418,7 +3599,7 @@ ok_in_err "SINGLE SOURCE" \
 # press survives, and the drop-in written next suspends on both of them.
 power_reset
 rm -f "$root/dev/input/event2" "$FAKE_UDEV_DB/event2"
-run_stage_body stage_power_button
+run_stage_body stage_power_button "$hypr_dead"
 ok_failed "an ID_PATH the rule untags that matches NO device on this machine stops the stage"
 ok_in_err "acpi-LNXPWRBN:00" "the refusal names the ID_PATH that matched nothing"
 ok_in_err "suspends twice" \
@@ -3427,7 +3608,7 @@ ok_absent "$POWER_LOGIND_DROPIN" "and the handler is never armed on a machine wh
 
 power_reset
 rm -f "$root/dev/input"/event* "$FAKE_UDEV_DB"/event*
-run_stage_body stage_power_button
+run_stage_body stage_power_button "$hypr_dead"
 ok_failed "a machine where udev reports no power-switch device at all stops the stage"
 ok_in_err "TAGS=:${POWER_UDEV_TAG}: at all" "and says the tag is absent everywhere, not that one node is missing"
 
@@ -3440,7 +3621,7 @@ ok_in_err "TAGS=:${POWER_UDEV_TAG}: at all" "and says the tag is absent everywhe
 power_reset
 printf '[Login]\nHandlePowerKey=ignore\n' \
   >"$root/etc/systemd/logind.conf.d/zzzz-somebody-else.conf"
-run_stage_body stage_power_button
+run_stage_body stage_power_button "$hypr_dead"
 ok_failed "a logind drop-in that sorts AFTER ours stops the stage"
 ok_in_err "zzzz-somebody-else.conf" "the refusal names the file that would override us"
 ok_in_err "sorts BEFORE" \
@@ -3450,14 +3631,14 @@ ok_absent "$POWER_UDEV_RULE" "and nothing is written when the drop-in could not 
 power_reset
 printf '%s\n' 'SUBSYSTEM=="input", TAG+="power-switch"' \
   >"$root/usr/lib/udev/rules.d/zzzz-somebody-else.rules"
-run_stage_body stage_power_button
+run_stage_body stage_power_button "$hypr_dead"
 ok_failed "a udev rule that ADDS the tag and sorts after ours stops the stage"
 ok_in_err "remove a tag that has not been added yet" \
   "and explains the no-op: '-=' removes from a list, so read first it removes nothing"
 
 power_reset
 rm -f "$root/usr/lib/udev/rules.d/${POWER_UDEV_TAGGER}"
-run_stage_body stage_power_button
+run_stage_body stage_power_button "$hypr_dead"
 ok_failed "a machine with nothing adding TAG+=\"${POWER_UDEV_TAG}\" stops the stage"
 ok_in_err "found no udev rule" \
   "the premise is that upstream tags these devices and we untag two of them; with nothing tagging, HandlePowerKey= would be dead on arrival"
@@ -3472,7 +3653,7 @@ ok_in_err "found no udev rule" \
 # than failing on half an answer.
 power_reset
 rm -f "$root$SLEEP_LOCK_GLOBAL_MASK"
-run_stage_body stage_power_button
+run_stage_body stage_power_button "$hypr_dead"
 ok_rc 0 "an unmasked ${SLEEP_LOCK_UNIT} does not stop the stage -- the other half of the answer is per-user and unreadable from here"
 ok_in_err "$SLEEP_LOCK_UNIT" "but it warns, naming the unit"
 ok_in_err "no keyboard" "and says why it matters on this device specifically"
@@ -3480,12 +3661,12 @@ ok_in_err "systemctl --user is-enabled" "and prints the one command that settles
 
 power_reset
 rm -f "$root$SLEEP_LOCK_GLOBAL_MASK" "$root/usr/lib/systemd/user/${SLEEP_LOCK_UNIT}"
-run_stage_body stage_power_button
+run_stage_body stage_power_button "$hypr_dead"
 ok_rc 0 "a machine with no ${SLEEP_LOCK_UNIT} at all installs cleanly"
 ok_in_out "is not installed on this machine" "and says so, rather than warning about a unit that does not exist"
 
 power_reset
-run_stage_body stage_power_button
+run_stage_body stage_power_button "$hypr_dead"
 ok_rc 0 "and the masked case is the one the fixture ships"
 ok_in_out "masked for every user" \
   "the stage reports the mask it verified, so 'resumes unlocked' is a checked property rather than an assumption"

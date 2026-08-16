@@ -425,6 +425,15 @@ readonly HYPR_INPUT_LUA_REL=.config/hypr/input.lua
 # input.lua, so creating one is strictly better than leaving it missing.
 readonly HYPR_INPUT_LUA_TEMPLATE=/usr/share/omarchy/config/hypr/input.lua
 
+# The sibling file, and the ONLY supported place to take an Omarchy default
+# binding away: hyprland.lua requires "hypr.bindings" AFTER
+# "default.hypr.omarchy", so an `hl.unbind` in here runs against a keymap the
+# defaults have already populated. Same seeding rule as input.lua -- the
+# `require` errors outright when the file is missing, so an absent one is
+# seeded from Omarchy's skeleton rather than left out.
+readonly HYPR_BINDINGS_LUA_REL=.config/hypr/bindings.lua
+readonly HYPR_BINDINGS_LUA_TEMPLATE=/usr/share/omarchy/config/hypr/bindings.lua
+
 # The block is delimited so a re-run replaces its own work instead of appending
 # a second copy, and so the user's own overrides above it are never touched.
 readonly OSK_KB_RULE_BEGIN="-- >>> deck-session.sh: on-screen keyboard XKB layout >>>"
@@ -1124,6 +1133,52 @@ readonly POWER_KEEP_ID_PATH=platform-i8042-serio-0
 #     holds. That makes it a live hazard rather than a dead setting.
 readonly POWER_KEY_ACTION=suspend
 readonly POWER_KEY_LONG_PRESS_ACTION=ignore
+
+# THE MENU FLASH, and why the udev rule above does not touch it.
+#
+# Omarchy binds this key in Desktop Mode --
+#   /usr/share/omarchy/default/hypr/bindings/utilities.lua:
+#   o.bind("XF86PowerOff", "Power menu", "omarchy-menu toggle system",
+#          { locked = true })
+# -- so a press ALSO toggles the System menu. That is a second handler for one
+# button, and it is what the operator has been seeing flash before the Deck
+# sleeps.
+#
+# 🔴 THE UDEV RULE CANNOT FIX IT, and believing otherwise cost this stage's
+# output a paragraph of wrong advice. `power-switch` is a tag systemd-logind
+# filters on; Hyprland does not look at it at all -- libinput opens EVERY input
+# device on the seat. So the untagged ACPI node keeps delivering KEY_POWER to
+# the compositor, one physical press stays TWO XF86PowerOff events there, and
+# `toggle` therefore opens the menu and closes it again.
+#
+# MEASURED on the operator's Deck 2026-08-16, by replaying T13 §2.2's two
+# sources through two uinput keyboards 165 ms apart with logind's
+# handle-power-key blocked (so only the compositor could answer):
+#
+#   17:00:18.379 openlayer>>omarchy-menu
+#   17:00:18.493 closelayer>>omarchy-menu
+#
+# 114 ms of System menu, on screen, per press. A single synthetic event in the
+# same harness left the menu OPEN, which is the same mechanism seen from the
+# other side. The suspend that follows is a THIRD, independent actor; it is not
+# what closes the menu, it just makes the flash brief.
+#
+# So the fix is to remove the second handler, not to make suspend faster: one
+# `hl.unbind` in the user's own bindings.lua, installed by this stage alongside
+# the two files that make the key suspend, because arming one without the other
+# is what produced the defect.
+readonly POWER_MENU_BIND_KEY=XF86PowerOff
+
+# Delimited for the same reason OSK_KB_RULE_* is: a re-run replaces its own
+# block instead of appending a second copy, and the user's own bindings above
+# it are never touched.
+readonly POWER_BIND_RULE_BEGIN="-- >>> deck-session.sh: power button, no System menu >>>"
+readonly POWER_BIND_RULE_END="-- <<< deck-session.sh: power button, no System menu <<<"
+
+# Assigned by the LAST line of that block, so its presence in a live compositor
+# proves the block executed. Asserted with `hyprctl eval 'if ... then error()'`,
+# never read back -- see OSK_KB_SENTINEL for why a readback cannot fail.
+readonly POWER_BIND_SENTINEL=DECK_POWER_MENU_UNBOUND
 
 # Only verified hardware. Every measurement above was taken on an OLED
 # (Galileo); an LCD (Jupiter) may enumerate its power button differently, and
@@ -2487,7 +2542,27 @@ if [[ -e ${POWER_LOGIND_DROPIN} ]]; then
       [[ -e \$dev ]] || continue
       props=\$(udevadm info --query=property --name "\$dev" 2>/dev/null) || continue
       id=\$(printf '%s\n' "\$props" | sed -n 's/^ID_PATH=//p' | head -n1)
-      tags=\$(printf '%s\n' "\$props" | sed -n 's/^TAGS=//p' | head -n1)
+      # 🔴 CURRENT_TAGS, NOT TAGS, AND THE DIFFERENCE IS THE WHOLE CHECK.
+      # udev keeps two lists: TAGS is CUMULATIVE -- every tag the device has
+      # ever carried, and \`TAG-=\` never takes anything out of it -- while
+      # CURRENT_TAGS is what the latest uevent left in place, which is what
+      # systemd-logind's tag filter matches on.
+      #
+      # Reading TAGS here made this check unfalsifiable: 70-power-switch.rules
+      # adds the tag, ${POWER_UDEV_RULE##*/} removes it, TAGS still lists
+      # it, and the verdict below concluded "the rule did NOT untag" on a
+      # machine where it had worked perfectly -- then deleted the drop-in and
+      # left the operator with a power button that did nothing. MEASURED on the
+      # operator's Deck 2026-08-16 (\`udevadm info -q property\`): the two ACPI
+      # nodes carry TAGS=:power-switch: with NO CURRENT_TAGS line at all, the
+      # surviving i8042 node carries both, and logind logs exactly ONE
+      # 'Power key pressed short' per press -- one source, i.e. the rule took.
+      #
+      # ⚠️ verify_power_button_premise deliberately reads TAGS instead, and that
+      # is not an inconsistency: it asks "is this the kind of node that gets
+      # tagged" BEFORE installing, and must keep saying yes on a re-run after
+      # our own rule has already removed the current tag.
+      tags=\$(printf '%s\n' "\$props" | sed -n 's/^CURRENT_TAGS=//p' | head -n1)
       [[ -n \$id ]] || continue
       case ":\${tags}:" in *":${POWER_UDEV_TAG}:"*) tagged=1 ;; *) tagged=0 ;; esac
       [[ \$id != "${POWER_KEEP_ID_PATH}" ]] || keep_tagged=\$tagged
@@ -2512,12 +2587,12 @@ EOF
       # drop-in restores exactly today's behaviour: Omarchy's
       # 10-ignore-power-button.conf takes the key back.
       rm -f ${POWER_LOGIND_DROPIN}
-      bad "the power-button udev rule did NOT untag:\${still_tagged} on this kernel, so KEY_POWER still has more than one source while HandlePowerKey=${POWER_KEY_ACTION} was armed -- the re-suspend loop. ${POWER_LOGIND_DROPIN} has been REMOVED, which restores the previous behaviour (the power button does nothing). ${POWER_UDEV_RULE} is left in place; it is harmless alone. Re-run the capture in docs/findings/T13-power-button-and-sleep.md 2.2 on this machine and correct POWER_ACPI_ID_PATHS."
+      bad "the power-button udev rule did NOT untag:\${still_tagged} on this kernel (CURRENT_TAGS still lists ${POWER_UDEV_TAG}), so KEY_POWER still has more than one source while HandlePowerKey=${POWER_KEY_ACTION} was armed -- the re-suspend loop. ${POWER_LOGIND_DROPIN} has been REMOVED, which restores the previous behaviour. ⚠️ In Desktop Mode that now means the power button does NOTHING: stage-power-button also removed Omarchy's ${POWER_MENU_BIND_KEY} menu bind, and that block is still in ~/${HYPR_BINDINGS_LUA_REL}. Delete it to get the menu back. ${POWER_UDEV_RULE} is left in place; it is harmless alone. Re-run the capture in docs/findings/T13-power-button-and-sleep.md 2.2 on this machine and correct POWER_ACPI_ID_PATHS."
     elif [[ \$keep_tagged -ne 1 ]]; then
       # Not disarmed: a missing keeper means logind is watching nothing, i.e.
       # the button is DEAD. That is a defect, but removing the drop-in cannot
       # improve it and would only hide which change caused it.
-      bad "no device carries ID_PATH=${POWER_KEEP_ID_PATH} with TAGS=:${POWER_UDEV_TAG}: on this kernel. That is the single KEY_POWER source this design keeps, so systemd-logind has nothing to act on and the power button does nothing. ${POWER_LOGIND_DROPIN} is left in place so the cause stays visible."
+      bad "no device carries ID_PATH=${POWER_KEEP_ID_PATH} with CURRENT_TAGS=:${POWER_UDEV_TAG}: on this kernel. That is the single KEY_POWER source this design keeps, so systemd-logind has nothing to act on and the power button does nothing. ${POWER_LOGIND_DROPIN} is left in place so the cause stays visible."
     else
       say "ok: power button -- ${POWER_KEEP_ID_PATH} is the surviving tagged KEY_POWER source and the ACPI duplicate(s) are untagged"
     fi
@@ -4802,37 +4877,29 @@ run_as_desktop_user() {
   fi
 }
 
-# install_osk_kb_layout_rule <desktop-user> <path to input.lua> [template]
+# splice_marked_lua_block <target> <block file> <begin> <end> <template> <out>
 #
-# Splices the block above into the user's Hyprland input config, replacing any
-# previous copy of itself. Everything outside the markers is preserved
-# byte-for-byte, which matters more here than anywhere else in this file: on the
-# test Deck that same file carries the `above_lock = 2` layer rule, and losing it
-# makes the lock screen unanswerable on a device with no physical keyboard.
-install_osk_kb_layout_rule() {
-  local user=$1
-  local target=$2
-  local template=${3:-$HYPR_INPUT_LUA_TEMPLATE}
+# Writes <target> into <out> with the contents of <block file> as the ONE copy
+# of the block between <begin> and <end>. Everything outside the markers is
+# preserved byte-for-byte, which is the whole point: these are user dotfiles
+# that carry the user's own overrides, and on the test Deck input.lua also
+# carries the `above_lock = 2` layer rule whose loss makes the lock screen
+# unanswerable on a device with no physical keyboard.
+#
+# An absent <target> is seeded from <template> rather than created empty:
+# hyprland.lua `require`s these modules by name and a missing file RAISES,
+# taking the whole config down with it.
+#
+# Not sed/awk: the markers have to be matched as whole lines and an
+# unterminated previous block has to be refused rather than half-deleted.
+#
+# ⚠️ TWO CALLERS -- input.lua's XKB pin and bindings.lua's power-key unbind.
+# Keep it generic; anything specific to either block belongs in that block's
+# own render_*/install_* pair.
+splice_marked_lua_block() {
+  local target=$1 block=$2 begin=$3 end=$4 template=$5 out=$6
 
-  # The two names must stay in step: OSK_UINPUT_NAME is what the mapper
-  # declares, OSK_HYPR_DEVICE is what a rule matches. Deriving one and comparing
-  # it to the other means a mapper rename tracked in only one of them stops the
-  # stage instead of shipping a rule that matches no device.
-  local derived=${OSK_UINPUT_NAME,,}
-  derived=${derived// /-}
-  [[ $derived == "$OSK_HYPR_DEVICE" ]] ||
-    fail "the uinput device name '${OSK_UINPUT_NAME}' normalises to '${derived}', but the rule matches '${OSK_HYPR_DEVICE}'. Hyprland lowercases the name and turns spaces into dashes; a rule naming anything else matches no device and does nothing at all."
-
-  local block tmp
-  block=$(mktemp) || fail "mktemp failed"
-  render_osk_kb_layout_lua >"$block" ||
-    fail "could not render the on-screen keyboard's layout rule"
-
-  tmp=$(mktemp) || { rm -f "$block"; fail "mktemp failed"; }
-
-  # Not sed/awk: the markers have to be matched as whole lines and an
-  # unterminated previous block has to be refused rather than half-deleted.
-  python3 - "$target" "$block" "$template" "$OSK_KB_RULE_BEGIN" "$OSK_KB_RULE_END" >"$tmp" <<'PY' || {
+  python3 - "$target" "$block" "$template" "$begin" "$end" >"$out" <<'PY'
 import pathlib, sys
 target, block, template = (pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]),
                            pathlib.Path(sys.argv[3]))
@@ -4864,6 +4931,38 @@ sys.stdout.write((text + "\n\n") if text else "")
 sys.stdout.write(block.read_text())
 sys.stderr.write(f"seeded-from: {source}\n")
 PY
+}
+
+# install_osk_kb_layout_rule <desktop-user> <path to input.lua> [template]
+#
+# Splices the block above into the user's Hyprland input config, replacing any
+# previous copy of itself. Everything outside the markers is preserved
+# byte-for-byte, which matters more here than anywhere else in this file: on the
+# test Deck that same file carries the `above_lock = 2` layer rule, and losing it
+# makes the lock screen unanswerable on a device with no physical keyboard.
+install_osk_kb_layout_rule() {
+  local user=$1
+  local target=$2
+  local template=${3:-$HYPR_INPUT_LUA_TEMPLATE}
+
+  # The two names must stay in step: OSK_UINPUT_NAME is what the mapper
+  # declares, OSK_HYPR_DEVICE is what a rule matches. Deriving one and comparing
+  # it to the other means a mapper rename tracked in only one of them stops the
+  # stage instead of shipping a rule that matches no device.
+  local derived=${OSK_UINPUT_NAME,,}
+  derived=${derived// /-}
+  [[ $derived == "$OSK_HYPR_DEVICE" ]] ||
+    fail "the uinput device name '${OSK_UINPUT_NAME}' normalises to '${derived}', but the rule matches '${OSK_HYPR_DEVICE}'. Hyprland lowercases the name and turns spaces into dashes; a rule naming anything else matches no device and does nothing at all."
+
+  local block tmp
+  block=$(mktemp) || fail "mktemp failed"
+  render_osk_kb_layout_lua >"$block" ||
+    fail "could not render the on-screen keyboard's layout rule"
+
+  tmp=$(mktemp) || { rm -f "$block"; fail "mktemp failed"; }
+
+  splice_marked_lua_block \
+    "$target" "$block" "$OSK_KB_RULE_BEGIN" "$OSK_KB_RULE_END" "$template" "$tmp" || {
     rm -f "$block" "$tmp"
     fail "could not splice the keyboard-layout rule into ${target}"
   }
@@ -5004,6 +5103,186 @@ PY
       ;;
     *)
       fail "unexpected verdict '${verdict}' from the device-list check; refusing to guess whether the keyboard works"
+      ;;
+  esac
+}
+
+# The one line that stops the System menu flashing on every power press. Read
+# the POWER_MENU_BIND_KEY block above for the measurement it comes from.
+#
+# `hl.unbind` and NOT a rival `o.bind` of our own: two binds on one key both
+# fire, so binding it to something inert would replace one handler with two.
+# Unbinding is also the idiom Omarchy documents for taking a default away --
+# ~/.config/hypr/bindings.lua ships with `hl.unbind("SUPER + SHIFT + B")` as its
+# worked example, and hyprland.lua requires that file AFTER the defaults, which
+# is what makes the order work.
+#
+# ⚠️ IT IS DELIBERATELY TOLERANT OF THE KEY BEING UNBOUND ALREADY. Probed live
+# on the Deck 2026-08-16: `hyprctl eval 'hl.unbind([[XF86Massage]])'` on a name
+# nothing has ever bound prints `ok` and exits 0. So an Omarchy release that
+# drops its own bind does not turn this block into a raise -- which matters,
+# because a raise here would discard the user's WHOLE bindings.lua silently.
+render_power_menu_unbind_lua() {
+  cat <<EOF
+${POWER_BIND_RULE_BEGIN}
+${INSTALL_MARKER_LUA}
+--
+-- The power button suspends this Deck (systemd-logind, see
+-- ${POWER_LOGIND_DROPIN}). Omarchy also binds it to its System menu, in
+-- default/hypr/bindings/utilities.lua:
+--
+--   o.bind("${POWER_MENU_BIND_KEY}", "Power menu", "omarchy-menu toggle system",
+--          { locked = true })
+--
+-- Two handlers for one button. Worse, the compositor sees ONE physical press
+-- as TWO ${POWER_MENU_BIND_KEY} events -- the real key on platform-i8042-serio-0 and an
+-- ACPI notify on acpi-LNXPWRBN:00 ~165 ms later -- because libinput opens every
+-- device on the seat and does not care about the 'power-switch' udev tag that
+-- ${POWER_UDEV_RULE} edits. So 'toggle' runs twice and the System menu
+-- opens and closes: measured at 114 ms of visible menu per press, on this
+-- hardware, immediately before the screen sleeps.
+--
+-- Removing the bind is the fix. It does not touch suspend, which is logind's.
+hl.unbind("${POWER_MENU_BIND_KEY}")
+
+-- Deliberately the LAST line: its absence in a live compositor means the block
+-- did not run to the end, which is the only symptom Hyprland gives for a file
+-- it discarded. deck-session.sh asserts it with
+--   hyprctl eval 'if ${POWER_BIND_SENTINEL} ~= true then error("...") end'
+-- because eval reports Lua errors and cannot report values.
+${POWER_BIND_SENTINEL} = true
+${POWER_BIND_RULE_END}
+EOF
+}
+
+# install_power_menu_unbind <desktop-user> <path to bindings.lua> [template]
+#
+# Same splice, same luac gate, same reasoning as install_osk_kb_layout_rule --
+# and the file it edits is the one Omarchy hands the user for exactly this, so
+# everything outside our markers is theirs and survives byte-for-byte.
+install_power_menu_unbind() {
+  local user=$1
+  local target=$2
+  local template=${3:-$HYPR_BINDINGS_LUA_TEMPLATE}
+
+  local block tmp
+  block=$(mktemp) || fail "mktemp failed"
+  render_power_menu_unbind_lua >"$block" ||
+    fail "could not render the power-button unbind"
+
+  tmp=$(mktemp) || { rm -f "$block"; fail "mktemp failed"; }
+
+  splice_marked_lua_block \
+    "$target" "$block" "$POWER_BIND_RULE_BEGIN" "$POWER_BIND_RULE_END" "$template" "$tmp" || {
+    rm -f "$block" "$tmp"
+    fail "could not splice the power-button unbind into ${target}"
+  }
+  rm -f "$block"
+
+  # A Lua syntax error is silent: Hyprland discards the file and falls back,
+  # with 'hyprctl configerrors' still clean. Here that would take every personal
+  # keybinding in the user's bindings.lua down with it.
+  if command -v luac >/dev/null 2>&1; then
+    local luaerr
+    if ! luaerr=$(luac -p "$tmp" 2>&1); then
+      rm -f "$tmp"
+      fail "the patched ${target} is not valid Lua: ${luaerr}. Refusing to install it -- Hyprland discards a config it cannot parse WITHOUT logging a reason, so this would silently drop every binding in that file."
+    fi
+    log "verified: the patched ${target} parses as Lua"
+  else
+    warn "luac not found, so the patched ${target} was NOT syntax-checked. A Lua syntax error there is silent: Hyprland discards the whole file, which would drop the user's own bindings as well as this one. Install the 'lua' package to enable this check."
+  fi
+
+  chmod 0644 "$tmp" || { rm -f "$tmp"; fail "could not make the staged ${target} readable by ${user}"; }
+  log "installing the power-button unbind: ${target}"
+  run_as_desktop_user "$user" install -D -m 0644 "$tmp" "$target" || {
+    rm -f "$tmp"
+    fail "could not install ${target} as ${user}"
+  }
+  rm -f "$tmp"
+
+  grep -qxF -- "$POWER_BIND_RULE_END" "$target" ||
+    fail "${target} does not carry '${POWER_BIND_RULE_END}' after being installed. The write reported success and the file does not have the unbind in it."
+}
+
+# verify_power_menu_unbind <desktop-user> <uid> [runtime-dir]
+#
+# The runtime directory is a PARAMETER for the reason spelled out above
+# verify_osk_kb_layout: baked in, a unit-suite run on a developer's own Hyprland
+# box would reload THEIR desktop.
+#
+# Two questions, and the second is the one that matters to the operator:
+#   - did our block execute?      -> the sentinel, asserted, never read back
+#   - is the key bound to anything now? -> `hyprctl -j binds`, which is the
+#     observable the flash comes from. A sentinel that is set while the bind is
+#     still there would mean `hl.unbind` had stopped working, and the menu would
+#     still flash.
+verify_power_menu_unbind() {
+  local user=$1 uid=$2
+  local runtime_dir=${3:-/run/user/${uid}}
+
+  local manual="hyprctl -j binds"
+
+  local sig="" d
+  for d in "$runtime_dir"/hypr/*/; do
+    [[ -S "${d}.socket.sock" ]] || continue
+    d=${d%/}
+    sig=${d##*/}
+  done
+
+  if [[ -z $sig ]]; then
+    warn "no live Hyprland instance under ${runtime_dir}/hypr, so the power-button unbind is installed but has NOT been observed working. It applies to ${user}'s next session. Check it there with: ${manual} -- no bind may name '${POWER_MENU_BIND_KEY}'."
+    return 0
+  fi
+
+  command -v hyprctl >/dev/null 2>&1 ||
+    fail "a Hyprland instance is live (${sig}) but hyprctl is not on PATH, so the unbind this stage just installed cannot be checked at all. Refusing to report success for a menu nobody has seen stay shut."
+
+  # ⚠️ HYPRLAND_INSTANCE_SIGNATURE is not optional (R-46): without it hyprctl
+  # exits before doing anything, and a check that never ran reads as a pass.
+  local -a hy=(env "XDG_RUNTIME_DIR=${runtime_dir}" "HYPRLAND_INSTANCE_SIGNATURE=${sig}" hyprctl)
+
+  "${hy[@]}" reload config-only >/dev/null 2>&1 ||
+    fail "'hyprctl reload config-only' failed against instance ${sig}. The unbind is written to disk but the running session has not picked it up, and this stage will not call that success."
+
+  local evalout
+  if ! evalout=$("${hy[@]}" eval "if ${POWER_BIND_SENTINEL} ~= true then error('${POWER_BIND_SENTINEL} is not set') end" 2>&1); then
+    fail "the running compositor does not have ${POWER_BIND_SENTINEL} set (${evalout}). That global is the LAST line of the block this stage installed, so its absence means the block did not run to the end -- most likely Hyprland discarded ${HYPR_BINDINGS_LUA_REL} over a Lua error elsewhere in it. The System menu still flashes on every power press."
+  fi
+  log "verified: ${POWER_BIND_SENTINEL} is set in the live compositor, so the whole unbind block executed"
+
+  local binds verdict
+  binds=$("${hy[@]}" -j binds 2>&1) ||
+    fail "could not read 'hyprctl -j binds' from instance ${sig}: ${binds}"
+
+  verdict=$(python3 - "$POWER_MENU_BIND_KEY" "$binds" <<'PY'
+import json, sys
+
+key, binds_json = sys.argv[1:3]
+try:
+    binds = json.loads(binds_json)
+except ValueError as exc:
+    sys.exit("hyprctl did not return JSON: %s" % exc)
+
+# An empty bind list is not "our key is gone" -- it is a list worth drawing no
+# conclusion from, so say so rather than report success.
+if not binds:
+    sys.exit("hyprctl reported no keybindings at all")
+
+still = [b for b in binds if b.get("key") == key]
+print("bound %d" % len(still) if still else "ok")
+PY
+) || fail "could not read the keybinding list back out of hyprctl"
+
+  case $verdict in
+    ok)
+      log "verified: nothing in the live compositor binds ${POWER_MENU_BIND_KEY}, so a press reaches systemd-logind and nothing else"
+      ;;
+    bound\ *)
+      fail "${verdict#bound } keybinding(s) still name ${POWER_MENU_BIND_KEY} in the live compositor. Our block ran (the sentinel is set) and the key is still bound, so either hl.unbind no longer removes it or something re-binds it after ${HYPR_BINDINGS_LUA_REL}. The System menu will still flash before the Deck sleeps. Compare: ${manual}"
+      ;;
+    *)
+      fail "unexpected verdict '${verdict}' from the keybinding check; refusing to guess whether the menu still opens"
       ;;
   esac
 }
@@ -6266,6 +6545,14 @@ verify_power_button_premise() {
     [[ -n $dev ]] || continue
     id=""; tags=""
     while IFS= read -r line; do
+      # ⚠️ TAGS AND NOT CURRENT_TAGS, DELIBERATELY, and the opposite of what the
+      # first-boot verifier reads -- see the long note at its `tags=` line. This
+      # is a PRE-INSTALL premise: "is this the kind of node udev tags", asked so
+      # a rule that would match nothing is refused. TAGS is cumulative and
+      # survives our own `TAG-=`, which is exactly what keeps a SECOND run of
+      # this stage from failing on the machine the first run fixed. CURRENT_TAGS
+      # here would make the stage non-idempotent.
+      # `TAGS=*` cannot match a CURRENT_TAGS= line: case anchors at the start.
       case $line in
         ID_PATH=*) id=${line#ID_PATH=} ;;
         TAGS=*)    tags=${line#TAGS=} ;;
@@ -6450,11 +6737,13 @@ ${INSTALL_MARKER}
 # is a DIFFERENT stage's artefact -- deck-session.sh checks it is in place
 # before it finishes here, rather than assuming the stages ran in order.
 #
-# Desktop Mode also still runs Omarchy's own XF86PowerOff bind
-# (\`omarchy-menu toggle system\`), which is a USER config concern and is not
-# changed here. With the duplicate press gone, one press opens that menu and
-# LEAVES IT OPEN behind the suspend. See deck-session.sh's stage-power-button
-# output for the one-line fix and why it belongs in ~/.config/hypr/bindings.lua.
+# Desktop Mode ALSO had Omarchy's own ${POWER_MENU_BIND_KEY} bind
+# (\`omarchy-menu toggle system\`) answering this key, which is what made the
+# System menu flash before the screen slept. That is a USER config concern and
+# not a logind one, so it is not fixed in this file -- stage-power-button
+# installs an \`hl.unbind\` into ~/${HYPR_BINDINGS_LUA_REL} in the same run.
+# ⚠️ Removing THIS file alone therefore leaves the power button doing nothing
+# in Desktop Mode; the undo printed by stage-power-button removes both.
 
 [Login]
 HandlePowerKey=${POWER_KEY_ACTION}
@@ -6486,6 +6775,11 @@ EOF
 # armed with the duplicate live, which is the one state this whole stage exists
 # to avoid.
 stage_power_button() {
+  # The compositor runtime directory is a SEAM ($1), exactly as it is for
+  # stage_osk_kb_layout and for the same reason: baked in, a unit-suite run on a
+  # developer's own Hyprland box would reload THEIR desktop.
+  local hypr_runtime=${1:-}
+
   local tool
   for tool in find readlink; do
     command -v "$tool" >/dev/null 2>&1 ||
@@ -6556,6 +6850,40 @@ stage_power_button() {
 
   warn_if_sleep_lock_live
 
+  # --- 3. and take the SECOND handler away ---------------------------------
+  #
+  # Last, and after the two files above, because it is only correct once the key
+  # suspends: on a machine where this stage stopped at the model gate, Omarchy's
+  # menu bind is the ONLY thing the power button does in Desktop Mode and
+  # removing it would leave a dead button. The gate is above, so reaching here
+  # means the key now suspends and the menu is pure flash. See the
+  # POWER_MENU_BIND_KEY block for the measurement.
+  local invoking_user; invoking_user=$(desktop_user)
+  [[ -n $invoking_user && $invoking_user != root ]] ||
+    fail "could not determine the desktop user (got '${invoking_user}'); the power-key unbind lives in their own ~/${HYPR_BINDINGS_LUA_REL} and there is no system-wide drop-in for it"
+
+  local home uid
+  home=$(getent passwd "$invoking_user" | cut -d: -f6) ||
+    fail "could not resolve ${invoking_user}'s home directory"
+  [[ -n $home ]] || fail "empty home directory for ${invoking_user}"
+  uid=$(getent passwd "$invoking_user" | cut -d: -f3) ||
+    fail "could not resolve ${invoking_user}'s uid"
+  [[ $uid =~ ^[0-9]+$ ]] ||
+    fail "getent reported a non-numeric uid ('${uid}') for ${invoking_user}; the compositor's runtime directory cannot be located from it"
+
+  # 🔴 In a chroot the seam is pointed somewhere that cannot exist, ON PURPOSE:
+  # arch-chroot bind-mounts /run, so /run/user/${uid} in here belongs to the
+  # INSTALLER's compositor and verify's live arm would reload the desktop the
+  # operator is looking at. Its "no live Hyprland" arm is the honest report for
+  # a machine that has never booted.
+  if in_chroot; then
+    hypr_runtime=$CHROOT_NO_HYPR_RUNTIME
+    defer "the power-key unbind cannot be observed taking effect at install time -- it needs a live Hyprland and the target has never booted. It is written to ${home}/${HYPR_BINDINGS_LUA_REL} and applies to ${invoking_user}'s first session. Confirm there with: hyprctl -j binds  -- no bind may name ${POWER_MENU_BIND_KEY}"
+  fi
+
+  install_power_menu_unbind "$invoking_user" "${home}/${HYPR_BINDINGS_LUA_REL}"
+  verify_power_menu_unbind "$invoking_user" "$uid" ${hypr_runtime:+"$hypr_runtime"}
+
   # The premise check above deferred rather than ran, so the thing that WILL
   # run it has to exist. Installed here as well as in stage-priv-write-helper
   # because the stages are individually invocable and neither may assume the
@@ -6576,6 +6904,11 @@ stage_power_button() {
     log "   ${POWER_LOGIND_DROPIN} -- restoring today's behaviour rather than"
     log "   leaving a Deck that suspends itself on resume. Read the verdict:"
     log "     journalctl -t ${FIRST_BOOT_VERIFY_TAG} -b"
+    log ""
+    log "   The ${POWER_MENU_BIND_KEY} unbind in ~/${HYPR_BINDINGS_LUA_REL} is the"
+    log "   third artefact and the one that stops the System menu flashing. It"
+    log "   is user config, not a service, so it takes effect at the first"
+    log "   Desktop Mode session with no reload of anything."
     return 0
   fi
 
@@ -6594,25 +6927,21 @@ stage_power_button() {
   log "A long press does nothing: no threshold in this project has been read"
   log "from source, and the ten-second hardware hold is unchanged."
   log ""
-  log "⚠️ DESKTOP MODE MAY STILL SHOW A BRIEF SYSTEM-MENU FLASH before it sleeps."
-  log "   The udev rule above only changes what LOGIND watches; Omarchy's"
-  log "   'omarchy-menu toggle system' bind (XF86PowerOff) reads raw key events"
-  log "   from the compositor's own input layer, which still sees BOTH power"
-  log "   events, so the toggle-open/toggle-close pair that caused the original"
-  log "   'flash' report is UNCHANGED at the compositor. What changed is that"
-  log "   suspend now fires off a single event and can win the race, cutting the"
-  log "   menu's animation short. MEASURED once on hardware, 2026-08-12: a"
-  log "   split-second flash, not a stuck-open menu -- n=1, and system load or"
-  log "   animation settings could shift the race either way."
-  log "   OPTIONAL cosmetic fix, as the desktop user, in ~/.config/hypr/bindings.lua:"
-  log "     hl.unbind(\"XF86PowerOff\")"
-  log "   ⚠️ A Lua syntax error there makes Hyprland discard the WHOLE file"
-  log "   silently, with 'hyprctl configerrors' still clean. Check it with"
-  log "   'luac -p ~/.config/hypr/bindings.lua' before rebooting."
+  log "DESKTOP MODE NO LONGER FLASHES THE SYSTEM MENU. Omarchy binds"
+  log "   ${POWER_MENU_BIND_KEY} to 'omarchy-menu toggle system', and the compositor sees"
+  log "   ONE physical press as TWO of those events (the real key, then the ACPI"
+  log "   notify ~165 ms later -- libinput reads every device on the seat and"
+  log "   ignores the udev tag this stage edits), so 'toggle' opened the menu and"
+  log "   closed it again: 114 ms of visible menu per press, MEASURED on this"
+  log "   hardware 2026-08-16. The bind is now removed in"
+  log "   ~/${HYPR_BINDINGS_LUA_REL}, so a press reaches logind and nothing else."
   log ""
   log "🔴 UNDO -- in this order, so the handler is never armed alone:"
   log "     sudo rm -f ${POWER_LOGIND_DROPIN}    # first: disarm the handler"
   log "     sudo rm -f ${POWER_UDEV_RULE}   # second: restore the tags"
+  log "   and delete the block between ${POWER_BIND_RULE_BEGIN}"
+  log "   and its closing marker in ~/${HYPR_BINDINGS_LUA_REL} to give the"
+  log "   power button its Omarchy menu back."
   log "     sudo reboot"
   log "   Removing only the first restores today's behaviour exactly (Omarchy's"
   log "   10-ignore-power-button.conf takes over again). Removing only the"

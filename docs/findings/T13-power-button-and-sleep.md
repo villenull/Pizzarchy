@@ -813,6 +813,48 @@ mechanism rather than the untested prediction, and the `hl.unbind` line is
 now offered as an **optional cosmetic** fix rather than "the supported fix"
 for a problem that, so far, does not visibly occur.
 
+> ⚠️ **SUPERSEDED 2026-08-16 — see §9.6a.** The mechanism above is right; the
+> conclusion drawn from it was wrong twice over. The flash is not a race that
+> suspend "wins" — it is the double toggle itself, measured at **114 ms of
+> visible menu** with suspend blocked entirely — and it recurred on every
+> build the operator ran. Printing the fix instead of installing it is what
+> kept it in the product.
+
+### 9.6a ✅ FIXED 2026-08-16 — the flash is the double toggle, and the unbind now ships
+
+Reproduced on the operator's Deck without touching the power button, by
+replaying §2.2's two sources through two uinput keyboards **165 ms apart**
+with `systemd-inhibit --what=handle-power-key --mode=block` held, so `logind`
+could not answer and only the compositor could:
+
+```
+17:00:18.379  openlayer>>omarchy-menu     # hyprland .socket2.sock
+17:00:18.493  closelayer>>omarchy-menu
+```
+
+**114 ms of System menu on screen, with suspend taken out of the picture
+entirely.** A single synthetic event through the same harness left the menu
+**open** instead — the same mechanism seen from the other side, and the
+`grim` capture of it is the "System…/Screensaver/Suspend/…/Gaming Mode"
+sheet the operator described. So suspend is not what closes the menu and not
+what makes the flash brief; the second `toggle` is. The race framing above is
+wrong, and "n=1, might not recur" was wrong too — it is deterministic, and
+the operator saw it on more than one build.
+
+⚠️ The polkit detail, because it is what made this testable at all: an
+`inhibit-handle-power-key` **block** lock is refused to an SSH session
+(`Failed to inhibit: Access denied`). Taking it *through the compositor* —
+`hyprctl eval 'hl.exec_cmd([[systemd-inhibit …]])'` — puts the child in
+session 9 on seat0, which polkit does grant.
+
+`stage-power-button` now installs `hl.unbind("XF86PowerOff")` into the
+desktop user's `~/.config/hypr/bindings.lua`, as a marked, re-runnable block
+beside the two files it already writes, and verifies it against the live
+compositor (sentinel + `hyprctl -j binds`). Verified on hardware the same
+day: `openlayer>>omarchy-menu` no longer appears for either the single- or
+the double-source replay, and the user's own bindings in that file survive
+the splice.
+
 **Net effect: all four of the operator's original defects are now closed on
 real hardware** — Desktop Mode suspends, Gaming Mode suspends, both resume to
 where they were with no password, and a reboot always lands in Gaming Mode.

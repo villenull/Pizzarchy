@@ -3651,6 +3651,66 @@ root. All three builds used `~/.cache/omarchy-deck/iso-build` regardless of what
 was passed, so the "always build in a fresh scratch dir" precaution (§5.33a) was
 never actually in effect for any of them.
 
+### 5.42 ✅ THE POWER-BUTTON MENU FLASH — two defects, one of them a check that could not fail (2026-08-16)
+
+**Defect 1 — the flash.** In Desktop Mode a power press suspends, but Omarchy's
+System menu blinks on screen first. Root cause, reproduced over SSH with no one
+touching the button: Omarchy binds `XF86PowerOff` to `omarchy-menu toggle
+system` (`default/hypr/bindings/utilities.lua`), and the compositor sees **one
+physical press as two `XF86PowerOff` events** — the real key on
+`platform-i8042-serio-0`, then the ACPI notify ~165 ms later — because libinput
+opens every device on the seat and the `power-switch` udev tag our rule edits is
+a **`logind`-only** concept. So `toggle` runs twice: open, then shut.
+
+Measured with `systemd-inhibit --what=handle-power-key --mode=block` held, i.e.
+with suspend removed from the picture: `openlayer>>omarchy-menu` at
+17:00:18.379, `closelayer` at 17:00:18.493 — **114 ms of visible menu, per
+press**. §9.6 of T13 had called this a race that suspend wins, "n=1, may not
+recur". Both halves were wrong: it is deterministic, and the fix had been
+written down as *optional cosmetic advice printed by the stage* since 2026-08-12
+— which is exactly why it shipped in every build since.
+
+**Fix:** `stage-power-button` now installs `hl.unbind("XF86PowerOff")` into
+`~/.config/hypr/bindings.lua` as a marked, re-runnable block, luac-checked
+before it lands, and verified against the live compositor by sentinel **and** by
+`hyprctl -j binds` (a sentinel alone cannot see "the block ran and the key is
+still bound"). Not a rival bind: Hyprland fires *every* bind on a key, so
+binding it to something inert would have replaced one handler with two.
+Verified on hardware — the replay produces no `openlayer` at all, and the
+operator's own bindings in that file survive the splice.
+
+**Defect 2 — 🔴 and this one was disarming the power button on every boot.**
+`first-boot-verify` asks "did the udev rule actually untag the ACPI duplicate?"
+by reading `TAGS=`. **`TAGS` is cumulative** — every tag the device has ever
+carried, and `TAG-=` never removes anything from it — while **`CURRENT_TAGS`**
+is what the latest uevent left, and is what `logind`'s filter matches. So the
+check could only ever answer "still tagged", and its response to that answer is
+to **delete `zz-deck-power-button.conf`**. Read off the operator's Deck, on an
+install from our own ISO:
+
+```
+first-boot-verify[804]: FAIL: the power-button udev rule did NOT untag:
+  acpi-PNP0C0C:00 acpi-LNXPWRBN:00 … has been REMOVED
+```
+
+…while the same machine showed the two ACPI nodes with `TAGS=:power-switch:`
+and **no `CURRENT_TAGS` line at all**, the surviving i8042 node with both, and
+`logind` logging exactly **one** `Power key pressed short` per press. The rule
+had worked perfectly. The button still suspended only because `logind` had read
+the drop-in at boot, before the verifier deleted it — one reboot from doing
+nothing. Now reads `CURRENT_TAGS`, with a run-it regression test.
+
+⚠️ `verify_power_button_premise` deliberately keeps reading `TAGS`, and that is
+not an inconsistency: it asks "is this the kind of node udev tags" *before*
+installing, and must keep saying yes on a re-run after our own rule has removed
+the current tag. Both now say so in a comment.
+
+⚠️ Nothing on the operator's Deck has been made permanent: the unbind is applied
+there (user dotfile), but the `CURRENT_TAGS` fix only reaches a machine through
+a new ISO. **Until one is built, a reboot of that Deck leaves the power button
+inert in Desktop Mode** — the drop-in is already deleted and the menu bind is
+now gone too. Restoring either by hand is in `stage-power-button`'s printed undo.
+
 ---
 
 ## 6. Blocked on human
