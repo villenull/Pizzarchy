@@ -1,15 +1,12 @@
 # Pizzarchy: Omarchy on your Steam Deck
 
 **Hot and ready in about twenty minutes — one bootable USB, no keyboard, and
-Gaming Mode is unchanged. Easy as pie.**
+Gaming Mode is unchanged. Easy as Pizza(rchy) pie.**
 
-One bootable USB installs a full Arch + [Omarchy](https://omarchy.org) system on
-a Steam Deck — hardware-optimized, driven entirely by the Deck's buttons and
-trackpads. No keyboard. No terminal. Not once.
+One bootable USB installs [Omarchy](https://omarchy.org) on your Steam Deck with no keyboard/mouse required. Installation is driven entirely by the Deck's buttons and
+trackpads.
 
-Afterwards the Deck behaves like it always did: hold the power button, land in
-Gaming Mode, play. The difference is **Desktop Mode**, which now drops you into a
-real Omarchy/Hyprland desktop — with a button to come straight back.
+Afterwards, the Deck behaves like it always did as turning your Deck on lands you in Gaming Mode. The difference is **Desktop Mode**, which now drops you into an Omarchy/Hyprland desktop. Use the QAM button and menu to go back to Gaming Mode.
 
 > _**[ IMAGE — hero: the Deck in hand, running the Omarchy desktop ]**_
 > `docs/images/hero-desktop.png`
