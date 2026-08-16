@@ -3670,6 +3670,16 @@ recur". Both halves were wrong: it is deterministic, and the fix had been
 written down as *optional cosmetic advice printed by the stage* since 2026-08-12
 — which is exactly why it shipped in every build since.
 
+⚠️ **The spec had it right and the implementation demoted it.**
+`docs/tasks/T13-power-button-and-sleep.md` row 1 says the fix is
+"`HandlePowerKey=suspend` **and** `hl.unbind("XF86PowerOff")` — both, or the
+menu flashes as it suspends", and names "a marker block in
+`~/.config/hypr/bindings.lua`" as the artefact. Row 11 even makes "the System
+menu does not open on a power press" an acceptance criterion. Only the logind
+half was built; the other half became a `log` line. Worth remembering the shape:
+a two-artefact fix where one artefact is a *user dotfile* is the one that gets
+quietly downgraded to advice, because advice compiles and passes every test.
+
 **Fix:** `stage-power-button` now installs `hl.unbind("XF86PowerOff")` into
 `~/.config/hypr/bindings.lua` as a marked, re-runnable block, luac-checked
 before it lands, and verified against the live compositor by sentinel **and** by
