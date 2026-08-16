@@ -83,7 +83,7 @@ whether it worked.
 > _**[ IMAGE — Wi-Fi network list ]**_ `docs/images/install-02-wifi.png`
 
 ![The on-screen keyboard, drawn on the console and driven by the trackpads](docs/images/install-03-osk.png)
->
+
 ![The point of no return. The cursor starts on "No, go back"](docs/images/install-04-confirm.png)
 
 > _**[ IMAGE — install progress ]**_ `docs/images/install-05-progress.png`
