@@ -1190,10 +1190,47 @@ shopt -u nullglob
 # deck-form.sh -- 107KB, 147 passing assertions -- had shipped on zero ISOs.
 #
 # A SIXTH has to argue again, from scratch, against this same rule.
-(( ${#overlay_patches[@]} <= 5 )) ||
-  fail "iso/overlay/patches/ holds ${#overlay_patches[@]} patches; the budget is 5 (T5-fork-plan.md §1 point 3, raised from 4 in T5e -- see the block above)" \
-    "A sixth patch has to argue for itself -- and the argument is usually that the change belongs in the omarchy-deck package instead. Raising this number is a decision, not a fix."
-pass "the overlay patch budget is respected (${#overlay_patches[@]}/5 -- T5-fork-plan.md §1 point 3, raised from 4 in T5e)"
+#
+# 🔴 RAISED FROM 5 TO 6, 2026-08-16 (P33/P34), and this one was REFUSED ONCE
+# FIRST -- which is the only reason it is allowed now. The sixth patch is
+# zz-pacman-cache-eviction.patch. Its argument, made from scratch:
+#
+#   - The rule the budget protects is "patches for build-time behaviour;
+#     install-time goes in the omarchy-deck package". This patch is build-time
+#     in the strictest sense available: it runs between `repo-add` and
+#     `mkarchiso`, inside the build container, and nothing it touches exists on
+#     the ISO or the installed Deck. The usual counter-argument -- "put it in
+#     the package instead" -- has no target: there is no package, no installed
+#     system, and no runtime. It is the *builder's own cache*.
+#   - There is no additive alternative, and this was checked rather than
+#     asserted. The collision arises DURING the container run: the offline
+#     mirror is populated (leaving upstream's copy in the pacman cache), then
+#     our packages are compiled, then `repo-add` writes a db describing ours.
+#     `iso/bin/build` runs on the host and cannot interleave. Pre-cleaning the
+#     host cache does not help -- the bad copy is fetched during the run.
+#   - IT WAS DROPPED ON 2026-08-15 FOR LACK OF EVIDENCE, on this test's own
+#     terms: the build that succeeded reported "0 file(s) differed", so the fix
+#     could not be credited. `docs/PROGRESS.md` §5.41 recorded the diagnosis and
+#     said: "if this recurs, reinstate it with the failure as evidence and raise
+#     the budget deliberately."
+#   - IT RECURRED, on the very next build, on the same package. And the cause is
+#     now MEASURED rather than inferred: our locally-compiled
+#     `omarchy-settings-dev-4.0.0.r1744.gf002044-1` is **722,552 B**; upstream's
+#     published package of the identical name is **722,481 B**. Same filename,
+#     71 bytes apart. mkarchiso reads the cache first and validates against the
+#     db `repo-add` wrote from ours.
+#   - Tally: two builds failed without it, one succeeded with it, one failed
+#     again after it was removed.
+#
+# The cost of refusing it is not a smaller patch: it is a build that fails
+# whenever upstream has published a package at the same pkgver-pkgrel we
+# compile -- i.e. whenever our pin is current, which is the normal case.
+#
+# A SEVENTH has to argue again, from scratch, against this same rule.
+(( ${#overlay_patches[@]} <= 6 )) ||
+  fail "iso/overlay/patches/ holds ${#overlay_patches[@]} patches; the budget is 6 (T5-fork-plan.md §1 point 3, raised from 4 in T5e and from 5 in P34 -- see the block above)" \
+    "A seventh patch has to argue for itself -- and the argument is usually that the change belongs in the omarchy-deck package instead. Raising this number is a decision, not a fix."
+pass "the overlay patch budget is respected (${#overlay_patches[@]}/6 -- T5-fork-plan.md §1 point 3, raised from 4 in T5e and from 5 in P34)"
 
 # C. Staged and promoted are mutually exclusive states for the same patch.
 for staged in "${staged_patches[@]}"; do
