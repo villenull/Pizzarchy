@@ -123,6 +123,33 @@ render_finish
 
 LC_ALL=C grep -qF "CENTER:Installed Omarchy in 3m 14s" "$TTY_PATH" ||
   fail "render_finish must still show upstream's own 'Installed Omarchy in <duration>' line" "$(cat "$TTY_PATH")"
+
+# 🔴 THE REBOOT WARNING IS THE LAST THING THE OPERATOR READS BEFORE PRESSING
+# THE BUTTON THAT REBOOTS. docs/PROGRESS.md §5.35 measured what it describes:
+# 2m03s on a panel showing nothing, which P32-steam-never-installed.md records
+# as indistinguishable from a dead device. deck-form.sh's S5 says this too, but
+# minutes and a whole install earlier -- and the offline notice already proved
+# that a warning delivered early and not repeated goes unread (P34/L1).
+#
+# Asserted on SUBSTANCE, not on an exact sentence: a test that pins prose
+# verbatim is what kept a false DSP disclosure on the greeter for a month
+# (105523c). These check that the screen says the three things that matter.
+LC_ALL=C grep -qF "BLACK SCREEN" "$TTY_PATH" ||
+  fail "render_finish must warn that the first boot shows a black screen" "$(cat "$TTY_PATH")"
+LC_ALL=C grep -qiF "two minutes" "$TTY_PATH" ||
+  fail "render_finish must say roughly how long the black screen lasts -- 'wait' with no duration is not actionable" "$(cat "$TTY_PATH")"
+LC_ALL=C grep -qiF "turn me off" "$TTY_PATH" ||
+  fail "render_finish must tell the user not to power the Deck off during that wait" "$(cat "$TTY_PATH")"
+pass "S7 warns about the black first boot: what it looks like, how long, and not to power off"
+
+# The warning must come AFTER the summary, not replace it -- the bug this
+# caught on first write was a `>` where `>>` was meant, which erased the line
+# above. On a real tty both redirections behave identically, so only a suite
+# pointing TTY_PATH at a file can see it.
+finish_out="$(cat "$TTY_PATH")"
+[[ ${finish_out%%BLACK SCREEN*} == *"Installed Omarchy in 3m 14s"* ]] ||
+  fail "the reboot warning must FOLLOW the completion summary, not truncate it" "$finish_out"
+pass "the reboot warning is appended below the summary, not written over it"
 pass "render_finish keeps upstream's own duration line"
 
 # 🔴 THE ONE LINE THIS OVERRIDE EXISTS FOR (T4-screen-spec.md §4 S7).

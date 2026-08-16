@@ -188,6 +188,41 @@ render_finish() {
       >"$TTY_PATH" 2>/dev/null || true
     printf '%s%d;1H' "$CSI" "$((LOGO_HEIGHT + 8))" >"$TTY_PATH"
   fi
+
+  # 🔴 THE LAST THING ON SCREEN BEFORE THE REBOOT, and it is drawn AFTER the
+  # laser-etch block on purpose: `tte` anchors its canvas absolutely at
+  # LOGO_HEIGHT+2 and would paint straight over anything written above it.
+  # After the block the cursor is parked at LOGO_HEIGHT+8, so these lines land
+  # under the effect on the tte path and under the summary without it -- both
+  # well inside the measured 50-row console (docs/PROGRESS.md §7).
+  #
+  # WHY IT IS REPEATED HERE. deck-form.sh's S5 already says this before the
+  # install starts, but S5 is minutes and a full install earlier -- and S7 is
+  # the screen the operator is actually looking at when they press the button
+  # that reboots. docs/PROGRESS.md §5.35 measured the wait it describes: Steam
+  # unpacks itself for 2m03s on a panel that shows nothing at all, which
+  # `docs/findings/P32-steam-never-installed.md` records as being
+  # indistinguishable from a dead device. A warning that arrives before the
+  # thing it warns about, and is not repeated at the moment of the thing, is
+  # how the offline notice went unread (P34/L1).
+  #
+  # deck-form.sh is NOT sourced into this process (this file's own header), so
+  # the wording is duplicated rather than shared. If one changes, change both --
+  # test/unit/test-deck-dashboard.sh asserts the substance of it here.
+  {
+    blank_line
+    center "The Deck reboots on its own from here." "$CONTENT_WIDTH"
+    center "The first boot sits on a BLACK SCREEN for about two minutes" "$CONTENT_WIDTH"
+    center "while Steam unpacks itself. That is normal." "$CONTENT_WIDTH"
+    center "Don't turn me off -- just wait." "$CONTENT_WIDTH"
+    blank_line
+    # ⚠️ APPEND, not truncate. On a real tty `>` and `>>` are the same thing,
+    # which is why this is easy to get wrong and impossible to notice on
+    # hardware -- but test/unit/test-deck-dashboard.sh points TTY_PATH at a
+    # FILE, and `>` here silently erased the "Installed Omarchy in <duration>"
+    # line this block is supposed to follow. The suite caught it; the panel
+    # never would have.
+  } >>"$TTY_PATH"
 }
 
 # ===========================================================================
