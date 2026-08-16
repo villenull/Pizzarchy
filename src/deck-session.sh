@@ -247,8 +247,7 @@ readonly RETURN_DESCRIPTION="Switch back to the Steam Big Picture session"
 #                                 + "/.config/omarchy/extensions/omarchy-menu.jsonc"
 #
 # IDs are object keys and the parent is inferred from the dotted id, so
-# "gaming" is a ROOT row and "system.gaming" would sit under System. See
-# stage_menu_row for why this one is at the root.
+# "gaming" is a ROOT row and "system.gaming" sits under System.
 readonly MENU_EXT_REL=.config/omarchy/extensions/omarchy-menu.jsonc
 # /etc/skel as well as the invoking user's home, and that is not belt and
 # braces: docs/tasks/T5-fork-plan.md §3 trap (a) records that the ISO's
@@ -257,11 +256,27 @@ readonly MENU_EXT_REL=.config/omarchy/extensions/omarchy-menu.jsonc
 # row. The verification below reads the USER's copy for the same reason.
 readonly MENU_EXT_SKEL="/etc/skel/${MENU_EXT_REL}"
 
-# The row's id. A NEW id lands at the END of the root order
+# The row's id. A NEW id lands at the END of its parent's order
 # (MenuModel.js:mergeMenuSources appends); reusing an existing id would keep
 # that id's position and merge our fields on top of Omarchy's. Deliberately new
 # -- overriding one of Omarchy's own rows to make room would be a surprise.
-readonly MENU_ROW_ID=gaming
+#
+# 🔴 UNDER System, NOT AT THE ROOT, as of 2026-08-16. It was `gaming` -- a root
+# row -- and the operator saw the consequence on hardware: a root row appears in
+# BOTH menus, so "Gaming Mode" showed up in the apps menu (STEAM) *and* the
+# Omarchy menu (QAM). One way back to Gaming Mode should have one home.
+#
+# The cost, stated rather than discovered: this is now one press deeper. That
+# is the trade the operator chose, and it puts the row beside Omarchy's own
+# Lock / Suspend / Logout / Reboot / Shutdown -- which is where a
+# session-switching action belongs, and where someone looking for it will
+# think to look.
+#
+# The dotted parent must be one Omarchy actually defines: `system` is declared
+# at default/omarchy/omarchy-menu.jsonc:28, with system.screensaver / .lock /
+# .suspend / .hibernate / .logout / .reboot / .shutdown as its children. Read
+# off the pinned runtime, not assumed.
+readonly MENU_ROW_ID=system.gaming
 
 # 🔴 U+F0297, Nerd Font `md-gamepad_variant`. A GLYPH, not an icon file, which
 # sidesteps docs/findings/P16-redistribution-and-trademark.md entirely -- we
