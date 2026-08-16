@@ -54,8 +54,6 @@ image — see [Recovery](#recovery).
 
 5. **Wait.** Reboots when finished, and comes up in Gaming Mode.
 
-> Ventoy's own boot menu draws rotated 90° on the Deck's panel.
-
 ![The first screen: what this does, and what it erases](docs/images/install-01-greeter.png)
 
 > _**[ IMAGE — Wi-Fi network list ]**_ `docs/images/install-02-wifi.png`
