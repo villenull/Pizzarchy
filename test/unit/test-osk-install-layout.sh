@@ -103,9 +103,9 @@ import deck_osk_layout as osk, deck_osk_tty as tty
 rows = tty.render(osk.OnScreenKeyboard(), osk.Cursors())
 print(len(rows), tty.width(rows), osk.LETTERS.width * tty.KEY_CELL, tty.KEY_CELL)
 " 2>&1) || fail "the installed renderer imports and draws" "$rendered"
-[[ $rendered == "5 80 80 5" ]] ||
-  fail "the installed renderer draws 5 rows of exactly 80 columns at KEY_CELL=5" \
-       "expected '5 80 80 5' (rows, drawn width, 16 cells x KEY_CELL, KEY_CELL); got: $rendered"
+[[ $rendered == "10 80 80 5" ]] ||
+  fail "the installed renderer draws 10 rows of exactly 80 columns at KEY_CELL=5" \
+       "expected '10 80 80 5' (rows, drawn width, 16 cells x KEY_CELL, KEY_CELL); got: $rendered"
 pass "the installed renderer imports the core from the same directory and draws (5 rows, 80 cols)"
 
 # ⚠️ NOT A RESTATEMENT OF THE LINE ABOVE. That one pins the literal geometry;

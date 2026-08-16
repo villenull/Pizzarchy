@@ -74,7 +74,9 @@ WHO IT MAY SHARE A CONSOLE WITH -- A POLICY, AND IT IS MEASURED
 
     **A full-screen curses TUI is not shareable, and it does not fail the way
     it looks like it should.** Measured, R-52. The keyboard draws over such a
-    TUI perfectly well -- five rows of five. What breaks it is the TUI's next
+    TUI perfectly well -- five rows of five, as it was drawn then; since P33 J
+    a key row is `KEY_ROWS` console rows and the same measurement would read ten
+    (five labels, five bodies). What breaks it is the TUI's next
     repaint, and an ORDINARY curses repaint does not erase the keyboard at all:
     ncurses diffs against its own model of the physical screen, which has never
     heard of us, so it rewrites only the cells whose content changed and
@@ -82,7 +84,7 @@ WHO IT MAY SHARE A CONSOLE WITH -- A POLICY, AND IT IS MEASURED
     become zero while the screen still looks like a keyboard. Only a hard clear
     -- `clearok`, which is what upstream's own `clear_logo` does on every
     validation failure (T4 §2.5) -- actually removes it. Going the other way,
-    one pad sample repaints the keyboard and takes five rows off the TUI, which
+    one pad sample repaints the keyboard and takes those rows off the TUI, which
     has no idea it lost them. Neither side is wrong and neither yields.
 
     🔴 THAT LAST SENTENCE CHANGED IN P33 B2 AND THE CONCLUSION DID NOT. Since
@@ -164,6 +166,71 @@ KEY_CELL = 5
 # guard is what does the refusing -- see `cell_width_for`.
 MIN_KEY_CELL = 3
 
+# --- HOW TALL A KEY IS, AND THE ROW BUDGET THAT BOUNDS IT (P33 J) ------------
+#
+# 🔴 CONSOLE ROWS PER KEY ROW. The operator, looking at the panel 2026-08-16
+# with the adaptive grid already shipped: *"the keyboard is too short ... I
+# would make the keyboard twice as tall"*. The grid had just gone full-width
+# (160 columns at the default font) and was still FIVE text rows on a fifty-row
+# console -- 10% of the screen height, and squat.
+#
+# A console has ONE type size, so a key cannot be made taller by drawing its
+# label bigger; the only lever is how many text rows the key occupies. Each key
+# row is therefore drawn as a LABEL row plus `KEY_ROWS - 1` BODY rows, and the
+# highlight covers all of them -- which is most of the win, because the cursor
+# is what a user hunts for and it is now a two-row block instead of a strip.
+#
+# ⚠️ AND THE ROWS ARE COSTED, BECAUSE THE LAST CHANGE THAT SPENT ROWS SHIPPED
+# AND COST AN INSTALL (`docs/PROGRESS.md` §5.40). Pinning a 16x32 console font
+# halved the columns -- intended -- and halved the ROWS as well, which nobody
+# costed: 25 rows could not hold the logo, a prompt and the keyboard at once, so
+# the username and password prompts were pushed off the screen entirely. The
+# arithmetic for THIS change, measured rather than reasoned:
+#
+#   the live ISO's console                                50 rows (§7, measured)
+#   the account prompt  (MEASURED 2026-08-16, replayed into
+#   a 160x50 pty with the real logo.txt: `clear_logo` = 1 pad
+#   + 10 logo lines, blank, the step's text, blank, one
+#   `[deck-form] WARNING:`, `gum input`, blank, gum's help)  18 rows, 1..18
+#   the Wi-Fi passphrase prompt, same replay, with EVERY
+#   warning that screen can emit at once (the keymap one
+#   wraps 160 columns onto two lines)                       21 rows, 1..21
+#   the keyboard, bottom-anchored by the mapper
+#   (`top = console_rows - len(rows) + 1`)                  10 rows, 41..50
+#   ------------------------------------------------------------------------
+#   clear between the worst screen and the keyboard         19 rows
+#
+# So the ceiling is `(50 - 21) // 5 == 5` console rows per key row, and this
+# ships 2. `test-deck-osk-tty.py` asserts the whole sum -- header + keyboard
+# against 50 -- so raising this constant cannot silently repeat §5.40.
+#
+# ⚠️ THE 21 IS A MEASUREMENT AND MORE WARNINGS WOULD PUSH IT DOWN. Every extra
+# `deck_form_warn` line costs a row (two if it wraps 160 columns), and
+# `deck_form_account_notice` exists because they used to accumulate without
+# bound (T4 bug 2, measured at 16/22/28/34 rows). The 19 rows of slack absorb 19
+# more lines than the worst screen draws today.
+#
+# ⚠️ THE INSTALLED SYSTEM'S TTY IS 25x80 (§5.11), NOT 50x160, and 18 + 10 would
+# NOT fit there. It does not have to: `src/deck-session.sh` installs the mapper
+# with `--osk-backend=layer`, and this renderer is reached only by
+# `--osk-backend=tty`, which only `deck-form.sh` in the live ISO spawns. A 10-row
+# keyboard still DRAWS on a 25-row console (`write_at` accepts it at the bottom,
+# asserted in the suite) -- what would not fit is a logo-and-prompt screen ABOVE
+# it. Anything that puts this renderer on a 25-row console has to redo the sum.
+KEY_ROWS = 2
+
+# What a body row is made of. NOT a space, and that is the R-49/R-52 lesson
+# rather than a preference: `rows_on_screen` counts console lines that carry a
+# WHOLE rendered row, and an all-blank rendered row would match any blank console
+# line -- so a screen with the keyboard destroyed would still count ten rows of
+# keyboard. A rule of dashes is a signature; blankness is not.
+#
+# Drawn one column in from each edge (`fill * (width - 2)`, centred), so plain
+# keys are visibly separated instead of running into one continuous line, and a
+# highlighted body cell is `[-----]` -- the same width, under the same bracket
+# convention as the label above it.
+KEY_BODY_FILL = "-"
+
 
 def cell_width_for(console_cols: int, grid_cells: int) -> int:
     """The widest cell that fits `grid_cells` of them into `console_cols`.
@@ -207,6 +274,22 @@ def cell_text(label: str, width: int, highlighted: bool) -> str:
         inner = label.center(width - 2)[: width - 2]
         return f"[{inner}]"
     return label.center(width)[:width]
+
+
+def body_text(width: int, highlighted: bool) -> str:
+    """The non-label row(s) of one key, drawn to exactly `width` characters.
+
+    🔴 THE OTHER HALF OF A TALL KEY (P33 J). `KEY_ROWS` says how many console
+    rows a key row occupies; the first carries the label and every one after it
+    is this. Same width, same bracket convention, same highlight -- so a
+    highlighted key is a solid block `KEY_ROWS` rows tall and nothing shifts
+    sideways as a cursor moves.
+
+    It goes through `cell_text` rather than building the string here, so there
+    is exactly ONE piece of code deciding how a cell is padded and bracketed. A
+    second one would drift.
+    """
+    return cell_text(KEY_BODY_FILL * max(width - 2, 0), width, highlighted)
 
 
 # --- visual parity with SteamOS's keyboard (T8 §9g, degraded honestly) --------
@@ -383,6 +466,21 @@ def render(kb: osk.OnScreenKeyboard, cursors: osk.Cursors,
     what will not fit, and on a console too narrow even for `MIN_KEY_CELL` the
     second is what stops a keyboard being drawn off the edge.
 
+    🔴 ONE KEY ROW IS `KEY_ROWS` CONSOLE ROWS (P33 J), so this returns
+    `KEY_ROWS * len(layer.rows)` rows -- 10 for today's five-row letters layer.
+    The first of each group carries the labels and the rest are `body_text`.
+    The height is NOT a parameter and is NOT derived from the console: there is
+    no row count to derive it from (this function is pure, and the mapper passes
+    only the width), so it is a constant whose ROW BUDGET is worked out against
+    the measured 50-row console at `KEY_ROWS` and asserted in the suite.
+
+    ⚠️ CALLERS THAT COUNT ROWS SEE THE NEW NUMBER, AND THAT IS THE POINT.
+    `deck-input-mapper` anchors the keyboard at `console_rows - len(rows) + 1`,
+    so a taller render moves the top up on its own with no call-site change;
+    `clear_at` erases the same rows it drew for the same reason. Anything that
+    hardcodes five rows against this function is now wrong, loudly -- which is
+    where a stale copy of that number will show up.
+
     One continuous grid (T8 §9g): every row spans all `Layer.width` cells and
     each key's columns come from `Layer.cell_bounds`, so the drawn width cannot
     drift from the grid the hit test uses. `Layer.__post_init__` already refuses
@@ -404,15 +502,21 @@ def render(kb: osk.OnScreenKeyboard, cursors: osk.Cursors,
     out: list[list[Segment]] = []
     for row_index, row in enumerate(layer.rows):
         bounds = layer.cell_bounds(row_index)
-        segments: list[Segment] = []
+        labels: list[Segment] = []
+        body: list[Segment] = []
         for key_index, key in enumerate(row):
             start, end = bounds[key_index]
             hot = (row_index, key_index) in hot_cells
-            segments.append((
-                cell_text(display_label(kb, key, cell), (end - start) * cell, hot),
-                hot,
+            drawn = (end - start) * cell
+            labels.append((
+                cell_text(display_label(kb, key, cell), drawn, hot), hot,
             ))
-        out.append(segments)
+            body.append((body_text(drawn, hot), hot))
+        out.append(labels)
+        # A COPY PER ROW, not the same list repeated: `write_at` snapshots what
+        # it drew, and an aliased row would make two console rows one object in
+        # that snapshot. Cheap, and it removes a whole class of question.
+        out.extend(list(body) for _ in range(KEY_ROWS - 1))
     return out
 
 
@@ -484,6 +588,17 @@ def rows_on_screen(screen: str, rows: list[list[Segment]]) -> list[int]:
     re-deriving that width for exactly this reason: since P33 B1 the width
     depends on the console the keyboard was drawn on, so a checker that computed
     it from a constant would disagree with the screen on any console but one.
+
+    🔴 THE COUNT DOUBLED IN P33 J AND HALF OF IT IS NOW BODY ROWS. A whole
+    keyboard is `KEY_ROWS * len(layer.rows)` lines, so a check comparing this
+    against 5 is stale, not passing. And the two kinds of line are not equally
+    informative: a label row carries sixteen distinct faces, a body row carries
+    a rule, so a body row is easier for an unrelated screen to match by
+    accident and easier for damage to leave looking intact. It is still an
+    exact, column-for-column comparison -- one punched character still fails it,
+    which is R-52's case -- but a count of ten is not twice the evidence a count
+    of five was. `KEY_BODY_FILL` is deliberately not a space for this reason:
+    blank rows would have matched anything.
     """
     return [n for n, line in enumerate(screen.split("\n"), start=1)
             if any(_line_carries(line, row) for row in rows)]
@@ -542,6 +657,23 @@ def _line_carries(line: str, row: list[Segment]) -> bool:
 #      console (R-49: `stty cols` RESIZES a Linux VT) or a moved keyboard is a
 #      full repaint, not a diff against a screen that no longer exists.
 #
+# 🔴 RE-MEASURED AFTER P33 J DOUBLED THE HEIGHT, because a fix whose cost is a
+# row count has to be re-costed when the row count changes. One second of pad
+# motion on the live ISO's 50x160 console, bottom-anchored:
+#
+#                       write()   cursor moves   erase-to-EOL   bytes
+#   5 rows (P33 B2)  resting    5      25             25         4360
+#                    sweeping  13      41             25         4834
+#   10 rows (P33 J)  resting    5      50             50         8690
+#                    sweeping  13      82             50         9590
+#
+# The erase rate doubles -- a full repaint now clears ten rows -- and stays two
+# orders of magnitude below the 1250/s this fix was written against, because it
+# is bounded by `FULL_REPAINT_EVERY` and not by the draw rate. An unchanged
+# frame still writes nothing. A cursor move now paints 2 * KEY_ROWS cells rather
+# than 2, and erases none of them. `test-deck-osk-tty.py` runs that second and
+# asserts the numbers.
+#
 # 60 is a quarter-second of pad motion at 250 Hz. Low enough that damage is
 # transient at human timescales, high enough that the erase rate falls by more
 # than an order of magnitude. It is a count and not a clock deliberately: a
@@ -592,6 +724,14 @@ def write_at(stream, rows: list[list[Segment]], top_row: int, *,
 
     `console_rows` is the guard. Given it, a draw that would fall outside the
     console REFUSES and raises, rather than painting five rows onto one.
+
+    🔴 AND SINCE P33 J THERE ARE TWICE AS MANY ROWS TO PLACE (`KEY_ROWS`). This
+    guard is the one that catches a keyboard drawn off the BOTTOM; it cannot
+    catch a keyboard drawn over the logo and the prompt ABOVE it, because
+    nothing here knows they are there. That budget is arithmetic, it is done
+    against measured numbers at `KEY_ROWS`, and it is asserted in
+    `test-deck-osk-tty.py` -- `docs/PROGRESS.md` §5.40 is what an uncosted row
+    spend costs.
 
     🔴 `console_cols` IS THE SAME GUARD ON THE OTHER AXIS, and since §9g the
     keyboard needs every column the installed TTY has (see `KEY_CELL`). A row

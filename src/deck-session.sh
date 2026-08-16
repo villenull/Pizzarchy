@@ -3770,8 +3770,19 @@ import deck_osk_layout, deck_osk_tty, deck_osk_wayland
 print(len(deck_osk_tty.render(deck_osk_layout.OnScreenKeyboard(), deck_osk_layout.Cursors())))
 " 2>&1) ||
     fail "the OSK modules in ${OSK_LIB_DIR} do not import. The installer's keyboard would be missing. Output: ${osk_import}"
-  [[ $osk_import == 5 ]] ||
-    fail "the installed OSK renderer drew ${osk_import} rows for the letters layer, expected 5. Output: ${osk_import}"
+  # 🔴 DERIVED FROM THE MODULE, NOT RESTATED. This asserted a literal 5 until
+  # 2026-08-16, when KEY_ROWS made each key row two console rows and the count
+  # became 10 -- and because this is an INSTALL stage, a stale literal here does
+  # not warn, it fails the install. The renderer already knows its own height;
+  # ask it rather than keeping a second copy of the number in sync by hand.
+  osk_rows_expected=$(LC_ALL=C "$target_python" -c "
+import sys
+sys.path.insert(0, '${OSK_LIB_DIR}')
+import deck_osk_layout, deck_osk_tty
+print(len(deck_osk_layout.OnScreenKeyboard().layer().rows) * deck_osk_tty.KEY_ROWS)
+" 2>&1) || osk_rows_expected=
+  [[ -n $osk_rows_expected && $osk_import == "$osk_rows_expected" ]] ||
+    fail "the installed OSK renderer drew ${osk_import} rows for the letters layer, expected ${osk_rows_expected:-<could not derive>}. Output: ${osk_import}"
   log "verified: the installed OSK modules import and render"
 
   assert_ours_or_absent "$MAPPER_UNIT" "something else"

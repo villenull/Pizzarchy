@@ -88,7 +88,6 @@ def deck_steps() -> list[DeckStep]:
         deck_patches,
         deck_pkgs,
         deck_rotation,
-        deck_steam_prewarm,
         deck_steam_seed,
         deck_session_bake,
         deck_session_settings,
@@ -114,24 +113,6 @@ def deck_steps() -> list[DeckStep]:
         # section, the phase prints, and omarchy-deck-steam-first-boot.service
         # says so on the machine itself and stays in `systemctl --failed`.
         DeckStep("pkgs", deck_pkgs.fetch_packages_step, critical=False),
-        # 🔴 IMMEDIATELY AFTER `pkgs`, AND THE ORDER IS A DEPENDENCY, not a
-        # preference: this step looks for the Steam bootstrap tarball that
-        # `pkgs` installs, and reads `deck_wifi`'s recorded status to tell "no
-        # network" apart from "network, but the fetch failed".
-        #
-        # It pre-downloads Steam's own client update (~491 MiB) into the target
-        # user's home so first boot has nothing to fetch. docs/PROGRESS.md
-        # §5.35 measured that download at 95 s of a 2m03s black screen on real
-        # hardware -- with no way to say what was happening, on a machine that
-        # looks switched off. Moving it here puts the wait behind the
-        # installer's own progress bar.
-        #
-        # critical=False, and every failure mode is a named `skipped-*` status
-        # rather than a stop: no network, no space, no Steam, deferred
-        # provisioning. The floor is exactly today's behaviour -- first boot
-        # downloads it -- so this can only make the wait shorter, never break
-        # an install that would otherwise have worked.
-        DeckStep("steam_prewarm", deck_steam_prewarm.prewarm_steam_step, critical=False),
         # P34. Answers Steam's OOBE stage 1 from the keyboard layout the
         # installer already collected, so the user is not asked to choose a
         # region minutes after our own screen asked for a timezone.

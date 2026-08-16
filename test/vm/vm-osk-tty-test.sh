@@ -442,7 +442,16 @@ pad() { printf '%s\n' "$*" >/tmp/padfifo; sleep 0.12; }
 # again, so nothing here may hardcode a height.
 CONSOLE_ROWS=$(stty size </dev/tty2 2>/dev/null | cut -d' ' -f1)
 CONSOLE_ROWS=${CONSOLE_ROWS:-25}
-OSK_HEIGHT=5                       # the letters layer is five rows
+# 🔴 DERIVED, NOT RESTATED. This was a literal 5 until 2026-08-16, when KEY_ROWS
+# made each key row two console rows. A stale height here does not just fail a
+# check -- OSK_TOP/OSK_TOP3 feed the mapper, so it would draw off the bottom of
+# the guest console and every later assertion would blame the wrong thing. This
+# file's own header already forbids hardcoding a height.
+OSK_HEIGHT=$(python3 -c "
+import sys; sys.path.insert(0, '$REPO_ROOT/src')
+import deck_osk_layout as osk, deck_osk_tty as tty
+print(len(tty.render(osk.OnScreenKeyboard(), osk.Cursors())))
+" 2>/dev/null || echo 10)
 TUI_ROWS=$((CONSOLE_ROWS - OSK_HEIGHT))
 OSK_TOP=$((TUI_ROWS + 1))
 # ⚠️ R-49: the console is NOT shrunk any more. `stty rows N` on a Linux VT
@@ -853,10 +862,10 @@ check "VT3 is the active console"                  "$(field curses.vt_active)" 3
 check "and nothing counted as a keyboard before one was drawn" \
                                                    "$(field curses.osk_rows_alone)" 0
 check "the second mapper bound to the pad"         "$(field curses.mapper_bound)" 1
-check "the keyboard draws over a full-screen TUI fine -- all five rows" \
-                                                   "$(field curses.osk_rows_drawn)" 5
-check "...costing the TUI exactly those five"      "$(field curses.tui_rows_with_osk)" \
-                                                   "$(( curses_rows - 5 ))"
+check "the keyboard draws over a full-screen TUI fine -- all $OSK_HEIGHT rows" \
+                                                   "$(field curses.osk_rows_drawn)" "$OSK_HEIGHT"
+check "...costing the TUI exactly those $OSK_HEIGHT" "$(field curses.tui_rows_with_osk)" \
+                                                   "$(( curses_rows - OSK_HEIGHT ))"
 check "the TUI received all three characters the trackpads typed" \
                                                    "$(field curses.received)" "hhh"
 check "and repainted once per character"           "$(field curses.paints_hard)" 3
@@ -878,10 +887,10 @@ check "only a HARD repaint (clearok, i.e. clear_logo) erases the keyboard" \
 check "...and only then does the word go too"      "$(field curses.grep_shift_after_hard)" 0
 check "...leaving the TUI holding the whole console again" \
                                                    "$(field curses.tui_rows_after_hard)" "$curses_rows"
-check "one pad sample repaints the keyboard"       "$(field curses.osk_rows_after_nudge)" 5
-check "...taking five rows back off the TUI -- neither side yields" \
+check "one pad sample repaints the keyboard"       "$(field curses.osk_rows_after_nudge)" "$OSK_HEIGHT"
+check "...taking $OSK_HEIGHT rows back off the TUI -- neither side yields" \
                                                    "$(field curses.tui_rows_after_nudge)" \
-                                                   "$(( curses_rows - 5 ))"
+                                                   "$(( curses_rows - OSK_HEIGHT ))"
 check "the mapper survived the collision"          "$(field curses.mapper_alive)" 1
 check "with no traceback"                          "$(field curses.mapper_errors)" 0
 check "done (the probe ran to its last line)"      "$(field probe.done)" 1

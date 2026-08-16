@@ -1322,9 +1322,14 @@ check("a zero on one axis holds only that axis, and the other keeps moving",
 # --- ranges: the device's own absinfo wins, and the edges are safe ------------
 
 cur = osk.Cursors(ranges={e.ABS_HAT0X: (0, 1000)})
-cur.update(e.ABS_HAT0X, 250)
+cur.update(e.ABS_HAT0X, 1000)
+# The advertised maximum is the cursor's maximum. Under the DEFAULT range the
+# same value is a hair past centre, so this fails loudly if the range is ignored.
 check("a device-supplied range is used instead of the default",
-      cur.position("left")[0], 0.25)
+      cur.position("left")[0], 1.0)
+cur.update(e.ABS_HAT0X, 500)
+check("...and its own midpoint is still the middle of the half",
+      cur.position("left")[0], 0.5)
 cur.update(e.ABS_HAT0X, 5000)
 check("a value beyond the advertised range clamps rather than escaping the half",
       cur.position("left")[0], 1.0)
@@ -1335,6 +1340,196 @@ cur = osk.Cursors(ranges={e.ABS_HAT1X: (7, 7)})
 check("a degenerate range reports nothing rather than dividing by zero",
       cur.update(e.ABS_HAT1X, 7), None)
 check("and leaves the cursor alone", cur.position("right"), (0.5, 0.5))
+
+
+# --- 🔴 THE PAD INSET: the rim is not needed to reach the outer keys ----------
+#
+# Operator, on the installed Deck, 2026-08-16:
+#
+#     "the trackpad mapping [is] too insensitive... to type the t for example I
+#      have to move my left thumb all the way to the edge of the trackpad to
+#      highlight. And then at that edge it's kind of hard to press the thumb."
+#
+# The pad's full travel used to map onto the full keyboard, so the outermost
+# column demanded the outermost rim -- least reach, least leverage, and the
+# hardest place to squeeze L2/R2 to commit. An INSET region of the pad now
+# covers the whole keyboard instead.
+#
+# ⚠️ FEEL CANNOT BE TESTED HERE. Whether 0.12 is the right amount is a question
+# only a thumb on hardware answers. What IS testable, and is what these assert,
+# is that the transform cannot be wrong in the ways that would matter: the
+# extremes stay reachable, it is monotonic, it stays clamped to 0..1, and the
+# centre is still the centre.
+#
+# ⚠️ The margin is written out LONGHAND below rather than imported, like every
+# other expectation in this file. Retuning is therefore a deliberate two-file
+# edit: change `PAD_EDGE_MARGIN` in the module and `MARGIN` here, together.
+
+MARGIN = 0.12          # must equal osk.PAD_EDGE_MARGIN -- asserted immediately
+
+
+def inset(f: float) -> float:
+    """The rule, written out from the module's prose rather than imported."""
+    return min(1.0, max(0.0, (f - MARGIN) / (1.0 - 2.0 * MARGIN)))
+
+
+def at(fraction: float) -> int:
+    """The raw axis value `fraction` of the way along the DEFAULT pad range."""
+    value = round(MIN + (MAX - MIN) * fraction)
+    # ⚠️ Dead centre of this range rounds to exactly 0, which the module treats
+    # as a LIFT rather than a reading. One count off is the closest a test can
+    # legally sample, and it is 0.0015% of the axis.
+    return value if value else -1
+
+
+check("the shipped inset is the one this file was written against -- change "
+      "BOTH when retuning", osk.PAD_EDGE_MARGIN, MARGIN)
+check("the margin leaves a usable pad: strictly inside [0, 0.5)",
+      0.0 <= osk.PAD_EDGE_MARGIN < 0.5, True)
+check("the active span is derived, so the two cannot drift",
+      round(osk.PAD_ACTIVE_SPAN, 12),
+      round(1.0 - 2.0 * osk.PAD_EDGE_MARGIN, 12))
+check("...and it is a real span, not a collapsed point",
+      osk.PAD_ACTIVE_SPAN > 0.0, True)
+
+# 🔴 INVARIANT 1: THE EXTREMES ARE STILL REACHABLE. A fix that put the last
+# column out of reach would be worse than the complaint it answers. All four
+# axes, both ends, exactly 0.0 and 1.0 -- no "close enough".
+cur = osk.Cursors()
+extremes = {}
+for code, (half, which) in sorted(osk.PAD_AXES.items()):
+    cur.update(code, MIN)
+    lo = cur.position(half)[0 if which == "x" else 1]
+    cur.update(code, MAX)
+    hi = cur.position(half)[0 if which == "x" else 1]
+    extremes[(half, which)] = (lo, hi)
+check("every axis still reaches BOTH extremes exactly (y inverted)",
+      extremes,
+      {("left", "x"): (0.0, 1.0), ("left", "y"): (1.0, 0.0),
+       ("right", "x"): (0.0, 1.0), ("right", "y"): (1.0, 0.0)})
+
+# ...and the extremes still land on the outermost KEYS, which is what a thumb
+# actually cares about. Corners of both halves, in the metric each renderer uses.
+kb_edge = osk.OnScreenKeyboard()
+cur = osk.Cursors()
+cur.update(e.ABS_HAT0X, MIN)
+cur.update(e.ABS_HAT0Y, MAX)
+check("the left pad's top-left corner still reaches the backtick key",
+      kb_edge.key_at("left", *cur.position("left")).label, "`")
+cur.update(e.ABS_HAT1X, MAX)
+cur.update(e.ABS_HAT1Y, MIN)
+check("the right pad's bottom-right corner still reaches Move",
+      kb_edge.key_at("right", *cur.position("right")).label, "Move")
+check("...in the units metric too, which the Wayland renderer draws from",
+      kb_edge.key_at("right", *cur.position("right"), osk.UNITS).label, "Move")
+
+# 🔴 INVARIANT 2: THE COMPLAINT ITSELF. `t` is the LAST cell of the left half on
+# row 1, so it used to need 87.5% of the pad's travel. It must now arrive well
+# before the rim -- and the old linear mapping must NOT have got there, or this
+# asserts nothing.
+Y_ROW1 = at(1.0 - (2 * 1 + 1) / 10)      # row 1's centre, in raw pad counts
+cur = osk.Cursors()
+cur.update(e.ABS_HAT0Y, Y_ROW1)
+cur.update(e.ABS_HAT0X, at(0.80))
+check("🔴 't' is reachable at 80% of the left pad's travel, not at the rim",
+      kb_edge.key_at("left", *cur.position("left")).label, "t")
+check("...and the old full-range mapping would still have been on 'r' there",
+      osk.key_at(LETTERS, "left", 0.80, 0.30).label, "r")
+cur.update(e.ABS_HAT0X, at(1.0 - MARGIN))
+check("the last column is fully selected a whole margin short of the edge",
+      (round(cur.position("left")[0], 6),
+       kb_edge.key_at("left", *cur.position("left")).label), (1.0, "t"))
+
+# Both axes, not just x: the top row must arrive early too.
+cur = osk.Cursors()
+cur.update(e.ABS_HAT0X, at(0.5))
+cur.update(e.ABS_HAT0Y, at(0.75))
+check("the top row is reachable at 75% of the pad's upward travel",
+      kb_edge.locate("left", *cur.position("left"))[0], 0)
+check("...where the old full-range mapping was still on row 1",
+      osk.locate(LETTERS, "left", 0.5, 0.25)[0], 1)
+cur.update(e.ABS_HAT0Y, at(0.25))
+check("and the bottom row likewise, at 25% of it",
+      kb_edge.locate("left", *cur.position("left"))[0], 4)
+
+# 🔴 INVARIANT 3: MONOTONIC, AND CLAMPED TO 0..1 THROUGHOUT. A gain applied
+# wrongly is most likely to show up as a fold-back or an escape past 1.0, and
+# either would put the cursor somewhere the thumb is not.
+cur = osk.Cursors()
+xs, ys = [], []
+for step in range(0, 201):
+    raw = at(step / 200)
+    cur.update(e.ABS_HAT1X, raw)
+    cur.update(e.ABS_HAT1Y, raw)
+    px, py = cur.position("right")
+    xs.append(px)
+    ys.append(py)
+check("x never goes backwards across the whole sweep", xs == sorted(xs), True)
+check("y never goes forwards -- it is inverted, and stays inverted",
+      ys == sorted(ys, reverse=True), True)
+check("nothing in the sweep escapes 0..1",
+      [v for v in xs + ys if not 0.0 <= v <= 1.0], [])
+check("the sweep really does reach both ends, so the above is not vacuous",
+      (min(xs), max(xs)), (0.0, 1.0))
+check("and it is not a constant -- the middle still moves",
+      len({round(v, 4) for v in xs}) > 100, True)
+
+# 🔴 INVARIANT 4: THE CENTRE IS STILL THE CENTRE. The inset is symmetric about
+# the middle of the pad, so a thumb resting where it always rested finds the
+# cursor where it always was. Checked on a range whose midpoint is NOT zero,
+# because zero is the lift value and never reaches the transform.
+cur = osk.Cursors(ranges={e.ABS_HAT0X: (0, 1000), e.ABS_HAT0Y: (0, 1000)})
+cur.update(e.ABS_HAT0X, 500)
+cur.update(e.ABS_HAT0Y, 500)
+check("the middle of the pad is still the middle of the half, on both axes",
+      cur.position("left"), (0.5, 0.5))
+cur = osk.Cursors()
+cur.update(e.ABS_HAT1X, -1)   # one count off dead centre, the closest legal read
+cur.update(e.ABS_HAT1Y, -1)
+check("a hair off dead centre is still within half a key of the middle",
+      [round(v, 3) for v in cur.position("right")
+       if abs(v - 0.5) > 0.5 / LETTERS.width], [])
+
+# The inset is applied in NORMALISED space, after each axis's own absinfo, so
+# two pads advertising DIFFERENT ranges each give up the same PROPORTION of
+# their own travel. ⚠️ The two pads' ranges are unverified on this hardware --
+# the mapper re-reads absinfo per axis, so this must not assume they agree.
+# ⚠️ The second range deliberately avoids putting its quarter point on 0, which
+# would be read as a LIFT and silently leave that cursor centred -- this test
+# caught itself doing exactly that with (-500, 1500).
+cur = osk.Cursors(ranges={e.ABS_HAT0X: (0, 1000), e.ABS_HAT1X: (-600, 1400)})
+cur.update(e.ABS_HAT0X, 250)                    # a quarter along a 1000 range
+cur.update(e.ABS_HAT1X, -100)                   # a quarter along a 2000 range
+check("two pads with DIFFERENT advertised ranges land on the same fraction",
+      (round(cur.position("left")[0], 9), round(cur.position("right")[0], 9)),
+      (round(inset(0.25), 9), round(inset(0.25), 9)))
+check("...and that fraction is the inset one, not the raw quarter",
+      round(cur.position("left")[0], 9) != 0.25, True)
+cur.update(e.ABS_HAT1X, 1400)   # its OWN advertised maximum, not beyond it
+check("the second pad still reaches its own extreme",
+      cur.position("right")[0], 1.0)
+
+# Everything inside the outer margin collapses onto the extreme -- deliberately.
+# That is the clamp doing its job, and it is the only reason the overshoot the
+# inset creates by construction is safe.
+cur = osk.Cursors()
+folded = []
+for f in (1.0 - MARGIN, 1.0 - MARGIN / 2, 1.0):
+    cur.update(e.ABS_HAT0X, at(f))
+    folded.append(round(cur.position("left")[0], 6))
+check("the outer margin is all 'the last column', not an overflow", folded,
+      [1.0, 1.0, 1.0])
+
+# The wire protocol carries DISPLAY fractions, already inset. apply_state must
+# not put them through the transform a second time -- that would compound on
+# every hop between the mapper and the overlay.
+kb_wire = osk.OnScreenKeyboard()
+cur_wire = osk.Cursors()
+osk.apply_state(kb_wire, cur_wire,
+                osk.parse_state_line("state letters off 0.25 0.25 0.75 0.75 off"))
+check("apply_state does NOT re-apply the inset to an already-inset position",
+      (cur_wire.position("left"), cur_wire.position("right")),
+      ((0.25, 0.25), (0.75, 0.75)))
 
 # --- triggers commit their own side --------------------------------------------
 

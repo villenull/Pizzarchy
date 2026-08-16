@@ -960,6 +960,9 @@ class OnScreenKeyboard:
 #
 # Both pads report ABSOLUTE position over the full range (measured 2026-08-10,
 # R-29..R-31), so a cursor is a direct mapping and not an accumulated delta.
+# ⚠️ Direct, but no longer one-to-one: an INSET of that range covers the whole
+# keyboard, so the rim is not needed to reach the outer keys. See
+# PAD_EDGE_MARGIN below -- it is the one number here a human is meant to retune.
 # That is why the OSK can have two of them while a Wayland seat has one pointer:
 # nothing outside this process needs to know either exists.
 #
@@ -970,6 +973,61 @@ class OnScreenKeyboard:
 # nothing to do with these. Read DEVICE_AXES in the mapper before touching this.
 
 PAD_RANGE = (-32768, 32767)
+
+# --- how much of the pad's travel the keyboard uses (operator, 2026-08-16) ---
+#
+# 🔴 THIS IS A FEEL CONSTANT AND IT CANNOT BE JUDGED WITHOUT THE HARDWARE IN
+# YOUR HANDS. Every other number in this module is a measurement; this one is a
+# choice, and it is here to be nudged. The operator's report, typing on the
+# installed Deck:
+#
+#     "the trackpad mapping [is] too insensitive... to type the t for example I
+#      have to move my left thumb all the way to the edge of the trackpad to
+#      highlight. And then at that edge it's kind of hard to press the thumb."
+#
+# The cause was that the pad's FULL physical range mapped linearly onto the FULL
+# keyboard, so the outermost column demanded the outermost rim of the pad --
+# exactly where a thumb has least reach and least leverage, and where pressing
+# L2/R2 to commit is hardest. `t` is the last cell of the left half on row 1, so
+# it needed 87.5% of the pad's travel before this existed.
+#
+# So an INSET region of the pad is mapped onto the whole keyboard instead: the
+# outer PAD_EDGE_MARGIN of travel on each side, on each axis, is already the
+# extreme. At 0.12 the last column starts at 78.5% of travel instead of 87.5%
+# and its far edge is reached at 88% instead of 100%.
+#
+# ⚠️ THE TRADE, both directions, because there is no free setting:
+#   larger   the extremes get easier, and the CENTRE gets twitchier -- every
+#            count of pad travel covers 1/(1-2m) more keyboard, so a resting
+#            thumb wanders further and the middle columns get harder to hold.
+#            Past 0.5 the pad would collapse to a point (refused below).
+#   smaller  the centre stays calm and the operator's complaint comes back.
+#
+# ⚠️ THE EXTREMES MUST STAY REACHABLE, and it is the CLAMP below that guarantees
+# it, not this number: the inset deliberately overshoots 0..1 and the clamp
+# folds the overshoot back onto the outermost cell. Never remove that clamp to
+# "fix" the overshoot.
+#
+# Applies to cursor POSITION, which is the only coordinate there is: the commit
+# path hit-tests at `cursors.position(half)` (`deck-input-mapper.py` :1428) and
+# both renderers DRAW the dot from the same call, so the drawn dot, the
+# highlighted key and the committed key move together. Insetting the commit
+# separately would recreate the exact defect session 21 measured, where the key
+# drawn white and the key typed disagreed on 287 of 1010 positions.
+PAD_EDGE_MARGIN = 0.12
+
+# Derived, so the two never drift: the share of travel that still maps to
+# 0..1 after the margins are taken off both ends.
+PAD_ACTIVE_SPAN = 1.0 - 2.0 * PAD_EDGE_MARGIN
+if not 0.0 <= PAD_EDGE_MARGIN < 0.5:
+    # Loud at import rather than silently inverting or dividing by zero: at
+    # exactly 0.5 the whole pad is one point, and beyond it every axis runs
+    # backwards. CLAUDE.md's "never silently swallow a failure", applied to the
+    # one constant in this file a human is expected to edit.
+    raise ValueError(
+        f"PAD_EDGE_MARGIN must be in [0.0, 0.5), got {PAD_EDGE_MARGIN!r}; "
+        "0.0 disables the inset, 0.5 would collapse the pad to a point"
+    )
 
 PAD_AXES: dict[int, tuple[str, str]] = {
     e.ABS_HAT0X: ("left", "x"),
@@ -1041,7 +1099,20 @@ class Cursors:
             return None  # a degenerate range would divide by zero; report nothing
 
         fraction = (value - low) / span
-        fraction = min(1.0, max(0.0, fraction))  # the device may exceed absinfo
+        # An INSET region of the pad covers the WHOLE keyboard -- see
+        # PAD_EDGE_MARGIN. Done here, in normalised space AFTER each axis's own
+        # absinfo, so the four axes may advertise four different ranges (the
+        # mapper re-reads absinfo per axis on every re-enumeration, and this
+        # module has never been able to assume the two pads agree) and each one
+        # still gives up the same PROPORTION of its own travel.
+        fraction = (fraction - PAD_EDGE_MARGIN) / PAD_ACTIVE_SPAN
+        # ⚠️ LOAD-BEARING TWICE OVER. The device may exceed absinfo -- and the
+        # inset above overshoots 0..1 BY CONSTRUCTION, for every reading in the
+        # outer margin. Folding that overshoot back onto the ends is what keeps
+        # the outermost column and row selectable at all; without it the fix
+        # would make the last column UNREACHABLE, which is worse than the
+        # complaint it answers.
+        fraction = min(1.0, max(0.0, fraction))
         if which == "y":
             # The pad's Y grows UPWARD and every screen coordinate grows
             # downward. The relative pointer in deck-input-mapper.py negates the

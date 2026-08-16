@@ -39,6 +39,17 @@ from evdev import UInput, ecodes as e
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAPPER = os.path.join(REPO_ROOT, "src", "deck-input-mapper.py")
 
+# 🔴 ASKED OF THE RENDERER, NOT RESTATED. These were literal 5s until
+# 2026-08-16, when KEY_ROWS made each key row two console rows. A height
+# hardcoded in a test is a second copy of a number that lives in the renderer,
+# and it goes stale silently -- the same defect shape that left a `== 5` in
+# deck-session.sh's install stage, where it would have failed every install.
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+import deck_osk_layout as _osk  # noqa: E402
+import deck_osk_tty as _tty  # noqa: E402
+
+EXPECTED_ROWS = len(_tty.render(_osk.OnScreenKeyboard(), _osk.Cursors()))
+
 FAILURES = 0
 
 
@@ -155,7 +166,7 @@ try:
     chord()
     shown = screen(drain())
     check("the chord draws the keyboard", "shift" in shown and "space" in shown, True)
-    check("it draws five rows", len(shown.split("\n")), 5)
+    check("it draws every row the renderer emits", len(shown.split("\n")), EXPECTED_ROWS)
     check("both cursors start centred, one highlight per half",
           shown.count("[") == 2 and "[  d  ]" in shown and "[  k  ]" in shown, True)
 
@@ -217,7 +228,7 @@ try:
     # The tail also holds one legitimate redraw: BTN_MODE arrives as its own
     # report while the keyboard is still up. The erase is the LAST write.
     last = tail.rsplit("\x1b[s", 1)[-1]
-    check("hiding erases every row it drew", last.count("\x1b[K"), 5)
+    check("hiding erases every row it drew", last.count("\x1b[K"), EXPECTED_ROWS)
     check("and writes no key text doing it",
           ANSI.sub("", last).strip(), "")
     check("and restores the cursor it borrowed", last.endswith("\x1b[u"), True)

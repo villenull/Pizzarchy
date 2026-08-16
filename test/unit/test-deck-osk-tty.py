@@ -16,6 +16,14 @@ actually runs on: **the installed TTY is 25x80**. 16 cells at KEY_CELL=5 is 80
 columns EXACTLY, with nothing spare. That fit is asserted here at the real
 measured geometry -- not at a convenient one -- because a keyboard one column
 too wide does not get clipped, it WRAPS, and R-49 is what that costs.
+
+⛔ AND SINCE P33 J THE OTHER AXIS IS COSTED TOO. A key row is `KEY_ROWS` console
+rows, so the keyboard is ten rows and not five, and "🔴 P33 J" below asserts the
+whole sum -- the measured prompt screen plus the measured keyboard against the
+measured 50-row console -- because `docs/PROGRESS.md` §5.40 is a change that
+spent rows without adding them up, shipped, and pushed the username and password
+prompts off the screen. Row arithmetic in this file is measured or it is a
+defect waiting for hardware.
 """
 
 from __future__ import annotations
@@ -190,21 +198,28 @@ check("there is no GUTTER left in the module at all", hasattr(tty, "GUTTER"), Fa
 # ⚠️ And the keys really are laid out from the grid: each key starts where
 # `Layer.cell_bounds` says it does, with nothing between them. This is what
 # "no gap" means structurally, rather than as an arithmetic coincidence of 80.
+#
+# 🔴 AND EVERY CONSOLE ROW OF THE KEY, not only its label row (P33 J). A key is
+# `KEY_ROWS` console rows tall; a body row drawn at different columns from the
+# label above it would be a keyboard whose keys are visibly out of register, and
+# it would put `write_at`'s incremental path -- which walks columns by summing
+# cell widths -- at the wrong column on half the rows.
 misplaced = []
 for layer in osk.LAYERS.values():
     kb_l = osk.OnScreenKeyboard(layer.name)
     rendered = tty.render(kb_l, osk.Cursors())
     for row_index, row in enumerate(layer.rows):
-        column = 0
-        for key_index, (start, end) in enumerate(layer.cell_bounds(row_index)):
-            text = rendered[row_index][key_index][0]
-            if (column != start * tty.KEY_CELL
-                    or len(text) != (end - start) * tty.KEY_CELL):
-                misplaced.append((layer.name, row_index, key_index, column,
-                                  start * tty.KEY_CELL, len(text)))
-            column += len(text)
-check("every key is drawn at the column Layer.cell_bounds puts it, contiguously",
-      misplaced, [])
+        for sub in range(tty.KEY_ROWS):
+            column = 0
+            for key_index, (start, end) in enumerate(layer.cell_bounds(row_index)):
+                text = rendered[row_index * tty.KEY_ROWS + sub][key_index][0]
+                if (column != start * tty.KEY_CELL
+                        or len(text) != (end - start) * tty.KEY_CELL):
+                    misplaced.append((layer.name, row_index, sub, key_index,
+                                      column, start * tty.KEY_CELL, len(text)))
+                column += len(text)
+check("every key is drawn at the column Layer.cell_bounds puts it, contiguously, "
+      "on every console row of the key", misplaced, [])
 
 # ⚠️ `width()` MUST BE AN UPPER BOUND, not "whatever the first row was". Every
 # row is the same width by construction today, which makes max() and min()
@@ -614,12 +629,196 @@ tight = osk.Key(code=e.KEY_1, label="1", shift_label="!!!!!", span=1)
 check("a legend that does not fit falls back to the bare face",
       tty.display_label(probe(), tight), "1")
 
+# =============================================================================
+# 🔴 P33 J: THE KEYBOARD IS TWICE AS TALL, AND THE ROWS ARE COSTED
+# =============================================================================
+#
+# Operator, looking at the panel 2026-08-16 with the adaptive grid already
+# shipped: *"the keyboard is too short ... I would make the keyboard twice as
+# tall"*. Full-width and five text rows on a fifty-row console is 10% of the
+# screen height.
+#
+# ⛔ AND THE LAST CHANGE THAT SPENT ROWS SHIPPED TO HARDWARE AND COST AN INSTALL
+# (`docs/PROGRESS.md` §5.40). A 16x32 console font was pinned for legibility; it
+# halved the columns, which was intended, and halved the ROWS, which nobody
+# costed -- 25 rows could not hold the logo, a prompt and the keyboard together,
+# so the username and password prompts went off the screen entirely. Every
+# number below is measured, and the sum is asserted, so raising KEY_ROWS cannot
+# repeat it silently.
+
+# The live ISO's console, MEASURED with `stty size` on tty2 (§7). Not derived
+# from the framebuffer -- that arithmetic has been wrong twice (§5.39, §5.40).
+LIVE_ISO_ROWS_MEASURED = 50
+
+# The tallest screen the keyboard shares, MEASURED 2026-08-16 by replaying the
+# real prompt screens into a 160x50 pty (the real logo.txt, upstream's
+# `clear_logo` and `step`, real `[deck-form] WARNING:` text, and `gum input`).
+#
+# The account prompt is 18 rows:
+#
+#     1      blank (clear_logo's top padding)
+#     2-11   the Omarchy logo, 10 lines, 81 columns
+#     12     blank
+#     13     the step's prompt text
+#     14     blank
+#     15     [deck-form] WARNING: ...
+#     16     Username>
+#     17     blank
+#     18     gum's "enter submit" help line
+#
+# The Wi-Fi passphrase prompt with EVERY warning it can emit at once -- the
+# keymap-pin warning wraps 160 columns onto two lines -- is 21, and that is the
+# number budgeted against. `deck_form_account_notice` is what stops warnings
+# accumulating past it (T4 bug 2, measured at 16/22/28/34 rows before it
+# existed).
+PROMPT_SCREEN_ROWS = 21
+
+OSK_ROWS = tty.KEY_ROWS * len(osk.LETTERS.rows)
+OSK_TOP_ROW = LIVE_ISO_ROWS_MEASURED - OSK_ROWS + 1   # the mapper's anchoring
+
+check("a key row is drawn as KEY_ROWS console rows, and KEY_ROWS is 2 -- "
+      "'twice as tall', which is what was asked for", tty.KEY_ROWS, 2)
+check("...so the keyboard is ten console rows, not five",
+      len(tty.render(*fresh(), LIVE_ISO_COLS)), OSK_ROWS)
+check("...and it is exactly twice what it was before P33 J",
+      OSK_ROWS, 2 * len(osk.LETTERS.rows))
+check("⛔ THE ROW BUDGET: the tallest prompt screen plus the keyboard fits the "
+      "console the installer measures, with room left over",
+      PROMPT_SCREEN_ROWS + OSK_ROWS <= LIVE_ISO_ROWS_MEASURED, True)
+check("...with this many rows clear between the worst prompt screen and the "
+      "keyboard", OSK_TOP_ROW - PROMPT_SCREEN_ROWS - 1, 19)
+check("...so the mapper's bottom-anchored top row starts below everything the "
+      "prompt screen draws", OSK_TOP_ROW > PROMPT_SCREEN_ROWS, True)
+check("the ceiling on KEY_ROWS at this console and this prompt is 5, so 2 is "
+      "not near it -- and a future increase is checked HERE, not on hardware",
+      (LIVE_ISO_ROWS_MEASURED - PROMPT_SCREEN_ROWS) // len(osk.LETTERS.rows), 5)
+
+# ⚠️ NOT VACUOUS: the same sum on §5.40's 25-row console FAILS. That is the
+# arithmetic nobody did before pinning the font, expressed as a check, so the
+# next person to change either number sees which side of the line they are on.
+check("⛔ ...and the same budget on the 16x32 font's 25 rows does NOT fit -- "
+      "which is exactly what §5.40 shipped and had to revert",
+      PROMPT_SCREEN_ROWS + OSK_ROWS <= 25, False)
+
+# The guards themselves, at both measured geometries. The keyboard has to DRAW
+# on the installed TTY's 25 rows even though nothing puts a prompt screen above
+# it there (deck-session.sh installs the mapper with --osk-backend=layer).
+tall = tty.render(*fresh(), LIVE_ISO_COLS)
+check("write_at accepts the keyboard bottom-anchored on the live ISO's 50x160",
+      (tty.write_at(io.StringIO(), tall, OSK_TOP_ROW,
+                    console_rows=LIVE_ISO_ROWS_MEASURED,
+                    console_cols=LIVE_ISO_COLS), True)[1], True)
+narrow_tall = tty.render(*fresh(), INSTALLED_TTY_COLS)
+check("...and bottom-anchored on the installed TTY's 25x80, which still holds "
+      "ten rows even though it could not hold a prompt above them",
+      (tty.write_at(io.StringIO(), narrow_tall,
+                    INSTALLED_TTY_ROWS - len(narrow_tall) + 1,
+                    console_rows=INSTALLED_TTY_ROWS,
+                    console_cols=INSTALLED_TTY_COLS), True)[1], True)
+check("...and one row further up than fits is REFUSED, not clamped",
+      raises(lambda: tty.write_at(io.StringIO(), narrow_tall,
+                                  INSTALLED_TTY_ROWS - len(narrow_tall) + 2,
+                                  console_rows=INSTALLED_TTY_ROWS), ValueError),
+      True)
+
+# --- what a body row is, and what it must never be ---------------------------
+#
+# ⚠️ NOT BLANK. `rows_on_screen` counts console lines carrying a WHOLE rendered
+# row; an all-blank rendered row would match any blank console line, so a screen
+# with the keyboard wiped off it would still count half a keyboard. That is
+# R-49's defect (a count that says "keyboard" when there is none) reintroduced
+# by a padding character. A rule is a signature.
+check("the body fill is not a space -- a blank row would match a blank console",
+      tty.KEY_BODY_FILL.strip() != "", True)
+check("...and it is one ASCII character, like everything else this module draws",
+      (len(tty.KEY_BODY_FILL), ord(tty.KEY_BODY_FILL) < 128), (1, True))
+check("a plain body cell is exactly its cell's width",
+      len(tty.body_text(10, False)), 10)
+check("a highlighted one is the SAME width, or keys shift as the cursor moves",
+      len(tty.body_text(10, True)), 10)
+check("a body cell is drawn one column in from each edge, so keys are separated",
+      tty.body_text(10, False), " -------- ")
+check("...and a highlighted one keeps the bracket convention of the label above",
+      tty.body_text(10, True), "[--------]")
+check("at the narrowest cell there is still a rule to see",
+      (tty.body_text(3, False), tty.body_text(3, True)), (" - ", "[-]"))
+
+# ⚠️ EVERY console row of a key is the same width as every other, at every cell
+# width, in every state and wherever the cursors are. A body row one column off
+# would put `write_at`'s incremental path -- which finds a cell's column by
+# summing the widths to its left -- at the wrong column on half the console.
+ragged = []
+for cell_width in range(tty.MIN_KEY_CELL, 11):
+    cols_here = cell_width * GRID_CELLS
+    for shift, caps in STATES:
+        for lx in (0.0, 0.5, 1.0):
+            cur_t = osk.Cursors()
+            cur_t.pos["left"], cur_t.pos["right"] = [lx, 0.5], [1.0 - lx, 0.2]
+            drawn_t = tty.render(probe(shift, caps), cur_t, cols_here)
+            if len(drawn_t) != OSK_ROWS:
+                ragged.append((cell_width, "row count", len(drawn_t)))
+            for label_row, body_row in zip(drawn_t[::tty.KEY_ROWS],
+                                           drawn_t[1::tty.KEY_ROWS]):
+                if ([len(t) for t, _ in label_row]
+                        != [len(t) for t, _ in body_row]):
+                    ragged.append((cell_width, shift, caps, "cell widths"))
+                if [hot for _, hot in label_row] != [hot for _, hot in body_row]:
+                    ragged.append((cell_width, shift, caps, "highlight"))
+check("🔴 every body row matches its label row cell for cell -- same widths, "
+      "same highlighted cells -- at every cell width and in every state",
+      ragged, [])
+
+# The highlight is what a user hunts for, and making it KEY_ROWS rows tall is
+# most of what "twice as tall" buys. Both halves, one key each, all their rows.
+kb_h, cur_h = fresh()
+cur_h.pos["left"], cur_h.pos["right"] = [0.1, 0.1], [0.9, 0.9]
+hot_rows = tty.render(kb_h, cur_h, LIVE_ISO_COLS)
+check("two cursors highlight two keys, KEY_ROWS cells each",
+      sum(1 for row in hot_rows for _, hot in row if hot), 2 * tty.KEY_ROWS)
+check("...and the highlighted cells sit in consecutive console rows, so the "
+      "cursor is one block and not two stripes",
+      [n for n, row in enumerate(hot_rows) if any(hot for _, hot in row)],
+      [0, 1, 8, 9])
+
+# ⚠️ AND THE WIDTH DID NOT MOVE. This change spends ROWS; a key that also grew
+# sideways would break the column budget the previous round measured.
+check("the drawn width is unchanged by the extra rows",
+      tty.width(tty.render(*fresh(), LIVE_ISO_COLS)),
+      GRID_CELLS * tty.cell_width_for(LIVE_ISO_COLS, GRID_CELLS))
+
+# ⚠️ THE LABELS ARE STILL ON EVERY KEY, once each. A body row that accidentally
+# carried a label would double every face on the screen.
+tall_plain = tty.to_plain(tty.render(*fresh(), LIVE_ISO_COLS))
+check("each key face is drawn exactly once, not once per console row",
+      (tall_plain.count("Backspace"), tall_plain.count("Y space"),
+       tall_plain.count("L2 Shift")), (1, 1, 2))
+check("...and the rows between them carry only the rule",
+      sorted(set(tall_plain.split("\n")[1].replace(" ", ""))),
+      [tty.KEY_BODY_FILL])
+
+
 # --- the rendered grid, read back as text ------------------------------------
 
 kb, cur = fresh()
 rows = tty.render(kb, cur)
 plain = tty.to_plain(rows)
-check("the letters layer renders five rows", len(rows), 5)
+KEY_ROWS_IN_LAYER = len(osk.LETTERS.rows)
+check("the letters layer has five key rows", KEY_ROWS_IN_LAYER, 5)
+check("...drawn as KEY_ROWS console rows each (P33 J)",
+      len(rows), tty.KEY_ROWS * KEY_ROWS_IN_LAYER)
+
+
+def label_line(n: int) -> str:
+    """The console line carrying key row `n`'s labels (P33 J).
+
+    A key row is `KEY_ROWS` console rows: the label row first, then the body
+    rows. Every check below that used to index a rendered line by key row goes
+    through this, so raising KEY_ROWS does not silently start asserting against
+    a rule of dashes.
+    """
+    return plain.split("\n")[n * tty.KEY_ROWS]
+
+
 check("every row is the same width",
       len({sum(len(t) for t, _ in row) for row in rows}), 1)
 check("the keyboard is one layer -- §9g's grid carries every printable ASCII "
@@ -636,25 +835,25 @@ def labels(line: str) -> list[str]:
 
 
 check("row 1 is §9g's number row, dual legends and the X-badged backspace",
-      labels(plain.split("\n")[0]),
+      labels(label_line(0)),
       ["`", "~", "1", "!", "2", "@", "3", "#", "4", "$", "5", "%", "6", "^",
        "7", "&", "8", "*", "9", "(", "0", ")", "-", "_", "=", "+",
        "X", "Backspace"])
 check("row 2 is Tab, qwertyuiop and the three bracket keys",
-      labels(plain.split("\n")[1]),
+      labels(label_line(1)),
       ["Tab", "q", "w", "e", "r", "t", "y", "u", "i", "o", "p",
        "{", "}", "\\", "|"])
 check("row 3 is L3-badged Caps, the home row, and R2 Enter",
-      labels(plain.split("\n")[2]),
+      labels(label_line(2)),
       ["L3", "Caps", "a", "s", "d", "f", "g", "h", "j", "k", "l",
        ";", ":", "'", '"', "R2", "Enter"])
 check("row 4 is Shift, zxcvbnm, the punctuation and Shift AGAIN on the right",
-      labels(plain.split("\n")[3]),
+      labels(label_line(3)),
       ["L2", "Shift", "z", "x", "c", "v", "b", "n", "m", ",", "<", ".", ">",
        "/", "?", "L2", "Shift"])
 check("row 5 is the emoji key, the wide space, the two dual-legend arrows, "
       "Paste and Move",
-      labels(plain.split("\n")[4]),
+      labels(label_line(4)),
       [":)", "Y", "space", "<", "^", ">", "v", "Paste", "Move"])
 
 # Row 2's `[` key is drawn `[ {` -- an opening bracket as a real key face, one
@@ -680,8 +879,8 @@ check("the left cursor brackets the key it is over",
 check("the right cursor brackets its own key",
       tty.cell_text(tty.display_label(kb, key_tr),
                     key_tr.span * tty.KEY_CELL, True) in plain, True)
-check("exactly two keys are highlighted -- one per half",
-      sum(1 for row in rows for _, hot in row if hot), 2)
+check("exactly two keys are highlighted -- one per half, KEY_ROWS cells each",
+      sum(1 for row in rows for _, hot in row if hot), 2 * tty.KEY_ROWS)
 
 # Independence: moving one cursor must not move the other's highlight.
 cur.update(e.ABS_HAT0X, MAX)   # left cursor to the right edge of ITS half
@@ -693,8 +892,9 @@ check("moving the left cursor moved its highlight",
 check("and left the right cursor's highlight alone",
       tty.cell_text(tty.display_label(kb, key_tr),
                     key_tr.span * tty.KEY_CELL, True) in plain, True)
-check("still exactly two highlights",
-      sum(1 for row in tty.render(kb, cur) for _, hot in row if hot), 2)
+check("still exactly two highlighted keys",
+      sum(1 for row in tty.render(kb, cur) for _, hot in row if hot),
+      2 * tty.KEY_ROWS)
 
 # 🔴 §9g's SPACE BAR STRADDLES THE SPLIT so either thumb can reach it, which
 # means BOTH CURSORS CAN BE OVER ONE KEY. That is one highlighted cell, not
@@ -706,10 +906,12 @@ check("both cursors are on the space bar",
       [kb_sp.key_at(h, *cur_sp.position(h)).label for h in ("left", "right")],
       ["space", "space"])
 sp_rows = tty.render(kb_sp, cur_sp)
-check("two cursors on one key highlight ONE cell, not two",
-      sum(1 for row in sp_rows for _, hot in row if hot), 1)
-check("...and it is the space bar",
-      [tty.face_of(t) for row in sp_rows for t, hot in row if hot], ["Y space"])
+check("two cursors on one key highlight ONE key, not two -- KEY_ROWS cells of it",
+      sum(1 for row in sp_rows for _, hot in row if hot), tty.KEY_ROWS)
+check("...and it is the space bar, label row and body rows alike",
+      [tty.face_of(t) for row in sp_rows for t, hot in row if hot],
+      ["Y space"] + [tty.face_of(tty.body_text(
+          osk.SPACE_KEY.span * tty.KEY_CELL, True))] * (tty.KEY_ROWS - 1))
 
 # ⚠️ A cursor outside its half makes `locate` return None -- "a caller bug
 # rather than a user miss", in the core's words, and the honest answer. The
@@ -722,7 +924,7 @@ check("a cursor outside its half locates nothing", kb_off.locate("left", 1.5, 0.
 off_rows = tty.render(kb_off, cur_off)
 check("...and the keyboard still draws, whole", tty.width(off_rows), KB_WIDTH)
 check("...with only the other half's cursor highlighted, not a phantom",
-      sum(1 for row in off_rows for _, hot in row if hot), 1)
+      sum(1 for row in off_rows for _, hot in row if hot), tty.KEY_ROWS)
 
 # --- ⚠️ THE PROPERTY THAT MATTERS: drawn == pressed --------------------------
 #
@@ -843,16 +1045,27 @@ check("...and every line actually written is exactly 80 columns of keyboard",
       all(f"\x1b[K{line}" in buf.getvalue() and len(line) == INSTALLED_TTY_COLS
           for line in tty.to_plain(rows).split("\n")), True)
 
+# 🔴 THE BOUNDARY, DERIVED FROM THE KEYBOARD'S OWN HEIGHT (P33 J). These used to
+# be the literals 20 and 21 against a 24-row console, which stopped meaning
+# "one row inside" and "one row over" the moment a key row became KEY_ROWS
+# console rows.
+SMALL_ROWS = 24
+TOP_FITS = SMALL_ROWS - len(rows) + 1      # the last top row that fits exactly
+TOP_OVER = TOP_FITS + 1                    # one row too far down
 check("a draw that fits is unaffected by the row guard",
-      "\x1b[20;1H" in (lambda b: (tty.write_at(b, rows, 20, console_rows=24),
-                                  b.getvalue())[1])(io.StringIO()), True)
+      f"\x1b[{TOP_FITS};1H" in (
+          lambda b: (tty.write_at(b, rows, TOP_FITS, console_rows=SMALL_ROWS),
+                     b.getvalue())[1])(io.StringIO()), True)
 check("a draw running off the end refuses, naming the rows and the console",
-      raises_saying(lambda: tty.write_at(io.StringIO(), rows, 21, console_rows=24),
-                    ValueError, "21", "24"), True)
+      raises_saying(lambda: tty.write_at(io.StringIO(), rows, TOP_OVER,
+                                         console_rows=SMALL_ROWS),
+                    ValueError, str(TOP_OVER), str(SMALL_ROWS)), True)
 check("and so does one starting above the first row",
-      raises(lambda: tty.write_at(io.StringIO(), rows, 0, console_rows=24), ValueError), True)
+      raises(lambda: tty.write_at(io.StringIO(), rows, 0,
+                                  console_rows=SMALL_ROWS), ValueError), True)
 check("the last row that fits exactly is allowed",
-      (tty.write_at(io.StringIO(), rows, 24 - len(rows) + 1, console_rows=24), True)[1], True)
+      (tty.write_at(io.StringIO(), rows, TOP_FITS, console_rows=SMALL_ROWS),
+       True)[1], True)
 check("with no console_rows given, nothing is checked -- callers opt in",
       (tty.write_at(io.StringIO(), rows, 9999), True)[1], True)
 
@@ -869,7 +1082,8 @@ check("...and the message is about WRAPPING, not about rows -- two guards "
       raises_saying(lambda: tty.write_at(io.StringIO(), rows, 1, console_cols=40),
                     ValueError, "wrap"), True)
 check("the row guard's message is NOT about wrapping",
-      raises_saying(lambda: tty.write_at(io.StringIO(), rows, 21, console_rows=24),
+      raises_saying(lambda: tty.write_at(io.StringIO(), rows, TOP_OVER,
+                                         console_rows=SMALL_ROWS),
                     ValueError, "wrap"), False)
 check("the live ISO's 160 columns are comfortably fine",
       (tty.write_at(io.StringIO(), rows, 1, console_rows=LIVE_ISO_ROWS,
@@ -878,7 +1092,8 @@ check("with no console_cols given, nothing is checked -- callers opt in",
       (tty.write_at(io.StringIO(), rows, 1, console_cols=None), True)[1], True)
 check("both guards can fire on the same draw; the ROW one is checked first, so a "
       "caller learns about the more destructive failure",
-      raises_saying(lambda: tty.write_at(io.StringIO(), rows, 99, console_rows=24,
+      raises_saying(lambda: tty.write_at(io.StringIO(), rows, 99,
+                                         console_rows=SMALL_ROWS,
                                          console_cols=10),
                     ValueError, "collapse"), True)
 
@@ -895,6 +1110,16 @@ kb, cur = fresh()
 rows = tty.render(kb, cur)
 CONSOLE_W, CONSOLE_H = INSTALLED_TTY_COLS, INSTALLED_TTY_ROWS
 
+# 🔴 ANCHORED AT THE BOTTOM, NOT AT A LITERAL ROW (P33 J). These checks used to
+# draw at line 20 of a 25-row console, which had room for five rows and has none
+# for ten. `deck-input-mapper` bottom-anchors the keyboard (`console_rows -
+# len(rows) + 1`), so that is what is modelled here -- and every expected line
+# number below is derived from it, so raising KEY_ROWS moves the assertions with
+# the keyboard instead of turning them into arithmetic nobody re-does.
+KB_TOP = CONSOLE_H - len(rows) + 1
+KB_LINES = list(range(KB_TOP, KB_TOP + len(rows)))
+KB_MIDDLE = KB_TOP + 2          # a line inside the keyboard, for damage checks
+
 
 def console(lines: dict[int, str], cols: int = CONSOLE_W, height: int = CONSOLE_H) -> str:
     """A `height` x `cols` screen, as /dev/vcsN folded gives it."""
@@ -909,7 +1134,7 @@ def drawn_at(top: int, source=None) -> dict[int, str]:
 
 
 check("a clean draw is found on exactly the rows it was drawn on",
-      tty.rows_on_screen(console(drawn_at(20)), rows), [20, 21, 22, 23, 24])
+      tty.rows_on_screen(console(drawn_at(KB_TOP)), rows), KB_LINES)
 check("a blank console carries no keyboard rows",
       tty.rows_on_screen(console({}), rows), [])
 check("neither does one full of somebody else's TUI",
@@ -920,18 +1145,31 @@ check("neither does one full of somebody else's TUI",
 # last -- which is what the kernel does when they fall past the end of the
 # console. The word survives; the keyboard does not.
 clamped = console({CONSOLE_H: tty.to_plain(rows).split("\n")[-1]})
-check("R-49's clamp is ONE row, not five", len(tty.rows_on_screen(clamped, rows)), 1)
-check("...while the word `space` is still right there on it -- the lie",
-      "space" in clamped, True)
+check("R-49's clamp is ONE row, not ten", len(tty.rows_on_screen(clamped, rows)), 1)
+# 🔴 AND WHICH ROW SURVIVES CHANGED IN P33 J. The kernel's clamp leaves whatever
+# was written LAST, and the last console row of a key row is now a BODY row --
+# a rule, with no word on it. So this particular screen no longer greps as a
+# keyboard, which is a weaker lie than R-49's, not a fixed one: clamp a LABEL
+# row and the word is right back.
+check("...and the surviving row is a body rule, so the word is gone from THIS one",
+      "space" in clamped, False)
+clamped_label = console({CONSOLE_H: tty.to_plain(rows).split("\n")[-tty.KEY_ROWS]})
+check("...but clamp a LABEL row and `space` is still right there -- R-49's lie",
+      "space" in clamped_label, True)
+check("...and it too counts as exactly ONE row",
+      len(tty.rows_on_screen(clamped_label, rows)), 1)
 
 # ⚠️ R-52's EXACT SHAPE, measured in QEMU. A full-screen TUI repaints every
 # line except the console's last, so four keyboard rows die and one lives.
-partial = drawn_at(CONSOLE_H - len(rows) + 1)
+partial = drawn_at(KB_TOP)
 for line in range(1, CONSOLE_H):
     partial[line] = f"MENU LINE {line:02d} PASS 01 " + "-" * 50
 check("a TUI repainting all but the last line leaves ONE row",
       len(tty.rows_on_screen(console(partial), rows)), 1)
-check("...and that surviving row still carries `space`", "space" in console(partial), True)
+check("...and since P33 J that survivor is the bottom BODY row, so this screen "
+      "does NOT grep as a keyboard -- the count is still the only reliable "
+      "question, and it still says one row of ten",
+      "space" in console(partial), False)
 
 # ⚠️ AND THE SHAPE THE MEASUREMENT ACTUALLY TOOK, which is nastier than the one
 # above. ncurses repaints by diffing against its own model of the physical
@@ -939,15 +1177,16 @@ check("...and that surviving row still carries `space`", "space" in console(part
 # only the cells whose content changed and punched a SINGLE CHARACTER through
 # each keyboard row. Every row still reads as a keyboard to a human and to a
 # grep; one key per row now types something other than what it draws.
-punched = drawn_at(20)
-for line in range(20, 25):
+punched = drawn_at(KB_TOP)
+for line in KB_LINES:
     punched[line] = punched[line][:17] + "1" + punched[line][18:]
 check("one character punched through each row leaves NO intact row",
       tty.rows_on_screen(console(punched), rows), [])
 check("...while `Shift` is still on the screen, untouched",
       "Shift" in console(punched), True)
 check("...and each row differs from an intact one by exactly ONE character",
-      sum(a != b for a, b in zip(punched[24], drawn_at(20)[24])), 1)
+      sum(a != b for a, b in zip(punched[KB_MIDDLE],
+                                 drawn_at(KB_TOP)[KB_MIDDLE])), 1)
 
 # The cursors move between a render and a console read. A row whose highlight
 # sits elsewhere is still that row -- otherwise every count would be a race.
@@ -958,7 +1197,7 @@ cur_moved.update(e.ABS_HAT1X, MAX)
 cur_moved.update(e.ABS_HAT1Y, MAX)
 moved = tty.render(kb_moved, cur_moved)
 check("the highlight having moved does not lose a row",
-      tty.rows_on_screen(console(drawn_at(20, moved)), rows), [20, 21, 22, 23, 24])
+      tty.rows_on_screen(console(drawn_at(KB_TOP, moved)), rows), KB_LINES)
 check("and the two renders really do differ, so that was not vacuous",
       tty.to_plain(moved) == tty.to_plain(rows), False)
 
@@ -966,49 +1205,61 @@ check("and the two renders really do differ, so that was not vacuous",
 # differ under shift (§9g), so a screen drawn shifted is not the same keyboard
 # -- if this passed, `face_of` would be throwing the legends away.
 shifted_rows = tty.render(probe("locked"), osk.Cursors())
-check("a shifted screen read against an unshifted render finds nothing",
-      tty.rows_on_screen(console(drawn_at(20, shifted_rows)), rows), [])
+# 🔴 THE PRICE OF A BODY ROW, STATED RATHER THAN DISCOVERED (P33 J). A body row
+# carries a rule and no legend, so it is IDENTICAL in every shift/caps state --
+# a shifted screen therefore matches the unshifted render on exactly its body
+# rows. No LABEL row may match, which is the property `face_of` is being tested
+# for; and only the FULL count means an intact keyboard, which is what the VM
+# suite asserts.
+shifted_found = tty.rows_on_screen(console(drawn_at(KB_TOP, shifted_rows)), rows)
+check("a shifted screen matches NO label row of an unshifted render",
+      [n for n in shifted_found if (n - KB_TOP) % tty.KEY_ROWS == 0], [])
+check("...only its body rows, which carry no legend to disagree about",
+      len(shifted_found), KEY_ROWS_IN_LAYER * (tty.KEY_ROWS - 1))
 check("...and against its OWN render finds every row",
-      tty.rows_on_screen(console(drawn_at(20, shifted_rows)), shifted_rows),
-      [20, 21, 22, 23, 24])
+      tty.rows_on_screen(console(drawn_at(KB_TOP, shifted_rows)), shifted_rows),
+      KB_LINES)
 
 # Partial damage is the whole point: one overwritten cell is not a row.
 FIRST_CELL = len(rows[2][0][0])
-damaged = drawn_at(20)
-damaged[22] = "X" * FIRST_CELL + damaged[22][FIRST_CELL:]
+damaged = drawn_at(KB_TOP)
+damaged[KB_MIDDLE] = "X" * FIRST_CELL + damaged[KB_MIDDLE][FIRST_CELL:]
 check("a row with its FIRST cell overwritten does not count",
-      tty.rows_on_screen(console(damaged), rows), [20, 21, 23, 24])
+      tty.rows_on_screen(console(damaged), rows),
+      [n for n in KB_LINES if n != KB_MIDDLE])
 
 # ⚠️ And the last cell too, separately. A check that stopped after the first
 # cell would pass the test above and miss a keyboard whose right-hand half a
 # TUI had eaten -- which is half the screen, and the half `Enter` is on.
 LAST_CELL = len(rows[2][-1][0])
-tail_damaged = drawn_at(20)
-tail_damaged[22] = tail_damaged[22][:KB_WIDTH - LAST_CELL] + "X" * LAST_CELL
+tail_damaged = drawn_at(KB_TOP)
+tail_damaged[KB_MIDDLE] = (tail_damaged[KB_MIDDLE][:KB_WIDTH - LAST_CELL]
+                           + "X" * LAST_CELL)
 check("a row with its LAST cell overwritten does not count either",
-      tty.rows_on_screen(console(tail_damaged), rows), [20, 21, 23, 24])
+      tty.rows_on_screen(console(tail_damaged), rows),
+      [n for n in KB_LINES if n != KB_MIDDLE])
 
 # ⚠️ Columns to the right are not the keyboard's business -- but on the
 # INSTALLED TTY there are none, so this has to be checked on the LIVE ISO's
 # 160-column console, which is the other geometry §7 measured.
-beside = drawn_at(20)
-beside[22] = beside[22][:KB_WIDTH].ljust(KB_WIDTH) + " TUI"
+beside = drawn_at(KB_TOP)
+beside[KB_MIDDLE] = beside[KB_MIDDLE][:KB_WIDTH].ljust(KB_WIDTH) + " TUI"
 check("text to the RIGHT of the keyboard does not disqualify the row (live ISO, "
       "160 columns -- on the installed TTY there is no 'right of')",
-      tty.rows_on_screen(console(beside, cols=LIVE_ISO_COLS), rows),
-      [20, 21, 22, 23, 24])
+      tty.rows_on_screen(console(beside, cols=LIVE_ISO_COLS), rows), KB_LINES)
 
 # A console too narrow to hold a row truncates it, and a truncated row must not
 # be padded back into a match -- that would invent a keyboard that is not there.
 # 🔴 THIS IS THE 79-COLUMN CONSOLE, i.e. the exact thing KEY_CELL=5 has no
 # slack against.
-narrow = console(drawn_at(20), cols=KB_WIDTH - 1)
+narrow = console(drawn_at(KB_TOP), cols=KB_WIDTH - 1)
 check("a console one column too narrow carries NO intact keyboard row",
       tty.rows_on_screen(narrow, rows), [])
 
 # Offsets. A row found on line 1 must report 1, not 0.
 check("line numbering is 1-based, like every console coordinate here",
-      tty.rows_on_screen(console(drawn_at(1)), rows), [1, 2, 3, 4, 5])
+      tty.rows_on_screen(console(drawn_at(1)), rows),
+      list(range(1, len(rows) + 1)))
 
 # The punctuation keys put `[` and `]` on real key faces, which is exactly where
 # a naive "strip the highlight brackets" reader goes wrong.
@@ -1039,10 +1290,12 @@ check("no cold cell can be misread as a highlighted one", misread, [])
 check("a stray closing bracket does not make a cell a highlight",
       tty.face_of("X q ]"), "X q ]")
 check("nor does a stray opening one", tty.face_of("[ q X"), "[ q X")
-half_bracketed = drawn_at(20)
-half_bracketed[22] = "X" + half_bracketed[22][1:KB_WIDTH - 1] + "]"
+half_bracketed = drawn_at(KB_TOP)
+half_bracketed[KB_MIDDLE] = ("X" + half_bracketed[KB_MIDDLE][1:KB_WIDTH - 1]
+                             + "]")
 check("a row whose ends a TUI replaced with brackets does not count",
-      tty.rows_on_screen(console(half_bracketed), rows), [20, 21, 23, 24])
+      tty.rows_on_screen(console(half_bracketed), rows),
+      [n for n in KB_LINES if n != KB_MIDDLE])
 
 # --- clear_at ------------------------------------------------------------------
 
@@ -1145,8 +1398,9 @@ moved = at(0.60, 0.5)
 check("...and the two frames really do differ, so this is not vacuous",
       tty.to_plain(first) == tty.to_plain(moved), False)
 tty.write_at(rec2, moved, 20)
-check("🔴 a one-row cursor move paints exactly the two cells that changed",
-      rec2.moves - before_moves, 2)
+check("🔴 a one-row cursor move paints exactly the two KEYS that changed -- "
+      "KEY_ROWS cells each, and nothing else on the console",
+      rec2.moves - before_moves, 2 * tty.KEY_ROWS)
 check("...and erases NOTHING -- the blank-then-paint flash is what the panel sees",
       rec2.erases, len(rows))
 check("...and it is still one write() per draw, not one per cell",
@@ -1168,7 +1422,8 @@ rec3 = Recorder()
 tty.write_at(rec3, at(0.35, 0.1), 20)
 base = rec3.moves
 tty.write_at(rec3, at(0.35, 0.9), 20)
-check("a cursor moving between rows paints a cell in each", rec3.moves - base, 2)
+check("a cursor moving between rows paints the cells of the key it left and the "
+      "key it reached", rec3.moves - base, 2 * tty.KEY_ROWS)
 
 # --- nothing is ever written past the console's last column -------------------
 #
@@ -1185,8 +1440,10 @@ for cols_w in (PLAN_COLS_BIG_FONT, INSTALLED_TTY_COLS,
     for lx, ly in positions:
         cursors_w = osk.Cursors()
         cursors_w.pos["left"], cursors_w.pos["right"] = [lx, ly], [1.0 - lx, ly]
-        tty.write_at(rec_w, tty.render(osk.OnScreenKeyboard(), cursors_w, cols_w),
-                     20, console_rows=25, console_cols=cols_w)
+        sweep_rows = tty.render(osk.OnScreenKeyboard(), cursors_w, cols_w)
+        tty.write_at(rec_w, sweep_rows,
+                     INSTALLED_TTY_ROWS - len(sweep_rows) + 1,
+                     console_rows=INSTALLED_TTY_ROWS, console_cols=cols_w)
     for chunk in rec_w.chunks:
         for piece in chunk.split("\x1b[")[1:]:
             hit = re.match(r"(\d+);(\d+)H(.*)", piece, re.S)
@@ -1251,6 +1508,65 @@ tty.write_at(rec9, rows, 20)
 tty.write_at(rec10, rows, 20)
 check("two streams have separate memories -- the VM suite draws on tty2 and tty3",
       (rec9.erases, rec10.erases), (len(rows), len(rows)))
+
+# --- 🔴 P33 J: what the extra rows cost the flicker fix -----------------------
+#
+# ⚠️ MEASURED BEFORE AND AFTER, not argued. Doubling the height doubles the
+# number of cells on the console, so the question is whether the incremental
+# path still keeps the erase rate near zero. One second of a thumb on a pad is
+# 250 draws (the mapper redraws once per read batch; the pads report at 250 Hz),
+# on the live ISO's 50x160 console, bottom-anchored the way the mapper anchors:
+#
+#                       write()   cursor moves   erase-to-EOL   bytes
+#   before (5 rows)  resting    5      25             25         4360
+#                    sweeping  13      41             25         4834
+#   after (10 rows)  resting    5      50             50         8690
+#                    sweeping  13      82             50         9590
+#
+# The erase rate -- what the panel sees as blank-then-paint, and the quantity
+# §5.34 D4 is about -- doubles from 25/s to 50/s because a full repaint now
+# clears ten rows instead of five. It does NOT scale with the draw rate: 250
+# draws still produce 5 full repaints (`FULL_REPAINT_EVERY`), and an unchanged
+# frame still writes nothing at all. Without the incremental path the same
+# second would erase 2500 times.
+#
+# ⚠️ AND WHETHER THE PANEL STILL FLICKERS IS STILL NOT ANSWERABLE HERE. §5.40
+# records that it does on hardware after B2's fix; this file has no VT and no
+# scanout. What is asserted is the drive, at the new height.
+DRAWS_PER_SECOND = 250
+
+
+def one_second(kind: str) -> tuple[int, int]:
+    """(erase-to-EOL, write() calls) for one second of pad motion."""
+    rec_s = Recorder()
+    kb_s = osk.OnScreenKeyboard()
+    height = LIVE_ISO_ROWS_MEASURED
+    top_s = height - OSK_ROWS + 1
+    for n in range(DRAWS_PER_SECOND):
+        t = n / (DRAWS_PER_SECOND - 1)
+        pos = 0.5 if kind == "rest" else (t if t <= 0.5 else 1.0 - t)
+        cur_s = osk.Cursors()
+        cur_s.pos["left"], cur_s.pos["right"] = [pos, pos], [0.9, 0.9]
+        tty.write_at(rec_s, tty.render(kb_s, cur_s, LIVE_ISO_COLS), top_s,
+                     console_rows=height, console_cols=LIVE_ISO_COLS)
+    return rec_s.erases, len(rec_s.chunks)
+
+
+FULL_REPAINTS = -(-DRAWS_PER_SECOND // tty.FULL_REPAINT_EVERY)
+rest_erases, rest_writes = one_second("rest")
+sweep_erases, sweep_writes = one_second("sweep")
+check("a resting thumb erases only what the periodic full repaint erases -- "
+      "FULL_REPAINTS x the keyboard's rows, and nothing per draw",
+      rest_erases, FULL_REPAINTS * OSK_ROWS)
+check("...and a sweeping thumb erases exactly the same, because a moved cursor "
+      "repaints cells and never blanks a row", sweep_erases, rest_erases)
+check("...which is a fiftieth of what a full repaint every draw would cost",
+      sweep_erases * 50, DRAWS_PER_SECOND * OSK_ROWS)
+check("a resting thumb writes only on the full repaints -- an identical frame "
+      "costs no bytes at all", rest_writes, FULL_REPAINTS)
+print(f"     (one second at {DRAWS_PER_SECOND} Hz, {OSK_ROWS} rows: resting "
+      f"{rest_erases} erases / {rest_writes} writes, sweeping {sweep_erases} "
+      f"erases / {sweep_writes} writes)")
 
 check("a stream that cannot be weak-referenced still draws, every time, in full",
       [len(str(n)) for n in range(2)
