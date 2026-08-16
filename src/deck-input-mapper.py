@@ -35,8 +35,7 @@ DESKTOP MODE ADDS THREE BUTTONS (docs/PROGRESS.md §5.23, §5.37)
     STEAM (tap, no chord)  `omarchy-menu toggle apps`  the apps menu
     STEAM + X              the on-screen keyboard      (unchanged)
     STEAM + Y              close the focused window    the controller's SUPER+W
-    QAM                    `omarchy-menu toggle`       Omarchy's own menu
-                           -- INERT until QAM's evdev code is measured
+    QAM (the ... button)   `omarchy-menu toggle`       the Omarchy menu
 
     Both need lizard_mode=N, or the firmware swallows the presses and no evdev
     node ever sees them. Startup says which of those is in force.

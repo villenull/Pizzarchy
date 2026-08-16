@@ -98,7 +98,8 @@ whether it worked.
 | **STEAM + Y** | close the focused window |
 | **A** / **B** | confirm / back |
 | **L2** / **R2** | left / right trackpad click |
-| **STEAM** (tap) | apps menu |
+| **STEAM** | apps menu |
+| **QAM** (the ⋯ button) | the Omarchy menu |
 
 ---
 
