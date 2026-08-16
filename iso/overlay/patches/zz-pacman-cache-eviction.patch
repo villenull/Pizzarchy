@@ -1,0 +1,40 @@
+diff --git i/builder/build-iso.sh w/builder/build-iso.sh
+index db8daa2..f17bf9b 100755
+--- i/builder/build-iso.sh
++++ w/builder/build-iso.sh
+@@ -274,6 +274,35 @@ printf '%s\n' "${required_package_files[@]}" |
+ rm -f "$offline_mirror_dir"/offline.db* "$offline_mirror_dir"/offline.files*
+ repo-add "$offline_mirror_dir/offline.db.tar.gz" "$offline_mirror_dir/"*.pkg.tar.zst
+ 
++# 🔴 EVICT SAME-NAMED, DIFFERENT-BYTES COPIES FROM THE PACMAN CACHE.
++#
++# We COMPILE omarchy-dev/omarchy-settings-dev from iso/RUNTIME's pinned commit,
++# and upstream PUBLISHES a package with the identical pkgver-pkgrel. Two
++# different builds, one filename. Populating the offline mirror also leaves
++# upstream's copy in the scratch pacman cache -- and mkarchiso reads that cache
++# first, then validates against the db `repo-add` just wrote from OUR build.
++# The checksums disagree and pacman reports "invalid or corrupted package
++# (checksum)" for a file that is not corrupt at all. Measured 2026-08-15: two
++# consecutive builds died here, on `omarchy-settings-dev-4.0.0.r1744.gf002044-1`
++# and (while upstream was mid-publish) on `tzupdate` and `ufw-docker`.
++#
++# The mirror is authoritative -- it is what the ISO ships and what the db
++# describes -- so a cache entry that disagrees with it is always the wrong copy.
++# Compare by content, never by name alone: an identical cache hit is a
++# legitimate saved download and must survive.
++#
++# Loud on purpose. Silence here is what made this cost two builds to find.
++evicted=0
++for mirror_pkg in "$offline_mirror_dir"/*.pkg.tar.zst; do
++  cached_pkg="/var/cache/pacman/pkg/$(basename "$mirror_pkg")"
++  [[ -f $cached_pkg ]] || continue
++  if cmp -s "$mirror_pkg" "$cached_pkg"; then continue; fi
++  echo "evicting stale pacman-cache copy (differs from the mirror): $(basename "$cached_pkg")"
++  rm -f "$cached_pkg" "$cached_pkg.sig"
++  evicted=$((evicted + 1))
++done
++echo "pacman-cache eviction: $evicted file(s) differed from the offline mirror and were removed"
++
+ # mkarchiso expects the mirror at /var/cache/omarchy/mirror/offline inside the
+ # container (the airootfs path); symlink rather than duplicate.
+ mkdir -p /var/cache/omarchy/mirror
