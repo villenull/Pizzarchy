@@ -54,15 +54,13 @@ image — see [Recovery](#recovery).
 
 5. **Wait.** Reboots when finished, and comes up in Gaming Mode.
 
-![The first screen: what this does, and what it erases](docs/images/install-01-greeter.png)
+![Picking a Wi-Fi network. There is no skip — the install needs a connection](docs/images/install-02-wifi.png)
 
-> _**[ IMAGE — Wi-Fi network list ]**_ `docs/images/install-02-wifi.png`
+![Typing a username on the on-screen keyboard, driven by the trackpads](docs/images/install-03-osk-username.png)
 
-![The on-screen keyboard, drawn on the console and driven by the trackpads](docs/images/install-03-osk.png)
+![The point of no return](docs/images/install-04-confirm.png)
 
-![The point of no return. The cursor starts on "No, go back"](docs/images/install-04-confirm.png)
-
-> _**[ IMAGE — install progress ]**_ `docs/images/install-05-progress.png`
+![Installing](docs/images/install-05-progress.png)
 
 ---
 

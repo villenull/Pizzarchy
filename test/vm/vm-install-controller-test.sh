@@ -573,6 +573,46 @@ sendkey() {
   qmp "{\"execute\":\"send-key\",\"arguments\":{\"keys\":[{\"type\":\"qcode\",\"data\":\"$qcode\"}]}}" >>"$WORK/qmp.log"
 }
 
+# --- OPTIONAL: pixel-exact screenshots of the INSTALL-PROGRESS screen -------
+#
+# ⚠️ ADDITIVE, HOST-ONLY AND INERT. With VM_SCREENSHOT_DIR unset -- which is
+# every CI run and every ordinary run -- nothing below issues a single extra
+# QMP command, and the guest is not modified at all. That last part is the
+# constraint that decided the design: this file's assertions are calibrated
+# against the probe's own timing (its "THE CADENCE" block), so a screenshot
+# hook may not add a sleep, a marker or a syscall inside the guest.
+#
+# WHEN THE FRAMES ARE TAKEN, and why it is not the guest's heartbeat. The
+# probe already emits `install.heartbeat_waited_s=<n>` on the serial line while
+# the real install runs, and that WAS this hook's trigger -- for one run.
+# 🔴 MEASURED 2026-08-16 and it does not work: the heartbeat interval is 60 s,
+# and the offline install finished in **54 s** (`install.outcome=success`,
+# `install.waited_s=56`), so not one heartbeat ever fired and not one progress
+# frame was captured. The install being faster than its own forensic heartbeat
+# is a good problem, but it makes the heartbeat useless as a shutter.
+#
+# So the shutter is now a host-side timer, armed by the guest's own step-29
+# request (S5's "Install" hotkey -- the key that starts the real install) and
+# disarmed when the guest reports it finished. Every ~6 s in that window is a
+# frame. The heartbeat capture is kept as well, for a slow run where the timer
+# window is long and named frames are easier to find.
+#
+# The finish frame is taken on the guest's reboot-accept request, BEFORE the
+# key is sent: at that instant the dashboard has just rendered
+# "Installed Omarchy in <duration>".
+VM_SCREENSHOT_DIR=${VM_SCREENSHOT_DIR:-}
+[[ -n $VM_SCREENSHOT_DIR ]] && mkdir -p "$VM_SCREENSHOT_DIR"
+screendump_now() {
+  [[ -n $VM_SCREENSHOT_DIR ]] || return 0
+  local name=$1
+  qmp "{\"execute\":\"screendump\",\"arguments\":{\"filename\":\"${VM_SCREENSHOT_DIR}/${name}.ppm\"}}" \
+    >>"$WORK/qmp.log" 2>&1
+  log "screendump -> ${VM_SCREENSHOT_DIR}/${name}.ppm"
+}
+declare -A shot_heartbeat_seen=()
+shot_installing=0      # 1 between step 29's key and the guest's own outcome line
+shot_last_progress=-99
+
 # Steps 1-28: identical to the proven sibling harness (see the probe's own
 # comment for why). Step 29: NEW, S5's "y". Step 30 (the reboot-accept key)
 # is NOT in this fixed list -- it is only requested by the guest if the
@@ -605,13 +645,37 @@ while kill -0 "$qemu_pid" 2>/dev/null; do
         sleep 1
         sendkey "$qcode"
         log "step ${i}/${nsteps} (${step%%:*}): sent '${qcode}'"
+        # Arm the progress shutter on the key that starts the real install.
+        # Inert unless VM_SCREENSHOT_DIR is set.
+        [[ ${step%%:*} == 29-post-install-start ]] && shot_installing=1
       fi
     done
+    if (( shot_installing )) && [[ -n $VM_SCREENSHOT_DIR ]]; then
+      if grep -q 'T4PROBE:FACT:install\.outcome=' "$serial_log"; then
+        shot_installing=0
+      elif (( elapsed - shot_last_progress >= 6 )); then
+        shot_last_progress=$elapsed
+        screendump_now "$(printf 'progress-%04d' "$elapsed")"
+      fi
+    fi
     # step 30: only requested (and only sent) if the guest's own probe saw
     # the install succeed. If it never appears, no key is sent -- matching
     # this project's "no key into a failure/upload menu" discipline.
+    # Inert unless VM_SCREENSHOT_DIR is set -- see screendump_now's comment.
+    if [[ -n $VM_SCREENSHOT_DIR ]]; then
+      while IFS= read -r hb; do
+        [[ -n $hb ]] || continue
+        [[ -n ${shot_heartbeat_seen[$hb]:-} ]] && continue
+        shot_heartbeat_seen[$hb]=1
+        screendump_now "$(printf 'progress-%04d' "$hb")"
+      done < <(LC_ALL=C command grep -oa 'install\.heartbeat_waited_s=[0-9]*' "$serial_log" 2>/dev/null |
+                 cut -d= -f2)
+    fi
     if [[ ${seen[reboot_accept_idx]} -eq 0 ]] && grep -q "T4PROBE:WANT-KEY-${reboot_accept_idx}-GO" "$serial_log"; then
       seen[reboot_accept_idx]=1
+      # The finish screen is on the framebuffer RIGHT NOW, before this key
+      # accepts the reboot. Inert unless VM_SCREENSHOT_DIR is set.
+      screendump_now "30-finish"
       sleep 1
       sendkey ret
       log "step ${reboot_accept_idx}/${reboot_accept_idx} (accept-reboot-now): sent 'ret'"

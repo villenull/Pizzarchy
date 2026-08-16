@@ -1,19 +1,83 @@
 # docs/images provenance -- written by tools/capture-screenshots.sh
 # Regenerate with: tools/capture-screenshots.sh --iso <the SHIPPING iso>
 
-generated:        2026-08-16T13:15:17-06:00
+generated:        2026-08-16T15:52:29-06:00
 installer ISO:    /home/huyke/.cache/omarchy-deck/iso-build/release/omarchy-2026.08.16-x86_64-quattro.iso
-  built:          2026-08-16 12:28:29
+  built:          2026-08-16 15:27:59 (iso9660 volume-creation stamp, written by the build)
   bytes:          6491736064
-OSK substrate:    /home/huyke/Pizzarchy/test/images/neptune-substrate.raw
-  ⚠️ the keyboard frames do NOT come from the ISO. vm-osk-tty-test.sh
-     copies src/deck-input-mapper.py and src/deck_osk_*.py onto the
-     substrate at run time, so they show the WORKING TREE's keyboard.
-     Same code the ISO carries, different carrier -- say so if it matters.
-installer suite:  skipped
-OSK suite:        skipped
-frames written:   7
+  file mtime:     2026-08-16 15:28:55  (NOT the build time -- see iso_build_time)
+sample run:       pass
+install-progress: /home/huyke/.cache/omarchy-deck/agent-t/shots/install/progress-0394.ppm
+                  (from test/vm/vm-install-controller-test.sh, a separate
+                   full-install run -- this script converts, never launches it)
+frames written:   8
 
-NOT capturable in QEMU, and why:
-  install-02-wifi     no wlan0 in a VM, so S1 never draws a network list
-  install-05-progress the screens suite stops at the final gate by design
+IS THIS ISO CURRENT? -- commits touching shipped paths (iso/, src/) that
+are NEWER than the ISO's own build stamp:
+  none.
+  ⚠️ The stamp is when the build FINISHED, and a build takes ~40 min, so
+     a commit slightly OLDER than it can still be missing. To settle it,
+     extract the ISO's own copy and compare:
+       7z x -so <iso> arch/x86_64/airootfs.sfs >a.sfs && \
+       7z x -so a.sfs usr/share/omarchy-iso/deck-form.sh | sha256sum
+
+  The four files that draw every screen in this directory, as they are
+  in the working tree right now:
+    f79030cbedeeb67fbb2e87b846b632ef381b7fcdc571064f4d6ed7d5d4a07bb8  iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh
+    10baacaf6eeb63f2a28f6795bc76b32c8de366dc1b40f677432ca13f00f81f1d  src/deck-input-mapper.py
+    3c4990672fde7ef1871db2d9e65a7448779065d1d27629c0bf69d2532586c90f  src/deck_osk_tty.py
+    08ed171beedbfa426e27af20b7cd22b5215673b947cef63367f123c24fb88012  src/deck_osk_layout.py
+  ✅ VERIFIED 2026-08-16 by extraction: all four are byte-identical inside
+     this ISO (deck-form.sh at usr/share/omarchy-iso/, the other three at
+     usr/local/bin/deck-input-mapper and usr/local/lib/deck-osk/). The ISO
+     was rebuilt at 15:27:59 that day; the rebuild changed
+     deck_steam_bootstrap.py, deck-session.sh and a screensaver patch --
+     none of which draws an installer screen.
+
+CROPPING: none. Every PNG here is the complete 1280x800 emulated VGA
+framebuffer -- a 160x50 console, the same character geometry
+docs/PROGRESS.md §7 measured on the Deck's own live console. No trim,
+no crop, no scaling. What you see is the whole screen.
+
+SAMPLE-DRIVEN (real screen, made-up contents):
+  install-02-wifi.png
+    The five EXAMPLE-* network names and their signal bars are SAMPLE
+    DATA. QEMU has no radio, so a stub stands in for `iwctl station
+    wlan0 get-networks` for the length of one capture run and prints
+    that table in iwd's own format. EVERYTHING ELSE IS REAL: a real
+    wireless interface (mac80211_hwsim), deck-form.sh's real parser,
+    its real row builder, its real gum list, on a real console.
+    No pixel of this image was drawn by hand.
+  install-04-confirm.png / install-04c-confirm-default.png / the two recaps
+    THE DISK IS THE VM'S, and it looks like it: '0x1af4 (  64M)' and
+    '/dev/vda'. On a Deck those read as the real internal NVMe and its
+    real size. The 64 MiB scratch device is deliberate and is NOT made
+    bigger for the photograph: it is the sole eligible install disk in
+    this run, and keeping it tiny and misaligned is what guarantees a
+    stray keypress cannot complete an install. A prettier number is not
+    worth trading that for. Same for hostname 'steamdeck' and timezone
+    'Europe/Amsterdam' -- defaults an offline VM lands on, not choices.
+  install-04b-final-gate.png
+    SAME SAMPLE DATA, SECOND-HAND. Its recap table has a `Wi-Fi` row,
+    and the value in it is the sample network the run joined
+    (`EXAMPLE-Cafe-Guest`). The row itself, and the fact that joining a
+    network removes the black-screen warning from this screen, are real.
+
+GUEST FIXTURES USED BY THE SAMPLE RUN (present in QEMU, unnecessary on
+a Deck, and never shipped):
+  modprobe hid_steam       so the lizard-mode knob exists and the
+                           installer's real step succeeds instead of
+                           printing its 'not present under QEMU' warning
+  modprobe mac80211_hwsim  a real wireless interface for the screen to find
+  a uinput Deck pad        so deck-input-mapper binds and --osk-start-shown
+                           DRAWS the real on-screen keyboard
+  The characters in the username field were sent as key events over QMP,
+  not typed with a trackpad. test/vm/vm-osk-tty-test.sh is the suite that
+  proves a trackpad types; this run photographs the screen.
+
+STILL NOT CAPTURABLE, and why:
+  a real network list       needs a radio
+  anything about legibility these are the right character geometry, not
+                            the right physical size; 7-inch legibility
+                            is a hardware question
+  the first-boot screens    they happen after the reboot, on hardware
