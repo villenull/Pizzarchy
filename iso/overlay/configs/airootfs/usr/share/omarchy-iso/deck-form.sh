@@ -1709,11 +1709,14 @@ deck_form_net_failure_action_for() {
 #     install gets it and the speakers are fine. `steam` is the only entry
 #     left in the fetch list, and it stays online on Steam Subscriber
 #     Agreement grounds, which is not negotiable.
-#     ⚠️ The identical stale claim is still in DECK_S0_LINES above
+#     ✅ FIXED 2026-08-16. DECK_S0_LINES carried the identical stale claim
 #     ("Steam and the audio DSP firmware are downloaded from Valve during
-#     setup"). It is NOT fixed here because
-#     test/vm/vm-installer-screens-test.sh asserts that sentence verbatim and
-#     this file's owner does not own that suite -- reported instead.
+#     setup") and could not be corrected in the same pass, because
+#     test/vm/vm-installer-screens-test.sh asserted that sentence VERBATIM and
+#     the two files had different owners -- a test pinning user-facing prose in
+#     place is how the lie survived a month. Both were changed together in
+#     105523c; the screen now says "Steam is downloaded from Valve during
+#     setup; everything else is already on this USB stick."
 #
 #  2. "Gaming Mode will have no Steam" MASSIVELY understates the outcome.
 #     docs/findings/P32-steam-never-installed.md, on hardware: with no Steam,
