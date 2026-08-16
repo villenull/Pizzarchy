@@ -75,6 +75,8 @@ image — see [Recovery](#recovery).
 | **STEAM** | apps menu |
 | **QAM** (the ⋯ button) | the Omarchy menu |
 
+![The on-screen keyboard on the desktop, aimed with the trackpads](docs/images/desktop-osk.png)
+
 ---
 
 ## What's supported
