@@ -8,8 +8,7 @@ trackpads.
 
 Afterwards, the Deck behaves like it always did as turning your Deck on lands you in Gaming Mode and power button puts the Deck to sleep/wake. The difference is **Desktop Mode**, which now drops you into an Omarchy/Hyprland desktop. Use the QAM button and menu to go back to Gaming Mode.
 
-> _**[ IMAGE — hero: the Deck in hand, running the Omarchy desktop ]**_
-> `docs/images/hero-desktop.png`
+![Omarchy's desktop running on a Steam Deck](docs/images/hero-desktop.png)
 
 ---
 
