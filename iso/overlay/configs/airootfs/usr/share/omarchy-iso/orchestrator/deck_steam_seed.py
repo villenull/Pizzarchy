@@ -1,19 +1,44 @@
-"""P34. Answer Steam's first-run wizard from what the installer already knows.
+"""P34, corrected in P33. Answer Steam's first-run wizard from what the
+installer already knows.
 
 SHIPPED AS ``/usr/share/omarchy-iso/orchestrator/deck_steam_seed.py``, a module
 inside the upstream orchestrator package, hence the relative imports.
 ``test/unit/test-deck-steam-seed.py`` builds the package shape around it.
 
-WHAT WAS OBSERVED, AND WHAT IS ACTUALLY WRONG WITH IT
-=====================================================
+🔴 THE DEFECT THIS FILE SHIPPED, AND THE CORRECTION
+===================================================
 
-On the first hardware boot (2026-08-16) the user is walked through Steam's own
-out-of-box experience: **choose a language**, then **choose a region**, then a
-client update that fails, then a restart, then a login prompt. The operator:
-"it works but just super weird and unintuitive for an install."
+The first version derived Steam's language from the **console keymap**. This
+docstring named the trap in advance -- *"a keymap is not a language"* -- and the
+module walked into it anyway, because a keymap was the only linguistic answer it
+could see.
 
-The redundancy is real but it is NOT the one it looks like, and the difference
-decides the whole design:
+Measured on hardware, 2026-08-16. The operator picked **English** as the system
+language and a **Spanish (Latin American) keyboard** -- an entirely ordinary
+combination. The seed read the keyboard, so Steam came up in Spanish:
+
+    "we successfully skipped the Steam language and region input which is
+    great. BUT Steam chose Spanish as my language even though I had selected
+    English as my language in the Omarchy setup. I believe this is because I
+    chose English as language but Spanish LatAm as my keyboard."
+
+They are right. The keymap -> BCP 47 -> Steam-language chain is **deleted**,
+including the ``/usr/share/systemd/kbd-model-map`` reading it rested on and the
+hand-written tag table at its far end. Nothing in this module reads a keymap.
+
+The language now comes from the **system locale**, which is the only value in
+the install that claims to be a language at all. What survives from the old
+design is its *shape*, which was the good part: an input this module cannot
+resolve with confidence seeds **nothing**, including the OOBE flag, so the user
+keeps their choice.
+
+WHAT WAS OBSERVED IN THE FIRST PLACE
+====================================
+
+On the first hardware boot the user is walked through Steam's own out-of-box
+experience: **choose a language**, then **choose a region**, then a client
+update that fails, then a restart, then a login prompt. The operator: "it works
+but just super weird and unintuitive for an install."
 
 * **Region IS a duplicate.** Screen S2 of our own installer
   (``deck-form.sh``'s ``omarchy_prompt_timezone``) asks for an IANA timezone
@@ -24,12 +49,20 @@ decides the whole design:
   for the timezone. The system value is already correct; the question just
   needs not to be asked.**
 
-* **Language is NOT a duplicate.** Our installer never asks for one.
-  ``iso/upstream/.../root/configurator`` hard-codes ``"sys_lang":
-  "en_US.UTF-8"`` (lines 780 and 1166 -- READ). The only user-supplied
-  linguistic answer anywhere in the install is ``locale_config.kb_layout``,
-  which is a **console keymap**, not a language. Any claim that we can simply
-  "carry the language over" is false, and this module does not make it.
+* **Language is answerable after all**, just not from the keyboard. It travels
+  the same route the keymap did: ``iso/upstream/.../root/configurator``:832-836
+  and :1221-1225 write ``"locale_config": {"kb_layout": ..., "sys_enc":
+  "UTF-8", "sys_lang": "en_US.UTF-8"}``, ``InstallContext.from_env`` parses that
+  document verbatim into ``ctx.user_configuration`` (``context.py``:50, :112),
+  and archinstall turns ``sys_lang`` into the target's ``/etc/locale.conf``.
+  ``sys_lang`` is the system's language; ``kb_layout`` never was.
+
+  Today ``sys_lang`` is a **constant**, so in practice this module now seeds
+  ``english`` on every standard install -- which is both what the system is and
+  what the operator expected. It is not written as a constant because the value
+  is not one: the configurator is upstream's file, an autoinstall config
+  (``OMARCHY_INSTALL_CONFIG``) is a user-supplied document, and a locale this
+  module cannot resolve has to degrade rather than guess.
 
 WHY THE ONE LEVER IS ALL-OR-NOTHING
 ===================================
@@ -83,6 +116,15 @@ OOBE welcome-text table in the shipped ``steamui/2561.js``
 (``english``, ``latam``, ``koreana``, ``schinese``...). ``STEAM_LANGUAGES``
 below is that list, and a derived value that is not in it is never written.
 
+Nor is the **mapping** to them invented. ``LANGUAGE_CODE_TO_STEAM`` below is a
+verbatim transcription of the ``Map`` in the shipped ``steamui/library.js``
+(webpack module ``51579``), which is the client's own language-code table --
+``["en","english"], ["es-419","latam"], ["pt-br","brazilian"],
+["zh-tw","tchinese"], ["nb","norwegian"]`` and so on. The same file pairs the
+same short names against the same codes a second time, in the ``Qt``/``Jt``
+enum switches; the two agree. Read 2026-08-16 off ``~/.local/share/Steam`` on
+the dev machine.
+
 WHAT IS **NOT** SEEDED, AND WHY
 ===============================
 
@@ -106,29 +148,56 @@ WHAT IS **NOT** SEEDED, AND WHY
   completing OOBE unblocks it. A Steam account cannot be logged into from
   local config, and this module does not pretend otherwise.
 
-THE CONFIDENCE RULE (the "a keymap is not a language" trap)
-===========================================================
+THE DERIVATION, AND THE CONFIDENCE RULE IT KEEPS
+================================================
 
-The derivation is keymap -> BCP 47 language tags -> Steam short name, and the
-middle step is **read off the target**, not invented:
-``/usr/share/systemd/kbd-model-map`` (shipped by ``systemd``, present on the
-target) documents its own sixth column as "a comma-separated list of RFC 4646 /
-BCP 47 language tags the row matches". ``la-latin1`` is ``es-419,es-MX,...``;
-``jp106`` is ``ja-JP,ja``; ``us`` is ``en-US,en``.
+``en_US.UTF-8`` -> language ``en``, territory ``US`` -> the client's own table
+-> ``english``. Three lookups, in order, and none of them is a guess:
 
-Only the last hop -- language tag to Steam's own spelling -- is a table in this
-file, and it is small, total and checkable (``BCP47_TO_STEAM``).
+1. the full ``language-territory`` code, lowercased (``pt_BR`` -> ``pt-br`` ->
+   ``brazilian``; ``zh_TW`` -> ``zh-tw`` -> ``tchinese``);
+2. the two region rules the client's table implies but cannot express, because
+   the codes it splits on are CLDR groupings rather than territories --
+   **Spanish** (``es-419`` is Latin America, so ``es_MX``/``es_AR``/``es_CO``
+   -> ``latam`` while ``es_ES`` -> ``spanish``) and **Chinese** (``zh_HK`` and
+   ``zh_MO`` are Traditional, i.e. ``tchinese``);
+3. the bare language code (``en`` -> ``english``, ``de_CH`` -> ``de`` ->
+   ``german``, ``nl_BE`` -> ``nl`` -> ``dutch``).
 
-**A row whose tags do not all resolve to one Steam language yields nothing.**
-``be-latin1`` is ``fr-BE,nl-BE`` (French or Dutch -- a coin flip); ``ie`` is
-``en-IE,ga-IE,ga`` (Irish is not a Steam language). Both are ambiguous, both
-seed nothing, and both therefore get **today's behaviour: the wizard appears**.
-The same is true of a keymap with no row at all (``colemak``, ``neo``) and of
-one whose row has no tags and whose X layout has none either.
+🔴 Note what step 3 does to the case that defeated the keymap version:
+``be-latin1`` was ``fr-BE,nl-BE`` and unanswerable, but ``nl_BE.UTF-8`` is
+Dutch and answerable. A locale carries the answer the keyboard never did.
+
+**A locale the client's own table does not contain yields nothing.** ``he_IL``
+(Hebrew), ``sr_RS`` (Serbian), ``ga_IE`` (Irish) and ``nn_NO`` (Nynorsk -- the
+client lists ``nb`` and ``no`` but not ``nn``) are all refusals, as are ``C``,
+``POSIX`` and ``C.UTF-8``, which are not languages. Every refusal gets
+**today's behaviour: the wizard appears** and the user picks.
 
 🔴 **No confident language means no OOBE seed either.** Marking the wizard done
-while silently imposing English on a user we know nothing about would remove
-their only chance to choose. The two writes stand or fall together.
+while silently imposing English on a user whose locale we could not read would
+remove their only chance to choose. The two writes stand or fall together.
+
+WHY THE LANGUAGE IS WRITTEN AT ALL, RATHER THAN JUST THE FLAG
+=============================================================
+
+``CompletedOOBEStage1`` is the only gate, so setting it alone *would* skip the
+wizard and Steam would fall back to a default of its own. The client's own
+string-to-enum function defaults to ``english`` (``er(e, t=bt)``, ``bt`` = 0 =
+``english``, ``steamui/library.js``), so on an ``en_US`` system flag-only would
+very probably land on English too. This module writes the language anyway, for
+three reasons:
+
+* "very probably" is an inference about somebody else's fallback, and the
+  defect above is exactly what inference costs here. The written value is a
+  fact under our control and is read back off the disk (``verify``).
+* It is the operator's verification surface. ``grep language
+  ~/.steam/registry.vdf`` has something to read; a flag-only seed leaves
+  nothing to check but the absence of a wizard.
+* It generalises. The moment ``sys_lang`` stops being a constant -- an
+  autoinstall config, or upstream adding a language question -- flag-only
+  silently gives every non-English install an English Steam, which is this
+  defect again with a different cause.
 
 DEGRADATION, WHICH IS THE POINT
 ===============================
@@ -140,16 +209,30 @@ existing ``registry.vdf`` that does not parse is **reported and left alone**,
 never rewritten: a client that already has state is worth more than a skipped
 wizard. Existing values are never overwritten, only absent ones filled in.
 
-⚠️ **UNVERIFIED ON HARDWARE.** P34 has no Deck access (sshd is gone after the
-reinstall). Everything above is read off the shipped Steam client and off real
-config files; nothing here has been observed suppressing the wizard on a Deck.
-The one command that settles it, on the installed machine:
+⚠️ **THE LANGUAGE FIX IS UNVERIFIED ON HARDWARE.** The *defect* is verified --
+the operator watched Steam come up in Spanish. The correction is read off the
+shipped Steam client and off real config files, and has not been observed
+producing an English Steam on a Deck. The one command that settles it, on the
+installed machine:
 
     jq .steam_seed /var/log/omarchy-deck-install.json &&
       grep -E '"(CompletedOOBEStage1|language)"' ~/.steam/registry.vdf
 
-⚠️ **File ownership within ``~/.steam`` is shared with P34's Steam pre-warm
-step** (``deck_steam_prewarm.py``). This module writes exactly one path,
+``language_on_disk`` in that record is the value Steam will actually use; the
+``grep`` is the same fact read straight off the file rather than out of our own
+report of it.
+
+⚠️ **ORDERING AGAINST ANY STEP THAT RUNS THE REAL STEAM CLIENT.** This module
+must run **before** one, not after. It never overwrites an existing value, so a
+client that has already written ``language`` (or, worse, a
+``CompletedOOBEStage1`` that is not ``"1"``) wins and the wizard comes back --
+loudly, via ``verify``, but it comes back. Run first and the client reads our
+seed instead, and carries it forward when it rewrites the file.
+``bin_steam.sh``:165 only creates ``~/.steam`` when it is missing and never
+removes anything inside it, so the seed survives a bootstrap that runs after it.
+
+⚠️ **File ownership within ``~/.steam`` is shared with the Steam pre-warm /
+bootstrap steps.** This module writes exactly one path,
 ``<home>/.steam/registry.vdf`` (plus the ``/etc/skel`` copy of it), and creates
 ``<home>/.steam`` if absent. It touches nothing under ``~/.local/share/Steam``.
 """
@@ -179,11 +262,10 @@ REGISTRY_REL = ".steam/registry.vdf"
 # cheap surface and it needs no account.
 SKEL_REGISTRY_REL = f"etc/skel/{REGISTRY_REL}"
 
-# systemd's console-keymap table, and the only non-invented keymap -> language
-# mapping available. Read from the TARGET first: it is the system the seed is
-# for, and the ISO's systemd may not be the installed one.
-KBD_MODEL_MAP_REL = "usr/share/systemd/kbd-model-map"
-LIVE_ROOT = Path("/")
+# The installed system's language, as archinstall writes it from `sys_lang`.
+# Only consulted when the install config does not carry a locale itself; the
+# config is the primary source and this is the same value one hop later.
+LOCALE_CONF_REL = "etc/locale.conf"
 
 REGISTRY_MODE = 0o644
 DOT_STEAM_MODE = 0o755
@@ -191,7 +273,7 @@ DOT_STEAM_MODE = 0o755
 # A registry.vdf a Steam has been living in for years is a few tens of KiB.
 # The cap is here because this is a root process reading a file into memory.
 MAX_REGISTRY_BYTES = 4 * 1024 * 1024
-MAX_MODEL_MAP_BYTES = 4 * 1024 * 1024
+MAX_LOCALE_CONF_BYTES = 64 * 1024
 
 # ---------------------------------------------------------------------------
 # The keys
@@ -248,51 +330,69 @@ STEAM_LANGUAGES = frozenset(
     }
 )
 
-# BCP 47 primary subtag -> Steam short name, for the tags that appear in
-# kbd-model-map. Deliberately partial: a subtag that is not here (he, hr, sl,
-# sr, sk, lt, lv, et, is, mk, be, kk, ka, km, tg, ga, fa, ...) has no Steam
-# language, and the correct answer for it is to seed nothing.
+# 🔴 NOT a hand-written table. This is the `Map` in the shipped
+# `steamui/library.js` (webpack module 51579), transcribed key for key, read
+# 2026-08-16 off ~/.local/share/Steam on the dev machine. The client uses it to
+# turn a language code into its own short name; we use it for exactly that and
+# nothing else.
 #
-# nb/nn/no all collapse to `norwegian` -- Steam ships one Norwegian, and the
-# `no` keymap's tags are `nb-NO,nn-NO,no`, which would otherwise read as three
-# disagreeing answers.
-BCP47_TO_STEAM = {
-    "ar": "arabic",
-    "bg": "bulgarian",
-    "cs": "czech",
-    "da": "danish",
-    "de": "german",
-    "el": "greek",
+# The previous version of this module derived a language from the console
+# keymap through a table written here from memory-of-a-standard. That is the
+# defect the docstring opens with. A code that is not a key of this map has no
+# Steam language as far as the client is concerned, and the correct answer is
+# to seed nothing -- `nn` (Nynorsk) is the notable one: the client lists `nb`
+# and `no`, not `nn`, and this module does not add it.
+LANGUAGE_CODE_TO_STEAM = {
     "en": "english",
-    "fi": "finnish",
+    "de": "german",
     "fr": "french",
-    "hu": "hungarian",
-    "id": "indonesian",
     "it": "italian",
-    "ja": "japanese",
     "ko": "koreana",
-    "ms": "malay",
-    "nb": "norwegian",
-    "nl": "dutch",
-    "nn": "norwegian",
-    "no": "norwegian",
-    "pl": "polish",
-    "ro": "romanian",
+    "es-419": "latam",
+    "es": "spanish",
+    "zh": "schinese",
+    "zh-cn": "schinese",
+    "zh-tw": "tchinese",
     "ru": "russian",
-    "sv": "swedish",
+    "ar": "arabic",
     "th": "thai",
+    "ja": "japanese",
+    "pt-br": "brazilian",
+    "pt": "portuguese",
+    "pl": "polish",
+    "da": "danish",
+    "nl": "dutch",
+    "fi": "finnish",
+    "nb": "norwegian",
+    "no": "norwegian",
+    "sv": "swedish",
+    "hu": "hungarian",
+    "cs": "czech",
+    "ro": "romanian",
     "tr": "turkish",
+    "bg": "bulgarian",
+    "el": "greek",
     "uk": "ukrainian",
+    "vn": "vietnamese",
     "vi": "vietnamese",
+    "id": "indonesian",
+    "ms": "malay",
 }
 
-# Three languages where Steam splits by region and the tag carries the split.
-# `la-latin1` is es-419/es-MX/... (latam); `es` is es-ES (spain). `br-abnt2` is
-# pt-BR; `pt-latin1` is pt-PT. Chinese has no console keymap in kbd-model-map,
-# but the rule is written down rather than left to a future guess.
+# The two splits the map above encodes as CLDR groupings rather than as
+# territories, so a glibc locale cannot hit them by string match alone.
+#
+# `es-419` is UN M.49 region 419, "Latin America and the Caribbean". Every
+# Spanish locale outside Spain falls in it -- es_MX, es_AR, es_CO, es_CL, es_PE,
+# es_VE, es_US... -- so the rule is stated the short way round: Spain is
+# `spanish`, the rest is `latam`. 🔴 This is the operator's own case
+# (Spanish LatAm) and the reason the split is not left to the bare `es` key.
 SPANISH_SPAIN_REGIONS = frozenset({"ES"})
-PORTUGUESE_BRAZIL_REGIONS = frozenset({"BR"})
-CHINESE_TRADITIONAL_REGIONS = frozenset({"TW", "HK", "MO", "HANT"})
+
+# `zh-tw` is the map's Traditional entry. Hong Kong and Macau write Traditional
+# too and have their own locales (zh_HK, zh_MO); zh_CN and zh_SG are Simplified
+# and reach `schinese` through the bare `zh` key the client itself provides.
+CHINESE_TRADITIONAL_REGIONS = frozenset({"TW", "HK", "MO"})
 
 
 class DeckSteamSeedError(Exception):
@@ -483,148 +583,112 @@ def read_leaf(doc: list, path: tuple[str, ...], key: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# keymap -> Steam language
+# system locale -> Steam language
+#
+# 🔴 There is deliberately no keymap in this section, and no reader for
+# /usr/share/systemd/kbd-model-map. Both were here, both produced a Spanish
+# Steam on an English system, and both are gone. See the docstring.
 # ---------------------------------------------------------------------------
 
 
-def parse_kbd_model_map(text: str) -> list[tuple[str, str, list[str]]]:
-    """``[(console keymap, x layout, [bcp47 tags]), ...]``.
+def parse_locale(value: str) -> tuple[str, str] | None:
+    """``"es_MX.UTF-8@euro"`` -> ``("es", "MX")``. ``None`` if it is not a
+    language at all.
 
-    The file's own header documents the columns; the sixth is the tag list, and
-    ``-`` (or a short row) means "no tags apply". Malformed rows are skipped
-    rather than raising, for ``deck_user.parse_passwd``'s reason: one bad line
-    in a file we did not write must not cost us the rest of it.
+    glibc's locale name is ``language[_TERRITORY][.codeset][@modifier]``. The
+    codeset and the modifier say nothing about which language Steam should
+    render, so both are dropped. ``C``, ``POSIX`` and ``C.UTF-8`` are the
+    portable locales rather than languages and are rejected here, not later.
     """
-    rows: list[tuple[str, str, list[str]]] = []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        fields = line.split()
-        if len(fields) < 2:
-            continue
-        keymap, xlayout = fields[0], fields[1]
-        tags: list[str] = []
-        if len(fields) >= 6 and fields[5] != "-":
-            tags = [t for t in fields[5].split(",") if t and t != "-"]
-        rows.append((keymap, xlayout, tags))
-    return rows
-
-
-def _steam_language_for_tag(tag: str) -> str | None:
-    """One BCP 47 tag -> a Steam short name, or None.
-
-    Region matters for exactly the three languages Steam splits, and the split
-    is taken from the tag rather than assumed.
-    """
-    parts = [p for p in tag.replace("_", "-").split("-") if p]
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    for sep in ("@", "."):
+        head, _, _tail = text.partition(sep)
+        text = head
+    if not text:
+        return None
+    parts = [p for p in text.replace("-", "_").split("_") if p]
     if not parts:
         return None
-    primary = parts[0].lower()
-    subtags = {p.upper() for p in parts[1:]}
+    language = parts[0].lower()
+    if language in ("c", "posix"):
+        return None
+    if not language.isalpha() or not 2 <= len(language) <= 3:
+        return None
+    territory = parts[1].upper() if len(parts) > 1 else ""
+    if territory and not territory.isalnum():
+        territory = ""
+    return language, territory
 
-    if primary == "es":
-        return "spanish" if not subtags or subtags & SPANISH_SPAIN_REGIONS else "latam"
-    if primary == "pt":
-        return "brazilian" if subtags & PORTUGUESE_BRAZIL_REGIONS else "portuguese"
-    if primary == "zh":
-        return "tchinese" if subtags & CHINESE_TRADITIONAL_REGIONS else "schinese"
-    return BCP47_TO_STEAM.get(primary)
 
+def steam_language_for_locale(locale: str) -> tuple[str | None, str]:
+    """``(steam language | None, reason)`` for a system locale.
 
-def steam_language_for_keymap(keymap: str, rows) -> tuple[str | None, str]:
-    """``(steam language | None, reason)`` for a console keymap.
-
-    Two lookups, in order:
-
-    1. the keymap's own row's tags;
-    2. failing that, the tags of every row sharing its X layout -- ``de-latin1``
-       has no tags of its own but its layout ``de`` does, via the plain ``de``
-       row. Same X layout means the same language; this is the only inference
-       in the chain and it is a small one.
-
-    A tag set is only accepted when **every** tag resolves and they all resolve
-    to the **same** Steam language. ``be-latin1`` (fr-BE, nl-BE) and ``ie``
-    (en-IE, ga-IE, ga) are therefore refusals, by design.
+    Three lookups, in the order the docstring sets out: the full
+    ``language-territory`` code, then the two region splits the client's map
+    encodes as CLDR groupings, then the bare language code. A locale that none
+    of the three resolves seeds **nothing**, which is the wizard appearing.
     """
-    if not keymap:
-        return None, "the install names no keyboard layout"
+    if not locale:
+        return None, "the install names no system locale"
 
-    wanted = keymap.lower()
-    own = [row for row in rows if row[0].lower() == wanted]
-    if not own:
-        return None, f"'{sanitize_text(keymap)}' has no row in {KBD_MODEL_MAP_REL}"
-
-    xlayout = own[0][1]
-    tags = [t for row in own for t in row[2]]
-    source = "its own row"
-    if not tags:
-        tags = [t for row in rows if row[1] == xlayout for t in row[2]]
-        source = f"the '{xlayout}' X layout it shares"
-    if not tags:
+    parsed = parse_locale(locale)
+    if parsed is None:
         return None, (
-            f"neither '{sanitize_text(keymap)}' nor the '{sanitize_text(xlayout)}' X layout "
-            f"carries a BCP 47 tag in {KBD_MODEL_MAP_REL}"
+            f"'{sanitize_text(locale)}' is not a language locale, so nothing is seeded "
+            "and Steam asks"
         )
+    language, territory = parsed
+    shown = f"{language}_{territory}" if territory else language
 
-    resolved = [_steam_language_for_tag(t) for t in tags]
-    if any(r is None for r in resolved):
-        unknown = sorted({t for t, r in zip(tags, resolved) if r is None})
+    code = f"{language}-{territory.lower()}" if territory else language
+    steam = LANGUAGE_CODE_TO_STEAM.get(code)
+    how = f"'{code}' in the client's own language map"
+
+    if steam is None and language == "es":
+        # es_ES is Spain; every other Spanish territory is UN M.49 region 419.
+        steam = "spanish" if territory in SPANISH_SPAIN_REGIONS else "latam"
+        how = "the es-419 / es split in the client's own language map"
+    if steam is None and language == "zh" and territory in CHINESE_TRADITIONAL_REGIONS:
+        steam = "tchinese"
+        how = "the zh-tw / zh split in the client's own language map"
+    if steam is None:
+        steam = LANGUAGE_CODE_TO_STEAM.get(language)
+        how = f"'{language}' in the client's own language map"
+
+    if steam is None:
         return None, (
-            f"'{sanitize_text(keymap)}' maps to {','.join(tags)} via {source}, and "
-            f"{','.join(unknown)} is not a language Steam ships -- ambiguous, so nothing "
-            "is seeded and Steam asks"
+            f"'{sanitize_text(shown)}' is not a language the shipped Steam client offers "
+            "-- nothing is seeded and Steam asks"
         )
-    distinct = sorted(set(resolved))
-    if len(distinct) != 1:
+    if steam not in STEAM_LANGUAGES:
+        # Unreachable while the transcription matches the client: every value in
+        # LANGUAGE_CODE_TO_STEAM is one of the 31, and the suite proves it
+        # against the shipped file. The guard is for the drift -- the client's
+        # `IsValidLanguage` set is 32, and the extra one (`sc_schinese`, the
+        # Steam China client's) is NOT an OOBE choice. Loud rather than silent:
+        # a language the wizard does not offer would be written into the
+        # registry and quietly ignored.
         return None, (
-            f"'{sanitize_text(keymap)}' maps to {','.join(tags)} via {source}, which is "
-            f"{' or '.join(distinct)} -- ambiguous, so nothing is seeded and Steam asks"
+            f"'{sanitize_text(steam)}' is not one of the {len(STEAM_LANGUAGES)} short names "
+            "the shipped Steam client's first-run wizard offers"
         )
-
-    language = distinct[0]
-    if language not in STEAM_LANGUAGES:
-        # Unreachable unless BCP47_TO_STEAM drifts from the client's own list.
-        # Loud rather than silent: a language Steam does not know would be
-        # written into its registry and quietly ignored.
-        return None, (
-            f"'{sanitize_text(language)}' is not one of the {len(STEAM_LANGUAGES)} short names "
-            "the shipped Steam client offers"
-        )
-    return language, f"'{sanitize_text(keymap)}' -> {','.join(tags)} via {source} -> {language}"
+    return steam, f"'{sanitize_text(shown)}' -> {steam}, via {how}"
 
 
-def read_model_map(target, live_root=LIVE_ROOT) -> tuple[list, str]:
-    """The target's copy, else the live ISO's. Returns ``(rows, where)``."""
-    candidates = [
-        (Path(target) / KBD_MODEL_MAP_REL, f"target:/{KBD_MODEL_MAP_REL}"),
-        (Path(live_root) / KBD_MODEL_MAP_REL, f"live:/{KBD_MODEL_MAP_REL}"),
-    ]
-    for path, where in candidates:
-        try:
-            data = path.read_bytes()
-        except OSError:
-            continue
-        if len(data) > MAX_MODEL_MAP_BYTES:
-            raise DeckSteamSeedError(f"{path} is {len(data)} bytes; refusing to parse it")
-        rows = parse_kbd_model_map(data.decode("utf-8", "replace"))
-        if rows:
-            return rows, where
-    raise DeckSteamSeedError(
-        f"/{KBD_MODEL_MAP_REL} is missing or empty on both the target and the live ISO, "
-        "so a keyboard layout cannot be turned into a language"
-    )
+def locale_from_ctx(ctx) -> str:
+    """The system language, from where the configurator actually puts it.
 
+    ``iso/upstream/.../root/configurator``:832-836 writes ``"locale_config":
+    {"kb_layout": ..., "sys_enc": "UTF-8", "sys_lang": "en_US.UTF-8"}`` and
+    ``InstallContext.user_configuration`` (``context.py``:50, :112) is that
+    document verbatim. ``sys_lang`` is what archinstall's
+    ``minimal_installation(locale_config=...)`` turns into the target's
+    ``/etc/locale.conf``, i.e. it *is* the installed system's language.
 
-def keymap_from_ctx(ctx) -> str:
-    """The user's pick, from where the configurator actually puts it.
-
-    ``iso/upstream/.../root/configurator``:833 writes
-    ``"locale_config": {"kb_layout": "$keyboard", ...}`` and
-    ``InstallContext.user_configuration`` is that document verbatim.
-    ``deck-form.sh`` deliberately leaves this value alone ("the user's pick
-    still reaches archinstall, byte for byte") and overrides only the LIVE
-    console keymap, so this is the preference and not the mechanism.
+    🔴 Its sibling ``kb_layout`` is a console keymap and is NOT read here. That
+    substitution is the defect this module shipped.
     """
     config = getattr(ctx, "user_configuration", None)
     if not isinstance(config, dict):
@@ -632,8 +696,44 @@ def keymap_from_ctx(ctx) -> str:
     locale = config.get("locale_config")
     if not isinstance(locale, dict):
         return ""
-    value = locale.get("kb_layout")
+    value = locale.get("sys_lang")
     return value.strip() if isinstance(value, str) else ""
+
+
+def read_locale_conf(target) -> str:
+    """``LANG=`` from the target's ``/etc/locale.conf``, or ``""``.
+
+    The fallback for a config document that carries no ``sys_lang`` of its own
+    (an autoinstall JSON, a future upstream shape). Same value one hop later:
+    archinstall wrote this file *from* ``sys_lang``. Absent or unreadable is a
+    normal answer, not a failure -- the caller degrades to seeding nothing.
+    """
+    path = Path(target) / LOCALE_CONF_REL
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    if len(data) > MAX_LOCALE_CONF_BYTES:
+        raise DeckSteamSeedError(f"/{LOCALE_CONF_REL} is {len(data)} bytes; refusing to parse it")
+    for raw in data.decode("utf-8", "replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "LANG":
+            return value.strip().strip('"').strip("'")
+    return ""
+
+
+def resolve_locale(ctx, target) -> tuple[str, str]:
+    """``(locale, where it came from)``. Empty locale means neither had one."""
+    locale = locale_from_ctx(ctx)
+    if locale:
+        return locale, "config:locale_config.sys_lang"
+    locale = read_locale_conf(target)
+    if locale:
+        return locale, f"target:/{LOCALE_CONF_REL}"
+    return "", "nowhere"
 
 
 # ---------------------------------------------------------------------------
@@ -769,18 +869,18 @@ def verify(path: Path, label: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def seed_steam(ctx, live_root=LIVE_ROOT) -> dict:
+def seed_steam(ctx) -> dict:
     """Do the work; return the install record. Never raises."""
     target = Path(ctx.target)
     record: dict = {
         "status": None,
-        "keymap": None,
+        "locale": None,
+        "locale_source": None,
         "language": None,
         # What Steam will actually use, read back off the disk. Differs from
         # `language` exactly when the registry already carried one.
         "language_on_disk": None,
         "mapping": None,
-        "model_map": None,
         "oobe_key": f"{OOBE_STAGE1_KEY}={OOBE_STAGE1_VALUE}",
         "skel": None,
         "user": None,
@@ -791,13 +891,12 @@ def seed_steam(ctx, live_root=LIVE_ROOT) -> dict:
     }
     warnings: list[str] = record["warnings"]
 
-    # 1. The answer we already have. No answer -> no seed, and say why.
-    keymap = keymap_from_ctx(ctx)
-    record["keymap"] = sanitize_text(keymap) if keymap else None
+    # 1. The system's own language. No answer -> no seed, and say why.
     try:
-        rows, where = read_model_map(target, live_root)
-        record["model_map"] = where
-        language, reason = steam_language_for_keymap(keymap, rows)
+        locale, where = resolve_locale(ctx, target)
+        record["locale"] = sanitize_text(locale) if locale else None
+        record["locale_source"] = where
+        language, reason = steam_language_for_locale(locale)
     except (DeckSteamSeedError, OSError) as exc:
         record["status"] = "failed"
         record["error"] = sanitize_text(f"{type(exc).__name__}: {exc}", limit=400)

@@ -190,6 +190,33 @@ result_img="$WORK/result.raw"
 result_txt="$WORK/report.txt"
 pidfile="$WORK/qemu.pid"
 serial_log="$WORK/serial.log"
+qmp_sock="$WORK/qmp.sock"
+
+# --- OPTIONAL: pixel-exact screenshots, for tools/capture-screenshots.sh ----
+#
+# ⚠️ ADDITIVE AND GATED, BOTH SIDES. With VM_SCREENSHOT_DIR unset -- every CI
+# and every ordinary run -- QEMU is launched WITHOUT a QMP socket (SHOT_ARGS is
+# empty), the injected unit carries no OSK_SHOT variable, the guest's `shot`
+# helper returns immediately, and no watcher process is started. Nothing in the
+# guest's timing changes, which matters here: every assertion in section 5 is a
+# row count taken at a specific instant in a scripted pad sequence.
+#
+# WHY THIS SUITE AND NOT THE INSTALLER ONE FOR THE KEYBOARD. QEMU has no
+# gamepad, so in the installer harness the mapper never binds and the OSK is
+# never drawn -- there is nothing on that framebuffer to photograph. THIS suite
+# builds a Deck-shaped pad out of `uinput` inside the guest, binds the real
+# mapper to it, and draws the real keyboard on a real Linux console. It also
+# `chvt`s to the VT it is drawing on (2, then 3), which is what makes a
+# screendump -- a copy of the FOREGROUND console's framebuffer -- capture the
+# keyboard rather than whatever tty1 is showing. Both facts were checked
+# against this file before the hook was written; neither is assumed.
+VM_SCREENSHOT_DIR=${VM_SCREENSHOT_DIR:-}
+SHOT_ARGS=()
+if [[ -n $VM_SCREENSHOT_DIR ]]; then
+  mkdir -p "$VM_SCREENSHOT_DIR"
+  SHOT_ARGS=(-qmp "unix:${qmp_sock},server,nowait")
+  command -v socat >/dev/null || fail "VM_SCREENSHOT_DIR is set but 'socat' is not installed"
+fi
 
 log "copying the substrate image (the test must not mutate it)"
 case $BASE_DISK in
@@ -347,6 +374,13 @@ RESULTS=$OUT/results
 : >"$RESULTS"
 emit() { printf '%s\n' "$*" >>"$RESULTS"; }
 
+# `shot NAME` -- tell the HOST that the console currently shows NAME, so it can
+# take a pixel-exact QMP screendump of it. A no-op unless the host set
+# OSK_SHOT=1 in the injected unit (it only does that when VM_SCREENSHOT_DIR is
+# set), so an ordinary run writes nothing and waits for nothing. It deliberately
+# does NOT sleep: a pause here would move every subsequent measurement.
+shot() { [[ ${OSK_SHOT:-0} == 1 ]] || return 0; printf 'OSKSHOT:%s\n' "$1" >/dev/ttyS0 2>/dev/null; }
+
 # The report's first fact is that its author ran at all (T4 §6.4 lie #3): a
 # report with content but no `unit.ran=1` means every other line in it is
 # unexplained, and `finish` writes a report even when the probe dies early.
@@ -447,11 +481,40 @@ CONSOLE_ROWS=${CONSOLE_ROWS:-25}
 # check -- OSK_TOP/OSK_TOP3 feed the mapper, so it would draw off the bottom of
 # the guest console and every later assertion would blame the wrong thing. This
 # file's own header already forbids hardcoding a height.
+#
+# 🔴 FIXED 2026-08-16, and MEASURED, not reasoned about. As committed in
+# ac93758 this read `sys.path.insert(0, '$REPO_ROOT/src')`. The probe heredoc is
+# quoted (<<'PROBE'), so `$REPO_ROOT` is written into the guest LITERALLY and is
+# expanded by the GUEST's bash, where it has never been set. The probe runs
+# `set -u`, so the expansion aborts the whole command substitution -- and `||
+# echo 10` NEVER RUNS, because the failure is in the expansion, not in python's
+# exit status. OSK_HEIGHT came out EMPTY, `$((CONSOLE_ROWS - OSK_HEIGHT))` read
+# it as 0, and the keyboard was asked to draw at row 51 of a 50-row console.
+# Reproduced off-VM:
+#
+#   $ env -u REPO_ROOT bash -c 'set -u; H=$(python3 -c "...$REPO_ROOT..." \
+#       2>/dev/null || echo 10); echo "[$H]"'
+#   bash: REPO_ROOT: unbound variable
+#   [ ]
+#
+# and confirmed in the run's own report: console.rows=50, layout.tui_rows=50,
+# layout.osk_top=51, osk.shown=0. The modules are already installed at
+# /usr/local/lib/deck-osk a few lines above -- the same path `osk_rows()` below
+# uses -- so the guest imports the SHIPPED copy and no host path is referenced.
 OSK_HEIGHT=$(python3 -c "
-import sys; sys.path.insert(0, '$REPO_ROOT/src')
+import sys; sys.path.insert(0, '/usr/local/lib/deck-osk')
 import deck_osk_layout as osk, deck_osk_tty as tty
 print(len(tty.render(osk.OnScreenKeyboard(), osk.Cursors())))
 " 2>/dev/null || echo 10)
+# ⚠️ AND IT MUST NOT FAIL SILENTLY AGAIN (CLAUDE.md). A non-positive height is
+# not a degraded run, it is a run that measures the wrong thing while looking
+# busy -- exactly what the empty value above did for a whole 10-minute VM boot.
+if ! [[ $OSK_HEIGHT =~ ^[1-9][0-9]*$ ]]; then
+  emit "layout.osk_height_INVALID=[${OSK_HEIGHT}]"
+  echo "FATAL: could not derive the keyboard height in the guest (got '[$OSK_HEIGHT]')" >&2
+  exit 1
+fi
+emit "layout.osk_height=${OSK_HEIGHT}"
 TUI_ROWS=$((CONSOLE_ROWS - OSK_HEIGHT))
 OSK_TOP=$((TUI_ROWS + 1))
 # ⚠️ R-49: the console is NOT shrunk any more. `stty rows N` on a Linux VT
@@ -488,7 +551,14 @@ emit "mapper.bound=$(LC_ALL=C command grep -ac 'reading /dev' "$OUT/mapper.err")
 pad "key BTN_MODE 1"; pad "key BTN_NORTH 1"; pad "key BTN_NORTH 0"; pad "key BTN_MODE 0"
 sleep 1
 snap 2-osk-shown
-emit "osk.shown=$(LC_ALL=C command grep -ac 'shift' "$OUT/screen.2-osk-shown")"
+shot 2-osk-shown
+# ⚠️ 'L2 Shift', NOT 'shift'. KEY_ROWS made the labels chord-prefixed on
+# 2026-08-16 and the lowercase word vanished from the render entirely --
+# measured: 0 occurrences of 'shift', 2 of 'L2 Shift'. This grep silently
+# returned 0 and the check could never pass again. That is exactly the failure
+# this file's own header warns about in the other direction (a substring that
+# matches a keyboard that is not there); here it stopped matching one that is.
+emit "osk.shown=$(LC_ALL=C command grep -ac 'L2 Shift' "$OUT/screen.2-osk-shown")"
 # --- R-49 diagnostics: is the console still 50 rows, and where did all five
 # keyboard rows actually land? Two candidate causes, and these separate them:
 # (a) `stty rows` RESIZED the console, so row 46 does not exist and the kernel
@@ -497,19 +567,27 @@ emit "osk.shown=$(LC_ALL=C command grep -ac 'shift' "$OUT/screen.2-osk-shown")"
 emit "diag.stty_at_snap=$(stty size </dev/tty2 2>/dev/null | tr ' ' 'x')"
 emit "diag.vcs2_bytes=$(wc -c </dev/vcs2 2>/dev/null)"
 emit "diag.screen_lines=$(wc -l <"$OUT/screen.2-osk-shown")"
-emit "diag.rows_with_keys=$(LC_ALL=C command grep -an 'q *w *e *r *t\|a *s *d *f *g\|z *x *c *v *b\|shift\|1 *2 *3 *4 *5' "$OUT/screen.2-osk-shown" | cut -d: -f1 | tr '\n' ',')"
+emit "diag.rows_with_keys=$(LC_ALL=C command grep -an 'q *w *e *r *t\|a *s *d *f *g\|z *x *c *v *b\|L2 Shift\|1 *2 *3 *4 *5' "$OUT/screen.2-osk-shown" | cut -d: -f1 | tr '\n' ',')"
 emit "gum.survived=$(LC_ALL=C command grep -ac 'pass>' "$OUT/screen.2-osk-shown")"
 
 # Which rows does each occupy? The whole question, answered from the kernel's
 # own screen buffer.
 emit "row.gum=$(LC_ALL=C command grep -an 'pass>' "$OUT/screen.2-osk-shown" | head -1 | cut -d: -f1)"
-emit "row.osk_last=$(LC_ALL=C command grep -an 'shift' "$OUT/screen.2-osk-shown" | head -1 | cut -d: -f1)"
+# 🔴 DERIVED FROM THE FIRST ROW, NOT FROM A LABEL. This used to grep 'shift'
+# and call that the LAST keyboard row -- true only while the keyboard was five
+# rows and Shift happened to be on the bottom one. At KEY_ROWS=2 the render is
+# ten rows and 'L2 Shift' is on row 6 of 10, so the old anchor reported a row
+# in the MIDDLE and the +4 arithmetic beside it compounded the error.
+# 'X Backspace' is on the first row, is unique in the render, and does not move.
+emit "row.osk_first=$(LC_ALL=C command grep -an 'X Backspace' "$OUT/screen.2-osk-shown" | head -1 | cut -d: -f1)"
+emit "row.osk_last=$(LC_ALL=C command grep -an 'X Backspace' "$OUT/screen.2-osk-shown" | head -1 | cut -d: -f1 | awk -v h="${OSK_HEIGHT}" '{ print $1 + h - 1 }')"
 
 # --- 3. type a Wi-Fi passphrase with the trackpads ---------------------------
 # Right cursor -> 'h' on the home row, then type; then shift; then a digit.
 pad "abs HAT1X -20000"; pad "abs HAT1Y 3000"; sleep 0.3
 pad "key BTN_TR2 1"; pad "key BTN_TR2 0"; sleep 0.4
 snap 3-typed-h
+shot 3-typed-h
 # The prompt line as the kernel has it, so the typed character is visible in
 # the report rather than inferred. (grep -c 'pass>' proved nothing: the prompt
 # is there whether or not anything was typed.)
@@ -520,6 +598,7 @@ pad "key BTN_TR2 1"; pad "key BTN_TR2 0"; sleep 0.4
 pad "abs HAT0X -30000"; pad "abs HAT0Y -30000"; sleep 0.3  # left -> shift
 pad "key BTN_TL2 1"; pad "key BTN_TL2 0"; sleep 0.4
 snap 4-shifted
+shot 4-shifted
 emit "osk.shift_shown=$(LC_ALL=C command grep -ac 'Shift' "$OUT/screen.4-shifted")"
 pad "abs HAT1X -20000"; pad "abs HAT1Y 3000"; sleep 0.3   # -> 'h', capitalised
 pad "key BTN_TR2 1"; pad "key BTN_TR2 0"; sleep 0.5
@@ -528,6 +607,7 @@ pad "abs HAT0X -30000"; pad "abs HAT0Y -30000"; sleep 0.2  # digit '1'
 pad "abs HAT0Y 30000"; sleep 0.2
 pad "key BTN_TL2 1"; pad "key BTN_TL2 0"; sleep 0.5
 snap 5-final
+shot 5-final
 
 # Submit, so gum writes what it received to disk -- the only assertion that
 # cannot be faked by anything drawn on screen.
@@ -638,6 +718,7 @@ pad "key BTN_MODE 1"; pad "key BTN_NORTH 1"; pad "key BTN_NORTH 0"; pad "key BTN
 sleep 1
 pad "abs HAT1X -20000"; pad "abs HAT1Y 3000"; sleep 0.5
 snap3 8-osk-over-tui
+shot 8-osk-over-tui
 emit "curses.osk_rows_drawn=$(osk_rows "$OUT/screen.8-osk-over-tui")"
 emit "curses.tui_rows_with_osk=$(tui_rows "$OUT/screen.8-osk-over-tui")"
 
@@ -716,6 +797,12 @@ RemainAfterExit=yes
 StandardOutput=journal+console
 StandardError=journal+console
 "
+# The gate for the guest half of the screenshot hook. Absent on an ordinary
+# run, so the probe's `shot` helper returns before doing anything at all.
+if [[ -n $VM_SCREENSHOT_DIR ]]; then
+  unit_text+="Environment=OSK_SHOT=1
+"
+fi
 dropin_text="[Unit]
 Wants=omarchy-deck-osk.service
 "
@@ -752,6 +839,7 @@ qemu-system-x86_64 \
   -device virtio-blk-pci,drive=result0,serial=vmresult \
   -nic user,model=virtio-net-pci \
   -display none -vga std \
+  "${SHOT_ARGS[@]}" \
   -serial "file:${serial_log}" \
   -daemonize -pidfile "$pidfile" \
   -no-reboot ||
@@ -759,6 +847,45 @@ qemu-system-x86_64 \
 
 qemu_pid=$(cat "$pidfile")
 log "qemu pid $qemu_pid"
+
+# --- the screenshot watcher (inert unless VM_SCREENSHOT_DIR is set) --------
+#
+# The probe prints `OSKSHOT:<name>` on the serial port the instant after it
+# folds /dev/vcsN, and this polls fast enough to screendump the SAME screen.
+# It is a separate process because the wait loop below sleeps 15 s, which would
+# miss every one of them. It takes no assertion and holds nothing up: if it
+# misses a frame the suite is unaffected and the image is simply absent.
+shot_pid=
+if [[ -n $VM_SCREENSHOT_DIR ]]; then
+  (
+    seen=" "
+    while kill -0 "$qemu_pid" 2>/dev/null; do
+      if [[ -f $serial_log ]]; then
+        while IFS= read -r shot_name; do
+          [[ -n $shot_name ]] || continue
+          case $seen in *" $shot_name "*) continue ;; esac
+          seen="$seen$shot_name "
+          printf '{"execute":"qmp_capabilities"}\n{"execute":"screendump","arguments":{"filename":"%s"}}\n' \
+            "$VM_SCREENSHOT_DIR/$shot_name.ppm" |
+            timeout 8 socat - "UNIX-CONNECT:${qmp_sock}" >/dev/null 2>&1
+          log "screendump -> $VM_SCREENSHOT_DIR/$shot_name.ppm"
+        # ⚠️ NOT ANCHORED AT ^, and that is measured, not defensive. The
+        # substrate runs a getty on ttyS0, so the FIRST marker lands glued to
+        # the tail of its prompt --
+        #   [root@neptune-substrate ~]# OSKSHOT:2-osk-shown
+        # -- and a `^OSKSHOT:` anchor silently skipped exactly one frame per
+        # run, always the first. Every later marker starts its own line because
+        # the previous printf ended in \n, which is what made the loss look
+        # like a random miss. Same class of bug as the CRLF anchor this repo's
+        # installer harness documents in its own WANT-KEY comment.
+        done < <(sed -n 's/.*OSKSHOT:\([A-Za-z0-9._-]*\).*/\1/p' "$serial_log" 2>/dev/null)
+      fi
+      sleep 0.3
+    done
+  ) &
+  shot_pid=$!
+  log "screenshot watcher pid $shot_pid -> $VM_SCREENSHOT_DIR"
+fi
 
 elapsed=0
 while kill -0 "$qemu_pid" 2>/dev/null; do
@@ -772,6 +899,7 @@ while kill -0 "$qemu_pid" 2>/dev/null; do
   fi
 done
 log "guest powered off after ${elapsed}s"
+[[ -n $shot_pid ]] && { kill "$shot_pid" 2>/dev/null; wait "$shot_pid" 2>/dev/null; }
 
 # --- results -----------------------------------------------------------------
 
@@ -856,6 +984,33 @@ check "no traceback while the console was alive" "$(field mapper.errors_before_s
 # ⚠️ Not one of these greps for a keyboard. Every number below is "how many
 # console lines carry a WHOLE keyboard row", which is the only question that
 # separates a keyboard from the wreckage of one -- see this file's header.
+#
+# 🔴 THE HOST NEEDS THE KEYBOARD'S HEIGHT TOO, and as committed in ac93758 it
+# never got it: `OSK_HEIGHT` was assigned ONLY inside the probe heredoc, i.e.
+# only in the guest, while eight host-side checks below spend it. The host runs
+# under `set -u` (inherited from test/lib/vm-disk-image.sh), so the first of
+# them killed the script outright -- measured, this exact message, which is how
+# it was found:
+#
+#   ./test/vm/vm-osk-tty-test.sh: line 942: OSK_HEIGHT: unbound variable
+#
+# The whole R-52 section -- every ⭐ measurement this suite exists for -- never
+# ran at all, and the run ended with no PASS and no FAILED line, only a bare
+# exit 1. Deriving it here, from src/, is the host's own half of the same
+# "derived, not restated" rule the guest side follows.
+OSK_HEIGHT=$(python3 -c "
+import sys; sys.path.insert(0, '$REPO_ROOT/src')
+import deck_osk_layout as osk, deck_osk_tty as tty
+print(len(tty.render(osk.OnScreenKeyboard(), osk.Cursors())))
+") || fail "could not derive the keyboard height from $REPO_ROOT/src"
+[[ $OSK_HEIGHT =~ ^[1-9][0-9]*$ ]] ||
+  fail "derived keyboard height is not a positive integer: '[$OSK_HEIGHT]'"
+# Two INDEPENDENT derivations -- the host's from src/, the guest's from the
+# module actually installed into the image -- so a disagreement means the thing
+# under test is not the thing that was shipped. That is worth a check, not an
+# assumption.
+check "host and guest derive the same keyboard height" "$(field layout.osk_height)" "$OSK_HEIGHT"
+
 curses_rows=$(field curses.console_rows)
 check "the curses TUI took the whole console"      "$(field curses.tui_rows_alone)" "$curses_rows"
 check "VT3 is the active console"                  "$(field curses.vt_active)" 3

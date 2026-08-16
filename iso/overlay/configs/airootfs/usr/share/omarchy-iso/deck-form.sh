@@ -125,7 +125,9 @@
 #   9. S1 Wi-Fi, the rest of it (2026-08-12) -- the interactive scan/select
 #      flow, the passphrase prompt through §2.3's bounded text-entry mode,
 #      §5's whole failure tree (no hardware / iwd dead / no networks /
-#      wrong passphrase, bounded at 3 / no DHCP / captive portal / skip),
+#      wrong passphrase, bounded at 3 / no DHCP / captive portal), and --
+#      since 2026-08-16 -- NO skip: the connection is required, and the S1
+#      block below carries the operator's decision and the three parts of it.
 #      and U1's NetworkManager credential hand-off. S1 is invoked from the
 #      END OF `greeter` -- upstream has no Wi-Fi screen to override, so
 #      there is no upstream name for it; see the S1 block's own "WHERE
@@ -1293,24 +1295,58 @@ omarchy_prompt_hostname() { deck_form_hostname_body; }
 #     S1 before any `loadkeys` means the passphrase is always typed under
 #     the boot default, which is the layout the OSK actually draws.
 #
-# S1 NEVER BLOCKS AND NEVER FAILS THE INSTALL. Every branch below ends in
-# `return 0` from deck_form_wifi_screen: no hardware, iwd dead, no networks,
-# three wrong passphrases, no DHCP, a captive portal, or an explicit Skip
-# all continue the install offline with the consequence stated on screen
-# (§5: "The install must still succeed. What is banned is silence").
-# `greeter` therefore ignores its status -- but logs it, so a nonzero return
-# is visible rather than swallowed.
+# ===========================================================================
+# 🔴 THE CONNECTION IS REQUIRED. OPERATOR DECISION, 2026-08-16, AND THE
+#    "Skip -- set up Wi-Fi later" ROW IS GONE.
+# ===========================================================================
+#
+# The operator, verbatim: "There should be no 'Skip -- set up Wi-Fi later'
+# option at all. Instead, where the installer says 'Wi-Fi' we should write:
+# Wi-Fi / (something like) An internet connection is required during install."
+#
+# WHY THE ROW WAS A DEFECT AND NOT A COURTESY. `steam` is the only entry left
+# in configs/deck/deck-fetch.packages, and it stays online on Steam Subscriber
+# Agreement grounds. A Deck that finishes an install with no Steam boots
+# gamescope with nothing to display -- measured on hardware,
+# docs/findings/P32-steam-never-installed.md: "identical to a dead one --
+# black, no messages, not even a cursor." The previous round put a warning in
+# front of the row. A warning in front of a trapdoor is still a trapdoor; it
+# only means the user falls through it having read more.
+#
+# REMOVING THE ROW IS ONE THIRD OF THE CHANGE. On its own it would turn a bad
+# choice into a trap, which is worse. The other two thirds:
+#
+#  1. THE SCREEN STATES THE REQUIREMENT AND THE REASON, above the list
+#     (deck_form_wifi_required_text). A requirement nobody explained reads as
+#     a wall; the reason is what makes it a requirement.
+#  2. A DECK THAT ALREADY HAS A CONNECTION IS NEVER STOPPED HERE AT ALL --
+#     see deck_form_wifi_screen's own first block. The question this screen
+#     asks the MACHINE is "is there a network?", never "did you configure the
+#     radio?" (orchestrator/deck_pkgs.py DECISION 2).
+#  3. THE DEAD END IS A SCREEN, NOT A LOOP (deck_form_net_dead_end). A Deck
+#     that genuinely cannot reach a network cannot install -- that IS the
+#     intended outcome now -- but it is said in words, on a screen with
+#     somewhere to go, rather than left as a list that silently will not
+#     advance.
+#
+# ⚠️ WHAT DID NOT CHANGE, AND MUST NOT: A MACHINE WITH NO WI-FI HARDWARE IS
+# NOT A USER DECLINING WI-FI. The no-radio and dead-iwd paths still state the
+# consequence and continue, keypress-free -- see deck_form_offline_note's own
+# block for the QEMU argument, which is unchanged and still load-bearing.
+#
+# S1 STILL NEVER FAILS THE INSTALL FROM A PATH A USER CAN REACH: every branch
+# ends in `return 0` from deck_form_wifi_screen, so `greeter` ignores its
+# status -- but logs it, so a nonzero return is visible rather than swallowed.
+# The dead end does not "return"; it either reboots, powers off, or goes back
+# to the list.
 
-readonly DECK_NET_SKIP_ROW="Skip -- set up Wi-Fi later"
 readonly DECK_NET_RESCAN_ROW="Rescan"
 
-# The "no" label on the offline gate (P33 L1). The gate is only ever reached
-# from a path that HAS a network list behind it (the Skip row, and the Skip
-# entry inside a post-association failure menu), so there is exactly one of
-# these -- offering "go back to the network list" where no list was ever drawn
-# is the kind of button that teaches a user the screen is lying to them, which
-# is why the no-hardware and dead-iwd paths get deck_form_offline_note instead.
-readonly DECK_NET_BACK_TO_LIST_ROW="Go back to the network list"
+# The list's last row. It does NOT skip anything -- it opens the dead-end
+# screen, which explains and offers Reboot / Power off / back to the list.
+# Named as a stop rather than as a skip on purpose: "Skip" promised an install
+# that would still work, and that promise was the defect.
+readonly DECK_NET_STOP_ROW="Stop the install"
 
 # Where a wireless interface is DETECTED. §5's own detection column says
 # "`ip -br link` has no wireless device" -- ⚠️ that is not something
@@ -1350,16 +1386,13 @@ readonly DECK_NET_STATE_DIR_DEFAULT=/root
 readonly DECK_NET_STAGED_NMCONNECTION=deck-wifi.nmconnection
 readonly DECK_NET_OUTCOME_FILE=deck-wifi-outcome
 
-# 🔴 THE DEFAULT CURSOR ON THE "no network at all" CONFIRM (P33 L1).
-# Same constant-and-reason shape as DECK_DISK_CONFIRM_DEFAULT below, and for
-# the same reason: `gum confirm` with no --default flag starts on the
-# AFFIRMATIVE, and here the affirmative is the choice that produces a Deck
-# with no Steam and a black panel (docs/findings/P32-steam-never-installed.md
-# -- "identical to a dead one -- black, no messages, not even a cursor").
-# The dangerous answer is never the default, and keeping it as its own named
-# constant makes a mutation that drops or flips it a one-line, directly
-# assertable change.
-readonly DECK_NET_OFFLINE_CONFIRM_DEFAULT=false
+# 🔴 DELETED 2026-08-16: DECK_NET_OFFLINE_CONFIRM_DEFAULT, and the
+# `gum confirm --affirmative "Install anyway, with no Steam"` it aimed. It was
+# the safe cursor on a question that is no longer asked, because the answer it
+# defended against is no longer offered (see the block at the top of S1). Left
+# in place it would have been a constant nothing reads, next to a comment
+# describing a screen that does not exist -- this project treats dead code and
+# false comments as the same defect class (docs/PROGRESS.md §5.33b).
 
 deck_form_strip_ansi() {
   # ESC [ ... <letter> -- the CSI form iwctl's own colouring uses.
@@ -1465,9 +1498,15 @@ deck_form_parse_iwctl_networks() {
 #
 # PARSED-NETWORKS-FILE is deck_form_parse_iwctl_networks's own output
 # format. Produces the rows gum choose shows: one per network (sanitized
-# SSID, a lock glyph for anything not 'open'), then Skip, then Rescan --
-# matching T4-screen-spec.md §4 S1's literal row order ("a literal final
-# row Skip -- set up Wi-Fi later and Rescan").
+# SSID, a lock glyph for anything not 'open'), then Rescan, then Stop.
+#
+# 🔴 THE ROW ORDER CHANGED WITH THE SKIP ROW'S REMOVAL (2026-08-16).
+# T4-screen-spec.md §4 S1's literal order was "a literal final row
+# Skip -- set up Wi-Fi later and Rescan"; the spec is superseded here by the
+# operator's decision, not ignored. Rescan is now the row directly under the
+# networks because it is the ACTION THAT LEADS SOMEWHERE -- plugging in a dock
+# or moving closer and rescanning is the whole recovery -- and Stop is last
+# because it is the only row that does not continue the install.
 deck_form_build_network_rows() {
   local parsed=$1
   local ssid security signal safe_ssid glyph
@@ -1477,8 +1516,8 @@ deck_form_build_network_rows() {
     if [[ $security == open ]]; then glyph=""; else glyph=$'\360\237\224\222 '; fi
     printf '%s%s\n' "$glyph" "$safe_ssid"
   done <"$parsed"
-  printf '%s\n' "$DECK_NET_SKIP_ROW"
   printf '%s\n' "$DECK_NET_RESCAN_ROW"
+  printf '%s\n' "$DECK_NET_STOP_ROW"
 }
 
 # --- S1: from a chosen ROW back to the real network -------------------------
@@ -1533,15 +1572,15 @@ deck_form_network_at() {
 # Esc SELECT an action ("Drop to shell") via `|| choice=...`, so the one
 # gesture a controller-only user reaches for became the most destructive
 # one. Here an empty choice -- B/Esc, or gum exiting nonzero for any other
-# reason -- REDRAWS. It is deliberately NOT mapped to `skip`, even though
-# skip is harmless: "the cancel fallback maps to the menu, not to an
-# action" is the rule, and Skip is already a row the user can pick on
-# purpose. Mutation-test target (§6.5: single-string changes).
+# reason -- REDRAWS. That matters MORE now, not less: the row a cancel could
+# fall into used to be a harmless-looking Skip and is now `Stop the install`.
+# "The cancel fallback maps to the menu, not to an action" is the rule.
+# Mutation-test target (§6.5: single-string changes).
 deck_form_net_choice_action() {
   local choice=$1
   case $choice in
     "")                        printf 'redraw\n' ;;
-    "$DECK_NET_SKIP_ROW")      printf 'skip\n' ;;
+    "$DECK_NET_STOP_ROW")      printf 'stop\n' ;;
     "$DECK_NET_RESCAN_ROW")    printf 'rescan\n' ;;
     *)                         printf 'connect\n' ;;
   esac
@@ -1672,10 +1711,16 @@ deck_form_portal_verdict() {
 # The post-association failure menu (§5's DHCP row: "offer Retry / Pick
 # another / Skip"). Same cancel discipline as
 # deck_form_net_choice_action: empty redraws, never acts.
+#
+# 🔴 THE SKIP ENTRY IS GONE FROM HERE TOO (2026-08-16), and that is not
+# tidiness. It was the SECOND way out of S1 without a network -- the one the
+# old offline gate's own comment called "the other way a user leaves S1
+# without Wi-Fi", and a rule enforced on one of two doors is not a rule. Both
+# remaining answers lead back to a screen that can still succeed; the only way
+# to leave S1 without a connection is now the dead end, which says so.
 readonly -a DECK_NET_FAILURE_ITEMS=("Try again" "Pick another network")
 deck_form_net_failure_items() {
   printf '%s\n' "${DECK_NET_FAILURE_ITEMS[@]}"
-  printf '%s\n' "$DECK_NET_SKIP_ROW"
 }
 deck_form_net_failure_action_for() {
   local choice=$1
@@ -1683,7 +1728,6 @@ deck_form_net_failure_action_for() {
     "")                       printf 'redraw\n' ;;
     "Try again")              printf 'retry\n' ;;
     "Pick another network")   printf 'another\n' ;;
-    "$DECK_NET_SKIP_ROW")     printf 'skip\n' ;;
     *)                        printf 'redraw\n' ;;
   esac
 }
@@ -1850,6 +1894,34 @@ deck_form_wifi_offline_notice() {
   while IFS= read -r line; do say "$line"; done < <(deck_form_wifi_offline_text)
 }
 
+# deck_form_wifi_required_text -- what the Wi-Fi screen says above its list.
+#
+# 🔴 THE OPERATOR'S SHAPE, KEPT: the screen's title is `Wi-Fi` (step's own
+# line) and the first line below it is the requirement, in their words. The
+# rest is the REASON, because a requirement without one reads as a wall and
+# this one has a very good reason -- and because the third line is the only
+# place in the whole installer that describes what a Steam-less Deck actually
+# looks like when it boots.
+#
+# Four lines, one copy, no side effects: the deck_form_s0_text /
+# deck_form_wifi_offline_text pattern, so the [U] suite asserts the real
+# words without a terminal.
+#
+# ⚠️ Line length is load-bearing here too: 121 columns is the say() budget
+# (see deck_form_wifi_offline_text's own note and §5.40). The unit suite
+# checks every line of this function against it.
+deck_form_wifi_required_text() {
+  printf '%s\n' "An internet connection is required during install -- it cannot continue without one."
+  printf '%s\n' "Steam is downloaded from Valve during setup; it is not on this USB stick."
+  printf '%s\n' "Without Steam the Deck boots to a BLACK SCREEN: no Gaming Mode, no message, nothing to press."
+  printf '%s\n' "Ethernet on a dock or a USB adapter counts too -- plug one in, then choose Rescan."
+}
+
+deck_form_wifi_required_notice() {
+  local line
+  while IFS= read -r line; do say "$line"; done < <(deck_form_wifi_required_text)
+}
+
 # deck_form_offline_headline <verdict>
 # One sentence naming the state that was DETECTED. Split out so S1's gate and
 # S5's recap cannot drift into describing the same machine two ways.
@@ -1868,20 +1940,35 @@ deck_form_offline_headline() {
 # Runs the detection ONCE and remembers it in the global DECK_NET_VERDICT, so
 # S5 can recap the SAME state without re-probing on every redraw of a screen
 # that loops -- a 5 s curl per redraw would be a new bug in the name of fixing
-# one. Echoes the verdict as well, so callers do not have to read the global.
+# one. Echoes the verdict as well, for callers that want it inline.
+#
+# 🔴 CALL IT AS A COMMAND AND THEN READ THE GLOBAL. NEVER `v=$(...)`.
+# That is not style: a command substitution runs this function in a SUBSHELL,
+# so the assignment below lands in a process that exits one line later and
+# DECK_NET_VERDICT is never set in the caller at all. Every in-file caller did
+# exactly that until 2026-08-16, which meant S5's recap always fell back to
+# `$DECK_NET_VERDICT_DEFAULT` (= offline) -- i.e. a Deck on a dock's ethernet
+# was told, on the last screen before the install, that it would boot to a
+# black screen. The precise false statement the detection was added to
+# prevent, produced by the detection working perfectly and being thrown away.
+# Found by reading, not by a test; test/unit/test-deck-form.sh now asserts the
+# global survives into the caller's shell.
 deck_form_offline_detect() {
-  local verdict
-  verdict=$(deck_form_network_verdict)
   # shellcheck disable=SC2034  # read by deck_final_summary, deliberately global
-  DECK_NET_VERDICT=$verdict
-  printf '%s\n' "$verdict"
+  DECK_NET_VERDICT=$(deck_form_network_verdict)
+  printf '%s\n' "$DECK_NET_VERDICT"
 }
 
-# deck_form_offline_note
+# deck_form_offline_note [<already-detected-verdict>]
 #
 # The NON-BLOCKING half: state what was detected and carry on. Used on the two
 # paths where the user made no choice at all -- there is no Wi-Fi hardware, or
 # iwd would not start.
+#
+# The optional argument exists so a caller that has ALREADY detected does not
+# pay for a second detection (and, more importantly, cannot end up describing
+# the machine with a verdict different from the one it acted on). With no
+# argument it detects for itself, which is what makes it usable on its own.
 #
 # 🔴 WHY THESE TWO PATHS ARE NOT GATED, DECIDED DELIBERATELY.
 #  1. There is nothing to decide. With no radio and no iwd there is no network
@@ -1900,50 +1987,107 @@ deck_form_offline_detect() {
 #     have to answer: S5 recaps the same detected verdict and the same
 #     consequence text immediately above its "Ready to install?" gate.
 deck_form_offline_note() {
-  local verdict
-  verdict=$(deck_form_offline_detect)
+  local verdict=${1:-}
+  if [[ -z $verdict ]]; then
+    deck_form_offline_detect >/dev/null
+    verdict=${DECK_NET_VERDICT:-$DECK_NET_VERDICT_DEFAULT}
+  fi
   say "$(deck_form_offline_headline "$verdict")"
   [[ $verdict == online ]] && return 0
   deck_form_wifi_offline_notice
   return 0
 }
 
-# deck_form_offline_gate <back-label>
+# ===========================================================================
+# 🔴 DELETED 2026-08-16: deck_form_offline_gate, the "Install anyway, with no
+#    Steam" confirm.
+# ===========================================================================
 #
-# The BLOCKING half, and the operator's actual request: the screen that stands
-# between "the user pressed Skip on the network list" and the rest of the
-# install. Returns 0 to continue, 1 to go back to the list.
+# It was the screen that stood between the Skip row and the rest of the
+# install. With no Skip row and no Skip entry in the failure menu, nothing
+# could ever reach it: the two call sites named in its own comment were the
+# only two, and both are gone. It is deleted rather than left unreachable
+# because an unreachable function with a confident comment is how
+# T4-screen-spec.md §6.4's failure mode starts, and this file has already paid
+# for it once (the S8 block below is the receipt).
 #
-# 🔴 It draws its own full screen (clear_logo) rather than appending under the
-# network list. Appending is what made the old notice unreadable: the list has
-# already consumed most of the console, so the text landed at the bottom and
-# the next screen's clear_logo erased it before anyone could read it.
-deck_form_offline_gate() {
-  local back_label=${1:-"Go back"} verdict
-  verdict=$(deck_form_offline_detect)
+# What survives from it, and where:
+#   - the detection            -> deck_form_offline_detect, now called at the
+#                                 TOP of deck_form_wifi_screen, which is what
+#                                 keeps an already-connected Deck out of the
+#                                 list entirely
+#   - the consequence text     -> deck_form_wifi_offline_notice, unchanged,
+#                                 still shown on the no-radio paths and on S5
+#   - "the dangerous answer is
+#      never the default"      -> no longer applicable HERE (the dangerous
+#                                 answer is not offered), and still enforced
+#                                 where it is, at DECK_DISK_CONFIRM_DEFAULT
 
-  if [[ $verdict == online ]]; then
-    # Frictionless, on purpose. Nothing to confirm: this machine HAS a
-    # network, it just is not Wi-Fi.
-    say "$(deck_form_offline_headline online)"
-    return 0
-  fi
+# ===========================================================================
+# The dead end: a Deck that cannot reach any network cannot install
+# ===========================================================================
+#
+# 🔴 THIS IS THE INTENDED OUTCOME, AND IT MUST BE LEGIBLE. Removing the Skip
+# row means a machine with a radio, no other link and nothing joinable has no
+# way forward -- which is correct (the alternative is a black-screen Deck) and
+# is exactly the kind of state a user has to be TOLD they are in. A list that
+# silently will not advance is a bug report; a screen that says what is
+# required, why, and what the remaining choices are is a decision.
+#
+# Same shape and same reasons as deck_form_disk_dead_end below -- Reboot /
+# Power off, never a shell, empty-or-unrecognised choice REDRAWS -- with one
+# row that screen does not have: a way back to the network list. The disk dead
+# end is genuinely terminal (no disk will appear while you stand there); this
+# one is not (plugging in a dock, or walking closer to an access point, fixes
+# it), so refusing to go back would be false.
+readonly -a DECK_NET_DEAD_END_ITEMS=("Back to the network list" "Reboot" "Power off")
 
-  clear_logo
-  echo
-  say --foreground 1 "$(deck_form_offline_headline "$verdict")"
-  deck_form_wifi_offline_notice
-  echo
+deck_form_net_dead_end_items() { printf '%s\n' "${DECK_NET_DEAD_END_ITEMS[@]}"; }
 
-  if [[ $verdict == unproven ]]; then
-    gum confirm --affirmative "Continue" --negative "$back_label" \
-      --default=true "Continue without Wi-Fi?" && return 0
-    return 1
-  fi
+# deck_form_net_dead_end_action_for <gum-choose-output-or-empty>
+#   -> back | reboot | poweroff | redraw
+deck_form_net_dead_end_action_for() {
+  local choice=$1
+  case $choice in
+    "Back to the network list") printf 'back\n' ;;
+    Reboot)                     printf 'reboot\n' ;;
+    "Power off")                printf 'poweroff\n' ;;
+    *)                          printf 'redraw\n' ;;
+  esac
+}
 
-  gum confirm --affirmative "Install anyway, with no Steam" --negative "$back_label" \
-    --default="$DECK_NET_OFFLINE_CONFIRM_DEFAULT" "Continue with no network at all?" && return 0
-  return 1
+# deck_form_net_dead_end
+# Returns 1 to go back to the network list. Every other answer either ends the
+# machine's power state or redraws; there is no return value that means
+# "continue the install", because there is no such answer on this screen.
+#
+# ⚠️ A FAILED `systemctl` REDRAWS AND SAYS SO -- it does not fall through.
+# Falling through would continue an install the user just asked to stop, which
+# is both the silent-failure rule (CLAUDE.md) and the worst possible reading
+# of a button labelled "Power off".
+deck_form_net_dead_end() {
+  local choice action systemctl_bin=${DECK_SYSTEMCTL_BIN:-systemctl}
+  while true; do
+    clear_logo
+    echo
+    say --foreground 1 "This Deck cannot be installed without an internet connection."
+    deck_form_wifi_required_notice
+    echo
+    choice=$(deck_form_net_dead_end_items | gum choose --header "What next?") || choice=""
+    action=$(deck_form_net_dead_end_action_for "$choice")
+    case $action in
+      back)   return 1 ;;
+      reboot)
+        "$systemctl_bin" reboot ||
+          deck_form_warn "'$systemctl_bin reboot' failed -- the Deck is still on this screen. Hold the power button to switch it off."
+        ;;
+      poweroff)
+        "$systemctl_bin" poweroff ||
+          deck_form_warn "'$systemctl_bin poweroff' failed -- the Deck is still on this screen. Hold the power button to switch it off."
+        ;;
+      *) : ;;
+    esac
+  done
 }
 
 # ===========================================================================
@@ -2134,7 +2278,12 @@ deck_form_wifi_passphrase_body() {
   if [[ ${DECK_FORM_OSK_UP:-0} != 1 ]]; then
     # stderr, not stdout: this function's stdout IS the passphrase.
     # §2.3: "a degradation the screen must state, not swallow."
-    deck_form_warn "the on-screen keyboard did not start -- there is no way to type here. Choose '$DECK_NET_SKIP_ROW' on the network list to continue without Wi-Fi."
+    # The way out named here changed with the Skip row's removal, and it had
+    # to: telling someone to pick a row that no longer exists is worse than
+    # saying nothing. What IS still true with no keyboard -- B cancels this
+    # prompt and, after the bounded tries, lands back on the list, where an
+    # open network or a wired connection needs nothing typed at all.
+    deck_form_warn "the on-screen keyboard did not start -- there is no way to type a password here. Press B to go back to the network list: an open network, or ethernet on a dock, needs no password."
   fi
   # 🔴 --password, and it is MEASURED, not stylistic: T4 §4 S1's flow trace
   # records that the real wizard never echoes a password. The OSK is how
@@ -2226,7 +2375,8 @@ deck_form_wifi_portal_check() {
 
 # deck_form_wifi_failure_menu <headline>
 # The shared "we associated but it did not work" menu (§5's DHCP and
-# captive-portal rows). Prints one of retry/another/skip on stdout; loops
+# captive-portal rows). Prints one of retry/another on stdout (skip was
+# removed with the Skip row -- see deck_form_net_failure_action_for); loops
 # on redraw so a cancelled prompt can never fall through to an action.
 deck_form_wifi_failure_menu() {
   local headline=$1 choice action
@@ -2242,11 +2392,16 @@ deck_form_wifi_failure_menu() {
 
 # deck_form_wifi_join <iface> <raw-ssid> <security-class>
 #
-# Status vocabulary, chosen to match upstream's own three-value convention
-# (§1.1 item 3) rather than inventing a fourth kind of return:
+# Status vocabulary:
 #   0  connected      DECK_WIFI_SSID is set, the profile is staged
 #   1  back to list   this network did not work; the caller redraws
-#   2  skip the whole screen (the user asked for it inside a failure menu)
+#   3  try this same network again (the DHCP menu's own "Try again")
+#
+# 🔴 STATUS 2 ("skip the whole screen") IS GONE, 2026-08-16. It existed only
+# for the Skip entry inside the failure menu, which is gone with the row on the
+# list -- see deck_form_net_failure_action_for. Keeping the branch would have
+# left a documented status nothing can return, which is the same defect as a
+# comment that is not true.
 deck_form_wifi_join() {
   local iface=$1 ssid=$2 class=$3
   local state_dir=${DECK_NET_STATE_DIR:-$DECK_NET_STATE_DIR_DEFAULT}
@@ -2294,7 +2449,6 @@ deck_form_wifi_join() {
       # them together would make "Try again" silently mean "pick another".
       retry)   return 3 ;;
       another) return 1 ;;
-      skip)    return 2 ;;
     esac
     return 1
   fi
@@ -2304,11 +2458,10 @@ deck_form_wifi_join() {
     # §5: "State plainly that this network needs a browser and cannot be
     # used during install ... Do not attempt to render a portal."
     say --foreground 1 "$safe_ssid needs a web sign-in page, which this installer cannot show."
-    say "Use a different network, or skip Wi-Fi and set it up from Desktop Mode later."
+    say "Pick a different network -- the install needs one that reaches the internet on its own."
     action=$(deck_form_wifi_failure_menu "This network needs a browser sign-in.")
     case $action in
       retry|another) return 1 ;;
-      skip)          return 2 ;;
     esac
     return 1
   fi
@@ -2342,13 +2495,63 @@ deck_form_wifi_screen() {
 
   step "Wi-Fi"
 
+  # 🔴 FIRST QUESTION: DOES THIS MACHINE ALREADY HAVE A NETWORK? Asked of the
+  # MACHINE, before a single row is drawn, and answered by
+  # deck_form_offline_detect (any interface, 169.254/16 and 127/8 excluded,
+  # plus NetworkManager's own connectivity endpoint for the wording).
+  #
+  # If it does, this screen is over. No list, no confirm, no keypress -- a
+  # Deck on a dock's ethernet, a USB adapter or a tethered phone is ALREADY in
+  # the state the requirement demands, and orchestrator/deck_pkgs.py DECISION
+  # 2 is explicit that refusing it "would silently deny that machine its Steam
+  # on the strength of an answer about the radio". Making it walk a mandatory
+  # Wi-Fi list would be that mistake wearing the new rule as a hat.
+  #
+  # ONE LINE IS SAID, AND IT IS NOT DECORATION. Silence here is
+  # indistinguishable from the detection never having run -- the user pressed
+  # A on a screen that promised Wi-Fi and got the keyboard screen instead, with
+  # nothing on the record explaining why. The line costs one row and no press,
+  # and its absence is what the unit suite would catch if this block were ever
+  # "simplified" away.
+  #
+  # ⚠️ AN ADDRESS IS ENOUGH; A CONFIRMED PROBE IS NOT REQUIRED. `unproven` (an
+  # address, but curl could not confirm the internet) does NOT go to the list
+  # either: the machine has a link, and stopping it on the strength of a check
+  # we could not complete is the same DECISION 2 error. It is told exactly what
+  # was and was not established, and the install proceeds -- which is also what
+  # the S5 recap will repeat, from the same global, a few screens later.
+  #
+  # THE COST, STATED: a Deck that is on ethernet AND wanted to save Wi-Fi
+  # credentials for the installed system does not get asked here. That is a
+  # deliberate trade -- Desktop Mode joins Wi-Fi in two presses after the
+  # install, and the alternative is interrogating every already-connected
+  # machine to serve the rarer case.
+  local verdict
+  deck_form_offline_detect >/dev/null
+  verdict=${DECK_NET_VERDICT:-$DECK_NET_VERDICT_DEFAULT}
+  if [[ $verdict != offline ]]; then
+    deck_form_offline_note "$verdict"
+    # `skipped` is S1's existing vocabulary for "this screen configured no
+    # Wi-Fi" (deck_wifi.py KNOWN_STATUSES, deck_pkgs.py
+    # NO_NETWORK_WIFI_STATUSES). Not a new value: those two modules validate
+    # the set and are owned elsewhere, and deck_pkgs.py's own DECISION 2 names
+    # this exact machine -- "a Deck on a dock's ethernet legitimately has
+    # status=skipped" -- so the record already means what happened here.
+    deck_form_wifi_record_outcome "$state_dir" skipped ""
+    return 0
+  fi
+
   if ! iface=$(deck_form_wifi_iface); then
     say "No Wi-Fi hardware found -- continuing offline."
-    # Non-blocking: the user chose nothing here, there is nothing to go back
-    # to, and this is the path every QEMU run takes. See
-    # deck_form_offline_note's own block for the full argument. S5 is where
-    # this machine's user has to acknowledge the consequence.
-    deck_form_offline_note
+    # ⚠️ STILL NON-BLOCKING, AND STILL DELIBERATELY DIFFERENT FROM A USER WHO
+    # DECLINED. There is no radio: there is no list to draw, nothing to
+    # rescan, and no answer a confirm could collect that would change
+    # anything. This is also the path EVERY QEMU run takes (no wlan0 in a VM),
+    # and both VM harnesses cross the greeter with a single `ret` that must
+    # land on the keyboard screen -- see deck_form_offline_note's own block.
+    # S5 is where this machine's user meets the consequence on a screen they
+    # have to answer.
+    deck_form_offline_note "$verdict"
     deck_form_wifi_record_outcome "$state_dir" no-hardware ""
     return 0
   fi
@@ -2358,7 +2561,7 @@ deck_form_wifi_screen() {
     # §5: "Same, with the unit's status line shown. Never swallow."
     say --foreground 1 "The Wi-Fi service (iwd) would not start -- continuing offline."
     [[ -n $iwd_status ]] && say "$iwd_status"
-    deck_form_offline_note
+    deck_form_offline_note "$verdict"
     deck_form_wifi_record_outcome "$state_dir" iwd-failed ""
     return 0
   fi
@@ -2368,11 +2571,18 @@ deck_form_wifi_screen() {
 
   while true; do
     step "Wi-Fi"
+    # The requirement and its reason, ABOVE the list and inside the loop, so a
+    # rescan or a cancelled menu redraws them with the list rather than
+    # scrolling them off. This is the operator's shape: the screen is titled
+    # `Wi-Fi` and says "An internet connection is required during install"
+    # directly beneath it.
+    deck_form_wifi_required_notice
     if ! deck_form_wifi_scan "$iface" "$parsed"; then
-      # §5: "'Rescan' and 'Skip' only. Say 'No networks found. Move
-      # closer, or skip.'" -- which is what build_network_rows produces
-      # from an empty parse, since it always appends both rows.
-      say "No networks found. Move closer, or skip."
+      # §5's sentence was "No networks found. Move closer, or skip." -- the
+      # second half named a row that no longer exists. Rescan is what is
+      # actually there, and it is what a user who has just moved closer, or
+      # just plugged in a dock, needs to press.
+      say "No networks found. Move closer, plug in a dock, or choose Rescan."
     fi
     deck_form_build_network_rows "$parsed" >"$rows"
 
@@ -2381,15 +2591,14 @@ deck_form_wifi_screen() {
     case $action in
       redraw) continue ;;
       rescan) continue ;;
-      skip)
-        # 🔴 The outcome is recorded only AFTER the gate has been answered.
-        # Recording `skipped` first and then offering a way back would leave
-        # a record saying the user gave up on a run where they did not.
-        deck_form_offline_gate "$DECK_NET_BACK_TO_LIST_ROW" || continue
-        say "Continuing without Wi-Fi."
-        deck_form_wifi_record_outcome "$state_dir" skipped ""
-        rm -f "$parsed" "$rows"
-        return 0
+      stop)
+        # The dead end is the only way out of S1 without a connection, and it
+        # never returns "continue": it reboots, powers off, or comes back here
+        # (return 1). Nothing is recorded on the way in -- a user who goes back
+        # to the list did not stop the install, and a record saying they did
+        # would be a lie about a run that is still going.
+        deck_form_net_dead_end
+        continue
         ;;
     esac
 
@@ -2403,7 +2612,7 @@ deck_form_wifi_screen() {
 
     if [[ $class == unsupported ]]; then
       say --foreground 1 "$(deck_form_sanitize_ssid "$ssid") uses enterprise security ($security), which needs a certificate this installer cannot collect."
-      say "Pick another network, or skip Wi-Fi."
+      say "Pick another network -- the install needs one it can join on its own."
       continue
     fi
 
@@ -2417,17 +2626,10 @@ deck_form_wifi_screen() {
         rm -f "$parsed" "$rows"
         return 0
         ;;
-      2)
-        # Same gate as the Skip row, and for the same reason: this is the
-        # other way a user leaves S1 without Wi-Fi (the "Skip" entry inside a
-        # post-association failure menu). A gate on only one of the two would
-        # be a gate with a hole in it.
-        deck_form_offline_gate "$DECK_NET_BACK_TO_LIST_ROW" || continue
-        say "Continuing without Wi-Fi."
-        deck_form_wifi_record_outcome "$state_dir" skipped ""
-        rm -f "$parsed" "$rows"
-        return 0
-        ;;
+      # Every other status -- including the failure menu's own answers -- goes
+      # back to the list. There is no longer a status that leaves this screen
+      # without a network; that door is the dead end, and it is a row on the
+      # list rather than an exit hidden behind a failed join.
       *) continue ;;
     esac
   done
@@ -2985,8 +3187,10 @@ deck_final_summary() {
     echo
     deck_form_summary_rows | gum table -s ',' -p | sed "s/^/${PADDING_LEFT_SPACES:-}/"
     echo
-    # §5: the offline consequence is "stated once, on S1's skip and again
-    # on S5". This is the S5 half. Keyed on the same global the Wi-Fi row
+    # §5: the offline consequence is "stated once, on S1 and again on S5".
+    # This is the S5 half, and since S1 stopped offering a way to decline a
+    # network it is the ONLY screen a no-radio Deck meets it on that it has to
+    # answer. Keyed on the same global the Wi-Fi row
     # above is built from, so the sentence and the row can never disagree.
     #
     # P33 L1: it now recaps the state S1 DETECTED (DECK_NET_VERDICT) rather

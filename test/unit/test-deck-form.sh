@@ -684,9 +684,18 @@ printf '\n' >"$work/fake-tty-input"   # one blank line, standing in for an Enter
 # on is not a test. An EMPTY sysfs root is the "no Wi-Fi hardware" branch,
 # which §5 requires to be non-blocking, so S0 still completes.
 mkdir -p "$work/net-empty" "$work/s0-state"
+# ⚠️ AND `ip` MUST BE PINNED TOO, for the identical reason, since 2026-08-16.
+# S1 now asks "does this machine have a network?" BEFORE it asks "is there a
+# radio?", and it asks it of the real `ip` unless told otherwise -- so on a dev
+# machine with an address this would take the already-connected path and record
+# `skipped`, while in an offline CI it would record `no-hardware`. `/bin/false`
+# is the whole fixture: deck_form_addr_present treats a failing `ip` as no
+# output, i.e. no address, and the probe is then never run at all (no curl, no
+# real network traffic out of the unit suite).
 out=$(STTY_MARKER="$work/stty.marker" PATH="$work/bin:$work/bin-fakegum:$PATH" \
       DECK_S0_TTY="$work/fake-tty-input" \
       DECK_NET_SYSFS="$work/net-empty" \
+      DECK_IP_BIN=/bin/false \
       DECK_NET_STATE_DIR="$work/s0-state" \
       DECK_TEST_SAY_LOG="$work/s0-say.log" \
       greeter)
@@ -1597,11 +1606,20 @@ echo "--- S1 network row building -------------------------------------------"
 
 deck_form_build_network_rows "$work/parsed.tsv" >"$work/rows.txt"
 
-LC_ALL=C grep -qF "$DECK_NET_SKIP_ROW" "$work/rows.txt" ||
-  fail "build_network_rows must include the Skip row"
 LC_ALL=C grep -qF "$DECK_NET_RESCAN_ROW" "$work/rows.txt" ||
   fail "build_network_rows must include the Rescan row"
-pass "build_network_rows always includes Skip and Rescan"
+LC_ALL=C grep -qF "$DECK_NET_STOP_ROW" "$work/rows.txt" ||
+  fail "build_network_rows must include the Stop row -- with no Skip, the dead end is the only way off this screen without a network, and a list with no way off it is a trap"
+# 🔴 THE OPERATOR'S DECISION, ASSERTED ON THE ROWS THEMSELVES (2026-08-16):
+# "There should be no 'Skip -- set up Wi-Fi later' option at all." An install
+# with no network reaches a Deck that boots black
+# (docs/findings/P32-steam-never-installed.md), so a row offering it is a row
+# offering that. Case-insensitive and substring-wide on purpose: this must fail
+# for "Skip", "skip Wi-Fi", or any re-spelling of the same escape hatch.
+if LC_ALL=C command grep -qi 'skip' "$work/rows.txt"; then
+  fail "the network list must not offer ANY skip row" "$(cat "$work/rows.txt")"
+fi
+pass "build_network_rows offers Rescan and Stop, and no skip row of any spelling"
 
 LC_ALL=C grep -qF 'Evil?Bar' "$work/rows.txt" ||
   fail "build_network_rows must sanitise the hostile SSID ('|' -> '?') before it reaches the row list"
@@ -1611,9 +1629,18 @@ fi
 pass "build_network_rows sanitises the hostile SSID and never leaks a raw '|' into the list"
 
 nrows_out=$(wc -l <"$work/rows.txt")
-[[ $nrows_out -eq 6 ]] ||   # 4 networks + Skip + Rescan
-  fail "build_network_rows must produce exactly 6 rows (4 networks + Skip + Rescan)" "got $nrows_out: $(cat "$work/rows.txt")"
-pass "build_network_rows produces exactly one row per network plus Skip and Rescan (6 total)"
+[[ $nrows_out -eq 6 ]] ||   # 4 networks + Rescan + Stop
+  fail "build_network_rows must produce exactly 6 rows (4 networks + Rescan + Stop)" "got $nrows_out: $(cat "$work/rows.txt")"
+pass "build_network_rows produces exactly one row per network plus Rescan and Stop (6 total)"
+
+# The order is asserted, not just the membership: Rescan is the row directly
+# under the networks because it is the one that leads somewhere, and Stop is
+# last because it is the only row that does not continue the install.
+[[ $(tail -2 "$work/rows.txt" | head -1) == "$DECK_NET_RESCAN_ROW" ]] ||
+  fail "Rescan must be the second-to-last row" "$(cat "$work/rows.txt")"
+[[ $(tail -1 "$work/rows.txt") == "$DECK_NET_STOP_ROW" ]] ||
+  fail "Stop must be the LAST row -- a cancel or a fat thumb must not land on it before Rescan" "$(cat "$work/rows.txt")"
+pass "the tail of the list is Rescan then Stop, in that order"
 
 # ⚠️ MUTATION-FOUND GAP, closed: an earlier draft of this suite never
 # checked the lock glyph itself -- only that parsing correctly classified
@@ -1699,29 +1726,55 @@ echo "--- S1 the cancel-fallback and menu decisions (mutation targets) ---------
 # shell" via `|| choice=...`. Here an empty choice must REDRAW.
 [[ $(deck_form_net_choice_action "") == redraw ]] ||
   fail "an empty (cancelled) choice must REDRAW the network list, never act -- this is S8's Drop-to-shell bug in a new place"
-[[ $(deck_form_net_choice_action "$DECK_NET_SKIP_ROW") == skip ]] ||
-  fail "the Skip row must map to skip"
+[[ $(deck_form_net_choice_action "$DECK_NET_STOP_ROW") == stop ]] ||
+  fail "the Stop row must map to stop"
+[[ $(deck_form_net_choice_action "Skip -- set up Wi-Fi later") == connect ]] ||
+  fail "the OLD Skip row's text must have no special meaning left anywhere -- a half-removed row that still maps to an action is worse than one that was never removed"
 [[ $(deck_form_net_choice_action "$DECK_NET_RESCAN_ROW") == rescan ]] ||
   fail "the Rescan row must map to rescan"
 [[ $(deck_form_net_choice_action $'\360\237\224\222 My Home Network') == connect ]] ||
   fail "an ordinary network row must map to connect"
-pass "network-list choice mapping: cancel redraws (never acts), Skip/Rescan/network map correctly"
+pass "network-list choice mapping: cancel redraws (never acts), Stop/Rescan/network map correctly"
 
 [[ $(deck_form_net_failure_action_for "") == redraw ]] ||
   fail "a cancelled post-association failure menu must REDRAW, never act"
 [[ $(deck_form_net_failure_action_for "Try again") == retry ]] || fail "'Try again' must map to retry"
 [[ $(deck_form_net_failure_action_for "Pick another network") == another ]] || fail "'Pick another network' must map to another"
-[[ $(deck_form_net_failure_action_for "$DECK_NET_SKIP_ROW") == skip ]] || fail "the Skip row must map to skip in the failure menu too"
+[[ $(deck_form_net_failure_action_for "Skip -- set up Wi-Fi later") == redraw ]] ||
+  fail "the failure menu's Skip entry is gone too -- if this maps to anything but redraw, the second door out of S1 without a network is still open"
 [[ $(deck_form_net_failure_action_for "Drop to shell") == redraw ]] ||
   fail "an unrecognised choice must redraw, never be guessed at"
-pass "post-association failure menu mapping: cancel and unrecognised both redraw; retry/another/skip map correctly"
+pass "post-association failure menu mapping: cancel, the old Skip text and anything unrecognised all redraw; retry/another map correctly"
 
 items=$(deck_form_net_failure_items)
-[[ $(LC_ALL=C command grep -c . <<<"$items") -eq 3 ]] ||
-  fail "the failure menu must offer exactly Retry / Pick another / Skip (§5's DHCP row)" "$items"
+[[ $(LC_ALL=C command grep -c . <<<"$items") -eq 2 ]] ||
+  fail "the failure menu must offer exactly Try again / Pick another network -- the Skip entry was the OTHER way out of S1 without a network (2026-08-16)" "$items"
 LC_ALL=C command grep -qiF "shell" <<<"$items" &&
   fail "the failure menu must never offer a shell -- there is no keyboard"
-pass "the failure menu offers exactly Retry / Pick another / Skip and never a shell"
+LC_ALL=C command grep -qi "skip" <<<"$items" &&
+  fail "the failure menu must not offer a skip of any spelling -- a rule enforced on one of two doors is not a rule"
+pass "the failure menu offers exactly Try again / Pick another network, never a shell and never a skip"
+
+echo "--- S1 the dead end: what a Deck with no network can actually do ---------"
+
+# 🔴 THE REPLACEMENT FOR THE SKIP ROW IS A SCREEN, NOT A LOOP. Removing the row
+# without this would leave a list that silently refuses to advance, which is a
+# worse bug than the one being fixed: the user cannot tell "you may not" from
+# "it is broken".
+dead_items=$(deck_form_net_dead_end_items)
+[[ $(LC_ALL=C command grep -c . <<<"$dead_items") -eq 3 ]] ||
+  fail "the dead end must offer exactly Back / Reboot / Power off" "$dead_items"
+LC_ALL=C command grep -qiF "shell" <<<"$dead_items" &&
+  fail "the dead end must never offer a shell -- there is no keyboard (S4's deck_form_disk_dead_end precedent)"
+[[ $(deck_form_net_dead_end_action_for "Back to the network list") == back ]] ||
+  fail "the dead end must offer a way BACK -- unlike the disk dead end, this state is fixable by plugging in a dock or walking closer"
+[[ $(deck_form_net_dead_end_action_for "Reboot") == reboot ]] || fail "Reboot must map to reboot"
+[[ $(deck_form_net_dead_end_action_for "Power off") == poweroff ]] || fail "Power off must map to poweroff"
+[[ $(deck_form_net_dead_end_action_for "") == redraw ]] ||
+  fail "a cancelled dead-end menu must REDRAW -- B must never pick 'Power off' by accident (S8's Drop-to-shell bug)"
+[[ $(deck_form_net_dead_end_action_for "Install anyway") == redraw ]] ||
+  fail "an unrecognised dead-end choice must redraw, never be guessed at"
+pass "the dead end offers Back / Reboot / Power off, maps each exactly, and redraws on cancel or anything unrecognised"
 
 echo "--- S1 security classification -------------------------------------------"
 
@@ -1944,9 +1997,14 @@ warn=$(FAKE_GUM_INPUT_OUTPUT="x" DECK_FORM_OSK_UP=0 PATH="$work/bin-fakegum:$PAT
        deck_form_wifi_passphrase_body "MyNet" 2>&1 >/dev/null)
 LC_ALL=C grep -qF "on-screen keyboard did not start" <<<"$warn" ||
   fail "a missing OSK must be STATED on the passphrase screen, not swallowed" "$warn"
-LC_ALL=C grep -qF "$DECK_NET_SKIP_ROW" <<<"$warn" ||
-  fail "with no keyboard the screen must name the way out (the Skip row), or the user is stuck"
-pass "a missing OSK is stated loudly on the passphrase screen, together with the way out"
+# The way out it names had to change with the Skip row: naming a row that no
+# longer exists is worse than naming nothing, and there is still a real way out
+# -- B cancels the prompt, and an open network or a dock needs nothing typed.
+LC_ALL=C grep -qF "Press B" <<<"$warn" ||
+  fail "with no keyboard the screen must name the way out (B, back to the list), or the user is stuck" "$warn"
+LC_ALL=C grep -qi "skip" <<<"$warn" &&
+  fail "this warning must not send the user to a Skip row that no longer exists" "$warn"
+pass "a missing OSK is stated loudly on the passphrase screen, together with a way out that still exists"
 
 echo "--- S1 end-to-end through deck_form_wifi_screen (§5's whole tree) --------"
 
@@ -1972,13 +2030,45 @@ chmod +x "$work/bin-net/iwctl"
 
 cat >"$work/bin-net/ip" <<'IPBIN'
 #!/usr/bin/env bash
-cat "${IP_ADDR_OUTPUT:-/dev/null}"
+# 🔴 TWO DIFFERENT QUESTIONS, AND THE FAKE HAS TO TELL THEM APART (2026-08-16).
+# S1 now asks `ip -4 -br addr show` with NO device -- "does this machine have a
+# network by ANY route?" -- before it draws anything, and
+# deck_form_wifi_wait_dhcp asks `... show dev wlan0` -- "did the join get a
+# lease?" -- after. A fake that answered both from one file made every join
+# fixture look like a machine that was already online before it joined, which
+# is not a state a live ISO can be in (iwd has not been started yet).
+case "$*" in
+  *" dev "*) cat "${IP_ADDR_OUTPUT:-/dev/null}" ;;
+  *)         cat "${IP_ADDR_ALL:-/dev/null}" ;;
+esac
 exit 0
 IPBIN
 chmod +x "$work/bin-net/ip"
 
 cat >"$work/bin-net/systemctl" <<'SYSTEMCTL'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >>"${SYSTEMCTL_LOG:-/dev/null}"
+# 🔴 A REAL `systemctl poweroff` ENDS THE MACHINE, and the fake has to as well.
+# One that returned 0 would drop deck_form_net_dead_end straight back into its
+# own redraw loop, so every case that ends there would spin until the timeout
+# and report nothing useful -- the "a stuck job that reports nothing is
+# strictly worse than a failure" trap this suite already names elsewhere.
+# Killing the parent is also the FAITHFUL simulation: the screen genuinely has
+# no answer that means "carry on installing". A run that reached the dead end
+# and powered off therefore exits 143 (SIGTERM), and that is asserted, not
+# tolerated.
+case "$*" in
+  # SIGTERM, and MEASURED rather than picked. Two earlier spellings were
+  # wrong, both instructively:
+  #   * SIGINT is IGNORED by a non-interactive bash that has a foreground
+  #     child, so the run sailed on and hit the 40 s timeout (rc 124).
+  #   * a SIGTERM that actually KILLS the process makes `timeout` re-raise the
+  #     same signal, and that took the whole suite with it (measured: the suite
+  #     itself exited 143 mid-run). So s1-boot.sh traps TERM and exits 143
+  #     ITSELF -- a normal exit with a signal-shaped status, which `timeout`
+  #     passes through untouched and bash never announces.
+  poweroff|reboot) kill -TERM "$PPID" 2>/dev/null; sleep 1; exit 0 ;;
+esac
 [[ -n ${SYSTEMCTL_FAIL:-} ]] && { printf 'Job for iwd.service failed.\n'; exit 1; }
 exit 0
 SYSTEMCTL
@@ -2013,7 +2103,12 @@ s1_env=(
   DECK_TEXT_PROMPT_DEADLINE=3
   DECK_UUID_SOURCE="$work/uuid"
   IWCTL_NETWORKS="$work/networks.raw"
-  FAKE_GUM_CHOOSE_EXHAUSTED="$DECK_NET_SKIP_ROW"
+  # The backstop when a case under-scripts its answers. "Power off" ends the
+  # run from the dead end (see the fake systemctl above) instead of spinning to
+  # the timeout; every case that means to stop still queues Stop + Power off
+  # explicitly, and asserts CHOOSE-QUEUE-EXHAUSTED is ABSENT, so this value can
+  # never quietly become part of what a case proves.
+  FAKE_GUM_CHOOSE_EXHAUSTED="Power off"
   PATH="$work/bin-fakegum:$work/bin-net:$PATH"
 )
 
@@ -2030,6 +2125,11 @@ s1_env=(
 #     defined is much closer to that than this suite's environment.
 # The wrapper carries the same minimal upstream stubs, and nothing else.
 cat >"$work/s1-boot.sh" <<'BOOT'
+# The machine going away, simulated: the fake systemctl signals this process
+# when the dead end asks it to power off or reboot. Exiting from the trap keeps
+# it a NORMAL exit (status 143) rather than a death by signal, which is what
+# stops `timeout` from re-raising the signal into the suite's own process group.
+trap 'exit 143' TERM
 clear_logo() { :; }
 say() { printf '%s\n' "$*" >>"${DECK_TEST_SAY_LOG:-/dev/null}"; }
 step() { printf '%s\n' "$*" >>"${DECK_TEST_SAY_LOG:-/dev/null}"; }
@@ -2040,6 +2140,13 @@ rc=$?
 # reads it directly), and it dies with this subshell -- so dump it, or the
 # one value that crosses the screen boundary is untested.
 printf '%s' "${DECK_WIFI_SSID:-}" >"${DECK_TEST_SSID_OUT:-/dev/null}"
+# 🔴 AND THE VERDICT, for the same reason: DECK_NET_VERDICT is the OTHER value
+# that crosses a screen boundary (deck_final_summary recaps it on S5), and it
+# is set by a function that used to be called in a command substitution -- i.e.
+# in a subshell, where the assignment died with the subshell and S5 always fell
+# back to "offline". Dumping it from the real process is what proves it
+# survives; asserting it inside deck-form.sh's own call would not.
+printf '%s' "${DECK_NET_VERDICT:-}" >"${DECK_TEST_VERDICT_OUT:-/dev/null}"
 exit $rc
 BOOT
 
@@ -2052,12 +2159,15 @@ s1_run() {
   for l in "$@"; do printf '%s\n' "$l" >>"$work/s1-$name/choose.q"; done
   : >"$work/s1-$name/iwctl.log"
   : >"$work/s1-$name/gum.log"
+  : >"$work/s1-$name/systemctl.log"
   s1_rc=0
   env "${s1_env[@]}" \
       DECK_FORM_PATH="$DECK_FORM_SH" \
       DECK_NET_STATE_DIR="$work/s1-$name" \
       DECK_TEST_SAY_LOG="$work/s1-$name/say.log" \
       DECK_TEST_SSID_OUT="$work/s1-$name/wifi-ssid" \
+      DECK_TEST_VERDICT_OUT="$work/s1-$name/verdict" \
+      SYSTEMCTL_LOG="$work/s1-$name/systemctl.log" \
       IWCTL_LOG="$work/s1-$name/iwctl.log" \
       FAKE_GUM_LOG="$work/s1-$name/gum.log" \
       FAKE_GUM_CHOOSE_QUEUE="$work/s1-$name/choose.q" \
@@ -2065,6 +2175,7 @@ s1_run() {
       IWCTL_CONNECT_RC="${S1_CONNECT_RC:-0}" \
       IWCTL_CONNECT_OUTPUT="${S1_CONNECT_OUTPUT:-}" \
       IP_ADDR_OUTPUT="${S1_IP_OUTPUT:-/dev/null}" \
+      IP_ADDR_ALL="${S1_IP_ALL:-/dev/null}" \
       SYSTEMCTL_FAIL="${S1_SYSTEMCTL_FAIL:-}" \
       timeout 40 bash "$work/s1-boot.sh" \
       >"$work/s1-$name/stdout" 2>"$work/s1-$name/stderr" || s1_rc=$?
@@ -2075,9 +2186,11 @@ s1_out()   { cat "$work/s1-$1/${DECK_NET_OUTCOME_FILE}" 2>/dev/null; }
 
 # --- §5 row 1: no wlan0 -> skip S1 entirely, never block ---
 mkdir -p "$work/s1-nohw"
+: >"$work/s1-nohw/gum.log"
 env "${s1_env[@]}" DECK_NET_SYSFS="$work/net-none" \
     DECK_FORM_PATH="$DECK_FORM_SH" \
     DECK_NET_STATE_DIR="$work/s1-nohw" DECK_TEST_SAY_LOG="$work/s1-nohw/say2.log" \
+    DECK_TEST_VERDICT_OUT="$work/s1-nohw/verdict" \
     IWCTL_LOG="$work/s1-nohw/iwctl.log" FAKE_GUM_LOG="$work/s1-nohw/gum.log" \
     timeout 20 bash "$work/s1-boot.sh" >/dev/null 2>&1 || fail "S1 must return 0 with no Wi-Fi hardware -- it must never block the install (this is also every QEMU run)"
 LC_ALL=C grep -qF "No Wi-Fi hardware found" "$work/s1-nohw/say2.log" ||
@@ -2095,12 +2208,20 @@ LC_ALL=C grep -qF "with no network it is NOT installed" "$work/s1-nohw/say2.log"
 # this machine happens on S5, which is a gate the user has to cross anyway.
 LC_ALL=C grep -qF "confirm" "$work/s1-nohw/gum.log" &&
   fail "the no-hardware path must NOT add a confirm -- every QEMU run takes it, and both VM harnesses expect one keypress from the greeter to land on the keyboard screen" "$(cat "$work/s1-nohw/gum.log")"
+# 🔴 AND NO LIST EITHER (2026-08-16). A MACHINE WITH NO WI-FI HARDWARE IS NOT A
+# USER DECLINING WI-FI: there is no radio, so there is nothing to list, nothing
+# to rescan and no answer a screen could collect. The connection requirement is
+# real for this machine too -- S5 states it on a gate the user must answer --
+# but enforcing it HERE would put a mandatory, unanswerable screen in front of
+# every QEMU run, which is exactly what the previous round tried and reverted.
+LC_ALL=C grep -qF "choose" "$work/s1-nohw/gum.log" &&
+  fail "the no-hardware path must draw NO menu at all -- it is keypress-free by design and both VM tiers depend on that" "$(cat "$work/s1-nohw/gum.log")"
 LC_ALL=C grep -qxF "status=no-hardware" "$work/s1-nohw/$DECK_NET_OUTCOME_FILE" ||
   fail "the no-hardware path must record its outcome" "$(cat "$work/s1-nohw/$DECK_NET_OUTCOME_FILE")"
 pass "§5: no Wi-Fi hardware -> S1 returns 0, says so, states the consequence, records no-hardware"
 
 # --- §5 row 2: iwd will not start ---
-S1_SYSTEMCTL_FAIL=1 s1_run iwddead "$DECK_NET_SKIP_ROW"
+S1_SYSTEMCTL_FAIL=1 s1_run iwddead
 [[ $s1_rc -eq 0 ]] || fail "a dead iwd must not block the install" "rc=$s1_rc"
 LC_ALL=C grep -qF "would not start" "$(printf '%s' "$work/s1-iwddead/say.log")" ||
   fail "S1 must say iwd would not start"
@@ -2111,63 +2232,56 @@ LC_ALL=C grep -qxF "status=iwd-failed" "$work/s1-iwddead/$DECK_NET_OUTCOME_FILE"
 unset S1_SYSTEMCTL_FAIL
 pass "§5: iwd will not start -> continues offline, SHOWS the unit's status line, records iwd-failed"
 
-# --- §5 row 7: the user picks Skip ---
-s1_run skip "$DECK_NET_SKIP_ROW"
-[[ $s1_rc -eq 0 ]] || fail "the Skip row must complete the screen" "rc=$s1_rc"
-LC_ALL=C grep -qxF "status=skipped" "$work/s1-skip/$DECK_NET_OUTCOME_FILE" ||
-  fail "Skip must record the skipped outcome" "$(s1_out skip)"
-LC_ALL=C grep -qF "with no network it is NOT installed" "$work/s1-skip/say.log" ||
-  fail "§5: the consequence must be stated on S1's skip"
-[[ ! -e "$work/s1-skip/$DECK_NET_STAGED_NMCONNECTION" ]] ||
-  fail "Skip must not stage a NetworkManager profile"
-pass "§5: Skip -> completes, states the consequence, records skipped, stages nothing"
-
 # ===========================================================================
-# P33 L1 -- the offline gate, driven end-to-end through the real screen
+# 🔴 THE OPERATOR'S DECISION, 2026-08-16, DRIVEN END TO END
 # ===========================================================================
 #
-# The operator's question was "the install doesn't work without wifi ... should
-# we add a flag on the wifi setup step to make this clear?" -- and the answer
-# that matters is that a machine on a dock's ethernet must NOT be flagged
-# (orchestrator/deck_pkgs.py DECISION 2: refusing to proceed there "would
-# silently deny that machine its Steam on the strength of an answer about the
-# radio"). So there are two assertions here, not one, and the second is the
-# one that keeps the fix honest.
-
-# --- (a) Skip with NO network anywhere: the confirm must actually be asked,
-#         and its cursor must start on the safe answer ---
-LC_ALL=C grep -qF "confirm" "$work/s1-skip/gum.log" ||
-  fail "Skip with no network must ask an explicit confirm -- the user must not default into a Deck that boots black" "$(cat "$work/s1-skip/gum.log")"
-LC_ALL=C grep -qF -- "--default=$DECK_NET_OFFLINE_CONFIRM_DEFAULT" "$work/s1-skip/gum.log" ||
-  fail "the offline confirm must pass --default=$DECK_NET_OFFLINE_CONFIRM_DEFAULT explicitly; gum confirm with no --default starts on the AFFIRMATIVE, which here is the dangerous answer" "$(cat "$work/s1-skip/gum.log")"
-[[ $DECK_NET_OFFLINE_CONFIRM_DEFAULT == false ]] ||
-  fail "DECK_NET_OFFLINE_CONFIRM_DEFAULT must be false -- the dangerous choice is never the default (the DECK_DISK_CONFIRM_DEFAULT precedent)"
-LC_ALL=C grep -qF "$DECK_NET_BACK_TO_LIST_ROW" "$work/s1-skip/gum.log" ||
-  fail "the gate reached from the network list must offer a way back TO the list"
-pass "P33 L1: Skip with no network at all -> an explicit confirm, cursor on the safe answer, with a way back"
-
-# --- (b) declining the gate returns to the list, and the run does NOT record
-#         `skipped` on the pass where the user changed their mind ---
-printf '1\n0\n' >"$work/gate-confirm.q"
-export FAKE_GUM_CONFIRM_QUEUE="$work/gate-confirm.q"
-s1_run gateback "$DECK_NET_SKIP_ROW" "$DECK_NET_SKIP_ROW"
-unset FAKE_GUM_CONFIRM_QUEUE
-[[ $s1_rc -eq 0 ]] || fail "declining the offline gate must return to the list, not fail the screen" "rc=$s1_rc"
-LC_ALL=C grep -qF "CONFIRM-QUEUE-EXHAUSTED" "$work/s1-gateback/gum.log" &&
-  fail "the gate was asked more times than this test scripted -- the loop is not doing what this case claims" "$(cat "$work/s1-gateback/gum.log")"
-[[ $(LC_ALL=C command grep -c '^choose' "$work/s1-gateback/gum.log") -eq 2 ]] ||
-  fail "'Go back' on the offline gate must redraw the network list exactly once more" "$(cat "$work/s1-gateback/gum.log")"
-LC_ALL=C grep -qxF "status=skipped" "$work/s1-gateback/$DECK_NET_OUTCOME_FILE" ||
-  fail "accepting the gate on the second pass must still record status=skipped"
-pass "P33 L1: 'Go back' on the offline gate returns to the network list; the outcome is recorded only once the gate is accepted"
-
-# --- (c) 🔴 THE ONE THAT KEEPS IT HONEST: a Deck with ethernet and real
-#         internet skips Wi-Fi with NO confirm at all ---
+# "There should be no 'Skip -- set up Wi-Fi later' option at all." The row is
+# gone, and with it the confirm that used to stand behind it -- so the cases
+# below prove the three things that have to be true INSTEAD, none of which are
+# "the row is missing":
 #
-# The shared s1_env points DECK_CURL_BIN at a path that does not exist (every
-# other case wants "the probe could not run"), so this case builds the screen's
-# environment itself with a curl that answers and an `ip` that reports a wired
-# address. Detection, not an answer the user gave.
+#   1. a Deck that already has a connection is not stopped here at all
+#   2. a Deck that has none is TOLD so, on a screen with somewhere to go
+#   3. neither the list nor the failure menu has any other way out
+
+# --- the dead end: Stop -> the screen that explains -> Power off ---
+s1_run stop "$DECK_NET_STOP_ROW" "Power off"
+[[ $s1_rc -eq 143 ]] ||
+  fail "'Power off' on the dead end must END the run (the fake systemctl kills the parent, as a real one ends the machine) -- any other status means the screen fell through and kept installing" "rc=$s1_rc"
+LC_ALL=C grep -qF "CHOOSE-QUEUE-EXHAUSTED" "$work/s1-stop/gum.log" &&
+  fail "the stop case ran off the end of its scripted answers -- it is not doing what this test claims" "$(cat "$work/s1-stop/gum.log")"
+LC_ALL=C grep -qxF "poweroff" "$work/s1-stop/systemctl.log" ||
+  fail "'Power off' must actually call systemctl poweroff" "$(cat "$work/s1-stop/systemctl.log")"
+LC_ALL=C grep -qF "cannot be installed without an internet connection" "$work/s1-stop/say.log" ||
+  fail "the dead end must SAY why there is no way forward -- a list that will not advance, with no sentence, is indistinguishable from a broken installer" "$(s1_say stop)"
+LC_ALL=C grep -qF "An internet connection is required during install" "$work/s1-stop/say.log" ||
+  fail "the dead end must repeat the requirement itself, not just refer to it"
+# 🔴 AND IT MUST NOT RECORD ANYTHING. `skipped` is the vocabulary for "this
+# screen configured no Wi-Fi and the install went on"; a machine that stopped
+# here never got there, and a record saying otherwise would be a lie in the
+# only artefact deck_pkgs.py can read.
+[[ ! -e "$work/s1-stop/$DECK_NET_OUTCOME_FILE" ]] ||
+  fail "stopping the install must not record a Wi-Fi outcome -- there was no install to record one for" "$(s1_out stop)"
+pass "Stop -> a dead-end screen that explains, offers Power off, actually powers off, and records nothing"
+
+# --- and the way BACK, which is what makes it a decision rather than a trap ---
+s1_run deadback "$DECK_NET_STOP_ROW" "Back to the network list" "$DECK_NET_STOP_ROW" "Power off"
+[[ $s1_rc -eq 143 ]] || fail "the dead-end back-and-forth case must still end at the power-off" "rc=$s1_rc"
+LC_ALL=C grep -qF "CHOOSE-QUEUE-EXHAUSTED" "$work/s1-deadback/gum.log" &&
+  fail "the dead-end back case over-ran its answers" "$(cat "$work/s1-deadback/gum.log")"
+[[ $(LC_ALL=C command grep -c 'header Networks' "$work/s1-deadback/gum.log") -eq 2 ]] ||
+  fail "'Back to the network list' must redraw the LIST -- exactly two list draws in this run" "$(cat "$work/s1-deadback/gum.log")"
+pass "'Back to the network list' returns to the list, and the list can be re-entered from the dead end"
+
+# --- (1) a Deck that is ALREADY connected is never stopped here at all ---
+#
+# 🔴 THE ONE THAT KEEPS THE REQUIREMENT HONEST. orchestrator/deck_pkgs.py
+# DECISION 2: a Deck on a dock's ethernet legitimately records `status=skipped`,
+# and refusing it "would silently deny that machine its Steam on the strength of
+# an answer about the radio". A mandatory Wi-Fi screen is that same refusal in
+# the new rule's clothing, so this case asserts the screen draws NO LIST AT ALL
+# -- not "the list has a way past it".
 mkdir -p "$work/bin-online"
 cat >"$work/bin-online/curl" <<CURLOK
 #!/usr/bin/env bash
@@ -2178,7 +2292,7 @@ chmod +x "$work/bin-online/curl"
 printf 'lo  UNKNOWN 127.0.0.1/8\nenp0s20u1 UP 192.168.7.31/24\n' >"$work/ip-eth"
 rm -rf "$work/s1-ethernet"; mkdir -p "$work/s1-ethernet"
 printf 'Y\n' >"$work/s1-lizard"
-printf '%s\n' "$DECK_NET_SKIP_ROW" >"$work/s1-ethernet/choose.q"
+: >"$work/s1-ethernet/choose.q"
 : >"$work/s1-ethernet/iwctl.log"; : >"$work/s1-ethernet/gum.log"
 eth_rc=0
 env "${s1_env[@]}" \
@@ -2186,49 +2300,76 @@ env "${s1_env[@]}" \
     DECK_FORM_PATH="$DECK_FORM_SH" \
     DECK_NET_STATE_DIR="$work/s1-ethernet" \
     DECK_TEST_SAY_LOG="$work/s1-ethernet/say.log" \
+    DECK_TEST_VERDICT_OUT="$work/s1-ethernet/verdict" \
     IWCTL_LOG="$work/s1-ethernet/iwctl.log" \
     FAKE_GUM_LOG="$work/s1-ethernet/gum.log" \
     FAKE_GUM_CHOOSE_QUEUE="$work/s1-ethernet/choose.q" \
-    IP_ADDR_OUTPUT="$work/ip-eth" \
+    IP_ADDR_ALL="$work/ip-eth" \
     timeout 40 bash "$work/s1-boot.sh" >/dev/null 2>&1 || eth_rc=$?
-[[ $eth_rc -eq 0 ]] || fail "an ethernet Deck skipping Wi-Fi must complete S1" "rc=$eth_rc"
-LC_ALL=C grep -qF "confirm" "$work/s1-ethernet/gum.log" &&
-  fail "🔴 an ethernet Deck was made to confirm a warning about having no network. deck_pkgs.py DECISION 2: a Deck on a dock's ethernet legitimately records status=skipped and must not be denied its Steam on the strength of an answer about the radio" "$(cat "$work/s1-ethernet/gum.log")"
+[[ $eth_rc -eq 0 ]] || fail "an already-connected Deck must complete S1" "rc=$eth_rc"
+[[ ! -s "$work/s1-ethernet/gum.log" ]] ||
+  fail "🔴 an already-connected Deck was shown a screen it had to answer. It HAS a network; the requirement is already met, and interrogating it is deck_pkgs.py DECISION 2's mistake in the new rule's clothing" "$(cat "$work/s1-ethernet/gum.log")"
+[[ ! -s "$work/s1-ethernet/iwctl.log" ]] ||
+  fail "an already-connected Deck must not start scanning for access points either" "$(cat "$work/s1-ethernet/iwctl.log")"
 LC_ALL=C grep -qF "with no network it is NOT installed" "$work/s1-ethernet/say.log" &&
-  fail "an ethernet Deck must not be told its Deck will boot black -- that is a false statement about that machine" "$(cat "$work/s1-ethernet/say.log")"
+  fail "an already-connected Deck must not be told its Deck will boot black -- that is a false statement about that machine" "$(cat "$work/s1-ethernet/say.log")"
 LC_ALL=C grep -qF "already has a network connection" "$work/s1-ethernet/say.log" ||
-  fail "the ethernet case must SAY why it is not warning -- silence here is indistinguishable from the detection never running" "$(cat "$work/s1-ethernet/say.log")"
+  fail "the already-connected case must SAY why it is not stopping -- silence is indistinguishable from the detection never running, and the user pressed A expecting a Wi-Fi screen" "$(cat "$work/s1-ethernet/say.log")"
 LC_ALL=C grep -qxF "status=skipped" "$work/s1-ethernet/$DECK_NET_OUTCOME_FILE" ||
-  fail "the ethernet case still records status=skipped -- deck_pkgs.py reads that vocabulary and must see it unchanged"
-pass "P33 L1: a Deck with ethernet and internet skips Wi-Fi with NO confirm, no false warning, and the same status=skipped record"
+  fail "the already-connected case still records status=skipped -- deck_wifi.py KNOWN_STATUSES and deck_pkgs.py NO_NETWORK_WIFI_STATUSES read that vocabulary and neither is this file's to change"
+pass "an already-connected Deck crosses S1 with no list, no confirm, no scan, no false warning, and the same status=skipped record"
 
-# --- (d) the middle case: an address, but the internet could not be
-#         confirmed. The consequence is still stated in full -- but the
-#         cursor starts on Continue, because stopping a machine that has a
-#         working link on the strength of a probe we could not complete is
-#         deck_pkgs.py DECISION 2's mistake wearing a different hat. ---
+# --- (2) the middle case: an address, but the internet could not be confirmed.
+#         Still not stopped -- the ADDRESS decides that, and a probe we could
+#         not complete must not deny a machine with a working link its install.
 rm -rf "$work/s1-unproven"; mkdir -p "$work/s1-unproven"
 printf 'Y\n' >"$work/s1-lizard"
-printf '%s\n' "$DECK_NET_SKIP_ROW" >"$work/s1-unproven/choose.q"
+: >"$work/s1-unproven/choose.q"
 : >"$work/s1-unproven/iwctl.log"; : >"$work/s1-unproven/gum.log"
 unp_rc=0
 env "${s1_env[@]}" \
     DECK_FORM_PATH="$DECK_FORM_SH" \
     DECK_NET_STATE_DIR="$work/s1-unproven" \
     DECK_TEST_SAY_LOG="$work/s1-unproven/say.log" \
+    DECK_TEST_VERDICT_OUT="$work/s1-unproven/verdict" \
     IWCTL_LOG="$work/s1-unproven/iwctl.log" \
     FAKE_GUM_LOG="$work/s1-unproven/gum.log" \
     FAKE_GUM_CHOOSE_QUEUE="$work/s1-unproven/choose.q" \
-    IP_ADDR_OUTPUT="$work/ip-eth" \
+    IP_ADDR_ALL="$work/ip-eth" \
     timeout 40 bash "$work/s1-boot.sh" >/dev/null 2>&1 || unp_rc=$?
 [[ $unp_rc -eq 0 ]] || fail "the unproven-network case must complete S1" "rc=$unp_rc"
 LC_ALL=C grep -qF "internet could not be confirmed" "$work/s1-unproven/say.log" ||
   fail "an unconfirmed probe must be described as unconfirmed, not as 'no network' -- there IS a link" "$(cat "$work/s1-unproven/say.log")"
 LC_ALL=C grep -qF "with no network it is NOT installed" "$work/s1-unproven/say.log" ||
   fail "the unproven case must still state the consequence in full -- it may well be the offline case"
-LC_ALL=C grep -qF -- "--default=true" "$work/s1-unproven/gum.log" ||
-  fail "the unproven case's confirm must default to Continue -- a machine with a working link must not be stopped by a probe we could not complete" "$(cat "$work/s1-unproven/gum.log")"
-pass "P33 L1: an address with no confirmable internet states the consequence in full, but defaults to Continue"
+[[ ! -s "$work/s1-unproven/gum.log" ]] ||
+  fail "a machine with an address must not be stopped by a probe we could not complete -- that is deck_pkgs.py DECISION 2 wearing a different hat" "$(cat "$work/s1-unproven/gum.log")"
+pass "an address with no confirmable internet states exactly what was and was not established, and is still not stopped"
+
+# --- (3) the verdict global has to SURVIVE into the caller's shell ---
+#
+# 🔴 THE BUG THIS CATCHES SHIPPED. deck_form_offline_detect sets
+# DECK_NET_VERDICT, and every caller invoked it as `v=$(deck_form_offline_detect)`
+# -- a command substitution, i.e. a subshell -- so the global was set in a
+# process that exited immediately and S5 always read its `offline` default. The
+# visible effect was the exact false statement the detection exists to prevent:
+# an ethernet Deck told, on the last screen before the install, that it would
+# boot to a black screen. Asserted from the REAL process, via the dump in
+# s1-boot.sh, because an in-function assertion could not have seen it.
+[[ $(cat "$work/s1-ethernet/verdict") == online ]] ||
+  fail "DECK_NET_VERDICT must survive into the shell S5 runs in -- an already-connected Deck must reach S5 as 'online', or S5 warns it about a black screen it will never see" "got: $(cat "$work/s1-ethernet/verdict")"
+[[ $(cat "$work/s1-unproven/verdict") == unproven ]] ||
+  fail "the unproven verdict must reach S5 as 'unproven'" "got: $(cat "$work/s1-unproven/verdict")"
+[[ $(cat "$work/s1-nohw/verdict") == offline ]] ||
+  fail "a machine with no radio and no address must reach S5 as 'offline'" "got: $(cat "$work/s1-nohw/verdict")"
+# And in-process, where the fix actually lives: call it as a command, read the
+# global afterwards.
+unset DECK_NET_VERDICT
+DECK_IP_BIN=/bin/false deck_form_offline_detect >/dev/null
+[[ ${DECK_NET_VERDICT:-unset} == offline ]] ||
+  fail "deck_form_offline_detect must set DECK_NET_VERDICT in ITS CALLER's shell, not in a subshell" "got: ${DECK_NET_VERDICT:-unset}"
+unset DECK_NET_VERDICT
+pass "the network verdict crosses the screen boundary into S5 -- from the real process, not from a subshell that threw it away"
 
 echo "--- P33 L1: the network verdict, as a truth table ------------------------"
 
@@ -2315,21 +2456,48 @@ check_width() {   # <label> <text-producing-command...>
   done < <("$@")
 }
 check_width "the offline consequence text" deck_form_wifi_offline_text
+check_width "the Wi-Fi requirement text" deck_form_wifi_required_text
 check_width "the pre-reboot notice" deck_form_reboot_notice_text
 for v in online unproven offline; do
   check_width "the offline headline ($v)" deck_form_offline_headline "$v"
 done
-pass "every line of both new screens fits the ${SAY_WIDTH}-column say() budget -- none of them wrap"
+pass "every line of all three screens fits the ${SAY_WIDTH}-column say() budget -- none of them wrap"
 
-# --- S1's offline gate, worst case (the `offline` verdict draws the most) ---
 offline_lines=$(deck_form_wifi_offline_text | LC_ALL=C command grep -c .)
 [[ $offline_lines -ge 3 ]] || fail "the offline consequence text lost lines -- is it still saying what it must?"
-# clear_logo + echo + headline + the consequence + echo + gum confirm.
-# gum confirm draws its question and a row of buttons; 3 is generous.
 GUM_CONFIRM_ROWS=3
-gate_rows=$(( LOGO_ROWS + 1 + 1 + offline_lines + 1 + GUM_CONFIRM_ROWS ))
-[[ $gate_rows -le $DECK_CONSOLE_ROWS ]] ||
-  fail "S1's offline gate needs $gate_rows rows on a ${DECK_CONSOLE_ROWS}-row console" "logo=$LOGO_ROWS text=$offline_lines confirm=$GUM_CONFIRM_ROWS"
+
+# --- S1's NETWORK LIST, which is the screen this round actually grew ---------
+#
+# 🔴 THE ROW COST OF THE REQUIREMENT TEXT IS PAID ON THE SCREEN THAT ALSO HAS
+# TO DRAW A LIST OF NETWORKS, and §5.40 is what happens when nobody counts:
+# a change that ate rows pushed the username and password prompts off the panel
+# and shipped. `step` is clear_logo + a blank + one line + a blank
+# (configurator:185, READ), and `gum choose` draws its --header plus one row
+# per item.
+STEP_ROWS=$(( LOGO_ROWS + 1 + 1 + 1 ))
+required_lines=$(deck_form_wifi_required_text | LC_ALL=C command grep -c .)
+[[ $required_lines -ge 3 ]] ||
+  fail "the requirement text must still say what is required, why, and what counts -- it is down to $required_lines lines"
+GUM_CHOOSE_HEADER_ROWS=1
+# The two rows every list carries whatever the scan found, plus the
+# "No networks found..." line, which is the WORST case (it appears exactly when
+# the list is shortest, so it never adds to a long list).
+LIST_FIXED_ROWS=$(( STEP_ROWS + required_lines + 1 + GUM_CHOOSE_HEADER_ROWS + 2 ))
+NETWORKS_VISIBLE=$(( DECK_CONSOLE_ROWS - LIST_FIXED_ROWS ))
+# 10 is not a wish: iwctl orders get-networks by signal, and a user who cannot
+# see their own access point in the ten strongest has a different problem. If
+# this budget ever drops below it, the text above the list has grown too far.
+[[ $NETWORKS_VISIBLE -ge 10 ]] ||
+  fail "S1's network list has room for only $NETWORKS_VISIBLE networks on a ${DECK_CONSOLE_ROWS}-row console -- the text above it has eaten the list (docs/PROGRESS.md §5.40)" \
+       "step=$STEP_ROWS required=$required_lines header=$GUM_CHOOSE_HEADER_ROWS fixed rows (Rescan+Stop)=2"
+
+# --- and the dead end, which draws the same requirement text plus a menu ---
+# clear_logo + echo + headline + the requirement + echo + choose header + 3 rows
+dead_end_rows=$(( LOGO_ROWS + 1 + 1 + required_lines + 1 + GUM_CHOOSE_HEADER_ROWS + 3 ))
+[[ $dead_end_rows -le $DECK_CONSOLE_ROWS ]] ||
+  fail "S1's dead end needs $dead_end_rows rows on a ${DECK_CONSOLE_ROWS}-row console" \
+       "logo=$LOGO_ROWS required=$required_lines menu=4"
 
 # --- S5, the worst case: the table, the offline recap AND the reboot notice ---
 # gum table -p borders a 10-row table as: top rule, header, header rule, 10
@@ -2347,7 +2515,28 @@ s5_rows=$(( LOGO_ROWS + 1 + TABLE_ROWS + 1 + 1 + offline_lines + 1 + reboot_line
 [[ $s5_rows -le $DECK_CONSOLE_ROWS ]] ||
   fail "S5 needs $s5_rows rows on a ${DECK_CONSOLE_ROWS}-row console -- §5.40 is what happens when a screen overruns: the prompts go off the panel and ship" \
        "logo=$LOGO_ROWS table=$TABLE_ROWS offline=$offline_lines reboot=$reboot_lines confirm=$GUM_CONFIRM_ROWS"
-pass "row budget: S1's offline gate = $gate_rows rows, S5 at its fullest = $s5_rows rows, both inside the measured ${DECK_CONSOLE_ROWS}-row console"
+pass "row budget: S1's list leaves room for $NETWORKS_VISIBLE networks, its dead end = $dead_end_rows rows, S5 at its fullest = $s5_rows rows -- all inside the measured ${DECK_CONSOLE_ROWS}-row console"
+
+echo "--- the Wi-Fi screen's own words: the requirement, and why ---------------"
+
+# The operator's shape, 2026-08-16: the screen is titled `Wi-Fi` and says,
+# directly beneath it, that an internet connection is required during install.
+required_text=$(deck_form_wifi_required_text)
+LC_ALL=C grep -qF "An internet connection is required during install" <<<"$required_text" ||
+  fail "the operator asked for this sentence, in these words, where the installer says 'Wi-Fi'" "$required_text"
+LC_ALL=C grep -qF "cannot continue without one" <<<"$required_text" ||
+  fail "the screen must say the install cannot continue without a connection -- with no Skip row, a user who is not told that reads a list that will not advance as a broken installer"
+LC_ALL=C grep -qF "Steam is downloaded from Valve during setup" <<<"$required_text" ||
+  fail "the REASON must be on the screen too: a requirement with no reason reads as a wall, and this one has a very good reason"
+LC_ALL=C grep -qF "BLACK SCREEN" <<<"$required_text" ||
+  fail "the screen must say what a Steam-less Deck actually looks like -- docs/findings/P32-steam-never-installed.md: 'identical to a dead one'. 'Gaming Mode will have no Steam' is the understatement that cost the operator an evening"
+LC_ALL=C grep -qiF "ethernet" <<<"$required_text" ||
+  fail "the screen must say that a dock or a USB adapter counts -- the requirement is a NETWORK, never an answer about the radio (deck_pkgs.py DECISION 2)"
+LC_ALL=C grep -qF "Rescan" <<<"$required_text" ||
+  fail "the screen must name the row that acts on what it just told the user to do"
+[[ $(LC_ALL=C command grep -ci "skip" <<<"$required_text") -eq 0 ]] ||
+  fail "the requirement text must not mention skipping" "$required_text"
+pass "the Wi-Fi screen states the requirement in the operator's words, the reason, the consequence, and what counts as a connection"
 
 echo "--- P33 L2: the pre-reboot notice ---------------------------------------"
 
@@ -2363,19 +2552,19 @@ LC_ALL=C grep -qF "Don't turn me off" <<<"$reboot_text" ||
 pass "L2: the pre-reboot notice says it reboots, says the panel goes black for the measured two minutes, and says don't turn me off"
 
 # --- the cancel fallback, driven for real: B on the list REDRAWS ---
-s1_run cancel "<CANCEL>" "<CANCEL>" "$DECK_NET_RESCAN_ROW" "$DECK_NET_SKIP_ROW"
-[[ $s1_rc -eq 0 ]] || fail "a cancelled list must redraw and the screen still complete" "rc=$s1_rc"
+s1_run cancel "<CANCEL>" "<CANCEL>" "$DECK_NET_RESCAN_ROW" "$DECK_NET_STOP_ROW" "Power off"
+[[ $s1_rc -eq 143 ]] || fail "a cancelled list must redraw, and the run must end where it was told to" "rc=$s1_rc"
 LC_ALL=C grep -qF "CHOOSE-QUEUE-EXHAUSTED" "$work/s1-cancel/gum.log" &&
   fail "the cancel/rescan case ran off the end of its scripted answers -- the loop is not doing what this test claims"
-[[ $(LC_ALL=C command grep -c '^choose' "$work/s1-cancel/gum.log") -eq 4 ]] ||
-  fail "two cancels and a rescan must each redraw the list (4 menus in total)" "$(cat "$work/s1-cancel/gum.log")"
-pass "B/Esc on the network list REDRAWS (never acts), and Rescan redraws too"
+[[ $(LC_ALL=C command grep -c 'header Networks' "$work/s1-cancel/gum.log") -eq 4 ]] ||
+  fail "two cancels and a rescan must each redraw the LIST (4 list draws in total)" "$(cat "$work/s1-cancel/gum.log")"
+pass "B/Esc on the network list REDRAWS (never acts, and never falls into Stop), and Rescan redraws too"
 
 # --- §5 row 4: wrong passphrase, bounded at 3 tries ---
 printf 'wrong1\nwrong2\nwrong3\nwrong4\n' >"$work/pass.q"
 S1_INPUT_QUEUE="$work/pass.q" S1_CONNECT_RC=1 \
-  s1_run wrongpw $'\360\237\224\222 My Home Network' "$DECK_NET_SKIP_ROW"
-[[ $s1_rc -eq 0 ]] || fail "three wrong passphrases must end back at the list, not stuck" "rc=$s1_rc"
+  s1_run wrongpw $'\360\237\224\222 My Home Network' "$DECK_NET_STOP_ROW" "Power off"
+[[ $s1_rc -eq 143 ]] || fail "three wrong passphrases must end back at the list, not stuck" "rc=$s1_rc"
 LC_ALL=C grep -qF "That didn't work -- check the password" "$work/s1-wrongpw/say.log" ||
   fail "§5's exact retry sentence must be shown" "$(s1_say wrongpw)"
 tries=$(LC_ALL=C command grep -c 'connect' "$work/s1-wrongpw/iwctl.log")
@@ -2427,36 +2616,36 @@ pass "an open network joins with no passphrase prompt and stages an unsecured ke
 printf 'C0rrect horse!\n' >"$work/pass-dhcp.q"
 printf 'wlan0 UP 169.254.9.9/16\n' >"$work/ip-linklocal"
 S1_INPUT_QUEUE="$work/pass-dhcp.q" S1_IP_OUTPUT="$work/ip-linklocal" \
-  s1_run nodhcp $'\360\237\224\222 My Home Network' "$DECK_NET_SKIP_ROW"
-[[ $s1_rc -eq 0 ]] || fail "a DHCP failure must be recoverable, not fatal" "rc=$s1_rc"
+  s1_run nodhcp $'\360\237\224\222 My Home Network' "Pick another network" "$DECK_NET_STOP_ROW" "Power off"
+[[ $s1_rc -eq 143 ]] || fail "a DHCP failure must be recoverable, not fatal" "rc=$s1_rc"
 LC_ALL=C grep -qF "never handed out an address" "$work/s1-nodhcp/say.log" ||
   fail "§5: an association with no DHCP must be reported as a failure, not as success" "$(s1_say nodhcp)"
-LC_ALL=C grep -qxF "status=connected" "$work/s1-nodhcp/$DECK_NET_OUTCOME_FILE" &&
+LC_ALL=C grep -qxF "status=connected" "$work/s1-nodhcp/$DECK_NET_OUTCOME_FILE" 2>/dev/null &&
   fail "🔴 a link-local address must NOT be recorded as connected -- that is the exact false success §5 row 5 exists to catch"
 [[ ! -e "$work/s1-nodhcp/$DECK_NET_STAGED_NMCONNECTION" ]] ||
   fail "a network that never gave out an address must not be staged for the installed system"
-# 🔴 MUTATION-FOUND GAP, closed. Skip inside the DHCP menu must end the
-# WHOLE screen, not bounce back to the network list. Both spellings reach
-# "skipped" in the end (the list would be redrawn and Skip picked again),
-# so only the SHAPE of the run distinguishes them: exactly two menus (the
-# list, then the failure menu) and no fallback onto the fake's exhausted
-# answer. Without this the join function's 1-vs-2 status vocabulary was
-# untested.
+# 🔴 THE FAILURE MENU HAS NO WAY OUT OF S1 ANY MORE, and this is where that is
+# proven on the real screen rather than on the mapping function. It used to
+# carry a Skip entry -- "the OTHER way a user leaves S1 without Wi-Fi", in the
+# deleted gate's own words -- so removing the row from the list alone would
+# have left the rule enforced on one of two doors. Both of the menu's remaining
+# answers lead back to a screen that can still succeed; here "Pick another
+# network" must return to the LIST.
 LC_ALL=C grep -qF "CHOOSE-QUEUE-EXHAUSTED" "$work/s1-nodhcp/gum.log" &&
-  fail "Skip inside the DHCP failure menu must END the screen -- this run fell through to an extra menu"
-[[ $(LC_ALL=C command grep -c '^choose' "$work/s1-nodhcp/gum.log") -eq 2 ]] ||
-  fail "the no-DHCP run must draw exactly two menus: the network list, then the failure menu" \
+  fail "the no-DHCP run over-ran its scripted answers -- the loop is not doing what this test claims" "$(cat "$work/s1-nodhcp/gum.log")"
+[[ $(LC_ALL=C command grep -c 'header Networks' "$work/s1-nodhcp/gum.log") -eq 2 ]] ||
+  fail "'Pick another network' must return to the network list (2 list draws in this run)" \
        "$(cat "$work/s1-nodhcp/gum.log")"
-LC_ALL=C grep -qxF "status=skipped" "$work/s1-nodhcp/$DECK_NET_OUTCOME_FILE" ||
-  fail "Skip inside the DHCP menu must record the skipped outcome"
+[[ ! -e "$work/s1-nodhcp/$DECK_NET_OUTCOME_FILE" ]] ||
+  fail "a run that never got a network and stopped must record no outcome at all" "$(s1_out nodhcp)"
 unset S1_INPUT_QUEUE S1_IP_OUTPUT
 pass "§5: associated-but-no-DHCP is a failure with a recovery menu, never a recorded success"
 
 # --- the DHCP menu's own three answers, driven for real ---
 printf 'pw1\npw2\n' >"$work/pass-retry.q"
 S1_INPUT_QUEUE="$work/pass-retry.q" S1_IP_OUTPUT="$work/ip-linklocal" \
-  s1_run dhcpretry $'\360\237\224\222 My Home Network' "Try again" "Pick another network" "$DECK_NET_SKIP_ROW"
-[[ $s1_rc -eq 0 ]] || fail "the DHCP menu must always end somewhere reachable" "rc=$s1_rc"
+  s1_run dhcpretry $'\360\237\224\222 My Home Network' "Try again" "Pick another network" "$DECK_NET_STOP_ROW" "Power off"
+[[ $s1_rc -eq 143 ]] || fail "the DHCP menu must always end somewhere reachable" "rc=$s1_rc"
 retries=$(LC_ALL=C command grep -c 'connect' "$work/s1-dhcpretry/iwctl.log")
 [[ $retries -eq 2 ]] ||
   fail "'Try again' must re-run the join for the SAME network (2 connects), then 'Pick another' must go back to the list" "connects: $retries"
@@ -2475,7 +2664,7 @@ printf 'C0rrect horse!\n' >"$work/pass-portal.q"
 printf 'wlan0 UP 10.0.0.9/24\n' >"$work/ip-portal"
 rm -rf "$work/s1-portal"; mkdir -p "$work/s1-portal"
 printf 'Y\n' >"$work/s1-lizard"
-printf '%s\n%s\n' $'\360\237\224\222 My Home Network' "$DECK_NET_SKIP_ROW" >"$work/s1-portal/choose.q"
+printf '%s\n%s\n%s\n%s\n' $'\360\237\224\222 My Home Network' "Pick another network" "$DECK_NET_STOP_ROW" "Power off" >"$work/s1-portal/choose.q"
 : >"$work/s1-portal/iwctl.log"; : >"$work/s1-portal/gum.log"
 env "${s1_env[@]}" \
     DECK_CURL_BIN="$work/bin-portal/curl" \
@@ -2489,11 +2678,17 @@ env "${s1_env[@]}" \
     IP_ADDR_OUTPUT="$work/ip-portal" \
     CURL_BODY='<html>Hotel sign-in</html>' \
     PATH="$work/bin-portal:$work/bin-fakegum:$work/bin-net:$PATH" \
-    timeout 40 bash "$work/s1-boot.sh" >/dev/null 2>&1 ||
-  fail "a captive portal must be recoverable from the controller, not fatal"
+    timeout 40 bash "$work/s1-boot.sh" >/dev/null 2>&1 || portal_rc=$?
+# 143 == the run reached the dead end and powered off, which is now the only
+# way a screen with no usable network ends. Anything else means it either fell
+# through (0) or hung until the timeout (124).
+[[ ${portal_rc:-0} -eq 143 ]] ||
+  fail "a captive portal must be recoverable from the controller (pick another), and the run must end where it was told to" "rc=${portal_rc:-0}"
 LC_ALL=C grep -qF "needs a web sign-in page" "$work/s1-portal/say.log" ||
   fail "§5: a captive portal must be stated plainly" "$(cat "$work/s1-portal/say.log")"
-LC_ALL=C grep -qxF "status=connected" "$work/s1-portal/$DECK_NET_OUTCOME_FILE" &&
+LC_ALL=C grep -qi "skip wi-fi" "$work/s1-portal/say.log" &&
+  fail "the captive-portal screen must not send the user to a skip that no longer exists" "$(cat "$work/s1-portal/say.log")"
+LC_ALL=C grep -qxF "status=connected" "$work/s1-portal/$DECK_NET_OUTCOME_FILE" 2>/dev/null &&
   fail "a captive-portal network must NOT be recorded as usable"
 [[ ! -e "$work/s1-portal/$DECK_NET_STAGED_NMCONNECTION" ]] ||
   fail "a captive-portal network must not be staged for the installed system"
@@ -2503,7 +2698,7 @@ pass "§5: a captive portal is stated plainly, never rendered, never recorded as
 : >"$work/networks-empty.raw"
 rm -rf "$work/s1-noscan"; mkdir -p "$work/s1-noscan"
 printf 'Y\n' >"$work/s1-lizard"
-printf '%s\n' "$DECK_NET_SKIP_ROW" >"$work/s1-noscan/choose.q"
+printf '%s\n%s\n' "$DECK_NET_STOP_ROW" "Power off" >"$work/s1-noscan/choose.q"
 : >"$work/s1-noscan/iwctl.log"; : >"$work/s1-noscan/gum.log"
 env "${s1_env[@]}" \
     IWCTL_NETWORKS="$work/networks-empty.raw" \
@@ -2513,10 +2708,15 @@ env "${s1_env[@]}" \
     IWCTL_LOG="$work/s1-noscan/iwctl.log" \
     FAKE_GUM_LOG="$work/s1-noscan/gum.log" \
     FAKE_GUM_CHOOSE_QUEUE="$work/s1-noscan/choose.q" \
-    timeout 40 bash "$work/s1-boot.sh" >/dev/null 2>&1 ||
-  fail "an empty scan must not block the screen"
-LC_ALL=C grep -qF "No networks found. Move closer, or skip." "$work/s1-noscan/say.log" ||
-  fail "§5's exact empty-scan sentence must be shown" "$(cat "$work/s1-noscan/say.log")"
+    timeout 40 bash "$work/s1-boot.sh" >/dev/null 2>&1 || noscan_rc=$?
+[[ ${noscan_rc:-0} -eq 143 ]] ||
+  fail "an empty scan must still reach the dead end and end there" "rc=${noscan_rc:-0}"
+# §5's sentence was "No networks found. Move closer, or skip." Its second half
+# named a row that no longer exists, so it names the two things that DO exist.
+LC_ALL=C grep -qF "No networks found. Move closer, plug in a dock, or choose Rescan." "$work/s1-noscan/say.log" ||
+  fail "the empty-scan sentence must name what the user can actually do now" "$(cat "$work/s1-noscan/say.log")"
+LC_ALL=C grep -qF "An internet connection is required during install" "$work/s1-noscan/say.log" ||
+  fail "the requirement must be on screen even when the list is empty -- that is the case where a user most needs to know it is not a bug" "$(cat "$work/s1-noscan/say.log")"
 # 🔴 MUTATION-FOUND GAP, closed. This used to read `-eq $DECK_NET_SCAN_TRIES`
 # -- a tautology: mutating the constant to 1 moved the expectation with the
 # behaviour and the test stayed green. §5's number is TWO ("empty
@@ -2527,9 +2727,9 @@ scans=$(LC_ALL=C command grep -c 'scan' "$work/s1-noscan/iwctl.log")
   fail "§5: an empty result must be retried exactly twice before giving up" "scans: $scans"
 [[ $DECK_NET_SCAN_TRIES -eq 2 ]] ||
   fail "§5's scan-retry count is two" "DECK_NET_SCAN_TRIES=$DECK_NET_SCAN_TRIES"
-LC_ALL=C grep -qxF "status=skipped" "$work/s1-noscan/$DECK_NET_OUTCOME_FILE" ||
-  fail "the empty-scan screen must still reach Skip"
-pass "§5: an empty scan retries twice, says exactly what §5 asks, and still offers Skip"
+[[ ! -e "$work/s1-noscan/$DECK_NET_OUTCOME_FILE" ]] ||
+  fail "an empty scan that ended at the dead end must record no outcome" "$(cat "$work/s1-noscan/$DECK_NET_OUTCOME_FILE")"
+pass "§5: an empty scan retries twice, says what the user can do about it, and still reaches the dead end"
 
 # --- an enterprise network must not open a passphrase prompt it cannot use ---
 cat >"$work/networks-8021x.raw" <<EOF
@@ -2541,7 +2741,7 @@ cat >"$work/networks-8021x.raw" <<EOF
 EOF
 rm -rf "$work/s1-corp"; mkdir -p "$work/s1-corp"
 printf 'Y\n' >"$work/s1-lizard"
-printf '%s\n%s\n' $'\360\237\224\222 CorpNet' "$DECK_NET_SKIP_ROW" >"$work/s1-corp/choose.q"
+printf '%s\n%s\n%s\n' $'\360\237\224\222 CorpNet' "$DECK_NET_STOP_ROW" "Power off" >"$work/s1-corp/choose.q"
 : >"$work/s1-corp/iwctl.log"; : >"$work/s1-corp/gum.log"
 env "${s1_env[@]}" \
     IWCTL_NETWORKS="$work/networks-8021x.raw" \
@@ -2551,8 +2751,9 @@ env "${s1_env[@]}" \
     IWCTL_LOG="$work/s1-corp/iwctl.log" \
     FAKE_GUM_LOG="$work/s1-corp/gum.log" \
     FAKE_GUM_CHOOSE_QUEUE="$work/s1-corp/choose.q" \
-    timeout 40 bash "$work/s1-boot.sh" >/dev/null 2>&1 ||
-  fail "an enterprise network must not break the screen"
+    timeout 40 bash "$work/s1-boot.sh" >/dev/null 2>&1 || corp_rc=$?
+[[ ${corp_rc:-0} -eq 143 ]] ||
+  fail "an enterprise network must not break the screen -- the run must reach the dead end and end there" "rc=${corp_rc:-0}"
 LC_ALL=C grep -qF "enterprise security" "$work/s1-corp/say.log" ||
   fail "an 802.1x network must SAY why it cannot be joined here" "$(cat "$work/s1-corp/say.log")"
 LC_ALL=C grep -qF 'connect' "$work/s1-corp/iwctl.log" &&

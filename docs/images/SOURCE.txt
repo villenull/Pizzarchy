@@ -1,0 +1,19 @@
+# docs/images provenance -- written by tools/capture-screenshots.sh
+# Regenerate with: tools/capture-screenshots.sh --iso <the SHIPPING iso>
+
+generated:        2026-08-16T13:15:17-06:00
+installer ISO:    /home/huyke/.cache/omarchy-deck/iso-build/release/omarchy-2026.08.16-x86_64-quattro.iso
+  built:          2026-08-16 12:28:29
+  bytes:          6491736064
+OSK substrate:    /home/huyke/Pizzarchy/test/images/neptune-substrate.raw
+  ⚠️ the keyboard frames do NOT come from the ISO. vm-osk-tty-test.sh
+     copies src/deck-input-mapper.py and src/deck_osk_*.py onto the
+     substrate at run time, so they show the WORKING TREE's keyboard.
+     Same code the ISO carries, different carrier -- say so if it matters.
+installer suite:  skipped
+OSK suite:        skipped
+frames written:   7
+
+NOT capturable in QEMU, and why:
+  install-02-wifi     no wlan0 in a VM, so S1 never draws a network list
+  install-05-progress the screens suite stops at the final gate by design

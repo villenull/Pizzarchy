@@ -113,18 +113,31 @@ def deck_steps() -> list[DeckStep]:
         # section, the phase prints, and omarchy-deck-steam-first-boot.service
         # says so on the machine itself and stays in `systemctl --failed`.
         DeckStep("pkgs", deck_pkgs.fetch_packages_step, critical=False),
-        # P34. Answers Steam's OOBE stage 1 from the keyboard layout the
-        # installer already collected, so the user is not asked to choose a
+        # P34. Answers Steam's OOBE stage 1 from the SYSTEM LOCALE
+        # (`locale_config.sys_lang`), so the user is not asked to choose a
         # region minutes after our own screen asked for a timezone.
         #
-        # ⚠️ It seeds a LANGUAGE too, and that is not gratuitous: the shipped
-        # client renders both the Language and Timezone OOBE pages with
-        # `skipPage: !1`, so neither can be skipped by already knowing the
-        # answer -- the only gate is CompletedOOBEStage1. Removing the
-        # duplicated question therefore requires answering the language one.
-        # The module only does that where the mapping is defensible (systemd's
-        # own kbd-model-map BCP 47 tags); an ambiguous layout seeds NOTHING,
-        # including the OOBE flag, so the user keeps their choice.
+        # ⚠️ IT USED TO DERIVE THE LANGUAGE FROM THE KEYBOARD LAYOUT, and that
+        # shipped and was wrong on hardware 2026-08-16: an operator on an
+        # English system with a Spanish (Latin American) keyboard got a Spanish
+        # Steam. The module's own docstring had already named the trap -- "a
+        # keymap is not a language" -- and did it anyway, because a keymap was
+        # the only linguistic answer it could find. `sys_lang` is what the
+        # system actually IS (it becomes the target's /etc/locale.conf), so
+        # that is what Steam is told.
+        #
+        # ⚠️ It seeds a LANGUAGE at all, rather than only the flag, because the
+        # shipped client renders both the Language and Timezone OOBE pages with
+        # `skipPage: !1` -- neither can be skipped by already knowing the
+        # answer, and the only gate is CompletedOOBEStage1. A locale the
+        # client's own table cannot resolve seeds NOTHING, including the flag,
+        # so the user keeps their choice.
+        #
+        # 🔴 ORDERING: this must run BEFORE anything that starts the real Steam
+        # client. The seed never overwrites an existing value, so a client that
+        # has already written `language` would win -- and a bootstrap that
+        # wrote CompletedOOBEStage1 as anything but "1" would make verify()
+        # raise and the wizard come back.
         #
         # It does NOT skip the Steam login, which is not part of the OOBE.
         # critical=False; every failure leaves the registry absent or

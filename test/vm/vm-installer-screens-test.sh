@@ -541,6 +541,36 @@ sendkey() {
   qmp "{\"execute\":\"send-key\",\"arguments\":{\"keys\":[{\"type\":\"qcode\",\"data\":\"$qcode\"}]}}" >>"$WORK/qmp.log"
 }
 
+# --- OPTIONAL: pixel-exact screenshots, for tools/capture-screenshots.sh ----
+#
+# ⚠️ ADDITIVE AND INERT. With VM_SCREENSHOT_DIR unset -- which is every CI and
+# every ordinary run -- `screendump_now` returns before touching anything, no
+# extra QMP command is issued, and the guest side is not modified at all. This
+# hook is HOST-ONLY on purpose: the in-guest probe's timing is what every
+# assertion above is calibrated against (docs/PROGRESS.md §5.33a), so nothing
+# here may add a sleep, a marker or a syscall inside the guest.
+#
+# THE SYNCHRONISATION IS ALREADY THERE, which is why no guest change is needed.
+# The probe's loop is: send WANT-KEY-i-GO -> sleep -> snap(step i's name) ->
+# WANT-KEY-(i+1)-GO. So at the instant the HOST first sees WANT-KEY-i-GO, the
+# framebuffer holds exactly what the guest just folded out of /dev/vcs1 for
+# step i-1 (or, for i=1, the greeter). The host screendumps BEFORE it sends
+# step i's key, so the pixels and the text capture are the same screen.
+#
+# QMP `screendump` is a pixel copy of the emulated VGA framebuffer -- it needs
+# no guest agent, no camera, and works under `-display none`. Measured on this
+# ISO: 1280x800 PPM, which at the console's 8x16 font is 160x50 -- the same
+# geometry docs/PROGRESS.md §7 measured on the Deck's own live console.
+VM_SCREENSHOT_DIR=${VM_SCREENSHOT_DIR:-}
+[[ -n $VM_SCREENSHOT_DIR ]] && mkdir -p "$VM_SCREENSHOT_DIR"
+screendump_now() {
+  [[ -n $VM_SCREENSHOT_DIR ]] || return 0
+  local name=$1
+  qmp "{\"execute\":\"screendump\",\"arguments\":{\"filename\":\"${VM_SCREENSHOT_DIR}/${name}.ppm\"}}" \
+    >>"$WORK/qmp.log" 2>&1
+  log "screendump -> ${VM_SCREENSHOT_DIR}/${name}.ppm"
+}
+
 # STEPS must be identical to the guest's copy -- kept in exact sync by being
 # spelled the same way here (see this file's own header for what each step
 # proves). i is the WANT-KEY index the guest waits for; qcode is what the
@@ -567,13 +597,38 @@ declare -a seen
 for ((n = 1; n <= nsteps; n++)); do seen[n]=0; done
 
 elapsed=0
+seen_last=0
 while kill -0 "$qemu_pid" 2>/dev/null; do
+  # Best-effort last frame: there is no WANT-KEY after the final step, so the
+  # only marker left is the probe's own DONE. It sleeps 1 s before powering
+  # off and this loop polls every 2 s, so this MAY miss -- which is why it is
+  # best-effort and nothing below depends on the file existing.
+  if [[ -n $VM_SCREENSHOT_DIR && $seen_last -eq 0 && -f $serial_log ]] &&
+     grep -q "T4PROBE:DONE" "$serial_log"; then
+    seen_last=1
+    last_step=${STEPS##* }
+    screendump_now "${last_step%%:*}" 2>/dev/null || true
+  fi
   if [[ -f $serial_log ]]; then
     i=0
     for step in $STEPS; do
       i=$((i + 1))
       if [[ ${seen[i]} -eq 0 ]] && grep -q "T4PROBE:WANT-KEY-${i}-GO" "$serial_log"; then
         seen[i]=1
+        # The screen on the framebuffer RIGHT NOW is the outcome of the
+        # PREVIOUS step -- see screendump_now's comment. Inert unless
+        # VM_SCREENSHOT_DIR is set.
+        if [[ -n $VM_SCREENSHOT_DIR ]]; then
+          if (( i == 1 )); then
+            screendump_now "00-greeter"
+          else
+            prev=0
+            for pstep in $STEPS; do
+              prev=$((prev + 1))
+              (( prev == i - 1 )) && screendump_now "${pstep%%:*}"
+            done
+          fi
+        fi
         qcode=${step##*:}
         sleep 1
         sendkey "$qcode"
