@@ -560,6 +560,14 @@ readonly MAPPER_UNIT=/etc/systemd/user/deck-input-mapper.service
 # real target is this one.
 readonly MAPPER_WANTED_BY=wayland-session@hyprland.desktop.target
 
+# What `systemctl --global enable deck-input-mapper.service` writes, and the one
+# artefact that distinguishes "installed" from "installed AND enabled". Derived
+# from the two constants above rather than typed a third time: it is checked in
+# two places now (the stage's own read-back, and the every-boot verifier), and a
+# path that disagrees with itself is how an enabled-looking unit that never
+# starts gets shipped.
+readonly MAPPER_GLOBAL_WANTS="${MAPPER_UNIT%/*}/${MAPPER_WANTED_BY}.wants/${MAPPER_UNIT##*/}"
+
 # --- Lizard mode: the controller firmware's own input emulation -----------
 #
 # PROGRESS.md 5.21 is the defect, 5.9 / R-29 the measurements, and operator
@@ -2374,6 +2382,11 @@ ${INSTALL_MARKER}
 # Every line it writes is tagged '${FIRST_BOOT_VERIFY_TAG}':
 #   journalctl -t ${FIRST_BOOT_VERIFY_TAG} -b
 #
+# ...AND every line is also appended to ~/${FIRST_BOOT_LOG_REL}, because this
+# device has no terminal in normal use. A verdict that only exists in the
+# journal is a verdict only someone with SSH can read, and SSH does not survive
+# a reinstall (PROGRESS.md 5.36). That file opens in a text editor.
+#
 # NOT 'set -e'. The checks are independent and a machine with a brightness
 # problem must still get its power-button verdict. Each one records its own
 # outcome and the exit status is the union, so a failure is visible in
@@ -2382,7 +2395,23 @@ set -uo pipefail
 
 failures=0
 
-say()  { printf '%s\n' "\$1"; logger -t ${FIRST_BOOT_VERIFY_TAG} -- "\$1" 2>/dev/null || true; }
+# Written AS ${user}, not as root: this is the same file the Steam first-run
+# scripts append to, and a root-owned copy would make every one of their writes
+# fail (they redirect with '|| true', so the loss would be silent). Every step
+# of the append is best-effort for the same reason -- a logging problem must
+# never change a verdict.
+user_home=\$(getent passwd ${user} 2>/dev/null | cut -d: -f6)
+log_file=""
+[[ -n \$user_home ]] && log_file="\${user_home}/${FIRST_BOOT_LOG_REL}"
+
+say() {
+  printf '%s\n' "\$1"
+  logger -t ${FIRST_BOOT_VERIFY_TAG} -- "\$1" 2>/dev/null || true
+  [[ -n \$log_file ]] || return 0
+  local line
+  printf -v line '%s ${FIRST_BOOT_VERIFY_TAG}: %s' "\$(date -Iseconds)" "\$1"
+  runuser -u ${user} -- bash -c 'mkdir -p -- "\$(dirname -- "\$1")" 2>/dev/null; printf "%s\n" "\$2" >>"\$1"' _ "\$log_file" "\$line" 2>/dev/null || true
+}
 bad()  { say "FAIL: \$1"; failures=\$((failures + 1)); }
 
 # --- 1. brightness, on the kernel that is actually running -----------------
@@ -2480,6 +2509,37 @@ EOF
   fi
 else
   say "note: ${POWER_LOGIND_DROPIN} is not installed, so there is no power-button rule to verify"
+fi
+
+# --- 3. the desktop input mapper: installed, and enabled -------------------
+#
+# 🔴 THIS CHECK EXISTS BECAUSE ITS ABSENCE COST A WHOLE HARDWARE ROUND.
+# 2026-08-16: stage-input-mapper died at a keyboard-geometry assertion and
+# exited BEFORE writing ${MAPPER_UNIT}. The install reported success overall,
+# the desktop came up, and STEAM, QAM, STEAM+X and STEAM+Y were ALL dead, with
+# nothing on the machine saying why. lizard_mode back at Y was the only visible
+# trace and it was a symptom, not the cause. Finding it took a reinstall and an
+# SSH session, on a device that has neither in normal use.
+#
+# It asks nothing about button MAPPING -- that needs a person pressing buttons.
+# It asks the one question that turned out to matter: is the thing there.
+#
+# ⚠️ GATED ON THE STAGE HAVING RUN AT ALL, like its two siblings above and for
+# the same reason: a check that fails on a machine where the stage was never
+# selected is a check failing for the wrong reason, and this file already says
+# that is as bad as one passing for the wrong reason. The gate is ANY of the
+# three artefacts stage-input-mapper writes -- because the failure being hunted
+# is precisely a machine that has SOME of them.
+if [[ ! -x ${MAPPER_BIN} && ! -e ${MAPPER_UNIT} && ! -d ${OSK_LIB_DIR} ]]; then
+  say "note: no part of stage-input-mapper is installed here (no ${MAPPER_BIN}, no ${MAPPER_UNIT}, no ${OSK_LIB_DIR}), so there is no desktop input mapper to verify"
+elif [[ ! -x ${MAPPER_BIN} ]]; then
+  bad "${OSK_LIB_DIR} or ${MAPPER_UNIT} exists but ${MAPPER_BIN} does not, so stage-input-mapper started and did not finish: Desktop Mode has no controller support at all -- no STEAM button, no QAM menu, no on-screen keyboard, no STEAM+Y. Read /var/log/omarchy-deck-install.json for the stage that failed and why."
+elif [[ ! -e ${MAPPER_UNIT} ]]; then
+  bad "${MAPPER_BIN} is installed but ${MAPPER_UNIT} is not, so nothing ever starts it: the desktop has no STEAM button, no QAM menu, no on-screen keyboard and no STEAM+Y. stage-input-mapper died between installing the binary and installing the unit -- read /var/log/omarchy-deck-install.json for the stage that failed and why."
+elif [[ ! -L ${MAPPER_GLOBAL_WANTS} ]]; then
+  bad "${MAPPER_UNIT} exists but ${MAPPER_GLOBAL_WANTS} is not a symlink, so the unit is installed and NOT enabled. It would never start, and nothing else on this machine would say so."
+else
+  say "ok: input mapper -- ${MAPPER_BIN} is installed and ${MAPPER_UNIT} is enabled for ${MAPPER_WANTED_BY}"
 fi
 
 if [[ \$failures -gt 0 ]]; then
@@ -3757,34 +3817,6 @@ stage_input_mapper() {
     fail "${MAPPER_BIN} resolved no shift modifier for 'A'; ${OSK_LIB_DIR}/${OSK_SRC_NAME} is not the file the mapper imported. Output: ${probe}"
   log "verified: the mapper imports the OSK layout core and resolves shifted characters"
 
-  # The renderers are not on the --type path, so they need their own check:
-  # without them --osk-backend=tty/layer comes up with no keyboard and one
-  # warning line. Imported from the INSTALLED directory, which is what the
-  # mapper does. deck_osk_wayland imports `gi` inside main(), so importing it
-  # here needs no GTK and no display.
-  local osk_import
-  osk_import=$(python3 -c "
-import sys
-sys.path.insert(0, '${OSK_LIB_DIR}')
-import deck_osk_layout, deck_osk_tty, deck_osk_wayland
-print(len(deck_osk_tty.render(deck_osk_layout.OnScreenKeyboard(), deck_osk_layout.Cursors())))
-" 2>&1) ||
-    fail "the OSK modules in ${OSK_LIB_DIR} do not import. The installer's keyboard would be missing. Output: ${osk_import}"
-  # 🔴 DERIVED FROM THE MODULE, NOT RESTATED. This asserted a literal 5 until
-  # 2026-08-16, when KEY_ROWS made each key row two console rows and the count
-  # became 10 -- and because this is an INSTALL stage, a stale literal here does
-  # not warn, it fails the install. The renderer already knows its own height;
-  # ask it rather than keeping a second copy of the number in sync by hand.
-  osk_rows_expected=$(LC_ALL=C "$target_python" -c "
-import sys
-sys.path.insert(0, '${OSK_LIB_DIR}')
-import deck_osk_layout, deck_osk_tty
-print(len(deck_osk_layout.OnScreenKeyboard().layer().rows) * deck_osk_tty.KEY_ROWS)
-" 2>&1) || osk_rows_expected=
-  [[ -n $osk_rows_expected && $osk_import == "$osk_rows_expected" ]] ||
-    fail "the installed OSK renderer drew ${osk_import} rows for the letters layer, expected ${osk_rows_expected:-<could not derive>}. Output: ${osk_import}"
-  log "verified: the installed OSK modules import and render"
-
   assert_ours_or_absent "$MAPPER_UNIT" "something else"
   log "installing the user unit: ${MAPPER_UNIT}"
   $SUDO install -d -m 0755 -o root -g root "$(dirname "$MAPPER_UNIT")" ||
@@ -3875,13 +3907,83 @@ EOF
   # project keeps being bitten by. Off a Deck this is left alone: on a running
   # system the next line's claim is already covered by the manager itself.
   if in_chroot; then
-    local wants_dir wants_link
-    wants_dir=$(dirname "$MAPPER_UNIT")
-    wants_link="${wants_dir}/${MAPPER_WANTED_BY}.wants/${MAPPER_UNIT##*/}"
-    [[ -L $wants_link ]] ||
-      fail "'systemctl --global enable' exited 0 but ${wants_link} is not a symlink, so the mapper is installed and NOT enabled -- it would never start, and nothing would say so. That is the silent failure this project exists to remove."
-    log "verified: ${wants_link} -> $(readlink -- "$wants_link")"
+    [[ -L $MAPPER_GLOBAL_WANTS ]] ||
+      fail "'systemctl --global enable' exited 0 but ${MAPPER_GLOBAL_WANTS} is not a symlink, so the mapper is installed and NOT enabled -- it would never start, and nothing would say so. That is the silent failure this project exists to remove."
+    log "verified: ${MAPPER_GLOBAL_WANTS} -> $(readlink -- "$MAPPER_GLOBAL_WANTS")"
   fi
+
+  # 🔴 THE RENDERER CHECK RUNS *AFTER* THE UNIT IS INSTALLED AND ENABLED, AND
+  # THAT ORDER IS THE FIX FOR A SHIPPED DEFECT. It used to run before, and on
+  # 2026-08-16 it failed for a reason that had nothing to do with the mapper --
+  # `fail` exits the stage, so the unit was never written, the mapper never
+  # started, and STEAM, QAM, STEAM+X and STEAM+Y all went dead together on
+  # hardware. That is upside down: the mapper's own contract, asserted in
+  # test/unit/test-osk-install-layout.sh, is that a broken OSK core costs THE
+  # OSK AND NOTHING ELSE -- `--list` still works, the keyboard says DISABLED
+  # loudly, navigation and the menus survive. A verification of the keyboard
+  # must not be able to take out the whole input path; it can only refuse to
+  # certify it. The stage still exits non-zero and still lands in
+  # /var/log/omarchy-deck-install.json as a failed stage, so nothing is
+  # swallowed -- but the Deck it leaves behind has working buttons.
+  #
+  # The late-binding verifier answers, on the target's own kernel and at every
+  # boot, the question this stage cannot: is the mapper actually there? Calling
+  # it here as well as from the two stages that already do is deliberate -- it
+  # is idempotent and renders identical content, and a Deck whose priv-write and
+  # power-button stages both failed must still be told when its input path is
+  # missing. Installed BEFORE the renderer check below, so a broken keyboard
+  # cannot also cost the machine the check that would have reported it.
+  install_first_boot_verify
+
+  # The renderers are not on the --type path, so they need their own check:
+  # without them --osk-backend=${MAPPER_OSK_BACKEND} comes up with no keyboard
+  # and one warning line. Imported from the INSTALLED directory, which is what
+  # the mapper does. deck_osk_wayland imports `gi` inside main(), so importing
+  # it here needs no GTK and no display.
+  #
+  # 🔴 WHAT THIS ASSERTS, AND WHAT IT DELIBERATELY NO LONGER DOES. It asserted a
+  # literal `5` rows until 2026-08-16, when KEY_ROWS made each key row two
+  # console rows and the true count became 10; the stale number then failed the
+  # install. The replacement DERIVED the expected count from the same modules in
+  # a SECOND python invocation, and shipped two fresh defects in one line: it
+  # named an interpreter variable that does not exist anywhere in this file
+  # (`$target_python` -- shellcheck's SC2154 caught it and nothing else did),
+  # and it called `.layer()` on what is a property. On hardware the stage then
+  # failed on a render that had returned the CORRECT answer, and because the
+  # check sat ABOVE the unit install, the mapper was never installed at all:
+  # STEAM, QAM, STEAM+X and STEAM+Y all went dead together.
+  #
+  # So the expectation is gone rather than fixed. Deriving it from the modules
+  # under test made it very nearly tautological -- it could only ever restate
+  # what the renderer had just computed -- while carrying the full cost of a
+  # second interpreter, a second sys.path and a second failure mode. What is
+  # left is what this stage can honestly answer about the INSTALLED copy, in ONE
+  # process, with no number that can go stale:
+  #
+  #   * all three modules import from ${OSK_LIB_DIR}
+  #   * the renderer draws a positive number of rows
+  #   * every row is the same width, and that width is positive
+  #
+  # The last is the renderer's own documented invariant ("Every row is the same
+  # width by construction", deck_osk_tty.width) and it is the shape that breaks
+  # on screen: a ragged grid wraps the VT and pushes the keyboard off the
+  # bottom. The exact geometry is pinned where it can be pinned without a Deck,
+  # in test/unit/test-osk-install-layout.sh.
+  local osk_import
+  osk_import=$(LC_ALL=C python3 -c "
+import sys
+sys.path.insert(0, '${OSK_LIB_DIR}')
+import deck_osk_layout, deck_osk_tty, deck_osk_wayland
+rows = deck_osk_tty.render(deck_osk_layout.OnScreenKeyboard(), deck_osk_layout.Cursors())
+widths = {sum(len(text) for text, _ in row) for row in rows}
+if not rows:
+    raise SystemExit('the renderer drew no rows at all')
+if len(widths) != 1 or min(widths) <= 0:
+    raise SystemExit('the renderer drew rows of differing or zero width: %s' % sorted(widths))
+print('%d rows x %d columns' % (len(rows), widths.pop()))
+" 2>&1) ||
+    fail "the OSK modules in ${OSK_LIB_DIR} do not import, or do not render a usable grid. The installer's keyboard would be missing or wrapped. ${MAPPER_UNIT} is installed and enabled, so the mapper's buttons still work; the on-screen keyboard is what is in doubt. Output: ${osk_import}"
+  log "verified: the installed OSK modules import and render (${osk_import})"
 
   log "verified: unit installed and enabled --global, wanted by ${MAPPER_WANTED_BY}"
   log "stage-input-mapper: ok"

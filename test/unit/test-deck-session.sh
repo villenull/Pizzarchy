@@ -97,6 +97,11 @@ source "$REPO_ROOT/src/deck-session.sh"
 # behaviour under test, so this one suite deviates from the convention.
 pass()      { printf 'ok - %s\n' "$1"; }
 fail_test() { printf 'not ok - %s\n' "$1"; [[ -n ${2:-} ]] && printf '%s\n' "$2" >&2; exit 1; }
+# Used by the branches that skip a case for want of an optional tool. It was
+# called before it existed (the ImageMagick-absent branch in section 10), which
+# nothing noticed because this dev box has ImageMagick -- a skip path that
+# aborts the suite on the machines it exists for.
+note()      { printf '# %s\n' "$1"; }
 
 # Hard gate, not a courtesy: assert_ours_or_absent runs `$SUDO test`/`$SUDO
 # grep`. deck-session.sh leaves SUDO empty until stage_preconditions sets it,
@@ -2135,6 +2140,7 @@ exit 0
 NMSTUB
 SFR_RC=0
 SFR_OUT=$(NM_ARGS="$nm_args" "$wait_stubbed" 2>&1) || SFR_RC=$?
+# shellcheck disable=SC2015  # `fail` exits; guard, not if-then-else
 [[ $SFR_RC -eq 0 ]] && grep -q 'connectivity confirmed' <<<"$SFR_OUT" ||
   fail_test "the connected case reports the connection" "rc=${SFR_RC}"$'\n'"$SFR_OUT"
 pass "nm-online succeeding: exits 0 and reports the connection"
@@ -2423,5 +2429,270 @@ done
 pass "the message says \"Don't turn me off.\" and \"Steam is unpacking.\" -- the operator's own words"
 
 rm -rf "$sfr_work"
+
+# ===========================================================================
+# 11. stage-input-mapper's own checks -- RUN, not read (PROGRESS.md 5.28 shape)
+# ===========================================================================
+#
+# 🔴 WHY THIS SECTION EXISTS. On 2026-08-16 an ISO shipped in which
+# stage-input-mapper failed on every install, and the desktop came up with
+# STEAM, QAM, STEAM+X and STEAM+Y all dead. The stage's own words, from
+# /var/log/omarchy-deck-install.json on the Deck:
+#
+#   line 3783: target_python: unbound variable
+#   ERROR: the installed OSK renderer drew 10 rows for the letters layer,
+#          expected <could not derive>. Output: 10
+#
+# Two defects in one added line: an interpreter variable that exists nowhere in
+# deck-session.sh, and `.layer()` called on what is a property. The render had
+# returned the CORRECT answer. Every suite in test/unit was green, because every
+# check on that stage was STATIC -- test-osk-install-layout.sh greps the stage
+# body for code SHAPES, and a shape can be present and wrong.
+#
+# So this section EXECUTES what the stage executes, against the real modules,
+# in the installed directory shape. A python snippet that raises, or a shell
+# variable that does not exist, fails here in a second instead of on hardware
+# after a reinstall.
+
+ims_work="$work/input-mapper-stage"
+mkdir -p "$ims_work/lib"
+cp "$REPO_ROOT/src/deck_osk_layout.py" "$REPO_ROOT/src/deck_osk_tty.py" \
+   "$REPO_ROOT/src/deck_osk_wayland.py" "$ims_work/lib/"
+
+ims_body=$(sed -n '/^stage_input_mapper()/,/^}/p' "$REPO_ROOT/src/deck-session.sh")
+[[ -n $ims_body ]] ||
+  fail_test "stage_input_mapper() is findable in deck-session.sh" \
+    "the function name changed; everything below is now vacuous"
+
+# --- 11a. every variable the stage expands actually exists -----------------
+#
+# This is the check that would have caught `$target_python` with no knowledge of
+# what the stage is for. shellcheck's SC2154 found it on the first run, which
+# means the coordinator sequence's "shellcheck across changed shell" step was
+# the one that was skipped. Asserting it here puts it in the suite that runs
+# every time rather than in a step a human can forget.
+if command -v shellcheck >/dev/null 2>&1; then
+  sc_out=$(shellcheck -f gcc "$REPO_ROOT/src/deck-session.sh" 2>&1 || true)
+  if grep -q 'SC2154' <<<"$sc_out"; then
+    fail_test "deck-session.sh expands no variable that is never assigned (SC2154)" \
+      "$(grep 'SC2154' <<<"$sc_out")
+An unassigned variable inside \$(...) is not a syntax error and not a test
+failure -- under 'set -u' it empties the substitution, and the caller reads that
+as the CHECK failing. That is exactly how stage-input-mapper came to fail on a
+correct render and leave a Deck with no input mapper."
+  fi
+  pass "deck-session.sh references no unassigned variable (shellcheck SC2154 clean)"
+else
+  note "shellcheck is not on this machine, so SC2154 was not asserted here -- it is the check that caught the 2026-08-16 defect, so CI must keep running it"
+fi
+
+# --- 11b. the stage's OSK verification actually runs ------------------------
+#
+# Extracted from the stage body and executed verbatim against the real modules.
+# Nothing is retyped: a snippet edited in deck-session.sh is the snippet run
+# here, so this cannot drift into testing a copy that works.
+ims_snippet=$(awk '
+  /^  osk_import=\$\(LC_ALL=C python3 -c "$/ { grab = 1; next }
+  grab && /^" 2>&1\) \|\|$/                   { exit }
+  grab                                        { print }
+' <<<"$ims_body")
+[[ -n $ims_snippet ]] ||
+  fail_test "the OSK verification snippet is extractable from stage_input_mapper" \
+    "the assignment's shape changed; this case would silently test nothing"
+
+# The stage interpolates OSK_LIB_DIR into the snippet at run time; the extracted
+# text still carries the literal '${OSK_LIB_DIR}', and here it is pointed at the
+# temp copy -- the same directory shape the stage installs.
+# shellcheck disable=SC2016  # the LITERAL '${OSK_LIB_DIR}' is the search text;
+# expanding it here would look for this shell's value instead of the marker.
+ims_needle='${OSK_LIB_DIR}'
+[[ $ims_snippet == *"$ims_needle"* ]] ||
+  fail_test "the snippet imports from OSK_LIB_DIR rather than from wherever python happens to look" \
+    "$ims_snippet"
+ims_ready=${ims_snippet//"$ims_needle"/$ims_work/lib}
+ims_out=$(LC_ALL=C python3 -c "$ims_ready" 2>&1) || {
+  fail_test "the OSK verification the stage runs at install time SUCCEEDS on the real modules" \
+    "python said: ${ims_out}
+This is the install-time check itself, not a copy of it. It failing here means
+it would fail on the Deck -- and a failing check in this stage is what shipped a
+desktop with no STEAM button, no QAM menu and no keyboard."
+}
+[[ $ims_out =~ ^[0-9]+\ rows\ x\ [0-9]+\ columns$ ]] ||
+  fail_test "the stage's OSK check reports a row and column count" "got: ${ims_out}"
+pass "the stage's own OSK verification runs against the real modules and reports '${ims_out}'"
+
+# It has to be able to FAIL, or the case above proves nothing. A ragged grid is
+# the shape that wraps the VT and pushes the keyboard off the bottom, and it is
+# what the renderer's own "every row is the same width by construction" is
+# about. The fault is injected into a COPY of the installed directory, by
+# appending to the module rather than editing the snippet -- so the snippet
+# under test stays the one the stage runs.
+cp -r "$ims_work/lib" "$ims_work/lib-ragged"
+cat >>"$ims_work/lib-ragged/deck_osk_tty.py" <<'PY'
+
+_test_real_render = render
+
+
+def render(*a, **k):  # noqa: F811  -- deliberate fault injection
+    rows = _test_real_render(*a, **k)
+    rows[0] = rows[0][:-1]
+    return rows
+PY
+ims_neg=$(LC_ALL=C python3 -c "${ims_snippet//"$ims_needle"/$ims_work/lib-ragged}" 2>&1) &&
+  ims_neg_rc=0 || ims_neg_rc=$?
+[[ ${ims_neg_rc} -ne 0 ]] ||
+  fail_test "the stage's OSK check REJECTS a ragged grid" \
+    "it accepted one and printed: ${ims_neg}. A check that cannot fail is not a check."
+grep -q 'differing or zero width' <<<"$ims_neg" ||
+  fail_test "the ragged-grid rejection says what is wrong" "got: ${ims_neg}"
+pass "the stage's OSK check rejects a ragged grid and names the fault"
+
+# --- 11c. the unit is installed BEFORE anything that can fail after it ------
+#
+# The ordering IS the fix. With the check above the unit install, a keyboard
+# problem deletes the whole input path; below it, the stage still fails loudly
+# and the Deck still has working buttons. Asserted on line order in the stage
+# body, because that is the only place the ordering exists.
+# shellcheck disable=SC2016  # grep PATTERNS matching the stage's own literal
+# '${MAPPER_UNIT}' and '$(...)' text; these must not expand here.
+ims_unit_line=$(grep -n 'could not install \${MAPPER_UNIT}' <<<"$ims_body" | head -n1 | cut -d: -f1)
+# shellcheck disable=SC2016
+ims_check_line=$(grep -n 'osk_import=\$(LC_ALL=C python3' <<<"$ims_body" | head -n1 | cut -d: -f1)
+[[ -n $ims_unit_line && -n $ims_check_line ]] ||
+  fail_test "both the unit install and the OSK check are findable in the stage" \
+    "unit line: '${ims_unit_line}', check line: '${ims_check_line}'"
+[[ $ims_unit_line -lt $ims_check_line ]] ||
+  fail_test "the mapper unit is installed BEFORE the OSK renderer is verified" \
+    "unit install at body line ${ims_unit_line}, OSK check at ${ims_check_line}.
+With the check first, an OSK fault exits the stage before the unit exists and
+takes STEAM, QAM, STEAM+X and STEAM+Y with it -- measured on hardware
+2026-08-16. A keyboard check may refuse to certify the keyboard; it may not cost
+the machine its input path."
+pass "the mapper unit is installed and enabled before the OSK renderer is verified"
+
+# The enable read-back and the every-boot verifier must agree about WHERE the
+# symlink is. Two independently-typed copies of that path is how an
+# enabled-looking unit that never starts gets shipped.
+[[ $MAPPER_GLOBAL_WANTS == "$(dirname "$MAPPER_UNIT")/${MAPPER_WANTED_BY}.wants/$(basename "$MAPPER_UNIT")" ]] ||
+  fail_test "MAPPER_GLOBAL_WANTS is the path 'systemctl --global enable' writes" \
+    "got: ${MAPPER_GLOBAL_WANTS}"
+grep -q 'MAPPER_GLOBAL_WANTS' <<<"$ims_body" ||
+  fail_test "the stage's enable read-back uses MAPPER_GLOBAL_WANTS rather than recomputing it" "$ims_body"
+pass "the enable read-back and the verifier share one derivation of ${MAPPER_GLOBAL_WANTS}"
+
+# ===========================================================================
+# 12. first-boot-verify's third check -- is the mapper actually there?
+# ===========================================================================
+#
+# The install record held the answer to the 2026-08-16 failure the whole time,
+# and nothing on the machine read it. This check reads it, on the target, every
+# boot -- and its verdict now also lands in ~/.local/state/deck-session/
+# first-boot.log, which opens in a text editor on a device with no terminal.
+#
+# Run rather than read: the script is rendered, its absolute paths redirected
+# into a temp tree, and each of the three states exercised.
+
+fbv_work="$work/first-boot-verify"
+mkdir -p "$fbv_work/root" "$fbv_work/home"
+
+# A fake logger, so this suite never touches the real journal.
+mkdir -p "$fbv_work/bin"
+printf '#!/bin/sh\nexit 0\n' >"$fbv_work/bin/logger"
+chmod +x "$fbv_work/bin/logger"
+
+render_first_boot_verify testuser >"$fbv_work/verify.raw"
+
+# Redirect the three mapper paths into the temp root, and make the user log
+# writable without root: `runuser` needs privileges this suite must not have, so
+# the WRAPPER is asserted structurally below and the APPEND is exercised here.
+grep -q "runuser -u testuser -- bash -c" "$fbv_work/verify.raw" ||
+  fail_test "the verifier appends to the user's log AS the user, not as root" \
+    "a root-owned ${FIRST_BOOT_LOG_REL} would make every later write by the Steam first-run scripts fail, and they discard the error"
+grep -qF "$FIRST_BOOT_LOG_REL" "$fbv_work/verify.raw" ||
+  fail_test "the verifier writes to ~/${FIRST_BOOT_LOG_REL}" \
+    "the journal alone is unreadable on a Deck with no terminal and no SSH (PROGRESS.md 5.36)"
+pass "every verdict is written to ~/${FIRST_BOOT_LOG_REL} as the desktop user, not only to the journal"
+
+sed -e "s#user_home=\$(getent passwd testuser 2>/dev/null | cut -d: -f6)#user_home=${fbv_work}/home#" \
+    -e "s#runuser -u testuser -- bash -c#bash -c#" \
+    -e "s#${MAPPER_BIN}#${fbv_work}/root${MAPPER_BIN}#g" \
+    -e "s#${MAPPER_UNIT}#${fbv_work}/root${MAPPER_UNIT}#g" \
+    -e "s#${MAPPER_GLOBAL_WANTS}#${fbv_work}/root${MAPPER_GLOBAL_WANTS}#g" \
+    -e "s#${OSK_LIB_DIR}#${fbv_work}/root${OSK_LIB_DIR}#g" \
+    "$fbv_work/verify.raw" >"$fbv_work/verify"
+chmod +x "$fbv_work/verify"
+bash -n "$fbv_work/verify" ||
+  fail_test "the redirected verifier is still valid bash"
+
+fbv_run() { PATH="$fbv_work/bin:$PATH" bash "$fbv_work/verify" 2>&1; }
+
+# State 0: the stage was never run here at all. A note, not a failure -- the
+# same contract the brightness and power-button checks keep, and the reason is
+# the same: this script is also installed by stages that can run alone, and a
+# check that fails on a machine the stage never touched is a check failing for
+# the wrong reason.
+fbv_out=$(fbv_run) && fbv_rc=0 || fbv_rc=$?
+[[ $fbv_rc -eq 0 ]] ||
+  fail_test "a machine where stage-input-mapper never ran is a 'note', not a failure" "$fbv_out"
+grep -q 'no part of stage-input-mapper is installed here' <<<"$fbv_out" ||
+  fail_test "the note says which stage has nothing to verify" "$fbv_out"
+pass "nothing from stage-input-mapper installed -> a note, and the unit still passes"
+
+# State 1: the stage started and did not finish -- its OSK modules are on disk
+# and the binary is not. This is the gate opening: one artefact present is
+# enough to make the others' absence a defect rather than an opt-out.
+mkdir -p "$fbv_work/root$OSK_LIB_DIR"
+fbv_out=$(fbv_run) && fbv_rc=0 || fbv_rc=$?
+[[ $fbv_rc -ne 0 ]] ||
+  fail_test "a half-run stage-input-mapper FAILS the verification" "$fbv_out"
+grep -q 'no controller support at all' <<<"$fbv_out" ||
+  fail_test "the verdict names what the user will actually experience" "$fbv_out"
+pass "OSK modules present, mapper binary missing -> fails and says the desktop has no controller support"
+
+# State 2: the exact shape the broken ISO left behind -- binary installed, unit
+# never written, because the stage exited between the two.
+mkdir -p "$fbv_work/root$(dirname "$MAPPER_BIN")"
+printf '#!/bin/sh\nexit 0\n' >"$fbv_work/root$MAPPER_BIN"
+chmod +x "$fbv_work/root$MAPPER_BIN"
+fbv_out=$(fbv_run) && fbv_rc=0 || fbv_rc=$?
+[[ $fbv_rc -ne 0 ]] ||
+  fail_test "the half-installed shape the 2026-08-16 ISO shipped FAILS the verification" "$fbv_out"
+grep -q 'nothing ever starts it' <<<"$fbv_out" ||
+  fail_test "the half-install verdict says nothing starts the mapper" "$fbv_out"
+grep -q 'omarchy-deck-install.json' <<<"$fbv_out" ||
+  fail_test "the verdict points at the install record, which held the answer" "$fbv_out"
+pass "binary present, unit missing -> fails, names the four dead buttons, points at the install record"
+
+# State 3: installed but NOT enabled -- the silent one. The unit exists, every
+# 'is it installed' check passes, and it never starts.
+mkdir -p "$fbv_work/root$(dirname "$MAPPER_UNIT")"
+printf '[Unit]\n' >"$fbv_work/root$MAPPER_UNIT"
+fbv_out=$(fbv_run) && fbv_rc=0 || fbv_rc=$?
+[[ $fbv_rc -ne 0 ]] ||
+  fail_test "an installed-but-not-enabled mapper FAILS the verification" "$fbv_out"
+grep -q 'installed and NOT enabled' <<<"$fbv_out" ||
+  fail_test "the not-enabled verdict says so" "$fbv_out"
+pass "unit present but not enabled -> fails, rather than passing on the file's existence"
+
+# State 4: correct.
+mkdir -p "$fbv_work/root$(dirname "$MAPPER_GLOBAL_WANTS")"
+ln -sf "$fbv_work/root$MAPPER_UNIT" "$fbv_work/root$MAPPER_GLOBAL_WANTS"
+fbv_out=$(fbv_run) && fbv_rc=0 || fbv_rc=$?
+[[ $fbv_rc -eq 0 ]] ||
+  fail_test "a correctly installed mapper PASSES the verification" "$fbv_out"
+grep -q 'ok: input mapper' <<<"$fbv_out" ||
+  fail_test "the passing verdict names the mapper" "$fbv_out"
+pass "binary, unit and enable symlink all present -> passes"
+
+# And every one of those verdicts reached the file a person can open.
+[[ -s "$fbv_work/home/$FIRST_BOOT_LOG_REL" ]] ||
+  fail_test "the verdicts reached ~/${FIRST_BOOT_LOG_REL}" \
+    "the file is empty or missing; the journal would be the only copy"
+grep -q 'ok: input mapper' "$fbv_work/home/$FIRST_BOOT_LOG_REL" ||
+  fail_test "the log carries the mapper verdict" "$(cat "$fbv_work/home/$FIRST_BOOT_LOG_REL")"
+grep -q 'FAIL: ' "$fbv_work/home/$FIRST_BOOT_LOG_REL" ||
+  fail_test "the log carries the FAILING verdicts too, not just the passing one" \
+    "$(cat "$fbv_work/home/$FIRST_BOOT_LOG_REL")"
+pass "all four runs' verdicts are in ~/${FIRST_BOOT_LOG_REL}, failures included"
 
 echo "all deck-session.sh tests passed"

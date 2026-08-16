@@ -659,6 +659,7 @@ pass "stage_priv_write_helper takes the sentinel in chroot mode instead of globb
 # that carries a node the TARGET will not have, and prove nothing goes near it.
 mkdir -p "$work/fakesys/amdgpu_bl9"
 echo 1234 >"$work/fakesys/amdgpu_bl9/brightness"
+# shellcheck disable=SC2016  # the body is sent to the CHROOT verbatim -- expanding it HERE, in the test's own shell, is precisely the bug this asserts against
 run_chroot '
   if [[ -z "" ]] && in_chroot; then
     backlight=$BACKLIGHT_CHROOT_SENTINEL
@@ -718,30 +719,38 @@ pass "the verifier removes ${POWER_LOGIND_DROPIN} if the duplicate is still tagg
     "restoring the tags while the handler is armed is exactly the state the ordering of the writes is designed to make unreachable"
 pass "and it never removes ${POWER_UDEV_RULE} -- the harmless half stays"
 
-# Both checks gate on their own artefact, so a machine that ran only one stage
-# gets one verdict and one 'note:', not a false failure.
+# Every check gates on its own artefact, so a machine that ran only one stage
+# gets one verdict and 'note:' lines for the rest, not a false failure.
+#
+# ⚠️ THE THIRD CHECK'S GATE IS A DISJUNCTION, NOT A SINGLE FILE, and that is the
+# point of it. stage-input-mapper writes three artefacts; the 2026-08-16 failure
+# left TWO of them on disk and skipped the unit, so a gate on any one file would
+# either miss the defect or cry wolf on a machine that never ran the stage. Any
+# artefact present means the stage ran, and then the others' absence is a defect.
 grep -qF -- "if [[ -x ${PRIV_WRITE_HELPER} ]]" "$fbv" ||
   fail_test "the brightness check gates on the helper existing" "$(cat "$fbv")"
 grep -qF -- "if [[ -e ${POWER_LOGIND_DROPIN} ]]" "$fbv" ||
   fail_test "the power check gates on the drop-in existing" "$(cat "$fbv")"
+grep -qF -- "if [[ ! -x ${MAPPER_BIN} && ! -e ${MAPPER_UNIT} && ! -d ${OSK_LIB_DIR} ]]" "$fbv" ||
+  fail_test "the input-mapper check gates on ANY of stage-input-mapper's artefacts" "$(cat "$fbv")"
 pass "each check gates on its own artefact, so an unrun stage is a 'note:' and not a failure"
 
-# It runs the two checks INDEPENDENTLY. `set -e` here would mean a machine with
+# It runs the checks INDEPENDENTLY. `set -e` here would mean a machine with
 # a brightness problem never gets its power-button verdict.
 grep -qxF -- 'set -uo pipefail' "$fbv" ||
   fail_test "the verifier does not use set -e" \
     "the checks are independent and one failing must not hide the other; -u and pipefail are kept"
 pass "the verifier is 'set -uo pipefail', so one failed check does not suppress the next"
 
-# Behaviour: with neither artefact present it says so, twice, and exits 0.
+# Behaviour: with no artefact present it says so, once per check, and exits 0.
 chmod +x "$fbv"
 fbv_rc=0
 FBV_OUT=$(PATH="$stub_bin:$PATH" "$fbv" 2>&1) || fbv_rc=$?
 [[ $fbv_rc -eq 0 ]] ||
   fail_test "with nothing installed the verifier passes" "rc=${fbv_rc}"$'\n'"$FBV_OUT"
-[[ $(grep -c '^note:' <<<"$FBV_OUT") -eq 2 ]] ||
-  fail_test "it says out loud that it had nothing to check" "$FBV_OUT"
-pass "with neither artefact installed it reports two 'note:' lines and exits 0 -- not silence"
+[[ $(grep -c '^note:' <<<"$FBV_OUT") -eq 3 ]] ||
+  fail_test "it says out loud that it had nothing to check, once per check" "$FBV_OUT"
+pass "with no artefact installed it reports three 'note:' lines and exits 0 -- not silence"
 
 # ---------------------------------------------------------------------------
 # The power button, baked -- PROGRESS.md 5.38 D9
@@ -760,6 +769,7 @@ out_has "not a Galileo" ||
 pass "in a bake, an unsupported model warns and returns non-zero -- the stage skips instead of failing the install"
 
 run_normal 'power_model_reject "not a Galileo"; echo SHOULD-NOT-REACH'
+# shellcheck disable=SC2015  # `fail` exits, so this is a guard, not an if-then-else. shellcheck cannot know that
 [[ $RC -ne 0 ]] && ! out_has "SHOULD-NOT-REACH" ||
   fail_test "outside a chroot the refusal is still fatal" "rc=${RC}"$'\n'"$OUT"
 pass "outside a chroot it still exits non-zero -- a human on the wrong machine gets a refusal, as before"
@@ -790,6 +800,7 @@ pass "verify_power_button_ordering still proves ours sorts after every rival Han
 # project keeps paying for.
 [[ $ord_body == *'logind_dirs+='* && $ord_body == *'udev_dirs+='* ]] ||
   fail_test "the chroot arm filters rather than empties the directory list" "$ord_body"
+# shellcheck disable=SC2016  # same as above: the chroot body must reach the guest unexpanded
 run_chroot '
   ours=${POWER_LOGIND_DROPIN##*/}
   for d in "${POWER_LOGIND_DIRS[@]}"; do
@@ -798,6 +809,7 @@ run_chroot '
   done
   power_sorts_after "$ours" 10-ignore-power-button.conf && echo SORTS-AFTER-OMARCHY
 '
+# shellcheck disable=SC2015  # `fail` exits; guard, not if-then-else
 out_has "KEPT /etc/systemd/logind.conf.d" && out_has "SORTS-AFTER-OMARCHY" ||
   fail_test "the persistent directories survive the filter, and ours still wins there" "$OUT"
 pass "the chroot arm drops only /run -- /etc and /usr/lib, where Omarchy's 10- drop-in lives, are still scanned, and zz- still beats 10-"
