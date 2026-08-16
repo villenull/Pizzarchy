@@ -1,6 +1,7 @@
-# Pizzarchy
+# Pizzarchy: Omarchy on your Steam Deck
 
-**Omarchy on your Steam Deck, installed with the controller. Gaming Mode stays exactly as it was.**
+**Hot and ready in about twenty minutes — one bootable USB, no keyboard, and
+Gaming Mode stays exactly as it was.**
 
 One bootable USB installs a full Arch + [Omarchy](https://omarchy.org) system on
 a Steam Deck — hardware-optimized, driven entirely by the Deck's buttons and
@@ -195,7 +196,11 @@ Read docs/START-HERE.md and begin.
 
 ---
 
-## License
+## License and affiliation
+
+**An independent project. Not affiliated with, endorsed by, or supported by
+Basecamp or Valve.** "Omarchy" and "Steam Deck" are used descriptively, to say
+what this installs and what it runs on.
 
 MIT — see [LICENSE](LICENSE). Omarchy, SteamOS, gamescope, and Valve's kernel
 and firmware packages are covered by their own licenses.
