@@ -155,8 +155,20 @@ in the same place, the same way.**
   `iso/upstream/builder/build-iso.sh`'s `arch_packages` — and **report that you
   are doing so**, because that file is shared.
 - Never fatal. A prompt with a small font beats no prompt.
-- The Deck's console is `800x1280` with `fbcon=rotate:1`. At 8×16 that is 100
-  columns; at 16×32 it is 50. **Agent B is making the OSK adapt to whatever
+- ⚠️ **CORRECTED 2026-08-15 (P33/B): this arithmetic was wrong by an axis.**
+  It read the framebuffer's 800 px side as the console's horizontal one. With
+  `fbcon=rotate:1` the horizontal axis is the **1280 px** side, and
+  `docs/PROGRESS.md` §7 *measured* the live ISO's console as **`50 160` — 50
+  rows × 160 columns** (160 × 8 = 1280). So the real pair is **160 columns at
+  8×16 and 80 at 16×32**, not 100 and 50.
+  **This makes D3 worse than recorded and the fix better:** the OSK has been
+  drawing its fixed 80 columns on a **160-column console — half the screen
+  width** — which is most of "the keyboard is tiny", and the adaptive grid
+  corrects it with no font change at all. At 16×32 the console is 80 columns and
+  the grid renders cell 5 = exactly full width, so the font pin and the adaptive
+  grid compose rather than fight.
+- The Deck's console is `800x1280` with `fbcon=rotate:1`. **Agent B is making
+  the OSK adapt to whatever
   column count exists, so you do not need to coordinate a number with them.**
 
 #### A4 re-baseline the QEMU harness timings
@@ -232,15 +244,27 @@ Operator request: a controller equivalent of Omarchy's `SUPER+W`.
 that against the current `BUTTON_MAP` (`:190`) and the trackpad/QAM bindings
 (`:358`, `:417`) before wiring it.
 
-**Implement it as a direct exec (`hyprctl dispatch killactive`), NOT as a
+**Implement it as a direct exec of Hyprland's window-close dispatcher, NOT as a
 synthesised `SUPER+W` chord.** This is the file's own established precedent at
 `:373`, taken deliberately: a synthesised chord silently does nothing if upstream
 edits the binding, with nothing to read anywhere. The apps-menu binding at `:381`
 is the working template.
 
-- **Verify on the Deck** (`ssh steamdeck`) that `SUPER+W` is in fact
-  `killactive` in Omarchy 4.0's `bindings.lua` — do not assume it from other
-  Hyprland configs.
+⚠️ **CORRECTION, 2026-08-15.** This section originally named the bareword
+dispatcher from classic Hyprland. **That would have shipped a dead button**, and
+the brief was wrong, not the agent that refused it. Measured on the Deck
+(Hyprland 0.56.2 under `omarchy-dev 4.0.0.r1744.gf002044-1`): `hyprctl dispatch`
+now evaluates a **Lua expression**, a bareword resolves to `nil`, and Hyprland's
+own error names the expected form. Omarchy's real binding is one line of
+`default/hypr/bindings/tiling.lua`:
+
+    o.bind("SUPER + W", "Close window", hl.dsp.window.close())
+
+and the old bareword appears **nowhere** under `/usr/share/omarchy/`. Use the
+same dispatcher `SUPER+W` itself invokes. `test/unit/test-hyprctl-syntax.sh`
+guards this repo-wide — it went red on *this document* while the wrong form was
+in it. **Read `docs/PROGRESS.md` §5.30b and that guard before writing any
+`hyprctl dispatch` anywhere.**
 - Update the button-map docstring at the top of the file (`:17-35`). It is the
   only place a reader learns the bindings.
 - The chord must not fire the OSK toggle, and releasing STEAM alone must still

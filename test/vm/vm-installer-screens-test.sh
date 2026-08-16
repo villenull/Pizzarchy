@@ -10,7 +10,8 @@
 #   passes the Deck-forked ISO explicitly as $1.)
 #
 # Env vars (all optional):
-#   VM_RUN_TIMEOUT_SEC   whole-run ceiling, default 900
+#   VM_RUN_TIMEOUT_SEC   whole-run ceiling, default 1500 (raised from 900 by
+#                        P33: six steps now wait out the OSK bind deadline)
 #   VM_MEM_MB / VM_SMP   guest size, defaults 4096 / 4
 #   VM_OVMF_CODE / VM_OVMF_VARS   override firmware probing
 #   VM_KEEP_WORK=1       never delete the work dir, even on success
@@ -186,7 +187,7 @@ source "$REPO_ROOT/test/lib/vm-installer-screens.sh"
 ISO=${1:-$HOME/ISOs/omarchy-2026.08.10-x86_64-quattro.iso}
 WORK=${2:-$(mktemp -d /var/tmp/vm-installer-screens.XXXXXX)}
 
-RUN_TIMEOUT=${VM_RUN_TIMEOUT_SEC:-900}
+RUN_TIMEOUT=${VM_RUN_TIMEOUT_SEC:-1500}
 MEM_MB=${VM_MEM_MB:-4096}
 SMP=${VM_SMP:-4}
 
@@ -406,10 +407,44 @@ STEPS="01-kb-us:ret 02-kb-uk:down 03-username-empty:ret \
 21-fullname:ret 22-email:ret 23-hostname:ret 24-timezone-list:ret \
 25-summary:ret 26-disk-confirm:ret 27-disk-confirm-holds:ret 28-deck-summary:y"
 
+# --- THE CADENCE (P33, mirrored from vm-install-controller-test.sh) --------
+#
+# 🔴 6 s was measured against gum's redraw and is still right for that. It was
+# NEVER a budget for the OSK bind deadline, and while that deadline was 5 s the
+# text prompt landed AFTER the screenshot -- which is why `Username>` began
+# failing the moment the mapper was actually present in the image
+# (docs/PROGRESS.md §5.33a). Six steps here START a new deck_form_text_prompt
+# and must wait out the deadline; the rest keep the proven gum cadence.
+#
+# ⚠️ THE NUMBER IS READ, NOT COPIED. Restating deck-form.sh's deadline here is
+# exactly the copy-vs-source hazard that produced the dead reserved-username
+# check (§5.34 D1). Fall back loudly if it cannot be read.
+DECK_FORM_SH=/usr/share/omarchy-iso/deck-form.sh
+OSK_DEADLINE_DEFAULT=40
+osk_deadline=$(sed -n 's/^readonly DECK_OSK_BIND_DEADLINE=\([0-9][0-9]*\).*$/\1/p' \
+  "$DECK_FORM_SH" 2>/dev/null | head -1)
+if [[ -z ${osk_deadline:-} ]]; then
+  emit "osk.deadline_read=0"
+  emit "osk.deadline_source=fallback"
+  osk_deadline=$OSK_DEADLINE_DEFAULT
+else
+  emit "osk.deadline_read=1"
+  emit "osk.deadline_source=$DECK_FORM_SH"
+fi
+emit "osk.deadline_s=$osk_deadline"
+STEP_SLEEP=6
+OSK_STEP_SLEEP=$((osk_deadline + STEP_SLEEP))
+emit "osk.step_sleep_s=$OSK_STEP_SLEEP"
+OSK_STEPS="03-username-empty 04-username-empty-2 05-username-empty-3 06-username-empty-4 11-password-empty 16-confirm-empty"
+
 i=0
 for step in $STEPS; do
   i=$((i + 1))
   name=${step%%:*}
+  step_sleep=$STEP_SLEEP
+  for want in $OSK_STEPS; do
+    [[ $want == "$name" ]] && step_sleep=$OSK_STEP_SLEEP
+  done
   # ⚠️ "-GO" is load-bearing, not decoration. /dev/ttyS0 lines arrive CRLF
   # ("...WANT-KEY-1\r\n"), which a host-side `grep "...WANT-KEY-${i}\$"`
   # anchor never matches (the line's real last character is \r, not the
@@ -418,7 +453,7 @@ for step in $STEPS; do
   # that AND the substring collision an unanchored match would have
   # (WANT-KEY-1 is a prefix of WANT-KEY-10..19).
   say "WANT-KEY-${i}-GO"
-  sleep 6
+  sleep "$step_sleep"
   snap "$name"
 done
 emit "steps.sent=$i"

@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import pathlib
+import re
 import sys
 
 from evdev import ecodes as e
@@ -257,6 +258,156 @@ check("at KEY_CELL=4 labels WOULD overflow -- so 5 is a real floor, not a guess"
       widest_overflow(4) != [], True)
 check("at KEY_CELL=5 nothing overflows", widest_overflow(5), [])
 
+
+# =============================================================================
+# 🔴 P33 B1: THE GRID ADAPTS TO THE CONSOLE IT IS GIVEN (docs/PROGRESS.md §5.34
+# D3)
+# =============================================================================
+#
+# The 80 columns everything above pins is A MEASUREMENT OF ONE CONSOLE, at one
+# console font, and BOTH halves of that move. The keyboard was unreadable on a
+# 7" panel (§5.34 D3); the fix is a bigger console font, and a bigger font gives
+# FEWER columns. A grid hardcoded to 80 either wastes half a wide console or is
+# refused outright by `write_at`'s own column guard on a narrow one -- and the
+# screen it is refused on is where a Wi-Fi passphrase gets typed.
+#
+# ⚠️ Measured, not assumed: at HEAD, `render()` at 50 columns produced 80 and
+# `write_at(console_cols=50)` raised. That is the defect these checks exist to
+# keep fixed.
+#
+# 🔴 AND THE COLUMN COUNT ITSELF IS DISPUTED, WHICH IS PRECISELY WHY NOTHING
+# HERE DEPENDS ON KNOWING IT. `docs/tasks/P33-fix-round.md` §A3 works the Deck's
+# 800x1280 panel out as 100 columns at 8x16 and 50 at 16x32 -- i.e. taking the
+# console's horizontal axis to be the 800 px one. `docs/PROGRESS.md` §7's
+# MEASURED live-ISO console is 50x160, and 160 * 8 == 1280, which says the
+# horizontal axis is the 1280 px one and the same two fonts give 160 and 80.
+# Both pairs are checked below, and the sweep covers everything between them, so
+# whichever is right the keyboard fits. Resolving it is not this file's job; the
+# adaptation is what makes it not need resolving.
+PLAN_COLS_SMALL_FONT, PLAN_COLS_BIG_FONT = 100, 50    # §A3's arithmetic
+MEASURED_COLS_SMALL_FONT, MEASURED_COLS_BIG_FONT = 160, 80   # §7's 50x160
+
+check("the widest cell that fits 100 columns is 6", tty.cell_width_for(100, 16), 6)
+check("...80 columns is still 5, so nothing that ships today moves",
+      tty.cell_width_for(80, 16), 5)
+check("...and 50 columns is 3", tty.cell_width_for(50, 16), 3)
+check("the live ISO's 160 columns fill the console at 10",
+      tty.cell_width_for(160, 16), 10)
+check("a console that fits nothing gets MIN_KEY_CELL anyway -- a width that does "
+      "NOT fit, so write_at refuses loudly instead of drawing '[]' for every key",
+      tty.cell_width_for(20, 16), tty.MIN_KEY_CELL)
+check("...and MIN_KEY_CELL is 3, below which a highlight has no room for a face",
+      tty.MIN_KEY_CELL, 3)
+check("a grid with no cells is a caller bug, not a division",
+      raises(lambda: tty.cell_width_for(80, 0), ValueError), True)
+
+# ⚠️ THE POINT OF THE WHOLE CHANGE: no row may exceed the console, at EVERY
+# width the Deck can actually present. Asserted as a sweep rather than at two
+# convenient numbers, so an off-by-one at some width in between is not invisible.
+too_wide = []
+for cols in range(3 * GRID_CELLS, LIVE_ISO_COLS + 1):
+    for shift, caps in STATES:
+        drawn_rows = tty.render(probe(shift, caps), osk.Cursors(), cols)
+        if tty.width(drawn_rows) > cols:
+            too_wide.append((cols, shift, caps, tty.width(drawn_rows)))
+check("🔴 no rendered row exceeds the console, at every width from 48 to 160, "
+      "in every shift/caps state", too_wide, [])
+
+for cols, want_cell in ((PLAN_COLS_SMALL_FONT, 6), (PLAN_COLS_BIG_FONT, 3),
+                        (MEASURED_COLS_SMALL_FONT, 10),
+                        (MEASURED_COLS_BIG_FONT, 5)):
+    at = tty.render(*fresh(), cols)
+    check(f"at {cols} columns the keyboard is drawn at cell {want_cell}",
+          tty.width(at), GRID_CELLS * want_cell)
+    check(f"...and {cols} columns really does fit it -- write_at accepts",
+          (tty.write_at(io.StringIO(), at, 1, console_rows=25,
+                        console_cols=cols), True)[1], True)
+    check(f"...with less than a whole cell of slack, so the console is used",
+          cols - tty.width(at) < want_cell, True)
+
+check("with no console named, the keyboard is exactly what it always was",
+      tty.to_plain(tty.render(*fresh())),
+      tty.to_plain(tty.render(*fresh(), INSTALLED_TTY_COLS)))
+
+# ⚠️ AND NOTHING IS TRUNCATED AT ANY OF THEM. This is the check §5.34 D3's own
+# proposal would have failed: it argued 5->3 "appears to fit" from `cell_text`
+# drawing `[q]` at width 3, which is true and is not the binding constraint --
+# `display_label`'s budget is `span * cell - 2`, and at cell 3 `Enter` (5 against
+# 4) and `Backspace` (9 against 7) both overflow. `NARROW_LABELS` is what makes 3
+# real, and this is what proves it for every key in every state.
+truncated_anywhere = []
+for cell_width in range(tty.MIN_KEY_CELL, 11):
+    for shift, caps in STATES:
+        kb_p = probe(shift, caps)
+        for _layer, _r, _k, key in every_key():
+            text = tty.display_label(kb_p, key, cell_width)
+            budget = key.span * cell_width
+            for hot, available in ((False, budget), (True, budget - 2)):
+                if len(text) > available:
+                    truncated_anywhere.append(
+                        (cell_width, key.label, shift, caps, hot, text))
+                if text not in tty.cell_text(text, budget, hot):
+                    truncated_anywhere.append(
+                        (cell_width, key.label, "not drawn whole"))
+check("🔴 no label is truncated at ANY cell width from 3 to 10, at any span, in "
+      "any shift/caps state", truncated_anywhere, [])
+
+# ...and that it is not vacuous: at cell 2 a highlight has no room at all.
+check("at cell 2 labels WOULD overflow -- 3 is a real floor, not a preference",
+      [1 for shift, caps in STATES
+       for _l, _r, _k, key in every_key()
+       if len(tty.display_label(probe(shift, caps), key, 2)) > key.span * 2 - 2] != [],
+      True)
+
+# Highlighted and plain must stay the SAME width at every cell width, or keys
+# shift sideways as a cursor moves and the whole keyboard reads as twitching.
+uneven = []
+for cell_width in range(tty.MIN_KEY_CELL, 11):
+    for cols in (cell_width * GRID_CELLS,):
+        widths_here = set()
+        for shift, caps in STATES:
+            for lx in (0.0, 0.3, 1.0):
+                cursors_h = osk.Cursors()
+                cursors_h.pos["left"], cursors_h.pos["right"] = [lx, 0.5], [lx, 0.9]
+                plain = tty.to_plain(tty.render(probe(shift, caps), cursors_h, cols))
+                widths_here.update(len(line) for line in plain.split("\n"))
+        if widths_here != {cols}:
+            uneven.append((cell_width, sorted(widths_here)))
+check("every row is exactly the grid's width at every cell width, wherever the "
+      "cursors are and in every state", uneven, [])
+
+# The narrow faces have to be recognisable as the keys they replace, and they
+# have to be SHORTER -- an "abbreviation" that is not shorter is a typo.
+check("every narrow face is strictly shorter than the face it replaces",
+      [face for face, short in tty.NARROW_LABELS.items() if len(short) >= len(face)],
+      [])
+check("the narrow faces are ASCII, like everything else this module draws",
+      [s for s in tty.NARROW_LABELS.values() if any(ord(ch) > 127 for ch in s)], [])
+check("Enter keeps its badge at 100 columns, where there is room for it",
+      tty.display_label(probe(), osk.ENTER_KEY, tty.cell_width_for(100, 16)),
+      "R2 Enter")
+check("...and shortens rather than truncating at 50",
+      tty.display_label(probe(), osk.ENTER_KEY, tty.cell_width_for(50, 16)), "Entr")
+check("Backspace likewise", tty.display_label(probe(), osk.BACKSPACE_KEY, 3), "Bksp")
+check("...and Shift keeps the MODIFIER WORD at 50 columns, dropping face letters "
+      "for it -- the case of a character typed into a masked field",
+      tty.display_label(probe("locked"), osk.SHIFT_KEY, 3), "Sh LOCK")
+check("Caps needs no shortening even at 50 -- 'Caps ON' is exactly the budget",
+      tty.display_label(probe(caps=True), osk.CAPS_KEY, 3), "Caps ON")
+
+# ⚠️ THE ASCII RULE STILL HOLDS AT EVERY WIDTH. A narrow face is still a face.
+non_ascii_narrow = []
+for cols in (PLAN_COLS_BIG_FONT, PLAN_COLS_SMALL_FONT,
+             MEASURED_COLS_BIG_FONT, MEASURED_COLS_SMALL_FONT,
+             INSTALLED_TTY_COLS, LIVE_ISO_COLS):
+    for shift, caps in STATES:
+        non_ascii_narrow += [ch for ch
+                             in tty.to_plain(tty.render(probe(shift, caps),
+                                                        osk.Cursors(), cols))
+                             if ord(ch) > 127]
+check("nothing outside ASCII is drawn at any console width",
+      sorted(set(non_ascii_narrow)), [])
+
 # --- no glyph a bare console may lack ever reaches the screen -----------------
 #
 # ⚠️ §9g's arrows are `◀▶▲▼` and the emoji key is `☺`. The ISO's console font is
@@ -425,12 +576,26 @@ check("...the synthetic key matches the real one, so this is not testing a ficti
        osk.SHIFT_KEY.hint))
 
 # span 2 -> budget 8. "L2 Shift ONCE" (13) does not fit; "Shift ONCE" (10) does
-# not either; "Shift" (5) does. The word is kept as long as it can be.
+# not either.
+#
+# 🔴 THE ANSWER CHANGED IN P33 B1, AND IT CHANGED TOWARDS THIS FUNCTION'S OWN
+# STATED PRIORITY. It used to be "Shift" -- the badge AND the modifier word both
+# dropped, keeping the full face. `NARROW_LABELS` gives the ladder one more rung
+# ("Sh" for "Shift"), and "Sh ONCE" is 7 against a budget of 8, so now the WORD
+# survives and the face is what shortens. `display_label`'s docstring has always
+# said the modifier word is the last thing dropped -- a user who cannot see that
+# Shift is armed finds out by typing the wrong case into a field echoed as dots
+# -- and the check below, which predates the change, was already asserting
+# exactly this outcome with a hand-shortened face.
 narrow = osk.Key(label="Shift", action="shift", span=2, hint="L2")
-check("badge dropped first when both cannot fit",
-      tty.display_label(probe("once"), narrow), "Shift")
+check("badge dropped first, and the modifier word outlives the full face",
+      tty.display_label(probe("once"), narrow), "Sh ONCE")
 mid = osk.Key(label="Sh", action="shift", span=2, hint="L2")
-check("...and with a shorter face the WORD survives while the badge is dropped",
+check("...and a face with no shorter form drops the word rather than truncating",
+      tty.display_label(probe("once"),
+                        osk.Key(label="Zzzzz", action="shift", span=2, hint="L2")),
+      "Zzzzz")
+check("...with a shorter face the WORD survives while the badge is dropped",
       tty.display_label(probe("once"), mid), "Sh ONCE")
 check("with room for everything, everything is drawn",
       tty.display_label(probe("once"), wide_shift), "L2 Shift ONCE")
@@ -890,6 +1055,209 @@ check("clearing erases one line per rendered row", cleared.count("\x1b[K"), len(
 check("clearing writes no key label",
       any(lab in cleared for lab in ("Shift", "space", "q", "Backspace")), False)
 check("clearing also restores the cursor", cleared.endswith("\x1b[u"), True)
+
+
+# =============================================================================
+# 🔴 P33 B2: THE REPAINT RATE (docs/PROGRESS.md §5.34 D4)
+# =============================================================================
+#
+# §5.34 D4 says "rate is unmeasured -- measure before fixing", so it was.
+# `deck-input-mapper.py` redraws ONCE PER READ BATCH from the pad fd (its own
+# comment: "Redraw once per batch, not per event") and the pads run at 250 Hz,
+# so one second of a thumb on a pad was 250 draws, and at HEAD each one was:
+#
+#     5 rows BLANKED with `\x1b[K` and repainted -> 1250 erases/s, 116750 bytes/s
+#
+# on a framebuffer console with no double buffering, against a 90 Hz panel. A
+# thumb resting perfectly still cost exactly the same as one sweeping the pad,
+# because the draw did not look at what was already on the screen.
+#
+# ⚠️ THE FLICKER ITSELF IS NOT REPRODUCIBLE OFF HARDWARE -- there is no VT and no
+# scanout here, and this file has no way to see a flash. What IS measurable, and
+# what these checks pin, is the DRIVE: how many cells get erased and repainted
+# per draw. That is the quantity the fix reduces, and it is the honest thing to
+# assert. Whether the panel stops flickering is the operator's to confirm.
+
+MOVE_RE = re.compile(r"\x1b\[(\d+);(\d+)H")
+
+
+class Recorder:
+    """A stream that counts what a console would have had to paint."""
+
+    def __init__(self):
+        self.chunks = []
+
+    def write(self, text):
+        self.chunks.append(text)
+        return len(text)
+
+    def flush(self):
+        pass
+
+    @property
+    def text(self):
+        return "".join(self.chunks)
+
+    @property
+    def writes(self):
+        return len(self.chunks)
+
+    @property
+    def moves(self):
+        return len(MOVE_RE.findall(self.text))
+
+    @property
+    def erases(self):
+        return self.text.count("\x1b[K")
+
+
+def at(lx, ly, rx=0.9, ry=0.9):
+    cursors_r = osk.Cursors()
+    cursors_r.pos["left"], cursors_r.pos["right"] = [lx, ly], [rx, ry]
+    return tty.render(osk.OnScreenKeyboard(), cursors_r)
+
+
+# --- the first draw is exactly what it always was ----------------------------
+#
+# ⚠️ A COLD STREAM MUST NOT BE INCREMENTAL. Nothing is known about what is under
+# the keyboard on the first draw, so it clears each row to end-of-line and paints
+# it whole -- the pre-P33 behaviour, byte for byte. Every existing check above
+# draws into a fresh buffer, which is why they still hold.
+rec = Recorder()
+tty.write_at(rec, rows, 20)
+check("the first draw to a stream paints every row and clears each one",
+      (rec.writes, rec.moves, rec.erases), (1, len(rows), len(rows)))
+
+# --- an unchanged frame writes NOTHING ----------------------------------------
+#
+# The common case while a thumb rests on a pad that keeps reporting at 250 Hz.
+tty.write_at(rec, rows, 20)
+check("🔴 redrawing an identical keyboard writes nothing at all -- no bytes, no "
+      "erase, no flush", (rec.writes, rec.moves, rec.erases),
+      (1, len(rows), len(rows)))
+
+# --- a cursor move paints the CELLS that changed, and erases nothing ----------
+rec2 = Recorder()
+first = at(0.05, 0.5)
+tty.write_at(rec2, first, 20)
+before_moves = rec2.moves
+moved = at(0.60, 0.5)
+check("...and the two frames really do differ, so this is not vacuous",
+      tty.to_plain(first) == tty.to_plain(moved), False)
+tty.write_at(rec2, moved, 20)
+check("🔴 a one-row cursor move paints exactly the two cells that changed",
+      rec2.moves - before_moves, 2)
+check("...and erases NOTHING -- the blank-then-paint flash is what the panel sees",
+      rec2.erases, len(rows))
+check("...and it is still one write() per draw, not one per cell",
+      rec2.writes, 2)
+check("...still bracketed by save/restore, which also clears any pending wrap",
+      rec2.chunks[-1].startswith("\x1b[s") and rec2.chunks[-1].endswith("\x1b[u"),
+      True)
+
+# The incremental write is a fraction of a full one. Both numbers are recorded
+# rather than a ratio asserted, so a regression says which way it went.
+full_bytes = len(rec2.chunks[0])
+delta_bytes = len(rec2.chunks[1])
+check("a one-cell move costs a small fraction of a full repaint",
+      delta_bytes * 5 < full_bytes, True)
+print(f"     (full repaint {full_bytes} bytes, one-cell move {delta_bytes} bytes)")
+
+# --- a move that crosses rows repaints cells in BOTH -------------------------
+rec3 = Recorder()
+tty.write_at(rec3, at(0.35, 0.1), 20)
+base = rec3.moves
+tty.write_at(rec3, at(0.35, 0.9), 20)
+check("a cursor moving between rows paints a cell in each", rec3.moves - base, 2)
+
+# --- nothing is ever written past the console's last column -------------------
+#
+# ⚠️ THE ZERO-SLACK ARGUMENT, RE-CHECKED CELL BY CELL. `write_at`'s docstring
+# says a row that exactly fills the console is safe because the VT defers its
+# wrap until the next character, and the next thing written is always an absolute
+# move or the restore. That argument has to hold for a CELL that ends in the last
+# column too, which is new since P33 B2.
+for cols_w in (PLAN_COLS_BIG_FONT, INSTALLED_TTY_COLS,
+               PLAN_COLS_SMALL_FONT, LIVE_ISO_COLS):
+    rec_w = Recorder()
+    overrun = []
+    positions = [(x / 20, y / 20) for x in range(21) for y in (2, 9, 17)]
+    for lx, ly in positions:
+        cursors_w = osk.Cursors()
+        cursors_w.pos["left"], cursors_w.pos["right"] = [lx, ly], [1.0 - lx, ly]
+        tty.write_at(rec_w, tty.render(osk.OnScreenKeyboard(), cursors_w, cols_w),
+                     20, console_rows=25, console_cols=cols_w)
+    for chunk in rec_w.chunks:
+        for piece in chunk.split("\x1b[")[1:]:
+            hit = re.match(r"(\d+);(\d+)H(.*)", piece, re.S)
+            if hit:
+                text_after = hit.group(3).replace(tty.REVERSE, "").replace(tty.RESET, "")
+                text_after = text_after.split("\x1b")[0].replace("\x1b[K", "")
+                if int(hit.group(2)) - 1 + len(text_after) > cols_w:
+                    overrun.append((cols_w, hit.group(0)[:40]))
+    check(f"nothing is ever painted past column {cols_w}, cell by cell, over a "
+          "full sweep of both cursors", overrun, [])
+
+# --- damage heals: the unconditional repaint ---------------------------------
+#
+# ⚠️ THE PRICE OF REMEMBERING. This module can now be wrong about what is on the
+# screen, so it repaints everything every FULL_REPAINT_EVERY draws. Without that
+# bound, one line of damage from anything else on the console would stay until
+# the keyboard's own content happened to change in that row.
+rec4 = Recorder()
+tty.write_at(rec4, rows, 20)
+for _ in range(tty.FULL_REPAINT_EVERY):
+    tty.write_at(rec4, rows, 20)
+check("identical draws inside the interval write nothing more", rec4.writes, 1)
+tty.write_at(rec4, rows, 20)
+check(f"🔴 the draw after {tty.FULL_REPAINT_EVERY} incremental ones repaints "
+      "everything unconditionally, so damage from anything else is bounded, "
+      "not permanent",
+      (rec4.writes, rec4.erases), (2, 2 * len(rows)))
+check("the interval is a COUNT, not a clock -- a clock would need one to test",
+      isinstance(tty.FULL_REPAINT_EVERY, int) and tty.FULL_REPAINT_EVERY > 0, True)
+
+# --- everything that invalidates ---------------------------------------------
+
+rec5 = Recorder()
+tty.write_at(rec5, rows, 20)
+tty.write_at(rec5, rows, 20, full=True)
+check("full=True forces a repaint of an unchanged frame",
+      (rec5.writes, rec5.erases), (2, 2 * len(rows)))
+
+rec6 = Recorder()
+tty.write_at(rec6, rows, 20)
+tty.write_at(rec6, rows, 19)
+check("moving the keyboard is a full repaint, not a diff against the old rows",
+      (rec6.writes, rec6.erases), (2, 2 * len(rows)))
+
+rec7 = Recorder()
+tty.write_at(rec7, rows, 1, console_rows=50, console_cols=LIVE_ISO_COLS)
+tty.write_at(rec7, rows, 1, console_rows=25, console_cols=INSTALLED_TTY_COLS)
+check("a resized console is a full repaint -- R-49: `stty cols` RESIZES a VT, so "
+      "the remembered screen no longer exists",
+      (rec7.writes, rec7.erases), (2, 2 * len(rows)))
+
+rec8 = Recorder()
+tty.write_at(rec8, rows, 20)
+tty.clear_at(rec8, rows, 20)
+tty.write_at(rec8, rows, 20)
+check("🔴 clear_at forgets the frame, so the keyboard really comes back -- "
+      "without this the redraw after a clear would find 'nothing changed' and "
+      "leave the console blank", rec8.chunks[-1].count("\x1b[K"), len(rows))
+
+rec9, rec10 = Recorder(), Recorder()
+tty.write_at(rec9, rows, 20)
+tty.write_at(rec10, rows, 20)
+check("two streams have separate memories -- the VM suite draws on tty2 and tty3",
+      (rec9.erases, rec10.erases), (len(rows), len(rows)))
+
+check("a stream that cannot be weak-referenced still draws, every time, in full",
+      [len(str(n)) for n in range(2)
+       if tty.write_at(type("Slotted", (), {"__slots__": ("out",),
+                                            "write": lambda self, t: None,
+                                            "flush": lambda self: None})(),
+                       rows, 20) is None] != [], True)
 
 print()
 print(f"{'PASS' if FAILURES == 0 else 'FAIL'} — {FAILURES} failure(s)")

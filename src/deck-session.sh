@@ -685,6 +685,155 @@ readonly BACKLIGHT_GLOB='/sys/class/backlight/amdgpu_bl*/brightness'
 # second is a bug in this file.
 readonly BACKLIGHT_CLASS_DIR=/sys/class/backlight
 
+# 🔴 THE NODE MAY NOT BE DISCOVERED IN A CHROOT, AND THIS IS THE REASON.
+# arch-chroot bind-mounts /sys from the INSTALLING system, and the installer
+# boots the live ISO's stock archiso kernel while the target boots Neptune. The
+# two enumerate the panel differently -- MEASURED, twice, on one physical Deck:
+# the installer's kernel offered `amdgpu_bl1` and the installed system offers
+# only `amdgpu_bl0` (PROGRESS.md 5.38 D10). So an install-time discovery answers
+# a question about the WRONG MACHINE, and even a write that succeeded there
+# would have recorded a node the target does not have. It did not succeed: the
+# real install's stage-priv-write-helper FAILED with
+# "'/sys/class/backlight/amdgpu_bl1/brightness' is not writable even as root".
+#
+# So in chroot mode the discovery is not attempted and the write path is not
+# exercised. verify_priv_write_helper is handed this whitelist-SHAPED path that
+# cannot exist, exactly as the "this machine has no backlight" arm does, so its
+# boundary checks (refuses /etc/shadow, refuses a non-numeric value) still run
+# for the right reason -- and the write half is deferred, out loud, to a unit
+# that re-asks the question on the target's OWN kernel. See
+# render_first_boot_verify.
+readonly BACKLIGHT_CHROOT_SENTINEL="${BACKLIGHT_CLASS_DIR}/deck-session-chroot-cannot-answer-this/brightness"
+
+# --- late-binding verification (PROGRESS.md 5.38) ---------------------------
+#
+# 🔴 THE GENERAL FORM OF D10, and it is not only about brightness: a check that
+# reads HARDWARE STATE inside the installer's chroot is asking the live ISO's
+# kernel about a machine that will boot a different one. Some such checks are
+# safe -- DMI is firmware, and /sys/class/dmi/id/product_name reads the same on
+# both kernels because the installer runs ON the target hardware. Others are
+# not: driver-assigned names and indices (backlight nodes) and udev's runtime
+# database (which rules ran, which tags are live) belong to whichever kernel and
+# udevd are running right now.
+#
+# The answer is not to guess better at install time. It is to ask on the target,
+# once it is up, and to say so loudly either way. This unit is that seam: one
+# script, installed by whichever stage needs it, running every boot as root.
+#
+# WHY EVERY BOOT AND NOT ONCE. A marker file makes "the check has run" and "the
+# check passed" indistinguishable after the fact -- the exact confusion this
+# project keeps paying for. The checks are cheap, read-mostly and idempotent
+# (the brightness one writes the panel its own current value), so running them
+# on every boot costs nothing and puts a fresh, dated verdict in the journal
+# instead of a stale one from an install nobody can see any more.
+readonly FIRST_BOOT_VERIFY_BIN=/usr/local/lib/deck-session/first-boot-verify
+readonly FIRST_BOOT_VERIFY_NAME=deck-session-verify.service
+readonly FIRST_BOOT_VERIFY_UNIT="/etc/systemd/system/${FIRST_BOOT_VERIFY_NAME}"
+readonly FIRST_BOOT_VERIFY_WANTS="/etc/systemd/system/multi-user.target.wants/${FIRST_BOOT_VERIFY_NAME}"
+# The syslog tag every line it writes carries, so one grep finds the whole
+# verdict:  journalctl -t deck-session-verify -b
+readonly FIRST_BOOT_VERIFY_TAG=deck-session-verify
+
+# --- Steam's first run (PROGRESS.md 5.35) -----------------------------------
+#
+# MEASURED, from Steam's own ~/.local/share/Steam/logs/bootstrap_log.txt on the
+# installed Deck, 2026-08-15:
+#
+#   15:08:15  steam -gamepadui starts, "Downloading Update..."
+#   15:08:15  "Download failed: http error 0" -> "Steam needs to be online to
+#             update."                                <-- the modal the operator saw
+#   15:08:16  relaunches, retries the same request, SUCCEEDS
+#   15:09:51  "Extracting package..."
+#   15:10:14  "Update complete, launching..."
+#   15:10:18  the new client starts
+#
+# Two separate defects live in that table and they have separate fixes.
+#
+# 🐞 E2 -- THE ERROR IS A RACE, NOT A BROKEN NETWORK. One second apart, the
+# identical request fails and then works: Steam is started before
+# NetworkManager has connectivity. So Steam's start is ordered after a BOUNDED
+# wait for connectivity.
+#
+# ⚠️ AND NOT ON network-online.target, which is the obvious answer and the wrong
+# one. deck_wifi.py's first-boot unit says why in its own comment (it takes
+# Wants=network.target deliberately): on a Deck with no network at all that
+# target is reached only by TIMEOUT, so the cost lands on exactly the machines
+# least able to afford it. On this machine it would not even do that --
+# NetworkManager-wait-online.service is MASKED here (read off the Deck
+# 2026-08-15), so network-online.target is never reached at all and an ordering
+# on it would either hang or be silently meaningless.
+#
+# What is used instead is `nm-online`, which takes its own bound as an
+# argument, run from a wrapper that ALWAYS exits 0. Both halves matter: the
+# bound stops a networkless Deck paying for a network fix, and the exit 0 stops
+# a Wi-Fi problem from turning into "Gaming Mode does not start".
+readonly STEAM_LAUNCHER_UNIT=steam-launcher.service
+readonly STEAM_WAIT_ONLINE_BIN=/usr/local/lib/deck-session/steam-wait-online
+readonly STEAM_WAIT_DROPIN="/etc/systemd/user/${STEAM_LAUNCHER_UNIT}.d/50-deck-wait-online.conf"
+# Seconds. Chosen against the measurement above rather than picked: the retry
+# that worked was ONE second after the failure, so almost any bound closes the
+# race, and the number's real job is to be a ceiling on a Deck that will never
+# come online. 20 s is well under the ~120 s Steam then spends updating, so on a
+# connected Deck it costs nothing and on a disconnected one it costs 20 s once.
+readonly STEAM_WAIT_SECONDS=20
+readonly NM_ONLINE_BIN=/usr/bin/nm-online
+
+# 🆕 E1 -- THE "DON'T TURN ME OFF" SPLASH.
+#
+# For ~2 minutes on the first boot, gamescope is up, Steam is updating itself
+# headless, and the panel is black with no channel to say so: the cmdline is
+# `quiet splash loglevel=0 systemd.show_status=false`, so the console prints
+# nothing, and plymouth-quit ran at 659 ms -- three orders of magnitude before
+# the window opens.
+#
+# 🔴 IT LIVES IN THE SESSION, NOT THE BOOT PATH, and that was decided rather
+# than fallen into (docs/tasks/P33-fix-round.md §1). Holding plymouth past
+# plymouth-quit puts a splash bug on the critical path of every boot; a session
+# client that fails to start leaves exactly today's black screen. The failure
+# modes are not comparable, so the placement is not a preference.
+#
+# 🔴 AND IT MUST NOT BE ABLE TO OUTLIVE STEAM. A splash that fails to exit is a
+# permanently black-with-text panel -- strictly worse than the defect it fixes,
+# and on a device whose only escape is a ten-second hardware hold. It is
+# therefore bounded THREE independent ways, none of which depends on the other
+# two working: the script's own deadline, systemd's RuntimeMaxSec= on the unit,
+# and PartOf= so that a session teardown takes it with it.
+readonly SPLASH_UNIT_NAME=deck-steam-splash.service
+readonly SPLASH_UNIT="/etc/systemd/user/${SPLASH_UNIT_NAME}"
+readonly SPLASH_BIN=/usr/local/lib/deck-session/steam-first-boot-splash
+readonly SPLASH_IMAGE=/usr/local/share/deck-session/steam-first-boot.png
+# Relative to the desktop user's home. Shown ONCE: later boots reach Gaming
+# Mode in ~39 s and the splash must not appear in front of a client that is
+# about to draw. Written BEFORE anything is displayed, deliberately -- a splash
+# that crashes must not get a second attempt at every boot forever.
+readonly SPLASH_MARKER_REL=.local/state/deck-session/steam-first-boot-shown
+# Seconds. The measured update was 123 s end to end; this is that with room and
+# a hard stop. It is a CEILING, not a duration -- the normal exit is Steam's UI
+# appearing.
+readonly SPLASH_MAX_SECONDS=300
+# The process that only exists once the Steam CLIENT is running. The updater
+# that runs during those two minutes is not it, which is what makes this a
+# usable "Steam is drawing now" signal rather than "Steam was started".
+readonly SPLASH_STEAM_READY_PROC=steamwebhelper
+# gamescope's logical output, which is landscape: the panel is 800x1280 portrait
+# and gamescope applies its own transform (that is why Gaming Mode is exempt
+# from the rotation work in PANEL_TRANSFORM above). An image drawn portrait here
+# would be the one thing on the Deck rotated the wrong way.
+readonly SPLASH_IMAGE_SIZE=1280x800
+readonly SPLASH_VIEWER=/usr/bin/imv
+
+# ⚠️ NO NEW PACKAGE IS NEEDED FOR ANY OF THIS, and that was CHECKED rather than
+# hoped for. All three tools this section leans on are already in Omarchy's own
+# base list (runtime-src/install/omarchy-base.packages), which is installed on
+# the target before the bake runs -- `imagemagick` line 59, `imv` line 60,
+# `networkmanager` (which ships nm-online) line 64. Read 2026-08-15, and
+# confirmed present on the installed Deck the same day.
+#
+# So nothing here touches iso/upstream/builder/build-iso.sh's package list or
+# iso/overlay/configs/deck/*.packages. Every one is still checked at the point
+# of use, because "in a package list today" and "on this machine" are different
+# claims -- and a missing one costs the splash, never the stage.
+
 # Called by absolute path from the timezone helper's sudo line, because that is
 # the form omarchy-settings-dev's own sudoers rule matches (see
 # stage_timezone_helper). `timedatectl` bare would resolve through PATH and
@@ -948,6 +1097,10 @@ readonly -a INSTALL_STAGES=(
   stage-update-stub
   stage-timezone-helper
   stage-priv-write-helper
+  # Beside the other three Steam-facing stages, and after them: it installs a
+  # drop-in on Valve's steam-launcher.service and a splash for Steam's first
+  # run, neither of which is worth anything if the stubs above did not land.
+  stage-steam-first-run
   stage-greeter-rotation
   stage-sddm-resilience
   stage-return-icon
@@ -984,14 +1137,34 @@ readonly -a INSTALL_STAGES=(
 #     rule is deck-session.sh's to write and that its own block is a different
 #     one, so this is a division of labour that already exists on paper.
 #
-# The three opt-in stages stay opt-in here too, on their own arguments, which
-# chroot mode does not change: stage-default-session (deck_autologin.py already
-# writes and verifies the autologin drop-in -- a second writer of one file is
-# the drift this project pays for), stage-boot-default-gaming (arms a re-assert
-# at EVERY boot on a machine whose Gaming Mode nobody has yet watched start; it
-# is an operator decision, and its ordering check needs a live systemd), and
-# stage-power-button (rewires a hardware button; its own header refuses to be
-# armed by a bare run).
+#   - stage-power-button is IN, as of PROGRESS.md 5.38 D9, and it was NOT
+#     before. 🔴 The reason for the change is that leaving it out shipped a
+#     Deck whose power button does nothing at all: Omarchy's package-owned
+#     /etc/systemd/logind.conf.d/10-ignore-power-button.conf resolves
+#     HandlePowerKey=ignore, logind logs 'Power key pressed short' on every
+#     press and drops it, and the whole of this file's T13 work -- the udev
+#     untagging, the sort-order proof, the double-suspend guard -- was written,
+#     unit-tested, documented and reached by no code path. That is the P32
+#     family (Steam, the mapper, steamos-session-select, the reserved-username
+#     list), and the argument that kept it out ("a bare run must not arm a
+#     hardware button on a machine nobody has watched") is an argument about a
+#     BARE RUN, which is why it stays out of INSTALL_STAGES and stays in
+#     list-stages. The installer is not a bare run: it is building the product,
+#     on hardware it has just identified, from a plan a human approved.
+#     What answers the safety half instead is that the stage refuses any model
+#     but ${POWER_MODEL} (it now SKIPS rather than fails when baked, so a VM
+#     install is not a failed stage), and that the one live question a chroot
+#     cannot answer -- did the udev rule actually match? -- is deferred to
+#     ${FIRST_BOOT_VERIFY_NAME}, which DISARMS the handler on the target if it
+#     did not.
+#
+# The two remaining opt-in stages stay opt-in here too, on their own arguments,
+# which chroot mode does not change: stage-default-session (deck_autologin.py
+# already writes and verifies the autologin drop-in -- a second writer of one
+# file is the drift this project pays for) and stage-boot-default-gaming (arms
+# a re-assert at EVERY boot on a machine whose Gaming Mode nobody has yet
+# watched start; it is an operator decision, and its ordering check needs a
+# live systemd).
 readonly -a BAKE_STAGES=(
   stage-preconditions
   stage-session-select
@@ -999,6 +1172,7 @@ readonly -a BAKE_STAGES=(
   stage-update-stub
   stage-timezone-helper
   stage-priv-write-helper
+  stage-steam-first-run
   stage-greeter-rotation
   stage-sddm-resilience
   stage-return-icon
@@ -1006,6 +1180,13 @@ readonly -a BAKE_STAGES=(
   stage-input-mapper
   stage-lizard-mode
   stage-osk-kb-layout
+  # Last, and the ordering is not arbitrary: it writes the two files that
+  # change what a hardware button does, and every other stage should already
+  # have had its chance to fail before anything rewires the power key. It also
+  # depends on stage-desktop-settings' sleep-lock mask being decided (it checks
+  # rather than assumes -- warn_if_sleep_lock_live), and on the verification
+  # unit stage-priv-write-helper installs, which is above it.
+  stage-power-button
 )
 
 log()  { printf '[%s] %s\n' "$PROG" "$*"; }
@@ -1108,8 +1289,12 @@ stage_preconditions() {
       # QEMU install tier (CLAUDE.md's second testing tier), where nothing is a
       # Deck and this phase would then be exercised by nobody but hardware.
       # Everything the baked stages write is inert on a machine that is not a
-      # Deck -- and the one stage that is NOT inert on other hardware, the power
-      # button, keeps its own model gate and is not baked at all.
+      # Deck -- and the one stage that would NOT be inert on other hardware,
+      # the power button, keeps its own model gate. ⚠️ That stage IS baked now
+      # (PROGRESS.md 5.38 D9); what makes this warning still safe is
+      # verify_power_button_model, which on a baked run reports the machine as
+      # unsupported and writes nothing rather than rewiring a button on
+      # hardware nobody has measured.
       warn "this machine reports product='${product:-?}' vendor='${vendor:-?}', which is not Steam Deck hardware. Continuing because chroot mode is the installer's, and an ISO built for the Deck may legitimately be installed in a VM for testing -- but NOTHING below has been exercised on this hardware."
     else
       fail "not Steam Deck hardware (product='${product:-?}' vendor='${vendor:-?}'). Refusing to rewrite session configuration."
@@ -2104,6 +2289,237 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# LATE-BINDING VERIFICATION -- the answer to PROGRESS.md 5.38 D10
+# ---------------------------------------------------------------------------
+
+# The body of ${FIRST_BOOT_VERIFY_BIN}, written to stdout. Same seam as every
+# other render_* here: the unit suite can read it with no Deck, no root and no
+# VM.
+#
+# 🔴 WHY THIS FILE EXISTS AT ALL, given that this project's rule is "nothing the
+# installed system NEEDS is left to first boot". It leaves no artefact to first
+# boot. Both artefacts -- the priv-write helper and the power-button files --
+# are written at install time, complete, by their own stages. What is deferred
+# here is a pair of QUESTIONS THE INSTALLER'S KERNEL CANNOT ANSWER:
+#
+#   1. Does Steam's brightness write actually land? The node is named by the
+#      KERNEL, and the installer's kernel is not the target's -- measured, one
+#      Deck, two answers (amdgpu_bl1 in the ISO, amdgpu_bl0 installed).
+#   2. Did the power-button udev rule match? udev's tags are runtime state of
+#      whichever udevd is running, so the chroot can only see the installer's.
+#
+# ⚠️ IT DUPLICATES A LITTLE LOGIC FROM THIS FILE, AND THAT IS DELIBERATE RATHER
+# THAN CARELESS. deck-session.sh is NOT installed on the target -- the bake
+# stages it into /var/tmp and deletes it (deck_session_bake.py's docstring says
+# why: an unowned 5000-line script in /usr/local would be a second, unversioned
+# source of truth on every Deck). So a first-boot check either carries the few
+# lines it needs or the script has to ship, and shipping it is the larger harm.
+# What it carries is kept to the smallest possible restatement, every constant
+# is interpolated from the ones above rather than retyped, and it deliberately
+# does NOT restate find_backlight's three-outcome contract -- it has its own
+# two outcomes, because by the time it runs, "no backlight on this machine"
+# is no longer an ordinary answer.
+render_first_boot_verify() {
+  local user=${1:-$(desktop_user)}
+  cat <<EOF
+#!/usr/bin/env bash
+#
+# deck-session first-boot / every-boot verification.
+${INSTALL_MARKER}
+#
+# Runs as root from ${FIRST_BOOT_VERIFY_NAME}. Read the LATE-BINDING
+# VERIFICATION block in ${PROG}.sh before changing anything here.
+#
+# Every line it writes is tagged '${FIRST_BOOT_VERIFY_TAG}':
+#   journalctl -t ${FIRST_BOOT_VERIFY_TAG} -b
+#
+# NOT 'set -e'. The checks are independent and a machine with a brightness
+# problem must still get its power-button verdict. Each one records its own
+# outcome and the exit status is the union, so a failure is visible in
+# 'systemctl --failed' rather than only in a log nobody opens.
+set -uo pipefail
+
+failures=0
+
+say()  { printf '%s\n' "\$1"; logger -t ${FIRST_BOOT_VERIFY_TAG} -- "\$1" 2>/dev/null || true; }
+bad()  { say "FAIL: \$1"; failures=\$((failures + 1)); }
+
+# --- 1. brightness, on the kernel that is actually running -----------------
+#
+# Gated on the helper existing: stage-priv-write-helper installs both, so if
+# the helper is absent this check has nothing to say and says so.
+if [[ -x ${PRIV_WRITE_HELPER} ]]; then
+  nodes=()
+  for p in ${BACKLIGHT_GLOB}; do
+    [[ -e \$p ]] && nodes+=("\$p")
+  done
+
+  if [[ \${#nodes[@]} -eq 0 ]]; then
+    have=\$(ls -1 ${BACKLIGHT_CLASS_DIR} 2>/dev/null | tr '\n' ' ')
+    bad "no backlight matches ${BACKLIGHT_GLOB} on this running kernel (\$(uname -r)). ${BACKLIGHT_CLASS_DIR} carries: \${have:-<nothing>}. Gaming Mode's brightness slider has no node to drive, and the whitelist in ${PRIV_WRITE_HELPER} would refuse whatever Steam names."
+  else
+    # Deterministic, and said out loud when there is a choice -- the same rule
+    # find_backlight follows, for the same reason.
+    if [[ \${#nodes[@]} -gt 1 ]]; then
+      mapfile -t nodes < <(printf '%s\n' "\${nodes[@]}" | sort -V)
+      say "note: more than one backlight matches (\${nodes[*]}); taking \${nodes[0]}"
+    fi
+    bl=\${nodes[0]}
+    before=\$(cat "\$bl" 2>/dev/null) || before=""
+    if [[ -z \$before ]]; then
+      bad "could not read \${bl}"
+    else
+      # AS THE DESKTOP USER, not as root, and that is the point: root would
+      # exercise the helper's inner branch only. Going through ${user} runs the
+      # real path Steam runs -- sudo -n, the sudoers grant, then the whitelist.
+      rc=0
+      runuser -u ${user} -- ${PRIV_WRITE_HELPER} "\$bl" "\$before" >/dev/null 2>&1 || rc=\$?
+      after=\$(cat "\$bl" 2>/dev/null) || after=""
+      if [[ \$rc -ne 0 ]]; then
+        bad "${PRIV_WRITE_HELPER} exited \${rc} writing \${bl} its own current value (\${before}) as ${user}. Gaming Mode's brightness slider will fall back to 'sudo -n tee' and 'sudo -n chmod a+w', which need blanket sudo and leave the node world-writable. See: journalctl -t steamos-priv-write -b"
+      elif [[ \$after != "\$before" ]]; then
+        bad "${PRIV_WRITE_HELPER} changed \${bl} from \${before} to \${after} while being asked for \${before}"
+      else
+        say "ok: brightness -- ${PRIV_WRITE_HELPER} accepted \${bl} as ${user} and wrote \${before} (kernel \$(uname -r))"
+      fi
+    fi
+  fi
+else
+  say "note: ${PRIV_WRITE_HELPER} is not installed, so there is no brightness path to verify"
+fi
+
+# --- 2. the power-button rule, against this kernel's udev database ---------
+#
+# Gated on the drop-in existing, so this is silent on a machine where
+# stage-power-button never ran (an LCD Deck, a VM, an opt-out).
+if [[ -e ${POWER_LOGIND_DROPIN} ]]; then
+  if ! command -v udevadm >/dev/null 2>&1; then
+    bad "${POWER_LOGIND_DROPIN} is installed but udevadm is missing, so whether the power-button rule matched cannot be checked"
+  else
+    keep_tagged=0
+    still_tagged=""
+    for dev in /dev/input/event*; do
+      [[ -e \$dev ]] || continue
+      props=\$(udevadm info --query=property --name "\$dev" 2>/dev/null) || continue
+      id=\$(printf '%s\n' "\$props" | sed -n 's/^ID_PATH=//p' | head -n1)
+      tags=\$(printf '%s\n' "\$props" | sed -n 's/^TAGS=//p' | head -n1)
+      [[ -n \$id ]] || continue
+      case ":\${tags}:" in *":${POWER_UDEV_TAG}:"*) tagged=1 ;; *) tagged=0 ;; esac
+      [[ \$id != "${POWER_KEEP_ID_PATH}" ]] || keep_tagged=\$tagged
+EOF
+  local p
+  for p in "${POWER_ACPI_ID_PATHS[@]}"; do
+    cat <<EOF
+      if [[ \$id == "${p}" && \$tagged -eq 1 ]]; then still_tagged="\${still_tagged} ${p}"; fi
+EOF
+  done
+  cat <<EOF
+    done
+
+    if [[ -n \$still_tagged ]]; then
+      # 🔴 THE ONE STATE THIS WHOLE DESIGN EXISTS TO AVOID, and the only one
+      # worth undoing automatically: the handler is armed and a second
+      # KEY_POWER source is still live, so one press becomes two suspend
+      # requests ~198 ms apart and the second lands at or just after resume.
+      # On a device whose only other escape is a ten-second hardware hold that
+      # is indistinguishable from a Deck that will not wake, so the handler is
+      # DISARMED here rather than reported and left running. Removing the
+      # drop-in restores exactly today's behaviour: Omarchy's
+      # 10-ignore-power-button.conf takes the key back.
+      rm -f ${POWER_LOGIND_DROPIN}
+      bad "the power-button udev rule did NOT untag:\${still_tagged} on this kernel, so KEY_POWER still has more than one source while HandlePowerKey=${POWER_KEY_ACTION} was armed -- the re-suspend loop. ${POWER_LOGIND_DROPIN} has been REMOVED, which restores the previous behaviour (the power button does nothing). ${POWER_UDEV_RULE} is left in place; it is harmless alone. Re-run the capture in docs/findings/T13-power-button-and-sleep.md 2.2 on this machine and correct POWER_ACPI_ID_PATHS."
+    elif [[ \$keep_tagged -ne 1 ]]; then
+      # Not disarmed: a missing keeper means logind is watching nothing, i.e.
+      # the button is DEAD. That is a defect, but removing the drop-in cannot
+      # improve it and would only hide which change caused it.
+      bad "no device carries ID_PATH=${POWER_KEEP_ID_PATH} with TAGS=:${POWER_UDEV_TAG}: on this kernel. That is the single KEY_POWER source this design keeps, so systemd-logind has nothing to act on and the power button does nothing. ${POWER_LOGIND_DROPIN} is left in place so the cause stays visible."
+    else
+      say "ok: power button -- ${POWER_KEEP_ID_PATH} is the surviving tagged KEY_POWER source and the ACPI duplicate(s) are untagged"
+    fi
+  fi
+else
+  say "note: ${POWER_LOGIND_DROPIN} is not installed, so there is no power-button rule to verify"
+fi
+
+if [[ \$failures -gt 0 ]]; then
+  say "\${failures} check(s) failed. This unit is deliberately allowed to fail so the machine says so: systemctl status ${FIRST_BOOT_VERIFY_NAME}"
+  exit 1
+fi
+say "all checks passed"
+EOF
+}
+
+# Install (or refresh) the verifier and its unit. Idempotent, and safe to call
+# from more than one stage: the content is the same either way, and the two
+# stages that call it check DIFFERENT halves of it -- each half gates itself on
+# its own artefact being present, so a machine that ran only one stage gets only
+# that stage's verdict and a 'note:' line for the other.
+install_first_boot_verify() {
+  local tmp
+  assert_ours_or_absent "$FIRST_BOOT_VERIFY_BIN" "another package's verification helper"
+  assert_ours_or_absent "$FIRST_BOOT_VERIFY_UNIT" "another package's unit"
+
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$FIRST_BOOT_VERIFY_BIN")" ||
+    fail "could not create $(dirname "$FIRST_BOOT_VERIFY_BIN")"
+
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_first_boot_verify >"$tmp" || fail "could not render ${FIRST_BOOT_VERIFY_BIN}"
+  $SUDO install -m 0755 -o root -g root "$tmp" "$FIRST_BOOT_VERIFY_BIN" ||
+    fail "could not install ${FIRST_BOOT_VERIFY_BIN}"
+  rm -f "$tmp"
+
+  tmp=$(mktemp) || fail "mktemp failed"
+  cat >"$tmp" <<EOF
+${INSTALL_MARKER}
+#
+# Asks, on the target's OWN kernel, the two questions the installer's chroot
+# could only ask of the live ISO's -- see the LATE-BINDING VERIFICATION block
+# in ${PROG}.sh, and PROGRESS.md 5.38.
+[Unit]
+Description=deck-session late-binding verification (brightness, power button)
+# udev must have processed the input devices before their tags mean anything,
+# and logind must have read its configuration before its behaviour is worth
+# asking about. Neither is Requires=: this unit must never be able to stop the
+# machine reaching a session.
+After=systemd-udevd.service systemd-logind.service
+ConditionPathExists=${FIRST_BOOT_VERIFY_BIN}
+
+[Service]
+Type=oneshot
+ExecStart=${FIRST_BOOT_VERIFY_BIN}
+# Bounded. The checks start no services and wait on nothing, so anything past
+# this is wedged rather than slow -- and a wedged verification must not hold a
+# boot open.
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  $SUDO install -D -m 0644 -o root -g root "$tmp" "$FIRST_BOOT_VERIFY_UNIT" ||
+    fail "could not install ${FIRST_BOOT_VERIFY_UNIT}"
+  rm -f "$tmp"
+
+  # 🔴 THE SYMLINK, NOT 'systemctl enable', WHEN THERE IS NO MANAGER. In chroot
+  # mode `systemctl enable` would need to talk to a manager the target does not
+  # have; the symlink IS what enable writes, and writing it directly is what
+  # deck_wifi.py's first-boot unit does for the same reason. On a running
+  # machine the manager is asked properly, so this stays the one code path that
+  # is different rather than two that drift.
+  if in_chroot; then
+    $SUDO install -d -m 0755 -o root -g root "$(dirname "$FIRST_BOOT_VERIFY_WANTS")" ||
+      fail "could not create $(dirname "$FIRST_BOOT_VERIFY_WANTS")"
+    $SUDO ln -sf "$FIRST_BOOT_VERIFY_UNIT" "$FIRST_BOOT_VERIFY_WANTS" ||
+      fail "could not enable ${FIRST_BOOT_VERIFY_NAME}"
+    [[ -L $FIRST_BOOT_VERIFY_WANTS ]] ||
+      fail "wrote ${FIRST_BOOT_VERIFY_WANTS} but it is not a symlink on re-read, so the verification would never run and nothing would say so"
+  else
+    $SUDO systemctl enable "$FIRST_BOOT_VERIFY_NAME" >/dev/null 2>&1 ||
+      fail "could not enable ${FIRST_BOOT_VERIFY_NAME}"
+  fi
+  log "installed ${FIRST_BOOT_VERIFY_BIN} and enabled ${FIRST_BOOT_VERIFY_NAME}"
+}
+
+# ---------------------------------------------------------------------------
 
 # find_backlight [glob] [class-dir] -- print the panel's brightness node.
 #
@@ -2211,7 +2627,26 @@ stage_priv_write_helper() {
   # ${2:-$(find_backlight)} would print the diagnosis and then carry on with an
   # empty value -- a loud message followed by a silent skip, which is worse than
   # either. Resolving it as a statement lets each outcome be answered properly.
-  if [[ -z $backlight ]]; then
+  if [[ -z $backlight ]] && in_chroot; then
+    # 🔴 THE INSTALLER'S KERNEL IS NOT THE TARGET'S. This exact discovery, run
+    # here, is what made the real install's stage-priv-write-helper the one
+    # stage that FAILED (PROGRESS.md 5.38 D10): it found
+    # /sys/class/backlight/amdgpu_bl1/brightness -- which exists on the live
+    # ISO's stock archiso kernel and does NOT exist on the installed Deck, whose
+    # Neptune kernel offers only amdgpu_bl0 -- and then could not write it.
+    #
+    # Note what was NOT wrong, so it does not get re-diagnosed: the helper's
+    # whitelist is a pattern and accepts either name (measured and disproved as
+    # a cause in 0becd4b), and find_backlight's three outcomes are correct --
+    # they were just asked of the wrong machine. Nothing below is a workaround
+    # for a flaky check; the check is simply not answerable from in here, and
+    # even an answer that had SUCCEEDED would have been about the ISO.
+    #
+    # So: no discovery, no write, and the question is handed to a unit that asks
+    # it on the target's own kernel.
+    backlight=$BACKLIGHT_CHROOT_SENTINEL
+    defer "the backlight node cannot be discovered at install time -- arch-chroot bind-mounts /sys from the LIVE ISO, whose kernel enumerates the panel differently from the Neptune kernel the target boots (measured: amdgpu_bl1 in the installer, amdgpu_bl0 installed). The helper and its sudoers grant ARE installed, and the helper's whitelist is a pattern that accepts whichever name the kernel gives it. The write path is exercised on the target instead, by ${FIRST_BOOT_VERIFY_NAME}, on every boot. Confirm on the installed machine with: journalctl -t ${FIRST_BOOT_VERIFY_TAG} -b"
+  elif [[ -z $backlight ]]; then
     local blrc=0
     backlight=$(find_backlight) || blrc=$?
     case $blrc in
@@ -2268,6 +2703,14 @@ EOF
 
   verify_priv_write_helper "$helper" "$backlight"
 
+  # The deferred half, and it is a VERIFICATION rather than an artefact: both
+  # files above are complete and Steam can use them from the target's first
+  # second. What is installed here is the thing that ASKS whether they work, on
+  # the kernel that will actually be running.
+  if in_chroot; then
+    install_first_boot_verify
+  fi
+
   log "stage-priv-write-helper: ok"
   log "NOTE: this covers brightness and the status LED only. Steam also asks"
   log "      for /dev/drm_dp_aux0, which is deliberately NOT whitelisted."
@@ -2302,6 +2745,13 @@ verify_priv_write_helper() {
     [[ $after == "$before" ]] ||
       fail "${helper} changed ${bl} from ${before} to ${after} while being asked for ${before}"
     log "verified: wrote ${bl} its existing value (${before}) through the helper"
+  elif [[ $bl == "$BACKLIGHT_CHROOT_SENTINEL" ]]; then
+    # NOT the "no panel here" case, and saying so matters: the panel exists, the
+    # installer's kernel simply cannot be asked about the target's. The stage
+    # has already printed a DEFERRED line naming where the answer comes from
+    # instead, so this stays a log rather than a second warning about the same
+    # fact.
+    log "the write path is not exercised here on purpose -- see the DEFERRED line above; ${FIRST_BOOT_VERIFY_NAME} asks the target's own kernel"
   else
     warn "${bl} not present, so the helper's write path was NOT exercised. On non-Deck hardware that is expected; on a Deck it is not."
   fi
@@ -2422,7 +2872,354 @@ if ! printf '%s\n' "\$value" >"\$path" 2>/dev/null; then
   note "the kernel refused value '\${value}' for '\${path}'"
   exit 6
 fi
+
+# 🔴 SUCCESS IS JOURNALLED TOO, AND THAT IS NOT SYMMETRY FOR ITS OWN SAKE.
+# "The brightness slider moved" is not evidence that this helper ran: Steam
+# falls back to 'sudo -n tee' and then 'sudo -n chmod a+w' when the helper
+# fails, so the panel dims either way and an apparent-motion check has already
+# fooled this project once (PROGRESS.md 5.33a). Without this line there is
+# nothing in the journal that distinguishes tier 1 from tier 2, and the only
+# recorded outcome of a working helper is silence -- which is indistinguishable
+# from it never being called. One greppable line settles it:
+#   journalctl -t steamos-priv-write -b | grep accepted
+note "accepted: wrote '\${value}' to '\${path}'"
 EOF
+}
+
+# ---------------------------------------------------------------------------
+# stage-steam-first-run -- the race, and the two silent minutes after it
+# ---------------------------------------------------------------------------
+#
+# Read the "Steam's first run" constants block above for the measurement this
+# whole stage is shaped by. Both halves are drop-ins and neither edits a file
+# this project does not own: steam-launcher.service belongs to Valve's
+# gamescope package.
+
+# The bounded wait, written to stdout. Same seam as every other render_* here.
+#
+# 🔴 IT ALWAYS EXITS 0, AND THAT IS THE POINT, NOT AN OVERSIGHT. It is an
+# ExecStartPre= on the unit that starts Steam. A non-zero exit there means
+# Gaming Mode does not start -- i.e. a Wi-Fi problem would be converted into an
+# unusable Deck, which is a far worse defect than the error modal this exists to
+# remove. So the outcome is REPORTED (every branch logs, to the journal, by
+# name) and never propagated. That is not "silently swallowing a failure": the
+# failure is loud, it just is not fatal, because being fatal here is wrong.
+render_steam_wait_online() {
+  cat <<EOF
+#!/usr/bin/env bash
+#
+# Wait, briefly, for the network before Steam starts.
+${INSTALL_MARKER}
+#
+# WHY: Steam's very first run asks for its own update before NetworkManager has
+# connectivity, gets "Steam needs to be online to update.", and then succeeds on
+# a retry ONE SECOND LATER (measured -- PROGRESS.md 5.35). The modal is the only
+# lasting damage, and it is avoidable by starting one second later.
+#
+# WHY NOT network-online.target: on a Deck with no network that target is
+# reached only by timeout, and here NetworkManager-wait-online.service is masked
+# so it is never reached at all. See the constants block in ${PROG}.sh.
+set -uo pipefail
+
+say() { printf 'deck-steam-wait-online: %s\n' "\$1" >&2; }
+
+if [[ ! -x ${NM_ONLINE_BIN} ]]; then
+  say "${NM_ONLINE_BIN} is not installed, so connectivity cannot be waited for. Steam starts now; if this machine has no network yet it may show 'Steam needs to be online to update.' once and recover on its own retry."
+  exit 0
+fi
+
+# -s: wait for NetworkManager to finish activating its startup connections,
+#     rather than for a connection to exist. On a Deck with no configured
+#     network that completes promptly instead of burning the whole timeout,
+#     which is the trap this is written around.
+# -q: no output of its own; every line here is ours and carries this tag.
+# -t: the ceiling, in seconds.
+rc=0
+${NM_ONLINE_BIN} -q -s -t ${STEAM_WAIT_SECONDS} || rc=\$?
+if [[ \$rc -eq 0 ]]; then
+  say "network is up; starting Steam"
+else
+  say "nm-online exited \${rc} within ${STEAM_WAIT_SECONDS}s -- this machine is not online yet. Starting Steam ANYWAY, on purpose: a Deck with no Wi-Fi must still reach Gaming Mode. Steam may show 'Steam needs to be online to update.' once."
+fi
+exit 0
+EOF
+}
+
+# The splash. Written to stdout, same seam.
+#
+# 🔴 THE THREE BOUNDS, AND WHY THERE ARE THREE. A splash that cannot exit is a
+# permanently black-with-text panel, which is strictly worse than the two silent
+# minutes it replaces. So no single mechanism is trusted to end it:
+#
+#   1. this script's own deadline (${SPLASH_MAX_SECONDS}s), which it enforces
+#      itself and which does not depend on detecting Steam at all;
+#   2. RuntimeMaxSec= on ${SPLASH_UNIT_NAME}, which systemd enforces even if
+#      this script is wedged in an uninterruptible read;
+#   3. PartOf=gamescope-session.target, so ending the session ends this.
+#
+# The NORMAL exit is none of those -- it is ${SPLASH_STEAM_READY_PROC}
+# appearing, which is the Steam client's UI process and cannot be running while
+# the updater is still unpacking. ⚠️ That signal is REASONED, not measured: it
+# has not been watched on hardware, which is exactly why it is not the only way
+# out.
+render_steam_splash() {
+  cat <<EOF
+#!/usr/bin/env bash
+#
+# "Don't turn me off. Steam is unpacking." -- shown once, on the first boot.
+${INSTALL_MARKER}
+#
+# Read the "Steam's first run" constants block in ${PROG}.sh before changing
+# anything here, and the three-bounds note above render_steam_splash.
+set -uo pipefail
+
+say() { printf 'deck-steam-splash: %s\n' "\$1" >&2; }
+
+marker="\${HOME:-/home/\$(id -un)}/${SPLASH_MARKER_REL}"
+
+# ONCE. Later boots reach Gaming Mode in ~39 s and there is nothing to cover.
+if [[ -e \$marker ]]; then
+  exit 0
+fi
+
+# 🔴 WRITTEN BEFORE ANYTHING IS DRAWN. If displaying the splash is what breaks
+# this machine, it gets exactly one chance to do so -- not one per boot, for
+# ever. The cost of being wrong in this direction is missing the message once;
+# the cost of being wrong in the other is a Deck that covers its own screen at
+# every start.
+mkdir -p "\$(dirname "\$marker")" 2>/dev/null || true
+date -Iseconds >"\$marker" 2>/dev/null || say "could not write \${marker}; the splash may be shown again next boot"
+
+[[ -r ${SPLASH_IMAGE} ]] || { say "${SPLASH_IMAGE} is missing; showing nothing"; exit 0; }
+[[ -x ${SPLASH_VIEWER} ]] || { say "${SPLASH_VIEWER} is missing; showing nothing"; exit 0; }
+
+# Draw INSIDE gamescope, not beside it. gamescope publishes its nested
+# compositor's socket as GAMESCOPE_WAYLAND_DISPLAY in the session environment
+# file steam-launcher.service also reads; WAYLAND_DISPLAY at this point is the
+# OUTER session's, and a client on that one would be behind gamescope's own
+# fullscreen surface where nobody would ever see it.
+if [[ -n \${GAMESCOPE_WAYLAND_DISPLAY:-} ]]; then
+  export WAYLAND_DISPLAY=\$GAMESCOPE_WAYLAND_DISPLAY
+fi
+
+${SPLASH_VIEWER} -f -x ${SPLASH_IMAGE} &
+viewer=\$!
+say "showing ${SPLASH_IMAGE} (pid \${viewer}) until ${SPLASH_STEAM_READY_PROC} appears, or ${SPLASH_MAX_SECONDS}s, whichever comes first"
+
+# The deadline is computed once, up front, so nothing inside the loop can push
+# it out -- a loop that re-reads its own bound is a loop that can fail to end.
+deadline=\$(( \$(date +%s) + ${SPLASH_MAX_SECONDS} ))
+reason="deadline"
+while [[ \$(date +%s) -lt \$deadline ]]; do
+  # The viewer died on its own (no compositor, unsupported image, killed).
+  # Nothing left to take down, and no reason to keep counting.
+  kill -0 "\$viewer" 2>/dev/null || { reason="the viewer exited"; viewer=""; break; }
+  if pgrep -x ${SPLASH_STEAM_READY_PROC} >/dev/null 2>&1; then
+    # A short settle so the message does not vanish a frame before Steam's own
+    # first frame lands, which would read as a flicker rather than a handover.
+    sleep 2
+    reason="${SPLASH_STEAM_READY_PROC} is running"
+    break
+  fi
+  sleep 2
+done
+
+if [[ -n \$viewer ]]; then
+  kill "\$viewer" 2>/dev/null || true
+  # TERM first, then make sure. A viewer that ignores TERM must not become the
+  # permanent black-with-text screen this whole design is arranged against.
+  for _ in 1 2 3 4 5; do
+    kill -0 "\$viewer" 2>/dev/null || break
+    sleep 1
+  done
+  kill -9 "\$viewer" 2>/dev/null || true
+fi
+say "splash down (\${reason})"
+exit 0
+EOF
+}
+
+# Draw the message. Not a heredoc, because the artefact is a PNG: ImageMagick
+# is asked to make it at install time so that nothing has to render text at
+# first boot, on the one machine that is already busy.
+#
+# THE WORDING IS THE REQUIREMENT, not a placeholder. The operator asked for
+# "something to tell users like don't turn me off. steam is unpacking." -- in
+# those terms, so that is what it says, in those terms.
+render_steam_splash_image() {   # render_steam_splash_image <outfile> [magick]
+  local out=$1
+  local magick=${2:-}
+  local font=""
+
+  if [[ -z $magick ]]; then
+    if   command -v magick  >/dev/null 2>&1; then magick=magick
+    elif command -v convert >/dev/null 2>&1; then magick=convert
+    else return 2
+    fi
+  fi
+
+  # A real font file if fontconfig can name one, and ImageMagick's built-in
+  # default otherwise. Not fatal either way: an ugly message is worth far more
+  # than no message, and a chroot with a cold fontconfig cache is ordinary.
+  if command -v fc-match >/dev/null 2>&1; then
+    font=$(fc-match -f '%{file}' 'monospace:bold' 2>/dev/null) || font=""
+    [[ -r $font ]] || font=""
+  fi
+
+  local -a fontargs=()
+  [[ -z $font ]] || fontargs=(-font "$font")
+
+  "$magick" -size "$SPLASH_IMAGE_SIZE" xc:'#0e0e12' \
+    "${fontargs[@]+"${fontargs[@]}"}" -gravity center \
+    -fill '#f2f2f5' -pointsize 84 -annotate +0-150 "Don't turn me off." \
+    -fill '#f2f2f5' -pointsize 64 -annotate +0-40  "Steam is unpacking." \
+    -fill '#9a9aa6' -pointsize 34 -annotate +0+70  "It does this once, the first time you start." \
+    -fill '#9a9aa6' -pointsize 34 -annotate +0+120 "It takes a couple of minutes." \
+    -fill '#9a9aa6' -pointsize 34 -annotate +0+170 "The screen stays dark while it works." \
+    "png:$out"
+}
+# 🔴 'png:' IS LOAD-BEARING AND IS NOT DECORATION. ImageMagick picks its output
+# codec from the FILE EXTENSION, and the caller writes to a mktemp path, which
+# has none: without the explicit prefix it fails with "no encode delegate for
+# this image format `XC'" and produces a zero-byte file. Caught by rendering to
+# a suffix-less path, which is what production does -- a test that only ever
+# passed a name ending in .png would have shipped this. The stage's own gate
+# would then have warned and installed no splash on EVERY install, which is a
+# feature silently absent everywhere rather than a loud failure once.
+
+stage_steam_first_run() {
+  # --- E2: the bounded wait, and the drop-in that uses it ------------------
+  log "installing ${STEAM_WAIT_ONLINE_BIN}"
+  assert_ours_or_absent "$STEAM_WAIT_ONLINE_BIN" "another package's helper"
+  assert_ours_or_absent "$STEAM_WAIT_DROPIN" "another package's unit drop-in"
+
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$STEAM_WAIT_ONLINE_BIN")" ||
+    fail "could not create $(dirname "$STEAM_WAIT_ONLINE_BIN")"
+
+  local tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_steam_wait_online >"$tmp" || fail "could not render ${STEAM_WAIT_ONLINE_BIN}"
+  $SUDO install -m 0755 -o root -g root "$tmp" "$STEAM_WAIT_ONLINE_BIN" ||
+    fail "could not install ${STEAM_WAIT_ONLINE_BIN}"
+  rm -f "$tmp"
+
+  tmp=$(mktemp) || fail "mktemp failed"
+  cat >"$tmp" <<EOF
+${INSTALL_MARKER}
+#
+# Start Steam after a BOUNDED wait for connectivity -- PROGRESS.md 5.35, and
+# the "Steam's first run" constants block in ${PROG}.sh.
+#
+# A DROP-IN and not an edit: ${STEAM_LAUNCHER_UNIT} belongs to Valve's gamescope
+# package, so an edit would be reverted by the next upgrade with nothing to say
+# it had been.
+[Service]
+# No '-' prefix is needed and none is used: ${STEAM_WAIT_ONLINE_BIN} exits 0 on
+# every path by construction, which is a stronger guarantee than the prefix and
+# is testable. Read the note above render_steam_wait_online.
+ExecStartPre=${STEAM_WAIT_ONLINE_BIN}
+EOF
+  $SUDO install -D -m 0644 -o root -g root "$tmp" "$STEAM_WAIT_DROPIN" ||
+    fail "could not install ${STEAM_WAIT_DROPIN}"
+  rm -f "$tmp"
+
+  $SUDO grep -qxF -- "ExecStartPre=${STEAM_WAIT_ONLINE_BIN}" "$STEAM_WAIT_DROPIN" ||
+    fail "wrote ${STEAM_WAIT_DROPIN} but 'ExecStartPre=${STEAM_WAIT_ONLINE_BIN}' is not in it on re-read, so Steam would still start before the network and show the update error on first run"
+  log "verified: ${STEAM_LAUNCHER_UNIT} waits up to ${STEAM_WAIT_SECONDS}s for connectivity, then starts regardless"
+
+  # --- E1: the splash -------------------------------------------------------
+  #
+  # 🔴 GATED, AND ABSENCE IS NOT A FAILURE. Everything above is installed
+  # whatever happens here: the race fix and the splash are independent, and a
+  # target without ImageMagick should still stop showing the error modal. A
+  # missing splash is the behaviour this Deck has today.
+  local out
+  out=$(mktemp) || fail "mktemp failed"
+  local imrc=0
+  render_steam_splash_image "$out" >/dev/null 2>&1 || imrc=$?
+  if [[ $imrc -ne 0 || ! -s $out ]]; then
+    rm -f "$out"
+    warn "could not draw ${SPLASH_IMAGE} (ImageMagick returned ${imrc}, or produced nothing). The 'don't turn me off' splash is NOT installed; the first boot will show ~2 minutes of black panel while Steam updates itself, which is exactly today's behaviour. The connectivity fix above IS installed. Install imagemagick and re-run this stage to add the splash."
+    log "stage-steam-first-run: ok (without the splash)"
+    return 0
+  fi
+
+  $SUDO install -D -m 0644 -o root -g root "$out" "$SPLASH_IMAGE" ||
+    fail "could not install ${SPLASH_IMAGE}"
+  rm -f "$out"
+  log "drew ${SPLASH_IMAGE} (${SPLASH_IMAGE_SIZE}, gamescope's landscape logical output)"
+
+  assert_ours_or_absent "$SPLASH_BIN" "another package's helper"
+  assert_ours_or_absent "$SPLASH_UNIT" "another package's unit"
+
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_steam_splash >"$tmp" || fail "could not render ${SPLASH_BIN}"
+  $SUDO install -D -m 0755 -o root -g root "$tmp" "$SPLASH_BIN" ||
+    fail "could not install ${SPLASH_BIN}"
+  rm -f "$tmp"
+
+  tmp=$(mktemp) || fail "mktemp failed"
+  cat >"$tmp" <<EOF
+${INSTALL_MARKER}
+#
+# Say "don't turn me off" for the ~2 minutes of Steam's first-run self-update,
+# during which the panel is otherwise black -- PROGRESS.md 5.35.
+[Unit]
+Description=Deck first-boot notice while Steam unpacks itself
+# PartOf, so ending the session ends this. One of the three independent bounds
+# on a splash that must never outlive Steam -- see render_steam_splash.
+PartOf=gamescope-session.target
+After=gamescope-session.service
+# 🔴 NOTHING MAY DEPEND ON THIS. No Requires=, no Before= on steam-launcher: a
+# splash that fails must cost a message, never a session. Gaming Mode starting
+# is the product; this is a courtesy on top of it.
+Before=${STEAM_LAUNCHER_UNIT}
+
+[Service]
+Type=simple
+ExecStart=${SPLASH_BIN}
+# The environment gamescope publishes for the session -- the same file
+# ${STEAM_LAUNCHER_UNIT} reads, and where GAMESCOPE_WAYLAND_DISPLAY comes from.
+# '-' so a missing file is not a failure: without it the splash finds no
+# compositor, says so, and exits.
+EnvironmentFile=-%t/gamescope-environment
+# BOUND 2 OF 3, and the one systemd enforces regardless of what the script is
+# doing. ${SPLASH_MAX_SECONDS}s is the script's own deadline plus slack, so in
+# a healthy run this never fires.
+RuntimeMaxSec=$((SPLASH_MAX_SECONDS + 30))
+# A splash that failed is not a failed boot.
+SuccessExitStatus=0 1
+Restart=no
+
+[Install]
+WantedBy=gamescope-session.target
+EOF
+  $SUDO install -D -m 0644 -o root -g root "$tmp" "$SPLASH_UNIT" ||
+    fail "could not install ${SPLASH_UNIT}"
+  rm -f "$tmp"
+
+  $SUDO grep -qE '^RuntimeMaxSec=' "$SPLASH_UNIT" ||
+    fail "wrote ${SPLASH_UNIT} without RuntimeMaxSec=. That is the bound systemd enforces when the script cannot enforce its own, and without it a wedged splash is a permanently black-with-text panel -- worse than the defect it replaces."
+
+  $SUDO systemctl --global enable "$SPLASH_UNIT_NAME" >/dev/null 2>&1 ||
+    fail "could not enable ${SPLASH_UNIT_NAME} for all users"
+
+  if in_chroot; then
+    # Same readback stage-input-mapper does, for the same reason: --global
+    # enable needs no manager, but "exited 0" and "the symlink is there" are
+    # different claims and an installed-but-not-enabled unit is silent.
+    local wants_link="/etc/systemd/user/gamescope-session.target.wants/${SPLASH_UNIT_NAME}"
+    [[ -L $wants_link ]] ||
+      fail "'systemctl --global enable' exited 0 but ${wants_link} is not a symlink, so the splash is installed and would never run"
+    log "verified: ${wants_link} -> $(readlink -- "$wants_link")"
+    defer "whether the splash actually DRAWS cannot be checked at install time -- it needs a running gamescope session, and the target has never booted. It is installed, enabled for gamescope-session.target, and bounded three ways so it cannot outlive Steam. Confirm on the first boot with: journalctl --user -u ${SPLASH_UNIT_NAME} -b"
+  fi
+
+  log "stage-steam-first-run: ok"
+  log "NOTE: the splash is shown ONCE, on the first Gaming Mode session, and is"
+  log "      bounded at ${SPLASH_MAX_SECONDS}s by the script, $((SPLASH_MAX_SECONDS + 30))s by systemd, and by the"
+  log "      session itself. Its marker is ~/${SPLASH_MARKER_REL};"
+  log "      remove that file to see it again."
 }
 
 # ---------------------------------------------------------------------------
@@ -2728,8 +3525,24 @@ stage_input_mapper() {
   # the active local session -- NOT via the `input` group, which T3 §4 assumed.
   # Tested by opening it, because the permission bits alone do not tell you:
   # /dev/uinput is root:root 0660 and the access is an ACL.
-  python3 -c 'import os; os.close(os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK))' 2>/dev/null ||
-    warn "/dev/uinput is not writable by ${USER:-$(id -un)} right now. If this user has no active local graphical session that is expected (uaccess grants it per-session) and the service will still work once logged in. If it persists inside the desktop, the mapper will fail to create its virtual keyboard."
+  #
+  # 🔴 EXCEPT IN A CHROOT, WHERE IT IS THE WRONG /dev ENTIRELY -- found by the
+  # PROGRESS.md 5.38 D10 audit, and it is the same defect one subsystem over.
+  # arch-chroot bind-mounts /dev, so this opens the LIVE ISO's uinput node, as
+  # the INSTALLER's root, and then reports the answer as if it were about the
+  # target: root can always open it, so the probe passes for a reason that has
+  # nothing to do with the machine being built, and its warning text ("this user
+  # has no active local graphical session") describes a situation that cannot
+  # arise in here. It writes no conclusion into the target, so the cost is a
+  # misleading line in the install record rather than a broken Deck -- but a
+  # check that can only pass is not a check, and this file's own rule is that
+  # what cannot be answered is said out loud rather than answered wrongly.
+  if in_chroot; then
+    defer "whether /dev/uinput is openable by the desktop user cannot be tested at install time -- arch-chroot bind-mounts /dev, so the node in here is the LIVE ISO's and this process is root, which can open it whatever the target's ACLs will be. The access comes from a udev uaccess tag granted to whoever holds the active local session, so it can only be answered from inside one. Confirm in the first desktop session with: python3 -c 'import os; os.close(os.open(\"/dev/uinput\", os.O_WRONLY))'"
+  else
+    python3 -c 'import os; os.close(os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK))' 2>/dev/null ||
+      warn "/dev/uinput is not writable by ${USER:-$(id -un)} right now. If this user has no active local graphical session that is expected (uaccess grants it per-session) and the service will still work once logged in. If it persists inside the desktop, the mapper will fail to create its virtual keyboard."
+  fi
 
   # The OSK modules go in FIRST. The mapper imports the layout core at module
   # load and degrades to navigation-only without it (loudly, never silently), so
@@ -4930,18 +5743,39 @@ power_sorts_after() {   # power_sorts_after <candidate> <rival>
 # becomes "supported"; CLAUDE.md forbids claiming LCD support anywhere. The way
 # to run this on a Jupiter is to repeat T13 §2.2's capture on a Jupiter and add
 # what it measures -- which is a code change, reviewed, with evidence.
+#
+# ⚠️ THE GATE IS UNCHANGED. WHAT A REJECTION *COSTS* IS DIFFERENT WHEN BAKED.
+# A human typing `./deck-session.sh stage-power-button` on the wrong machine has
+# made a mistake and deserves a non-zero exit. The installer has not: it runs
+# every baked stage on whatever it is installing onto, including a QEMU VM whose
+# DMI is not a Deck at all, and a `fail` there would turn "this hardware is not
+# supported, so nothing was written" -- a correct and complete outcome -- into a
+# failed stage in /var/log/omarchy-deck-install.json and a `partial` bake. That
+# is a false alarm, and false alarms are how real ones stop being read.
+#
+# So the REFUSAL is identical either way (nothing is written on any model but
+# ${POWER_MODEL}, no flag overrides it); only the exit path differs, and in
+# chroot mode the stage says out loud what it skipped and why.
+power_model_reject() {
+  if in_chroot; then
+    warn "$1"
+    return 1
+  fi
+  fail "$1"
+}
+
 verify_power_button_model() {
   local product=""
   $SUDO test -r "$POWER_DMI_PRODUCT" ||
-    fail "cannot read ${POWER_DMI_PRODUCT}, so the model is unknown. This stage rewires the power button using ID_PATHs measured on one specific model; it will not guess."
+    { power_model_reject "cannot read ${POWER_DMI_PRODUCT}, so the model is unknown. This stage rewires the power button using ID_PATHs measured on one specific model; it will not guess."; return 1; }
   product=$($SUDO cat -- "$POWER_DMI_PRODUCT") ||
-    fail "reading ${POWER_DMI_PRODUCT} failed. Refusing to rewire the power button on an unidentified machine."
+    { power_model_reject "reading ${POWER_DMI_PRODUCT} failed. Refusing to rewire the power button on an unidentified machine."; return 1; }
   product=${product//$'\n'/}
   [[ -n $product ]] ||
-    fail "${POWER_DMI_PRODUCT} is empty. Refusing to rewire the power button on an unidentified machine."
+    { power_model_reject "${POWER_DMI_PRODUCT} is empty. Refusing to rewire the power button on an unidentified machine."; return 1; }
 
   [[ ${product,,} == "${POWER_MODEL,,}" ]] ||
-    fail "this machine reports product_name='${product}', and every measurement behind this stage was taken on '${POWER_MODEL}' (the OLED Deck). 'Jupiter' is the LCD Deck and it has never been measured: it may enumerate its power button differently, in which case this rule either matches nothing (leaving the duplicate press, and a suspend loop) or matches too much (leaving logind nothing to watch, and a dead button). Today's behaviour on an unmeasured model -- the System menu flashing -- is at least working software. To support this model, repeat the capture in docs/findings/T13-power-button-and-sleep.md §2.2 on it and add what it measures to POWER_ACPI_ID_PATHS / POWER_KEEP_ID_PATH. There is no override flag on purpose."
+    { power_model_reject "this machine reports product_name='${product}', and every measurement behind this stage was taken on '${POWER_MODEL}' (the OLED Deck). 'Jupiter' is the LCD Deck and it has never been measured: it may enumerate its power button differently, in which case this rule either matches nothing (leaving the duplicate press, and a suspend loop) or matches too much (leaving logind nothing to watch, and a dead button). Today's behaviour on an unmeasured model -- the System menu flashing -- is at least working software. To support this model, repeat the capture in docs/findings/T13-power-button-and-sleep.md §2.2 on it and add what it measures to POWER_ACPI_ID_PATHS / POWER_KEEP_ID_PATH. There is no override flag on purpose."; return 1; }
 
   log "model: ${product} -- the hardware every measurement behind this stage was taken on"
 }
@@ -4964,9 +5798,26 @@ verify_power_button_ordering() {
   ours_rule=${POWER_UDEV_RULE##*/}
   ours_conf=${POWER_LOGIND_DROPIN##*/}
 
+  # 🔴 /run IS THE INSTALLING MACHINE'S, NOT THE TARGET'S. arch-chroot
+  # bind-mounts it (see the CHROOT MODE block), so scanning /run/udev/rules.d
+  # and /run/systemd/logind.conf.d from in here asks the LIVE ISO what it has
+  # generated -- the same class of mistake as discovering a backlight node in
+  # the installer's kernel (PROGRESS.md 5.38 D10). A rival found there tells us
+  # nothing about the machine being built, and could fail this stage over a file
+  # that will not exist on the target. Both directories are volatile by
+  # definition and are empty on a target that has never booted, so the honest
+  # scan in chroot mode is the persistent directories only, said out loud.
+  local -a udev_dirs=("${POWER_UDEV_DIRS[@]}") logind_dirs=("${POWER_LOGIND_DIRS[@]}")
+  if in_chroot; then
+    udev_dirs=(); logind_dirs=()
+    for d in "${POWER_UDEV_DIRS[@]}";   do [[ $d == /run/* ]] || udev_dirs+=("$d");   done
+    for d in "${POWER_LOGIND_DIRS[@]}"; do [[ $d == /run/* ]] || logind_dirs+=("$d"); done
+    defer "the runtime rule directories (/run/udev/rules.d, /run/systemd/logind.conf.d) are NOT scanned for sort-order rivals at install time -- arch-chroot bind-mounts /run from the live ISO, so what is in there belongs to the installer and not to the target. The persistent directories (${udev_dirs[*]} ${logind_dirs[*]}) ARE scanned and ours is proven to sort last among them. Confirm on the installed machine with: systemd-analyze cat-config systemd/logind.conf | grep -n HandlePowerKey"
+  fi
+
   # --- udev: every file that ADDS the tag must be read before ours ---
   local taggers=0
-  for d in "${POWER_UDEV_DIRS[@]}"; do
+  for d in "${udev_dirs[@]}"; do
     $SUDO test -d "$d" || continue
     while IFS= read -r f; do
       [[ -n $f ]] || continue
@@ -4979,12 +5830,12 @@ verify_power_button_ordering() {
     done < <($SUDO find "$d" -maxdepth 1 -name '*.rules' -type f 2>/dev/null | sort)
   done
   [[ $taggers -gt 0 ]] ||
-    fail "found no udev rule anywhere in ${POWER_UDEV_DIRS[*]} that adds TAG+=\"${POWER_UDEV_TAG}\". This stage's whole premise is that ${POWER_UDEV_TAGGER} tags the power buttons and that ours then untags two of them; with nothing adding the tag, either logind is watching no power switch at all (so HandlePowerKey= would be dead) or something tags it by a mechanism this stage does not understand. Investigate before installing anything."
+    fail "found no udev rule anywhere in ${udev_dirs[*]} that adds TAG+=\"${POWER_UDEV_TAG}\". This stage's whole premise is that ${POWER_UDEV_TAGGER} tags the power buttons and that ours then untags two of them; with nothing adding the tag, either logind is watching no power switch at all (so HandlePowerKey= would be dead) or something tags it by a mechanism this stage does not understand. Investigate before installing anything."
   log "verified: ${ours_rule} is read after all ${taggers} udev rule(s) that add TAG+=\"${POWER_UDEV_TAG}\""
 
   # --- logind: every drop-in that assigns HandlePowerKey= must lose to ours ---
   local rivals=0
-  for d in "${POWER_LOGIND_DIRS[@]}"; do
+  for d in "${logind_dirs[@]}"; do
     $SUDO test -d "$d" || continue
     while IFS= read -r f; do
       [[ -n $f ]] || continue
@@ -5026,10 +5877,38 @@ verify_power_button_premise() {
   local dev line id tags found_keep="" f
   local -a untag_found=() tagged=()
 
+  # A statement about the CONSTANTS, not about the machine, so it runs
+  # everywhere -- including in a chroot, where nothing else here can.
   for f in "${POWER_ACPI_ID_PATHS[@]}"; do
     [[ $f != "$POWER_KEEP_ID_PATH" ]] ||
       fail "POWER_KEEP_ID_PATH (${POWER_KEEP_ID_PATH}) also appears in POWER_ACPI_ID_PATHS. That would untag the ONE node this design keeps, leaving logind watching nothing and the power button dead. Refusing to render a rule that disables its own single source."
   done
+
+  # 🔴 THIS ONE CANNOT BE ANSWERED IN A CHROOT, AND THAT IS STRUCTURAL.
+  # It reads udev's RUNTIME DATABASE -- which devices exist, which tags are on
+  # them right now -- and arch-chroot bind-mounts /dev and /run from the live
+  # ISO, so every answer here belongs to the installer's kernel and the
+  # installer's udevd. It is the same defect that made stage-priv-write-helper
+  # the one stage to fail on the real install (PROGRESS.md 5.38 D10), applied to
+  # a different subsystem, and it must not be answered by guessing harder.
+  #
+  # The ID_PATHs at stake are ACPI and platform names, which come from firmware
+  # rather than from driver enumeration order, so they are FAR more likely to be
+  # stable across kernels than a DRM backlight index -- but "far more likely"
+  # is not a measurement, and this project has been wrong about exactly that
+  # shape of assumption twice.
+  #
+  # So the artefacts are still written here (rule 1 of chroot mode: nothing the
+  # installed system needs is left to first boot), and the question is asked on
+  # the target by ${FIRST_BOOT_VERIFY_NAME} -- which, uniquely among the
+  # deferred checks, can also ACT on the answer: if the ACPI duplicates are
+  # still tagged once the real kernel is up, it removes the logind drop-in and
+  # the machine falls back to exactly today's behaviour instead of into the
+  # re-suspend loop.
+  if in_chroot; then
+    defer "which input devices exist and which carry TAGS=:${POWER_UDEV_TAG}: cannot be read at install time -- arch-chroot bind-mounts /dev and /run from the LIVE ISO, so udev's database in here is the installer's kernel's, not the target's. Both power-button files ARE installed. The premise is re-checked on the target by ${FIRST_BOOT_VERIFY_NAME} at every boot, and it REMOVES ${POWER_LOGIND_DROPIN} if the ACPI duplicate is still tagged there -- so the worst case is the power button behaving as it does today, not a suspend loop. Confirm on the installed machine with: journalctl -t ${FIRST_BOOT_VERIFY_TAG} -b"
+    return 0
+  fi
 
   while IFS= read -r dev; do
     [[ -n $dev ]] || continue
@@ -5239,6 +6118,15 @@ EOF
 # must not arm that on a machine where nobody has yet pressed the button and
 # watched.
 #
+# ⚠️ IT *IS* IN BAKE_STAGES, as of PROGRESS.md 5.38 D9, and the two facts are
+# not in tension -- read the BAKE_STAGES comment for the argument. The short
+# form: keeping it out of the installer did not make anything safer, it shipped
+# a Deck whose power button does nothing, because Omarchy's package-owned
+# 10-ignore-power-button.conf owns the key and nothing of ours ever contested
+# it. The safety this comment is about is preserved by the model gate and by
+# ${FIRST_BOOT_VERIFY_NAME}, which disarms the handler on the target if the
+# udev rule turns out not to have matched.
+#
 # ORDER OF WRITES IS THE SAFETY PROPERTY. The udev rule (remove the duplicate)
 # goes first, the logind drop-in (arm the handler) second. A run that dies
 # between them leaves a machine with one fewer redundant tag and today's
@@ -5247,12 +6135,28 @@ EOF
 # to avoid.
 stage_power_button() {
   local tool
-  for tool in find udevadm readlink; do
+  for tool in find readlink; do
     command -v "$tool" >/dev/null 2>&1 ||
       fail "required tool '${tool}' not found; this stage verifies what it is about to write and will not install unverified"
   done
+  # udevadm is needed by the premise check, which only runs outside a chroot.
+  # Requiring it in here would fail a bake on a target that has not installed
+  # systemd's udev tools yet, over a check that is not being run.
+  if ! in_chroot; then
+    command -v udevadm >/dev/null 2>&1 ||
+      fail "required tool 'udevadm' not found; this stage verifies what it is about to write and will not install unverified"
+  fi
 
-  verify_power_button_model
+  # 🔴 THE MODEL GATE IS THE FIRST THING, AND IN A BAKE IT IS A SKIP.
+  # See verify_power_button_model for why the refusal is identical on every
+  # model and only the exit path differs. Nothing has been written at this
+  # point, so returning here leaves the machine exactly as it was found: the
+  # power button keeps whatever behaviour Omarchy gave it.
+  if ! verify_power_button_model; then
+    log "stage-power-button: SKIPPED -- this is not a ${POWER_MODEL} (see the warning above). Nothing was written; the power button is unchanged."
+    return 0
+  fi
+
   verify_power_button_ordering
   verify_power_button_premise
 
@@ -5299,6 +6203,29 @@ stage_power_button() {
   log "verified: ${POWER_LOGIND_DROPIN} sets HandlePowerKey=${POWER_KEY_ACTION} explicitly"
 
   warn_if_sleep_lock_live
+
+  # The premise check above deferred rather than ran, so the thing that WILL
+  # run it has to exist. Installed here as well as in stage-priv-write-helper
+  # because the stages are individually invocable and neither may assume the
+  # other ran; install_first_boot_verify is idempotent and writes identical
+  # content from either caller.
+  if in_chroot; then
+    install_first_boot_verify
+    log "stage-power-button: ok"
+    log ""
+    log "🔴 NOTHING TAKES EFFECT UNTIL THE TARGET BOOTS, which is the whole"
+    log "   safety property here: udev applies ${POWER_UDEV_RULE##*/} before the"
+    log "   uevent reaches logind, so the tag is gone before there is anything"
+    log "   to arm. The install is not a live machine and reloads nothing."
+    log ""
+    log "   On that first boot ${FIRST_BOOT_VERIFY_NAME} re-asks the question"
+    log "   this chroot could not: it reads udev's database on the target's own"
+    log "   kernel, and if the ACPI duplicate is STILL tagged it deletes"
+    log "   ${POWER_LOGIND_DROPIN} -- restoring today's behaviour rather than"
+    log "   leaving a Deck that suspends itself on resume. Read the verdict:"
+    log "     journalctl -t ${FIRST_BOOT_VERIFY_TAG} -b"
+    return 0
+  fi
 
   log "stage-power-button: ok"
   log ""
@@ -5436,6 +6363,15 @@ Stages also cover Gaming Mode / display defects (PROGRESS.md 5.11, 5.14, 5.15):
   stage-priv-write-helper  steamos-priv-write, so Gaming Mode's brightness
                            slider stops falling back to blanket 'sudo tee'
                            and 'sudo chmod a+w' on system nodes
+  stage-steam-first-run    two fixes for Steam's FIRST start (PROGRESS.md 5.35):
+                           a bounded ${STEAM_WAIT_SECONDS}s wait for connectivity before Steam
+                           starts, so the "Steam needs to be online to update."
+                           modal never appears; and a one-time fullscreen
+                           "don't turn me off, Steam is unpacking" notice for
+                           the ~2 minutes it then spends updating itself behind
+                           a black panel. Both degrade to today's behaviour --
+                           the wait always exits 0, and the splash is bounded
+                           three ways so it cannot outlive Steam.
   stage-greeter-rotation   rotates the SDDM greeter for the Deck's panel.
                            The user's desktop needs a matching transform in
                            ~/.config/hypr/monitors.lua; the Limine menu and

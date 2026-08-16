@@ -3450,6 +3450,29 @@ controller bound and present as **`fts3528:00-2808:1015`**. The cause is that
 **`~/.config/hypr/` contains no `device` block at all** — nothing binds the touch
 device to the output, so its coordinates are never rotated with the panel and
 every tap lands 270° from the finger. Fix is to bind the touch device to `eDP-1`.
+
+⚠️ **CORRECTED 2026-08-15 (P33 Agent D) — the mechanism above is WRONG, and the
+fix named above is only half of it. Binding to an output does not rotate
+anything.** Read from Hyprland v0.56.2 `src/managers/input/Touch.cpp`, where the
+monitor transform appears nowhere at all:
+
+    const auto TOUCH_COORDS = PMONITOR->m_position + (e.pos * PMONITOR->m_size);
+
+Rotation is a *separate* option applied as a libinput calibration matrix in
+`InputManager.cpp`'s `setTouchDeviceConfigs`: **`input:touchdevice:transform`**,
+clamped −1..7. So `transform` is the fix; `output` is belt-and-braces. Measured
+in the same function: **`[[Auto]]` does not autodetect in 0.56.2** — the branch
+body is commented out behind a `// FIXME:`, so the default leaves the device
+unbound. The value is derived, not guessed: `EVIOCGABS` on the digitizer reports
+`ABS_X 0..800`, `ABS_Y 0..1280` — the **native portrait frame, unrotated** —
+while `eDP-1` presents 1280×800 and `/proc/cmdline` carries `fbcon=rotate:1`.
+Content rotates 90° CW, so touch must come back 90° CCW = transform **3**.
+Shipped as global `input.touchdevice` (which names no device) rather than an
+`hl.device({ name = "fts3528:…" })` rule, so no untested LCD claim is made.
+
+⚠️ Related, already in §7 and re-learned the hard way this round: **`hyprctl
+keyword` is rejected outright** under Omarchy 4.0's Lua parser — *"keyword can't
+work with non-legacy parsers. Use eval."* Use `hyprctl eval`.
 ⚠️ **Omarchy 4.0 configures Hyprland in LUA** (`hyprland.lua`, `input.lua`,
 `monitors.lua`, `bindings.lua`, via `hl.config({...})`), not the classic `.conf`
 syntax — the exact Lua spelling of a device block must be READ, not assumed, and

@@ -17,9 +17,16 @@
 #   VM_DISK_SIZE_GB          target disk size, default 16 (matches
 #                             vm-install-test.sh's own default)
 #   VM_MEM_MB / VM_SMP        guest size, defaults 4096 / 4
-#   VM_RUN_TIMEOUT_SEC        whole-run ceiling, default 2700 (45 min --
+#   VM_RUN_TIMEOUT_SEC        whole-run ceiling, default 2940 (49 min --
 #                             boot + wizard navigation + a real offline
-#                             package install + finish animation)
+#                             package install + finish animation). Raised from
+#                             2700 in P33 A4: six of the wizard's keys start a
+#                             new deck-form.sh text prompt, and each of those
+#                             now waits out the OSK bind deadline (~35 s here,
+#                             where no gamepad exists) instead of 5 s. That is
+#                             ~210 s more wizard, and the ceiling has to carry
+#                             it or a timing change reads as an install
+#                             timeout. See "THE CADENCE" in the probe below.
 #   VM_INSTALL_POLL_DEADLINE_SEC  the IN-GUEST ceiling for "is the real
 #                             install done yet", default 2100 (35 min)
 #   VM_OVMF_CODE / VM_OVMF_VARS   override firmware probing
@@ -145,7 +152,7 @@ WORK=${2:-$(mktemp -d /var/tmp/vm-install-controller.XXXXXX)}
 DISK_SIZE_GB=${VM_DISK_SIZE_GB:-16}
 MEM_MB=${VM_MEM_MB:-4096}
 SMP=${VM_SMP:-4}
-RUN_TIMEOUT=${VM_RUN_TIMEOUT_SEC:-2700}
+RUN_TIMEOUT=${VM_RUN_TIMEOUT_SEC:-2940}
 INSTALL_POLL_DEADLINE=${VM_INSTALL_POLL_DEADLINE_SEC:-2100}
 
 log() { printf '[vm-install-controller] %s\n' "$*" >&2; }
@@ -313,14 +320,79 @@ STEPS="01-kb-us:ret 02-kb-uk:down 03-username-empty:ret \
 25-summary:ret 26-disk-confirm:ret 27-disk-confirm-holds:ret 28-deck-summary:y"
 STREAM_CAPTURES="03-username-empty 10-username-deck 11-password-empty 25-summary 26-disk-confirm 27-disk-confirm-holds 28-deck-summary"
 
+# ===========================================================================
+# THE CADENCE (P33 A4) -- 6 s was right for gum, and has never been right for
+# the on-screen keyboard
+# ===========================================================================
+#
+# docs/PROGRESS.md §5.33a: S0's `Username>` assertion FAILED on the P32 ISO,
+# and the failure was the fix working. `deck-form.sh` borrows lizard mode and
+# starts `deck-input-mapper` for the duration of every text prompt, then waits
+# for the mapper's `bound` marker before the gum prompt is drawn at all. In
+# this VM there is no gamepad, so the marker never comes and that wait is
+# spent in full, every time. The 6 s cadence below is inherited verbatim from
+# `vm-installer-screens-test.sh`, which was written when the ISO carried no
+# mapper -- 6 s was a measurement of how long a gum redraw takes, and it is
+# still correct for that. It was never a budget for a bind deadline, and once
+# the deadline was 5 s the prompt landed after the screenshot.
+#
+# ⚠️ SO THE NUMBER IS READ, NOT COPIED. Restating deck-form.sh's deadline here
+# would put a third guess beside the two that already disagreed. The shipped
+# file is right there in the image, and it is the same file the installer
+# actually runs, so the harness asks it.
+OSK_DEADLINE_DEFAULT=40
+DECK_FORM_SH=/usr/share/omarchy-iso/deck-form.sh
+osk_deadline=$(sed -n 's/^readonly DECK_OSK_BIND_DEADLINE=\([0-9][0-9]*\).*$/\1/p' \
+                 "$DECK_FORM_SH" 2>/dev/null | head -n1)
+if [[ -z ${osk_deadline:-} ]]; then
+  # Never silent: a harness that quietly fell back to a default would report
+  # a timing failure as a navigation failure, which is exactly how §5.33a's
+  # red was misread the first time.
+  fact "osk.deadline_read=0"
+  fact "osk.deadline_source=fallback"
+  osk_deadline=$OSK_DEADLINE_DEFAULT
+else
+  fact "osk.deadline_read=1"
+  fact "osk.deadline_source=$DECK_FORM_SH"
+fi
+fact "osk.deadline_s=$osk_deadline"
+
+# The gum-redraw cadence, unchanged, for every key that types into a prompt
+# that is already on screen.
+STEP_SLEEP=6
+# The cadence for a key that ENDS one prompt and therefore STARTS the next
+# one: that next prompt cannot draw until deck-form.sh's wait resolves, so the
+# budget is the deadline plus the same redraw allowance.
+OSK_STEP_SLEEP=$((osk_deadline + STEP_SLEEP))
+fact "osk.step_sleep_s=$OSK_STEP_SLEEP"
+
+# WHICH STEPS THOSE ARE, derived from deck-form.sh's own control flow rather
+# than from the step names (same idiom as STREAM_CAPTURES above):
+#   03  the keyboard choice is accepted -> user_form -> the FIRST username
+#       prompt starts
+#   04, 05, 06  each empty submit re-enters omarchy_prompt_username's loop,
+#       and every pass through it is a fresh deck_form_text_prompt with a
+#       fresh mapper and a fresh wait
+#   11  the username is accepted -> omarchy_prompt_password starts
+#   16  the password is accepted -> the confirm prompt starts
+# The keys after each of these (07 'd', 12 'p', 17 'p') are typed INTO the
+# prompt the marked step started, so if the marked step's wait is too short
+# those characters are typed into a screen that does not exist yet and are
+# lost -- which is a navigation failure that looks nothing like a timing one.
+OSK_STEPS="03-username-empty 04-username-empty-2 05-username-empty-3 06-username-empty-4 11-password-empty 16-confirm-empty"
+
 i=0
 for step in $STEPS; do
   i=$((i + 1))
   name=${step%%:*}
+  step_sleep=$STEP_SLEEP
+  for want in $OSK_STEPS; do
+    [[ $want == "$name" ]] && step_sleep=$OSK_STEP_SLEEP
+  done
   # "-GO" suffix: load-bearing anchor against CRLF line endings on
   # /dev/ttyS0, same reasoning as the sibling harness's identical comment.
   say "WANT-KEY-${i}-GO"
-  sleep 6
+  sleep "$step_sleep"
   for want in $STREAM_CAPTURES; do
     [[ $want == "$name" ]] && cap "$name"
   done
@@ -456,9 +528,12 @@ cred_script="io.systemd.credential.binary:t4installprobe.sh=$(base64 -w0 <"$prob
 # `After=basic.target` reasoning ~line 400 stays correct but stops being
 # load-bearing. Do not "simplify" the probe on the strength of a networked run.
 VM_NIC=${VM_NIC:-none}
+# The disable has to sit in front of the WHOLE case, not the one branch that
+# needs it: a shellcheck directive on an individual case item is itself an
+# error (SC1124), and this file did not lint at all until that was moved.
+# shellcheck disable=SC2054  # the commas are qemu's own -nic syntax, one arg
 case $VM_NIC in
   none) VM_NIC_ARGS=(-nic none) ;;
-  # shellcheck disable=SC2054  # the commas are qemu's own -nic syntax, one arg
   user) VM_NIC_ARGS=(-nic user,model=virtio-net-pci) ;;
   *) fail "VM_NIC must be 'none' (default, offline) or 'user' (NAT'd virtio); got '$VM_NIC'" ;;
 esac

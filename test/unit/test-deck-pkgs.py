@@ -323,10 +323,18 @@ check(
     "linux-firmware-neptune" in install_names,
     False,
 )
-check_true(
-    "…but it stays mirror-carried, so the post-install firmware swap has a "
-    "local source",
+check(
+    "🔴 …and it is no longer mirror-carried either (P33/F1, 2026-08-15). It had "
+    "NO reader in either direction: pacstrap refuses it (above) and "
+    "src/omarchy-deck-kernel.sh's -Rdd swap runs on a BOOTED system against the "
+    "ONLINE Valve repos, so it never read the mirror copy. Held until hardware "
+    "could answer; hardware answered -- the Deck runs "
+    "6.11.11-valve29-1-neptune-611 on Arch's split linux-firmware 20260810 with "
+    "`pacman -Q linux-firmware-neptune` returning not-found, ath11k up on "
+    "qca2066 hw2.1, no firmware-load failures in the kernel journal, and audio "
+    "and gamescope operator-confirmed. 349.6 MiB off the ISO",
     "linux-firmware-neptune" in mirror_raw,
+    False,
 )
 check(
     "🔴 the kernel HEADERS are deliberately mirror-only (nothing on the target "
@@ -335,7 +343,13 @@ check(
     False,
 )
 check_true(
-    "…but still carried, so a later DKMS build has a source",
+    "…and still carried, for now. ⚠️ NOT because 'a later DKMS build has a "
+    "source' — that justification was MEASURED FALSE on 2026-08-15 (P33/F1): "
+    "the mirror is a bind mount, not a copy, so on the installed Deck "
+    "/var/cache/omarchy/mirror/offline is EMPTY and no Valve repo is configured. "
+    "It survives this round only because P33/F1 was scoped to the firmware. See "
+    "deck-mirror.packages for the evidence; if the coordinator takes the "
+    "recommended cut, flip this check and the annotated-entry count below",
     "linux-neptune-611-headers" in mirror_raw,
 )
 check_true("mangoapp's package is installed, not merely carried", "mangohud" in install_names)
@@ -363,6 +377,78 @@ for entry in mirror_raw:
         f"qualified mirror entry {entry} has a bare install-list twin ({bare})",
         bare in install_names,
     )
+
+
+# 🔴 THE PER-LINE CONSUMER RULE — the thing guard 6.8 structurally cannot do.
+#
+# Guard 6.8 (iso/bin/build ~1238) asks "does this package LIST have a consumer?"
+# and deck-mirror.packages always answers yes: the patched build-iso.sh adds it
+# to `all_packages`. So the guard is green, correctly by its own definition,
+# while an individual LINE in the file reaches nothing at all.
+#
+# That is not hypothetical either. `linux-firmware-neptune` sat here from
+# 2026-08-15 14:13 (when `a380fe3` pulled the bare name back out of
+# deck-install.packages, an hour after adding it) until the P33 cut, under a
+# comment that still said "DUAL ENTRY, both of them" — a consumer that had been
+# deleted. 350 MiB, downloaded into every ISO, installed by nobody, and no check
+# anywhere could see it. docs/findings/P32-neptune-firmware-placement.md §5
+# proposed exactly this rule and did not write it; this is it.
+#
+# The rule: every entry either (a) has a bare twin in deck-install.packages, so
+# pacstrap installs it — the dual-entry pattern — or (b) carries an explicit
+# "READER: NOBODY" annotation in the comment block directly above it, which is
+# the file's own established convention for a deliberate mirror-only line.
+# Silence is the failure. An entry that is neither installed nor annotated is
+# the exact shape of the defect.
+
+
+def mirror_entries_with_comment_blocks(text: str):
+    """Yield (entry, comment_block) for each non-comment line.
+
+    The block is the run of comment lines immediately above the entry. A blank
+    line breaks the run — that is what makes `lib32-mangohud` (which sits bare
+    under `mangohud`) inherit nothing and have to justify itself via the
+    install list, which it does.
+    """
+    block: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            block = []
+        elif line.startswith("#"):
+            block.append(line)
+        else:
+            yield line, "\n".join(block)
+            block = []
+
+
+mirror_text = (DECK_LISTS / "deck-mirror.packages").read_text()
+annotated = 0
+for entry, block in mirror_entries_with_comment_blocks(mirror_text):
+    bare = entry.rsplit("/", 1)[-1]
+    installed = bare in install_names
+    no_reader = "READER: NOBODY" in block
+    if no_reader:
+        annotated += 1
+    check_true(
+        f"🔴 mirror entry {entry!r} either installs on the target ({bare} in "
+        f"deck-install.packages) or is annotated 'READER: NOBODY' in the comment "
+        f"block above it — installed={installed}, annotated={no_reader}",
+        installed or no_reader,
+    )
+    check(
+        f"…and not BOTH, which would be a contradiction ({entry!r} claims no "
+        f"reader while deck-install.packages installs it)",
+        installed and no_reader,
+        False,
+    )
+
+check(
+    "exactly one deliberate no-reader entry remains (linux-neptune-611-headers). "
+    "If this number grows, something was carried without an installer again",
+    annotated,
+    1,
+)
 
 
 # ---------------------------------------------------------------------------

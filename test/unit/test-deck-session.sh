@@ -2000,4 +2000,263 @@ raw_sudo_u_sites=$(grep -n '\$SUDO -u ' "$REPO_ROOT/src/deck-session.sh" | grep 
     "$raw_sudo_u_sites"
 pass "no call site in src/deck-session.sh uses the unguarded '\$SUDO -u <user>' form"
 
+# ===========================================================================
+# 10. Steam's first run -- the race, and the two silent minutes (PROGRESS.md 5.35)
+# ===========================================================================
+#
+# Two artefacts, and BOTH are tested by RUNNING them rather than by reading
+# them, because both are load-bearing in the same way: they are allowed to fail
+# at what they do, and they are not allowed to take Gaming Mode down with them.
+# That is a behavioural claim and a grep cannot make it.
+#
+#   E2  the bounded wait -- an ExecStartPre= on Valve's steam-launcher.service.
+#       A non-zero exit there means Steam does not start, i.e. a Wi-Fi problem
+#       becomes an unusable Deck. It must exit 0 on every path there is.
+#   E1  the splash -- a fullscreen "don't turn me off, Steam is unpacking"
+#       notice. A splash that cannot exit is a permanently black-with-text
+#       panel, which is strictly worse than the two minutes of black it
+#       replaces. It must come down: when Steam appears, when its viewer dies,
+#       and when neither happens.
+echo "# 10. Steam's first run"
+
+sfr_work=$(mktemp -d)
+sfr_bin="$sfr_work/bin"
+mkdir -p "$sfr_bin"
+
+# --- E2: the wait always exits 0 -------------------------------------------
+wait_sh="$sfr_work/steam-wait-online"
+bash -c 'source "$1"; render_steam_wait_online' _ "$REPO_ROOT/src/deck-session.sh" >"$wait_sh"
+bash -n "$wait_sh" || fail_test "the rendered wait script is valid bash" "$(cat "$wait_sh")"
+chmod +x "$wait_sh"
+pass "render_steam_wait_online emits syntactically valid bash"
+
+# 🔴 IT MUST NOT WAIT ON network-online.target. deck_wifi.py's first-boot unit
+# takes Wants=network.target deliberately, because on a Deck with no network
+# that target is reached only by TIMEOUT -- the cost landing on exactly the
+# machines least able to afford it. On this hardware it is worse than that:
+# NetworkManager-wait-online.service is MASKED (read off the Deck 2026-08-15),
+# so the target is never reached at all.
+# Code only: the file EXPLAINS the trap in a comment, which is the opposite of
+# falling into it.
+wait_code=$(grep -v '^[[:space:]]*#' "$wait_sh")
+! grep -q 'network-online' <<<"$wait_code" ||
+  fail_test "the wait does not depend on network-online.target" \
+    "on a networkless Deck that is a timeout, and here it is a target nothing ever reaches. Found:"$'\n'"$(grep -n 'network-online' <<<"$wait_code")"
+pass "the wait never mentions network-online.target -- the trap deck_wifi.py documents"
+
+# BOUNDED, and the bound is an argument to the tool rather than a sleep.
+grep -qE -- "-t ${STEAM_WAIT_SECONDS}\b" "$wait_sh" ||
+  fail_test "the wait passes its own ceiling to nm-online" "$(cat "$wait_sh")"
+[[ $STEAM_WAIT_SECONDS -gt 0 && $STEAM_WAIT_SECONDS -le 60 ]] ||
+  fail_test "the ceiling is a bound a handheld can afford" \
+    "STEAM_WAIT_SECONDS=${STEAM_WAIT_SECONDS}; the retry that succeeded was ONE second after the failure, so the number's job is to be small and finite"
+pass "the wait is bounded at ${STEAM_WAIT_SECONDS}s, passed to nm-online as its own timeout"
+
+# Now run it, in each of the three states the target can be in. nm-online is
+# reached by ABSOLUTE path (the constant), so each state is set up by pointing
+# that path somewhere rather than by PATH order -- which also means this suite
+# behaves the same on a dev machine that happens to have NetworkManager.
+wait_missing="$sfr_work/steam-wait-online-missing"
+sed "s|${NM_ONLINE_BIN}|${sfr_work}/definitely-not-installed|g" "$wait_sh" >"$wait_missing"
+chmod +x "$wait_missing"
+
+# (a) nm-online missing entirely.
+SFR_RC=0
+SFR_OUT=$("$wait_missing" 2>&1) || SFR_RC=$?
+[[ $SFR_RC -eq 0 ]] ||
+  fail_test "with no nm-online at all the wait still exits 0" "rc=${SFR_RC}"$'\n'"$SFR_OUT"
+grep -q 'not installed' <<<"$SFR_OUT" ||
+  fail_test "and says why, rather than passing silently" "$SFR_OUT"
+pass "no nm-online: exits 0 and says so -- a missing tool cannot stop Gaming Mode starting"
+
+# (b) nm-online present and FAILING -- the networkless Deck, the case the bound
+#     exists for. This is the one that would strand a user if it propagated.
+nm_stub="$sfr_work/nm-online"
+cat >"$nm_stub" <<'NMSTUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$NM_ARGS"
+exit 1
+NMSTUB
+chmod +x "$nm_stub"
+nm_args="$sfr_work/nm.args"
+: >"$nm_args"
+# The script calls nm-online by ABSOLUTE path (the constant), so the stub is
+# injected by pointing that path at it rather than by PATH order.
+wait_stubbed="$sfr_work/steam-wait-online-stubbed"
+sed "s|${NM_ONLINE_BIN}|${nm_stub}|g" "$wait_sh" >"$wait_stubbed"
+chmod +x "$wait_stubbed"
+SFR_RC=0
+SFR_OUT=$(NM_ARGS="$nm_args" "$wait_stubbed" 2>&1) || SFR_RC=$?
+[[ $SFR_RC -eq 0 ]] ||
+  fail_test "a FAILED connectivity wait still exits 0" \
+    "rc=${SFR_RC}. This runs as ExecStartPre= on steam-launcher.service: a non-zero exit here turns 'no Wi-Fi' into 'Gaming Mode does not start', which is a far worse defect than the modal this removes."$'\n'"$SFR_OUT"
+grep -q 'Starting Steam ANYWAY' <<<"$SFR_OUT" ||
+  fail_test "and it says it is proceeding regardless" "$SFR_OUT"
+grep -qE -- "-t ${STEAM_WAIT_SECONDS}" "$nm_args" ||
+  fail_test "the bound really reached nm-online" "captured: $(cat "$nm_args")"
+grep -qE -- '-s' "$nm_args" ||
+  fail_test "it waits for NM STARTUP, not for a connection to exist" \
+    "without -s a networkless Deck burns the whole timeout; with it, NM finishing its startup attempts is enough. captured: $(cat "$nm_args")"
+pass "nm-online failing: exits 0, says it is proceeding, and really passed -q -s -t ${STEAM_WAIT_SECONDS}"
+
+# (c) the happy path.
+cat >"$nm_stub" <<'NMSTUB'
+#!/usr/bin/env bash
+exit 0
+NMSTUB
+SFR_RC=0
+SFR_OUT=$(NM_ARGS="$nm_args" "$wait_stubbed" 2>&1) || SFR_RC=$?
+[[ $SFR_RC -eq 0 ]] && grep -q 'network is up' <<<"$SFR_OUT" ||
+  fail_test "the connected case reports the connection" "rc=${SFR_RC}"$'\n'"$SFR_OUT"
+pass "nm-online succeeding: exits 0 and reports the connection"
+
+# --- E1: the splash comes down ---------------------------------------------
+splash_sh="$sfr_work/splash"
+bash -c 'source "$1"; render_steam_splash' _ "$REPO_ROOT/src/deck-session.sh" >"$splash_sh"
+bash -n "$splash_sh" || fail_test "the rendered splash is valid bash" "$(cat "$splash_sh")"
+pass "render_steam_splash emits syntactically valid bash"
+
+# A fake viewer that never exits on its own -- the whole question is whether
+# something else takes it down.
+viewer_stub="$sfr_work/fake-imv"
+cat >"$viewer_stub" <<'VSTUB'
+#!/usr/bin/env bash
+printf 'started\n' >"$VIEWER_MARK"
+while true; do sleep 0.2; done
+VSTUB
+chmod +x "$viewer_stub"
+
+splash_image="$sfr_work/splash.png"
+: >"$splash_image"
+
+# splash_variant <deadline-seconds> -> a runnable copy with the real viewer and
+# image paths redirected at the stubs. The deadline is shrunk so the timeout
+# case is testable in seconds rather than in minutes; everything else about the
+# script is the shipped text.
+splash_variant() {
+  local deadline=$1 out="$sfr_work/splash-run"
+  sed -e "s|${SPLASH_VIEWER}|${viewer_stub}|g" \
+      -e "s|${SPLASH_IMAGE}|${splash_image}|g" \
+      -e "s|+ ${SPLASH_MAX_SECONDS} ))|+ ${deadline} ))|" \
+      "$splash_sh" >"$out"
+  chmod +x "$out"
+  printf '%s' "$out"
+}
+
+# pgrep stub: says "Steam is up" only when READY is set.
+cat >"$sfr_bin/pgrep" <<'PSTUB'
+#!/usr/bin/env bash
+[[ -n ${READY:-} ]] && exit 0
+exit 1
+PSTUB
+chmod +x "$sfr_bin/pgrep"
+
+splash_home="$sfr_work/home"
+viewer_mark="$sfr_work/viewer.mark"
+
+run_splash() {   # run_splash <deadline> [READY=1]
+  local script; script=$(splash_variant "$1")
+  rm -rf "$splash_home"; mkdir -p "$splash_home"
+  : >"$viewer_mark"
+  SPLASH_RC=0
+  SPLASH_SECONDS=$SECONDS
+  SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$viewer_mark" READY="${2:-}" \
+    PATH="$sfr_bin:$PATH" timeout 60 "$script" 2>&1) || SPLASH_RC=$?
+  SPLASH_ELAPSED=$((SECONDS - SPLASH_SECONDS))
+}
+
+# (a) Steam appears -- the NORMAL exit. It must come down promptly and the
+#     viewer must not survive it.
+run_splash 120 1
+[[ $SPLASH_RC -eq 0 ]] ||
+  fail_test "the splash exits 0 when Steam appears" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
+grep -q 'splash down' <<<"$SPLASH_OUT" ||
+  fail_test "and says it came down" "$SPLASH_OUT"
+[[ $SPLASH_ELAPSED -lt 30 ]] ||
+  fail_test "it comes down promptly once Steam is up" "took ${SPLASH_ELAPSED}s"
+pgrep -f "$viewer_stub" >/dev/null 2>&1 &&
+  fail_test "no viewer process survives the splash" "one is still running -- a splash that leaves its viewer up IS the permanently black-with-text panel"
+pass "🔴 THE SPLASH EXITS: Steam appearing brings it down in ${SPLASH_ELAPSED}s, and no viewer survives"
+
+# (b) Steam NEVER appears -- the deadline. This is the case that decides whether
+#     a splash bug is a message you miss or a Deck you cannot use.
+run_splash 4
+[[ $SPLASH_RC -eq 0 ]] ||
+  fail_test "the splash exits 0 on its deadline too" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
+grep -q 'splash down (deadline)' <<<"$SPLASH_OUT" ||
+  fail_test "the deadline path names itself" "$SPLASH_OUT"
+[[ $SPLASH_ELAPSED -lt 30 ]] ||
+  fail_test "the deadline is honoured" "took ${SPLASH_ELAPSED}s against a 4s deadline"
+pgrep -f "$viewer_stub" >/dev/null 2>&1 &&
+  fail_test "the deadline path kills the viewer too" "the viewer outlived its own script"
+pass "🔴 AND IT EXITS WITHOUT STEAM: the deadline fires, the viewer is killed, nothing is left drawing"
+
+# (c) Shown ONCE. Later boots reach Gaming Mode in ~39 s and a splash in front
+#     of a client that is about to draw would be a defect of its own.
+marker="$splash_home/$SPLASH_MARKER_REL"
+[[ -e $marker ]] ||
+  fail_test "the splash leaves a marker" "expected ${marker}"
+script=$(splash_variant 120)
+SPLASH_RC=0
+SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/second.mark" \
+  PATH="$sfr_bin:$PATH" timeout 30 "$script" 2>&1) || SPLASH_RC=$?
+[[ $SPLASH_RC -eq 0 && -z $SPLASH_OUT ]] ||
+  fail_test "a second run does nothing at all" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
+[[ ! -s $sfr_work/second.mark ]] ||
+  fail_test "and starts no viewer" "the second boot would cover a Gaming Mode that is about to draw"
+pass "shown once: the marker makes every later boot a no-op, so ~39 s boots are untouched"
+
+# (d) A missing image or viewer is today's black screen, not a failure. This is
+#     the degradation the whole placement decision is about.
+rm -f "$splash_image"
+script=$(splash_variant 120)
+SPLASH_RC=0
+rm -rf "$splash_home"; mkdir -p "$splash_home"
+SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/third.mark" \
+  PATH="$sfr_bin:$PATH" timeout 30 "$script" 2>&1) || SPLASH_RC=$?
+[[ $SPLASH_RC -eq 0 ]] ||
+  fail_test "a missing image is not a failure" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
+grep -q 'showing nothing' <<<"$SPLASH_OUT" ||
+  fail_test "and it says so" "$SPLASH_OUT"
+pass "a missing image degrades to today's black screen, loudly, with exit 0"
+
+# --- the wording is the requirement ----------------------------------------
+#
+# The operator asked for "something to tell users like don't turn me off. steam
+# is unpacking." Not paraphrased -- that IS the specification.
+#
+# 🔴 RENDERED TO A PATH WITH NO EXTENSION, ON PURPOSE. That is what the stage
+# does (it renders into a mktemp file and then `install`s it), and ImageMagick
+# picks its output codec from the extension: an earlier version of this called
+# it with a name ending in .png, passed, and would have shipped a stage that
+# failed with "no encode delegate" on every real install -- installing no splash
+# at all, quietly, because the stage's gate treats a failed render as "no
+# ImageMagick here". A test that is easier on the code than production is worse
+# than no test.
+splash_png="$sfr_work/message-no-extension"
+if bash -c 'source "$1"; render_steam_splash_image "$2"' _ "$REPO_ROOT/src/deck-session.sh" "$splash_png" 2>/dev/null && [[ -s $splash_png ]]; then
+  size=$(bash -c 'source "$1"; printf "%s" "$SPLASH_IMAGE_SIZE"' _ "$REPO_ROOT/src/deck-session.sh")
+  if command -v identify >/dev/null 2>&1 || command -v magick >/dev/null 2>&1; then
+    got=$( { command -v magick >/dev/null 2>&1 && magick identify -format '%wx%h' "$splash_png"; } || identify -format '%wx%h' "$splash_png" )
+    [[ $got == "$size" ]] ||
+      fail_test "the message is drawn at gamescope's logical size" \
+        "got ${got}, expected ${size}. The panel is 800x1280 PORTRAIT and gamescope applies its own transform, so a portrait image here would be the one thing on the Deck rotated the wrong way."
+    pass "the message renders at ${got} -- gamescope's landscape logical output, not the panel's portrait scanout"
+  fi
+else
+  note "ImageMagick is not on this machine, so the message image was not rendered here (the stage warns and installs no splash in that case, which is today's behaviour)"
+fi
+
+# The words themselves, checked on the source so they survive a machine with no
+# ImageMagick.
+img_body=$(bash -c 'source "$1"; declare -f render_steam_splash_image' _ "$REPO_ROOT/src/deck-session.sh")
+for phrase in "Don't turn me off." "Steam is unpacking."; do
+  [[ $img_body == *"$phrase"* ]] ||
+    fail_test "the splash says what the operator asked for" \
+      "missing: '${phrase}'. The wording is the requirement, not a placeholder."
+done
+pass "the message says \"Don't turn me off.\" and \"Steam is unpacking.\" -- the operator's own words"
+
+rm -rf "$sfr_work"
+
 echo "all deck-session.sh tests passed"

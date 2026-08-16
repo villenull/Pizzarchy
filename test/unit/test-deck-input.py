@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Unit tests for `configure_deck`'s `lock_wake_dpms` step — §5.25 decision #1's
-`above_lock = 2` layer rule plus §5.24a requirement #1's two DPMS `misc` lines,
-spliced into the per-user `~/.config/hypr/input.lua` (`deck_input.py`).
+`above_lock = 2` layer rule, §5.24a requirement #1's two DPMS `misc` lines, and
+§5.37 D5's `input.touchdevice` output/transform pair, spliced into the per-user
+`~/.config/hypr/input.lua` (`deck_input.py`).
 
 No VM, no root, no network, no chroot, no compositor, no ISO build, and nothing
 against the Deck:
@@ -18,7 +19,7 @@ grepping the module's own source. `deck_monitors.py`'s sibling suite
 its six traps, adapted to `input.lua`'s own extra hazard — it is a file with
 TWO independent writers.
 
-Seven traps:
+Eight traps:
 
 1. 🔴 **A second writer eating the first one's block.** `input.lua` already
    carries `src/deck-session.sh`'s `OSK_KB_RULE_BEGIN`/`END` block. §5–§7
@@ -42,7 +43,16 @@ Seven traps:
    requires a refusal.
 6. 🔴 **A sentinel that is not last.** §9 asserts the position, not just the
    presence.
-7. 🔴 **A live-compositor readback via a bare `return`.** §12 exercises
+7. 🔴 **A touchscreen fix that quietly claims LCD support**, or that is
+   verified by a fake `hyprctl` too blunt to tell a string option from an
+   integer one. §1 requires the rendered block to carry no `name =` device
+   field and no `fts3528` outside its prose; §13's `getoption` fake answers
+   per option name, in the exact output shape the Deck printed, so the
+   `output` check cannot pass on an `int: 0` that was meant for `misc`.
+   ⚠️ **Nothing in this file can prove a tap lands where the finger is.** The
+   transform's derivation is asserted here; only the operator's finger closes
+   §5.37 D5.
+8. 🔴 **A live-compositor readback via a bare `return`.** §12 exercises
    `verify_live`'s three outcomes with a fake `hyprctl`, and separately
    `test-hyprctl-syntax.sh` (run by the full suite, not this file) fails the
    build if the broken readback form is written down anywhere in this file or
@@ -56,6 +66,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import shutil
 import stat
 import subprocess
@@ -377,6 +388,44 @@ print("\n## 1. the decided values, and the sentinel this repo standardised on")
 check("above_lock is 2, hardware-verified 2026-08-11", di.ABOVE_LOCK, 2)
 check("the OSK's layer namespace is deck-osk", di.DECK_OSK_LAYER_NAMESPACE, "deck-osk")
 
+# docs/PROGRESS.md §5.37 D5.
+check("the touch transform is 3 (libinput's 270 calibration matrix)", di.TOUCH_TRANSFORM, 3)
+check_true(
+    "…and it is one of Hyprland's eight, not an out-of-range value it would "
+    "clamp (0.56.2 clamps to -1..7 and treats -1 as 'leave libinput alone', so "
+    "a typo'd 8 would silently become 7 and rotate taps the wrong way)",
+    di.TOUCH_TRANSFORM in di.VALID_TOUCH_TRANSFORMS,
+)
+check(
+    "🔴 the touchdevice is bound to the SAME output monitors.lua bets the "
+    "desktop's rotation and scale on — two names for one panel is how a "
+    "touchscreen ends up stretched over a rectangle the desktop is not on",
+    di.PANEL_OUTPUT,
+    dm.PANEL_OUTPUT,
+)
+check(
+    "…and it equals deck_monitors' panel transform. NOT the argument for the "
+    "value (that is the digitizer's measured 800x1280 portrait ABS ranges plus "
+    "fbcon=rotate:1) — asserted so that if one is ever re-measured, the "
+    "coincidence breaking is visible rather than silent",
+    di.TOUCH_TRANSFORM,
+    dm.PANEL_TRANSFORM,
+)
+check_true(
+    "🔴 the rendered block names NO touch device — CLAUDE.md forbids claiming "
+    "LCD support anywhere, so this uses Hyprland's device-agnostic GLOBAL "
+    "input:touchdevice options rather than an hl.device rule keyed on the "
+    "OLED's fts3528 controller (the string may appear in prose about what was "
+    "measured; it must never appear in a `name =` field)",
+    not re.search(r"\bname\s*=", di.strip_lua_comments("\n".join(di.render_block())))
+    and "fts3528" not in di.strip_lua_comments("\n".join(di.render_block())),
+)
+check_true(
+    "…and the OLED controller IS named in the block's PROSE, so a reader on "
+    "other hardware learns which digitizer this was measured against",
+    "fts3528" in "\n".join(di.render_block()).lower(),
+)
+
 t5_sentinel_lines = [
     ln for ln in T5_PLAN.read_text().splitlines() if "DECK_INPUT_LUA_LOADED = true" in ln
 ]
@@ -631,6 +680,66 @@ check_raises(
     "expected 2",
 )
 
+check(
+    "verify() on a clean render: the touchdevice pair, §5.37 D5",
+    (proof["touch_output"], proof["touch_transform"]),
+    (di.PANEL_OUTPUT, str(di.TOUCH_TRANSFORM)),
+)
+
+v_no_touch = tmpdir("verify-no-touch") / "input.lua"
+v_no_touch.write_text(
+    good.replace(f'      output = "{di.PANEL_OUTPUT}",\n', "")
+    .replace(f"      transform = {di.TOUCH_TRANSFORM},\n", "")
+)
+check_raises(
+    "🔴 verify() refuses a file with no active input.touchdevice pair — the "
+    "state §5.37 D5 was measured in, where every tap lands a quarter turn out",
+    lambda: di.verify(v_no_touch, "no-touch file"),
+    di.DeckInputError,
+    "no ACTIVE input.touchdevice",
+)
+
+v_touch_commented = tmpdir("verify-touch-commented") / "input.lua"
+v_touch_commented.write_text(
+    good.replace(f"      transform = {di.TOUCH_TRANSFORM},", f"--      transform = {di.TOUCH_TRANSFORM},")
+)
+check_raises(
+    "🔴 verify() does not count a COMMENTED-OUT touch transform as active",
+    lambda: di.verify(v_touch_commented, "commented-out touch file"),
+    di.DeckInputError,
+    "no ACTIVE input.touchdevice",
+)
+
+v_touch_zero = tmpdir("verify-touch-zero") / "input.lua"
+v_touch_zero.write_text(good.replace(f"transform = {di.TOUCH_TRANSFORM},", "transform = 0,"))
+check_raises(
+    "verify() refuses transform = 0 — Hyprland's shipped default, and exactly "
+    "the value the broken Deck read back",
+    lambda: di.verify(v_touch_zero, "unrotated touch file"),
+    di.DeckInputError,
+    "input.touchdevice.transform",
+)
+
+v_touch_wrong_out = tmpdir("verify-touch-wrong-out") / "input.lua"
+v_touch_wrong_out.write_text(good.replace(f'output = "{di.PANEL_OUTPUT}"', 'output = "DP-2"'))
+check_raises(
+    "verify() refuses a touchdevice bound to some OTHER output",
+    lambda: di.verify(v_touch_wrong_out, "wrong-output touch file"),
+    di.DeckInputError,
+    "input.touchdevice.output",
+)
+
+v_touch_auto = tmpdir("verify-touch-auto") / "input.lua"
+v_touch_auto.write_text(good.replace(f'output = "{di.PANEL_OUTPUT}"', 'output = "[[Auto]]"'))
+check_raises(
+    "🔴 verify() refuses the shipped [[Auto]] default: its autodetect branch is "
+    "commented out behind a // FIXME in Hyprland 0.56.2, so it leaves the "
+    "device UNBOUND rather than binding it to the panel",
+    lambda: di.verify(v_touch_auto, "auto-output touch file"),
+    di.DeckInputError,
+    "input.touchdevice.output",
+)
+
 v_not_last = tmpdir("verify-not-last") / "input.lua"
 v_not_last.write_text(good.replace(
     f"{di.SENTINEL} = true\n-- <<<",
@@ -661,6 +770,51 @@ second = user_lua(target).read_text()
 check("re-running produces EXACTLY the same output as the first run (not a growing file)", second, first)
 check("only ONE copy of our start marker exists after two runs", second.count(di.BEGIN), 1)
 check("only ONE copy of our end marker exists after two runs", second.count(di.END), 1)
+
+# 🔴 §5.37 D5. The marker count alone would not have caught a statement
+# appended INSIDE the block, and `verify()` refuses a second touchdevice call
+# rather than picking one, so a duplicate is an outage rather than a wart.
+check(
+    "exactly ONE active input.touchdevice call after two runs",
+    len(di.touchdevice_calls(second)),
+    1,
+)
+check("…and exactly one misc DPMS pair", len(di.misc_dpms_calls(second)), 1)
+check("…and exactly one above_lock rule", len(di.above_lock_calls(second)), 1)
+
+# 🔴 The preserve-everything-outside-the-markers rule, stated as its own check
+# rather than left implicit in §7/§8: a third run against a file carrying BOTH
+# deck-session.sh's OSK block AND arbitrary user content must leave every byte
+# that is not ours exactly where it was.
+USER_CONTENT = (
+    "-- the operator's own line, which nothing of ours may touch\n"
+    'o.window("(Alacritty|kitty|foot)", { scroll_touchpad = 1.5 })\n'
+    "hl.gesture({ fingers = 3, direction = \"horizontal\", action = \"workspace\" })\n"
+)
+target = make_target(
+    "preserve-outside",
+    seed=SHIPPED,
+    skel=SHIPPED,
+    user_file=SHIPPED + "\n" + USER_CONTENT + "\n" + OSK_BLOCK,
+)
+quiet(di.configure_lock_wake_dpms, make_ctx(target), runner=accepting_runner)
+once = user_lua(target).read_text()
+quiet(di.configure_lock_wake_dpms, make_ctx(target), runner=accepting_runner)
+twice = user_lua(target).read_text()
+check(
+    "🔴 everything OUTSIDE our markers is byte-identical across a re-run",
+    di.outside_our_block(twice),
+    di.outside_our_block(once),
+)
+check_true(
+    "…and that 'outside' really does still contain the OSK block, upstream's "
+    "seed AND the user's own lines (a check that passed because both sides "
+    "were empty would prove nothing)",
+    OSK_BLOCK.strip() in di.outside_our_block(twice)
+    and 'kb_layout = "us"' in di.outside_our_block(twice)
+    and "the operator's own line" in di.outside_our_block(twice),
+)
+check("…and the whole file is unchanged by the second run", twice, once)
 
 print("\n## 11. refusal on an unterminated own-marker block")
 
@@ -724,15 +878,40 @@ def make_live(target, uid, sig="abc123"):
     return sig
 
 
-def hyprctl_ok(target, argv):
-    assert argv[0] == "env"
-    if argv[-2] == "reload":
-        return 0, "ok"
-    if argv[-2] == "eval":
-        return 0, "ok"
-    if "getoption" in argv:
-        return 0, "int: 0\n"
-    raise AssertionError(argv)
+def getoption_replies(overrides=None):
+    """A fake `hyprctl getoption` keyed on the option name, in the exact output
+    shape the real one printed on the Deck 2026-08-15. A single flat "int: 0"
+    for everything would have let the §5.37 D5 touchdevice checks pass by
+    accident, since `output` is a STRING option."""
+    replies = {
+        "misc:key_press_enables_dpms": "int: 0\nset: true\n",
+        "misc:mouse_move_enables_dpms": "int: 0\nset: true\n",
+        "input:touchdevice:output": f"str: {di.PANEL_OUTPUT}\nset: true\n",
+        "input:touchdevice:transform": f"int: {di.TOUCH_TRANSFORM}\nset: true\n",
+    }
+    replies.update(overrides or {})
+    return replies
+
+
+def make_hyprctl(overrides=None):
+    replies = getoption_replies(overrides)
+
+    def hyprctl(target, argv):
+        assert argv[0] == "env"
+        if argv[-2] == "reload":
+            return 0, "ok"
+        if argv[-2] == "eval":
+            return 0, "ok"
+        if "getoption" in argv:
+            option = argv[-1]
+            assert option in replies, f"unexpected getoption {option!r}"
+            return 0, replies[option]
+        raise AssertionError(argv)
+
+    return hyprctl
+
+
+hyprctl_ok = make_hyprctl()
 
 
 def hyprctl_sentinel_gone(target, argv):
@@ -743,14 +922,13 @@ def hyprctl_sentinel_gone(target, argv):
     raise AssertionError(argv)
 
 
-def hyprctl_wrong_option(target, argv):
-    if "reload" in argv:
-        return 0, "ok"
-    if "eval" in argv:
-        return 0, "ok"
-    if "getoption" in argv:
-        return 0, "int: 1\n"
-    raise AssertionError(argv)
+hyprctl_wrong_option = make_hyprctl({"misc:key_press_enables_dpms": "int: 1\nset: true\n"})
+
+# 🔴 §5.37 D5: the compositor never picked the touch transform up. The values
+# below are the DEFAULTS the Deck printed before the block was applied --
+# `[[Auto]]` and `0` -- which is exactly the state the defect was measured in.
+hyprctl_touch_unbound = make_hyprctl({"input:touchdevice:output": "str: [[Auto]]\nset: false\n"})
+hyprctl_touch_unrotated = make_hyprctl({"input:touchdevice:transform": "int: 0\nset: false\n"})
 
 
 target = make_target("live-good", seed=SHIPPED, skel=SHIPPED, user_file=SHIPPED)
@@ -780,6 +958,27 @@ check_raises(
     lambda: di.verify_live(target, TEST_UID, runtime_dir_rel=f"run/user/{TEST_UID}", runner=hyprctl_wrong_option),
     di.DeckInputError,
     "misc:key_press_enables_dpms",
+)
+
+target = make_target("live-touch-unbound", seed=SHIPPED, skel=SHIPPED, user_file=SHIPPED)
+di.configure_lock_wake_dpms(make_ctx(target), runner=accepting_runner)
+make_live(target, TEST_UID)
+check_raises(
+    "🔴 live + touchdevice still on the [[Auto]] default -> FAIL, naming the option",
+    lambda: di.verify_live(target, TEST_UID, runtime_dir_rel=f"run/user/{TEST_UID}", runner=hyprctl_touch_unbound),
+    di.DeckInputError,
+    "input:touchdevice:output",
+)
+
+target = make_target("live-touch-unrotated", seed=SHIPPED, skel=SHIPPED, user_file=SHIPPED)
+di.configure_lock_wake_dpms(make_ctx(target), runner=accepting_runner)
+make_live(target, TEST_UID)
+check_raises(
+    "🔴 live + touchdevice transform still 0 -> FAIL: the digitizer is still in "
+    "the panel's native portrait frame and every tap is a quarter turn out",
+    lambda: di.verify_live(target, TEST_UID, runtime_dir_rel=f"run/user/{TEST_UID}", runner=hyprctl_touch_unrotated),
+    di.DeckInputError,
+    "input:touchdevice:transform",
 )
 
 check_true(

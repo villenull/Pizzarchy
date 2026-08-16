@@ -608,6 +608,225 @@ check("a QAM press runs the ROOT menu end to end",
       [argv for argv, _kw in _fake.calls], [["omarchy-menu", "toggle"]])
 
 
+# --- 🆕 STEAM+Y CLOSES THE FOCUSED WINDOW (docs/PROGRESS.md §5.37) -----------
+#
+# The controller equivalent of Omarchy's SUPER+W. Same shape as the STEAM+X
+# chord above and the menus beside it: translate() queues a NAME, main()
+# resolves it to an argv, and nothing here starts a process.
+#
+# 🔴 THE COMMAND IS NOT `killactive`, AND THAT IS A MEASUREMENT, NOT A STYLE
+# CHOICE. On the Deck's Hyprland `hyprctl dispatch` takes a LUA EXPRESSION, so
+# a classic dispatcher name is evaluated as a bare global and resolves to nil
+# (`type(killactive)` is `nil`, probed on hardware 2026-08-15 -- via an
+# `error()` because `hyprctl eval` never reports a value). The call then dies
+# in stderr while the button looks perfectly bound, which is the §5.28 shape
+# and what test/unit/test-hyprctl-syntax.sh exists to catch.
+#
+# Omarchy 4.0 binds it in Lua, in default/hypr/bindings/tiling.lua:
+#     o.bind("SUPER + W", "Close window", hl.dsp.window.close())
+# and `grep -rn killactive /usr/share/omarchy/` returns nothing at all.
+
+check("STEAM+Y runs the SAME dispatcher Omarchy's own SUPER+W runs",
+      m.CLOSE_WINDOW_ARGV, ["hyprctl", "dispatch", "hl.dsp.window.close()"])
+# The two halves of that, asserted separately so a rewrite cannot quietly
+# satisfy the shape while losing the point.
+check("...in the Lua form test-hyprctl-syntax.sh's scanner accepts",
+      m.CLOSE_WINDOW_ARGV[-1].startswith("hl."), True)
+check("...and NOT as the old bareword dispatcher, which is nil on this Hyprland",
+      any("killactive" in part for part in m.CLOSE_WINDOW_ARGV), False)
+# ⚠️ Exec'd, never synthesised. A SUPER+W keystroke would do nothing at all the
+# moment the user or upstream rebinds it, with nothing to read anywhere -- the
+# reasoning the menus above are built on, applied to a second button.
+#
+# ⚠️ ASSERTED ON *SUPER*, NOT ON W. KEY_W is in EMITTED_KEYS and must be: the
+# on-screen keyboard has a W key like every other letter, so its presence
+# proves nothing either way. SUPER is the half a synthesised chord cannot do
+# without, this uinput device has never declared it, and the kernel drops an
+# undeclared code silently -- so a future "just send SUPER+W" would fail
+# exactly as quietly as the nil dispatcher above.
+check("it EXECs rather than synthesising a SUPER+W keystroke: no SUPER is emitted",
+      (e.KEY_LEFTMETA in m.EMITTED_KEYS, e.KEY_RIGHTMETA in m.EMITTED_KEYS),
+      (False, False))
+
+# Y was genuinely unclaimed. Every other candidate on this pad is spoken for,
+# and this is the assertion that fails if one of them is ever moved onto Y.
+check("STEAM+Y collides with nothing else bound on this pad",
+      (m.CLOSE_CHORD_PRESS == m.OSK_CHORD_PRESS,
+       m.CLOSE_CHORD_PRESS == m.OSK_CHORD_HOLD,
+       m.CLOSE_CHORD_PRESS == m.QAM_BUTTON,
+       m.CLOSE_CHORD_PRESS == m.OSK_CAPS_BUTTON,
+       m.CLOSE_CHORD_PRESS in m.TRIGGER_BUTTON_MAP,
+       m.CLOSE_CHORD_PRESS in m.PAD_CLICK_HALF,
+       m.CLOSE_CHORD_PRESS in m.DPAD_BUTTON_MAP),
+      (False, False, False, False, False, False, False))
+check("and it is physical Y", m.CLOSE_CHORD_PRESS, e.BTN_WEST)
+
+# 🔴 ACCEPTANCE, HALF ONE: the chord closes a window and does NOT touch the OSK.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("Y while STEAM is held does not also type Space",
+      mm.translate(e.EV_KEY, e.BTN_WEST, 1, 0.1), [])
+check("the chord queued a window close", mm.pending_actions, ["close-window"])
+check("🔴 and did NOT toggle the on-screen keyboard",
+      "toggle-osk" in mm.pending_actions, False)
+check("releasing the chord's Y types nothing either",
+      mm.translate(e.EV_KEY, e.BTN_WEST, 0, 0.15), [])
+check("releasing STEAM after the chord emits nothing",
+      mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.2), [])
+check("🔴 and STEAM+Y is a CHORD, not a tap: no apps menu underneath it",
+      mm.pending_actions, ["close-window"])
+
+# 🔴 ACCEPTANCE, HALF TWO: the chord-less tap is untouched. This is the binding
+# STEAM has had since §5.23, and adding a partner to STEAM must not cost it.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.1)
+check("🔴 STEAM alone still opens the apps menu", mm.pending_actions, ["menu-apps"])
+check("...and opened no window-close on the way", "close-window" in mm.pending_actions, False)
+
+# Y on its own must still be Space, or the chord would cost the keyboard its
+# space bar -- the exact trade X/Backspace is protected against above.
+mm = fresh()
+check("Y alone is Space", mm.translate(e.EV_KEY, e.BTN_WEST, 1, 0.0),
+      [(e.KEY_SPACE, 1)])
+check("...and its release is Space up",
+      mm.translate(e.EV_KEY, e.BTN_WEST, 0, 0.1), [(e.KEY_SPACE, 0)])
+check("Y alone queues nothing", mm.pending_actions, [])
+
+# 🔴 A HELD Y ALWAYS GETS ITS RELEASE. Y down, THEN STEAM grabbed, then Y up.
+# The chord branch swallows that release wholesale unless the guard at the top
+# of translate() pairs it -- and Y is SPACE, so a lost release types spaces for
+# ever into whatever has focus. Identical hazard to X/Backspace; it arrived the
+# moment Y became a chord partner.
+mm = fresh()
+check("Y down first emits Space down",
+      mm.translate(e.EV_KEY, e.BTN_WEST, 1, 0.0), [(e.KEY_SPACE, 1)])
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.1)          # STEAM grabbed mid-hold
+check("🔴 the release still reaches the consumer, or Space sticks down",
+      mm.translate(e.EV_KEY, e.BTN_WEST, 0, 0.2), [(e.KEY_SPACE, 0)])
+check("and that release did NOT arm the chord",
+      "close-window" in mm.pending_actions, False)
+
+# Same hazard through the other door: the keyboard opening between press and
+# release, where `_osk_event` swallows face buttons' releases by design.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_WEST, 1, 0.0)
+mm.osk_active = True
+check("a held Y released after the keyboard opened is still released",
+      mm.translate(e.EV_KEY, e.BTN_WEST, 0, 0.1), [(e.KEY_SPACE, 0)])
+
+# 🔴 THE TWO CHORD PARTNERS MUST NOT SHARE ONE FLAG. This is what a single
+# boolean gets wrong: X's release clears the flag, and Y's release then finds
+# nothing to pair with and sticks SPACE down. Both held, both released.
+mm = fresh()
+check("X down emits Backspace down",
+      mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.0), [(e.KEY_BACKSPACE, 1)])
+check("Y down emits Space down",
+      mm.translate(e.EV_KEY, e.BTN_WEST, 1, 0.05), [(e.KEY_SPACE, 1)])
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.1)          # STEAM grabbed over both
+check("X's release is still delivered",
+      mm.translate(e.EV_KEY, e.BTN_NORTH, 0, 0.2), [(e.KEY_BACKSPACE, 0)])
+check("🔴 ...and so is Y's -- one shared flag loses this one",
+      mm.translate(e.EV_KEY, e.BTN_WEST, 0, 0.3), [(e.KEY_SPACE, 0)])
+
+# The chord stays reachable while the keyboard is up, exactly as STEAM+X is:
+# the chord branch sits ABOVE the `osk_active` routing on purpose.
+mm = fresh()
+mm.osk_active = True
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("STEAM+Y with the keyboard up closes the window rather than typing a space",
+      (mm.translate(e.EV_KEY, e.BTN_WEST, 1, 0.1), mm.pending_actions),
+      ([], ["close-window"]))
+
+# Disarming works the same way it does for X.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.1)
+mm.pending_actions.clear()
+check("Y after STEAM is released is Space again",
+      mm.translate(e.EV_KEY, e.BTN_WEST, 1, 0.2), [(e.KEY_SPACE, 1)])
+check("and no window close is queued", "close-window" in mm.pending_actions, False)
+
+# The pad's own autorepeat under a held STEAM must not fire it repeatedly --
+# a held Y would otherwise close every window on the workspace in turn.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_KEY, e.BTN_WEST, 1, 0.1)
+mm.translate(e.EV_KEY, e.BTN_WEST, 2, 0.2)
+mm.translate(e.EV_KEY, e.BTN_WEST, 2, 0.3)
+check("🔴 a HELD Y closes ONE window, not one per autorepeat",
+      mm.pending_actions, ["close-window"])
+
+# ⚠️ CHORD_PRESSES is what the release guard reads, so every partner in it must
+# have a plain BUTTON_MAP meaning to hand back. A partner added without one
+# makes the guard raise KeyError on a perfectly ordinary button release -- in
+# the input loop of the only input path on the device.
+check("every chord partner has a plain key to release",
+      sorted(code for code in m.CHORD_PRESSES if code not in m.BUTTON_MAP), [])
+check("CHORD_PRESSES names both chords and nothing else",
+      sorted(m.CHORD_PRESSES.values()), ["close-window", "toggle-osk"])
+
+# --- and the spawn, through the same stub the menus use ----------------------
+
+_result, _fake, _err = with_fake_subprocess(lambda: m.run_close_window())
+check("closing a window spawns exactly the measured argv",
+      [argv for argv, _kw in _fake.calls],
+      [["hyprctl", "dispatch", "hl.dsp.window.close()"]])
+check("and reports that it started", _result, True)
+check("nothing waits on it -- hyprctl must never freeze the input loop",
+      [p.waited for p in _fake.procs], [False])
+check("and it is an argv, never a shell string",
+      _fake.calls[0][1].get("shell"), None)
+# 🔴 §5.28: hyprctl needs HYPRLAND_INSTANCE_SIGNATURE, which this service does
+# NOT inherit -- measured on the Deck, whose running mapper's environ carries
+# XDG_RUNTIME_DIR and no signature at all. Without the RESOLVED environment
+# this binding is dead and says nothing. (The AST sweep below enforces the
+# general rule; this pins that THIS spawn is covered by it.)
+check("it runs with the RESOLVED session environment, not what it inherited",
+      _fake.calls[0][1].get("env") is not None, True)
+check("a successful spawn says nothing on stderr", _err, "")
+
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_close_window(),
+    error=FileNotFoundError(2, "No such file or directory", "hyprctl"))
+check("a missing hyprctl does not raise", _result, False)
+check("it is LOUD about it", "could not run" in _err, True)
+check("and names the command it tried", "hl.dsp.window.close()" in _err, True)
+# 🔴 AND BLAMES THE RIGHT BINARY. run_menu_action's message names omarchy-menu;
+# printing that for a missing hyprctl sends whoever reads the journal after a
+# dead button to the wrong package entirely.
+check("🔴 and names hyprctl, NOT omarchy-menu", ("hyprctl" in _err, "omarchy-menu" in _err),
+      (True, False))
+check("and says the rest of the mapper is unaffected",
+      "the rest of the mapper is unaffected" in _err, True)
+
+_result, _fake, _err = with_fake_subprocess(lambda: m.run_close_window(dry_run=True))
+check("--dry-run reports it instead of spawning, exactly like the menu buttons",
+      (_fake.calls, "hl.dsp.window.close()" in _err, _result), ([], True, True))
+
+# End to end, the way main() drives it: translate queues a NAME, the dispatcher
+# resolves it to an argv. Either half alone still passes if the two are crossed.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_KEY, e.BTN_WEST, 1, 0.1)
+mm.translate(e.EV_KEY, e.BTN_WEST, 0, 0.2)
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.3)
+check("STEAM+Y queues exactly one action, and it is the close",
+      mm.pending_actions, ["close-window"])
+_result, _fake, _err = with_fake_subprocess(
+    lambda: [m.run_close_window() for _a in mm.pending_actions])
+check("a STEAM+Y chord closes the window end to end",
+      [argv for argv, _kw in _fake.calls],
+      [["hyprctl", "dispatch", "hl.dsp.window.close()"]])
+
+# ⚠️ The close is NOT in MENU_ACTIONS, and that is the point: run_menu_action's
+# failure message names omarchy-menu, so an entry there would blame the wrong
+# package for a dead STEAM+Y. That no queued name falls through to main()'s
+# "no handler" branch is asserted against the SOURCE at the end of this file.
+check("the window close is not smuggled into the menus' table",
+      "close-window" in m.MENU_ACTIONS, False)
+
+
 # --- what startup says, so a dead button is never a mystery ------------------
 #
 # ⚠️ Both buttons exist only with lizard_mode=N (§5.9, §5.21), and QAM's binding
@@ -4335,6 +4554,40 @@ check("the report asks for BOTH halves -- what we believe and what is true",
 check("...taking `usable` from the live check, not from a placeholder",
       [ast.unparse(kw.value) for node in state_calls for kw in node.keywords
        if kw.arg == "usable"], ["osk_usable()"])
+
+# --- 🆕 every queued action reaches a handler in main() (§5.37) --------------
+#
+# 🔴 THE DEAD-BUTTON GUARD, AND IT IS THE P32 DEFECT FAMILY'S OWN SHAPE:
+# written, unit-tested, documented, never wired. Everything above proves
+# translate() QUEUES "close-window"; none of it can see main()'s run_pending
+# dispatching on it, and a name with no branch falls through to the "queued
+# action has no handler" print -- a button that does nothing, reported once in
+# a journal nobody reads.
+
+pending_def = next(node for node in ast.walk(main_def)
+                   if isinstance(node, ast.FunctionDef) and node.name == "run_pending")
+pending_src = ast.unparse(pending_def)
+check("main()'s run_pending dispatches on the close-window action",
+      "'close-window'" in pending_src, True)
+check("...and reaches the runner that spawns hyprctl",
+      [node.func.id for node in ast.walk(pending_def)
+       if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+       and node.func.id == "run_close_window"],
+      ["run_close_window"])
+# ⚠️ Every action name translate() can produce, checked against what
+# run_pending answers to. `CHORD_PRESSES` is the table the chord branch reads,
+# so a third chord added there without a branch here is caught by this rather
+# than by a user pressing it.
+check("every chord's action name appears in run_pending",
+      sorted(name for name in m.CHORD_PRESSES.values()
+             if f"'{name}'" not in pending_src), [])
+# --dry-run must reach it too, or `--dry-run` silently starts closing real
+# windows -- the emitters above print instead of injecting for the same reason.
+check("...and the close honours --dry-run like every other spawn",
+      [ast.unparse(kw) for node in ast.walk(pending_def)
+       if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+       and node.func.id == "run_close_window" for kw in node.keywords],
+      ["dry_run=ui is None"])
 
 print(f"\n{'PASS' if FAILURES == 0 else 'FAILED'} — {FAILURES} failure(s)")
 sys.exit(1 if FAILURES else 0)

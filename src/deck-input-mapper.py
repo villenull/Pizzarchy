@@ -31,9 +31,10 @@ WITH THE ON-SCREEN KEYBOARD UP, the buttons match Valve's keyboard exactly
     R2 (BTN_TR2)         right pad TOUCHED -> commit the right cursor's key
                          right pad LIFTED  -> Enter
 
-DESKTOP MODE ADDS TWO BUTTONS (docs/PROGRESS.md §5.23)
+DESKTOP MODE ADDS THREE BUTTONS (docs/PROGRESS.md §5.23, §5.37)
     STEAM (tap, no chord)  `omarchy-menu toggle apps`  the apps menu
     STEAM + X              the on-screen keyboard      (unchanged)
+    STEAM + Y              close the focused window    the controller's SUPER+W
     QAM                    `omarchy-menu toggle`       Omarchy's own menu
                            -- INERT until QAM's evdev code is measured
 
@@ -365,6 +366,31 @@ TRIGGER_BUTTON_MAP: dict[int, int] = {
 OSK_CHORD_HOLD = e.BTN_MODE
 OSK_CHORD_PRESS = e.BTN_NORTH  # physical X
 
+# --- 🆕 STEAM+Y CLOSES THE FOCUSED WINDOW (operator, docs/PROGRESS.md §5.37) --
+#
+# The controller equivalent of Omarchy's SUPER+W. Y is the only face button
+# STEAM does not already claim: X is the OSK chord above, and every other
+# candidate is spoken for elsewhere in this file -- QAM is BTN_BASE
+# (QAM_BUTTON), L3 is Caps (OSK_CAPS_BUTTON), the pad clicks are
+# BTN_THUMB/BTN_THUMB2 (PAD_CLICK_HALF) and the stick clicks BTN_THUMBL/R.
+# BTN_WEST appears in BUTTON_MAP (Space) and OSK_SHORTCUTS (Space) but in
+# neither case as a CHORD partner, so STEAM+Y was genuinely unbound.
+CLOSE_CHORD_PRESS = e.BTN_WEST  # physical Y
+
+# Every button that means something WHILE STEAM IS HELD, and what it queues.
+#
+# ⚠️ ONE TABLE, BECAUSE THE STUCK-KEY GUARD READS IT. Each of these codes also
+# has a plain meaning in BUTTON_MAP (X is Backspace, Y is Space), so a press
+# that lands BEFORE Steam is grabbed and a release that lands AFTER must still
+# be paired -- see `chord_keys_down` and the guard at the top of `translate`.
+# Adding a chord partner here without adding it to BUTTON_MAP's release path is
+# how a face button gets held down forever; keeping the set in one place is what
+# makes that impossible rather than merely unlikely.
+CHORD_PRESSES: dict[int, str] = {
+    OSK_CHORD_PRESS: "toggle-osk",
+    CLOSE_CHORD_PRESS: "close-window",
+}
+
 # --- Omarchy's menus on STEAM and QAM (docs/PROGRESS.md §5.23 item 3) --------
 #
 # Operator request, 2026-08-11, for Desktop Mode: STEAM opens the apps menu and
@@ -413,6 +439,58 @@ MENU_ACTIONS: dict[str, list[str]] = {
     "menu-root": [OMARCHY_MENU, "toggle"],
     "emoji": [EMOJI_MENU],
 }
+
+# --- what STEAM+Y runs, and why it is not `killactive` -----------------------
+#
+# 🔴 THE BAREWORD `killactive` DOES NOT WORK ON THIS HYPRLAND, and the way it
+# fails is this project's own worst shape: `hyprctl dispatch` now takes a LUA
+# EXPRESSION, so a classic dispatcher name is evaluated as a bare global,
+# resolves to nil, and the call dies in stderr while the button looks bound.
+# `test/unit/test-hyprctl-syntax.sh` exists for exactly this (docs/PROGRESS.md
+# §5.30b) and its scanner accepts only a first argument beginning `hl.`.
+#
+# ✅ MEASURED ON THE DECK 2026-08-15 (Omarchy 4.0, omarchy-dev
+# 4.0.0.r1744.gf002044-1, Hyprland's Lua config), not inferred from any other
+# Hyprland setup:
+#
+#   * Omarchy binds it in LUA, and there is no `killactive` anywhere in it.
+#     `grep -rn killactive /usr/share/omarchy/` returns NOTHING. The real
+#     binding is one line of default/hypr/bindings/tiling.lua:
+#
+#         o.bind("SUPER + W", "Close window", hl.dsp.window.close())
+#
+#     so this is the same dispatcher SUPER+W is, spelled the same way.
+#   * `type(killactive)` is `nil`; `type(hl.dsp.window.close)` is `function`
+#     and `type(hl.dsp.window.close())` is `userdata` -- the Dispatcher object
+#     `hl.dispatch` wants. Probed by handing `error("TYPEIS:" .. type(...))` to
+#     `hyprctl dispatch`, because `hyprctl eval` NEVER REPORTS A VALUE (hazard
+#     3 in test-hyprctl-syntax.sh) and an error is the only channel that does.
+#   * The argv below was run live against a deliberately non-existent window
+#     class and returned `ok` with the client count unchanged -- proving the
+#     expression parses and dispatches without closing anything to find out.
+#
+# ⚠️ EXEC'd DIRECTLY, NOT SYNTHESISED AS SUPER+W, for the reason the menu block
+# above gives: a synthesised chord does nothing at all if the user or upstream
+# rebinds SUPER+W, with nothing to read anywhere. Exec'ing couples us to the
+# dispatcher NAME instead, which is narrower and loud -- a wrong name prints a
+# Lua error and exits non-zero.
+#
+# ⚠️ `hyprctl` NEEDS `HYPRLAND_INSTANCE_SIGNATURE`, which this service does NOT
+# inherit -- the running mapper's /proc/PID/environ on the Deck carries
+# XDG_RUNTIME_DIR and no signature at all, and hyprctl does not auto-detect
+# (`HYPRLAND_INSTANCE_SIGNATURE not set! (is hyprland running?)`, exit non-zero).
+# `spawn_detached` passes `session_environ()`, which resolves it at spawn time;
+# that is §5.28's fix and this binding is dead without it.
+CLOSE_WINDOW_ARGV = ["hyprctl", "dispatch", "hl.dsp.window.close()"]
+
+# ⚠️ DELIBERATELY NOT FOLDED INTO `MENU_ACTIONS`. That table is the menus'
+# alone: `run_menu_action`'s failure message names `omarchy-menu` as the thing
+# to install, and `menu_binding_report` speaks about menu buttons. An entry
+# here would inherit a sentence that sends whoever reads the journal after a
+# dead STEAM+Y to the wrong package. `run_close_window` is the handler, and
+# main()'s `run_pending` dispatches to it by name; the suite asserts that
+# wiring against the source, because an action queued and handled by nobody is
+# exactly the P32 "written, tested, never wired" defect.
 
 # ✅ MEASURED ON HARDWARE 2026-08-11: QAM is BTN_BASE (294), on the "Steam Deck"
 # node (/dev/input/event7), with lizard_mode=N.
@@ -781,10 +859,16 @@ class Mapper:
     # back what it found. See `hold_osk_shift`.
     osk_shift_prev: "str | None" = None
 
-    # Whether the X we are holding emitted a real key-down. See translate():
-    # without it, pressing X, then STEAM, then releasing X swallows the release
-    # and leaves Backspace held down forever.
-    chord_key_down: bool = False
+    # Which CHORD_PRESSES buttons we are holding that emitted a real key-down.
+    # See translate(): without this, pressing X, then STEAM, then releasing X
+    # swallows the release and leaves Backspace held down forever.
+    #
+    # 🔴 A SET, NOT A BOOLEAN, SINCE STEAM+Y JOINED THE CHORDS (§5.37). Y is
+    # KEY_SPACE in BUTTON_MAP, so the identical sequence -- press Y, press
+    # STEAM, release Y -- would hold SPACE down for ever, and one boolean
+    # shared by both buttons would have let X's release clear Y's flag. The
+    # membership is per-code so the two cannot interfere.
+    chord_keys_down: set[int] = field(default_factory=set)
 
     # Whether a BTN_LEFT we emitted from the RIGHT PAD'S CLICK is still down.
     #
@@ -1377,20 +1461,22 @@ class Mapper:
 
     def translate(self, etype: int, code: int, value: int, now: float) -> list[tuple[int, int]]:
         if etype == e.EV_KEY:
-            # 🔴 A HELD X ALWAYS GETS ITS RELEASE, whatever changed underneath.
+            # 🔴 A HELD CHORD BUTTON ALWAYS GETS ITS RELEASE, whatever changed
+            # underneath.
             #
-            # X's press can be followed by STEAM being grabbed for a chord, or
-            # by the keyboard opening -- and both of those branches below
-            # swallow the release that belongs to a key which is PHYSICALLY
-            # DOWN. Since 2026-08-12 that key is BACKSPACE (see BUTTON_MAP), so
-            # a lost release holds it down and empties whatever field has focus.
+            # X's or Y's press can be followed by STEAM being grabbed for a
+            # chord, or by the keyboard opening -- and both of those branches
+            # below swallow the release that belongs to a key which is
+            # PHYSICALLY DOWN. Since 2026-08-12 X's key is BACKSPACE (see
+            # BUTTON_MAP), so a lost release holds it down and empties whatever
+            # field has focus; Y's is SPACE, which types for ever instead.
             # Blanket swallowing was survivable while X was Tab; it is not now.
             #
             # Checked before everything, because the point is that it does not
             # care what state was entered in between.
-            if code == OSK_CHORD_PRESS and value == 0 and self.chord_key_down:
-                self.chord_key_down = False
-                return [(BUTTON_MAP[OSK_CHORD_PRESS], 0)]
+            if code in CHORD_PRESSES and value == 0 and code in self.chord_keys_down:
+                self.chord_keys_down.discard(code)
+                return [(BUTTON_MAP[code], 0)]
             # 🔴 AND SO DOES A HELD MOUSE BUTTON, for the same reason and with a
             # worse failure. The right pad's click is BTN_LEFT while the keyboard
             # is DOWN (POINTER_CLICK_BUTTON), and the keyboard can go UP between
@@ -1435,9 +1521,20 @@ class Mapper:
             # resting on a trackpad is not a chord partner.
             if self.mode_held and value == 1:
                 self.mode_chorded = True
-            if code == OSK_CHORD_PRESS and self.mode_held:
+            # STEAM+X toggles the keyboard, STEAM+Y closes the focused window.
+            #
+            # ⚠️ ONE BRANCH FOR BOTH, off CHORD_PRESSES, so a partner cannot be
+            # given a chord meaning without also being given the release
+            # pairing above -- the two read the same table.
+            #
+            # ⚠️ REACHED WHILE THE KEYBOARD IS UP TOO, deliberately: this sits
+            # above the `osk_active` branch exactly as the OSK chord always
+            # has. STEAM+Y therefore closes the window UNDER the keyboard
+            # rather than typing a space, which is the same trade STEAM+X makes
+            # (it dismisses the keyboard instead of typing Backspace).
+            if code in CHORD_PRESSES and self.mode_held:
                 if value == 1:
-                    self.pending_actions.append("toggle-osk")
+                    self.pending_actions.append(CHORD_PRESSES[code])
                 return []
             # QAM opens Omarchy's own menu. INERT while QAM_BUTTON is unset,
             # which is its shipped state -- see the constant. No chord to
@@ -1505,11 +1602,14 @@ class Mapper:
             if key is None:
                 return []
             if value in (0, 1):
-                if code == OSK_CHORD_PRESS:
+                if code in CHORD_PRESSES:
                     # Remember that this one really went down, so a release
                     # arriving after STEAM was grabbed still reaches the
                     # consumer. See the chord branch above.
-                    self.chord_key_down = bool(value)
+                    if value:
+                        self.chord_keys_down.add(code)
+                    else:
+                        self.chord_keys_down.discard(code)
                 return [(key, value)]
             return []  # ignore the pad's own autorepeat; we schedule our own
         if etype == e.EV_ABS:
@@ -2229,6 +2329,32 @@ def run_menu_action(action: str, dry_run: bool = False) -> bool:
     return True
 
 
+def run_close_window(dry_run: bool = False) -> bool:
+    """STEAM+Y: close the focused window. True if the helper was started.
+
+    ⚠️ SEPARATE FROM `run_menu_action` ON PURPOSE, and it is the FAILURE
+    MESSAGE that earns the duplication. That function's message names
+    `omarchy-menu` as the thing to install; printing it for a missing `hyprctl`
+    would send whoever reads the journal after a dead button to the wrong
+    package entirely. Same shape, same `spawn_detached`, accurate sentence.
+
+    ⚠️ FIRE AND FORGET, LIKE THE MENUS. `spawn_detached` does not wait, so a
+    Lua error from `hyprctl` lands in its own stderr rather than here -- what
+    this can promise is that the process STARTED. See CLOSE_WINDOW_ARGV for the
+    live check that the expression itself dispatches.
+    """
+    printable = " ".join(CLOSE_WINDOW_ARGV)
+    if dry_run:
+        print(f"close-window -> {printable}", file=sys.stderr, flush=True)
+        return True
+    if not spawn_detached(CLOSE_WINDOW_ARGV, f"run `{printable}`"):
+        print("deck-input-mapper: STEAM+Y does nothing until `hyprctl` is "
+              "installed and on PATH; the rest of the mapper is unaffected",
+              file=sys.stderr, flush=True)
+        return False
+    return True
+
+
 # --- focus-triggered auto-show (T8 step 8) -----------------------------------
 
 
@@ -2504,6 +2630,10 @@ def menu_binding_report(lizard: str | None) -> list[str]:
     lines = [
         f"STEAM (tap, no chord) -> `{' '.join(MENU_ACTIONS['menu-apps'])}`; "
         "STEAM+X still toggles the on-screen keyboard",
+        # STEAM+Y is here rather than in a report of its own because it fails
+        # for the SAME first reason: no STEAM button, no chord. The `hyprctl`
+        # caveat is its own and is named where it bites (CLOSE_WINDOW_ARGV).
+        f"STEAM+Y (close the focused window) -> `{' '.join(CLOSE_WINDOW_ARGV)}`",
     ]
     if QAM_BUTTON is None:
         lines.append(
@@ -2520,13 +2650,13 @@ def menu_binding_report(lizard: str | None) -> list[str]:
         lines.append(
             f"could not read {LIZARD_MODE_PATH}, so this cannot tell you whether "
             "lizard mode is on -- and with it on, STEAM and QAM reach no evdev "
-            "node and NEITHER binding above can fire")
+            "node and NONE of the bindings above can fire")
     elif lizard.strip().upper() == "N":
         lines.append(f"lizard_mode is {lizard}: STEAM and QAM reach this process")
     else:
         lines.append(
             f"lizard_mode is {lizard}, so the firmware SWALLOWS STEAM and QAM "
-            "entirely -- they reach no evdev node and NEITHER binding above can "
+            "entirely -- they reach no evdev node and NONE of the bindings above can "
             f"fire. `echo N | sudo tee {LIZARD_MODE_PATH}` re-enables them, and "
             "does not survive a reboot (docs/PROGRESS.md §5.21)")
     return [f"deck-input-mapper: {line}" for line in lines]
@@ -3166,20 +3296,27 @@ def main() -> None:
 
         Measured every draw and for the same reason: `stty cols` resizes a VT
         exactly as `stty rows` does (R-49), and the two consoles this ships to
-        are 160 and 80 columns wide (`docs/PROGRESS.md` §7). Since §9g the
-        keyboard is exactly 80 columns, so on the narrower of the two there is
-        no slack whatsoever -- and an unread width is not a cosmetic risk but a
-        wrapped row, which pushes every row below it down and corrupts the whole
-        drawing. An unreadable console falls back rather than raising; see
-        `console_geometry`.
+        are 160 and 80 columns wide (`docs/PROGRESS.md` §7). An unread width is
+        not a cosmetic risk but a wrapped row, which pushes every row below it
+        down and corrupts the whole drawing. An unreadable console falls back
+        rather than raising; see `console_geometry`.
+
+        🔴 SINCE P33/B THIS VALUE IS AN INPUT TO THE RENDER, NOT ONLY A CHECK ON
+        IT. The keyboard is no longer "exactly 80 columns" -- `osk_tty.render`
+        derives its cell width from the number passed here, so this must be read
+        BEFORE the render and handed to it. It was read after, and passed to
+        nothing, until 2026-08-15: the adaptive grid was written, unit-tested and
+        completely inert, because the one call site still rendered at the
+        default. That is the P32 shape (`docs/PROGRESS.md` §5.32) and it very
+        nearly shipped again inside the fix for it.
         """
         return console_geometry(osk_stream.fileno())[1]
 
     def _osk_draw() -> None:
         nonlocal osk_narrow_at
-        rows = osk_tty.render(mapper.osk, mapper.cursors)
         height = _console_rows()
         cols = _console_cols()
+        rows = osk_tty.render(mapper.osk, mapper.cursors, cols)
         needed = osk_tty.width(rows)
         top = args.osk_top_row
         if top <= 0:
@@ -3207,7 +3344,10 @@ def main() -> None:
                          console_cols=cols)
 
     def _osk_erase() -> None:
-        rows = osk_tty.render(mapper.osk, mapper.cursors)
+        # Same width as _osk_draw, though only len(rows) is used below: an erase
+        # computed at a different cell width than the draw it undoes is a trap
+        # waiting for the day this starts reading the row TEXT.
+        rows = osk_tty.render(mapper.osk, mapper.cursors, _console_cols())
         top = args.osk_top_row
         if top <= 0:
             top = max(1, _console_rows() - len(rows) + 1)
@@ -3557,6 +3697,12 @@ def main() -> None:
                 # --dry-run reports instead of spawning, exactly as the emitters
                 # above print instead of injecting.
                 run_menu_action(action, dry_run=ui is None)
+                continue
+            if action == "close-window":
+                if args.verbose and ui is not None:
+                    print(f"close-window -> {' '.join(CLOSE_WINDOW_ARGV)}",
+                          file=sys.stderr, flush=True)
+                run_close_window(dry_run=ui is None)
                 continue
             # An action queued by translate() and handled by nobody is a bug
             # that would otherwise present as a dead button.

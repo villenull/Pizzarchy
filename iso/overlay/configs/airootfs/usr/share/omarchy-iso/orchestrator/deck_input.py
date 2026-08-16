@@ -1,16 +1,17 @@
-"""§5.25 decision #1's `above_lock = 2` layer rule, and §5.24a requirement #1's
-two DPMS `misc` lines -- T5 §5.6, `docs/PROGRESS.md` §5.25, and
+"""§5.25 decision #1's `above_lock = 2` layer rule, §5.24a requirement #1's
+two DPMS `misc` lines, and §5.37 D5's touchscreen transform -- T5 §5.6,
+`docs/PROGRESS.md` §5.25/§5.37, and
 `docs/findings/T9-lock-wake-and-blank-timing.md` §5.1.
 
 SHIPPED AS ``/usr/share/omarchy-iso/orchestrator/deck_input.py``. One
 ``configure_deck`` step -- ``lock_wake_dpms`` -- registered in
 ``deck_configure.deck_steps``.
 
-WHAT THIS CLOSES, AND WHY THE TWO FIXES SHARE ONE STAGE
-=========================================================
+WHAT THIS CLOSES, AND WHY THE THREE FIXES SHARE ONE STAGE
+===========================================================
 
-Both land in the same per-user file, ``~/.config/hypr/input.lua``, so they are
-one stage rather than two:
+All three land in the same per-user file, ``~/.config/hypr/input.lua``, so they
+are one stage rather than three:
 
 1. **§5.25 decision #1** -- ``hl.layer_rule({ match = { namespace = "deck-osk" },
    above_lock = 2 })``. Draws the on-screen keyboard above a lock surface and
@@ -33,6 +34,90 @@ one stage rather than two:
    recommendation: "whoever implements §5.25 decision #1's ``above_lock``/mask
    stage should fold these two ``misc`` lines into the same ``input.lua``
    mirror" -- this module is that whoever.
+3. **§5.37 D5** -- ``hl.config({ input = { touchdevice = { output = "eDP-1",
+   transform = 3 } } })``. Touch did nothing useful in Desktop Mode: every tap
+   landed a quarter-turn away from the finger. See the next section; the cause
+   is NOT a missing driver and NOT (only) a missing output binding.
+
+§5.37 D5 -- WHY THE TOUCHSCREEN IS ROTATED, MEASURED RATHER THAN ASSUMED
+==========================================================================
+
+⚠️ **This corrects §5.37 D5's own stated cause.** D5 says "nothing binds the
+touch device to the output, so its coordinates are never rotated with the
+panel". The binding half is real but it is **not** what rotates anything.
+Hyprland 0.56.2 (the version on the Deck, read off it 2026-08-15) maps a touch
+point to the layout with, verbatim from ``src/managers/input/Touch.cpp``::
+
+    const auto TOUCH_COORDS = PMONITOR->m_position + (e.pos * PMONITOR->m_size);
+
+``m_size`` is the monitor's LOGICAL size -- 1024x640 here, already transformed
+and scaled -- and the monitor's transform appears nowhere in that expression.
+Binding a touch device to an output therefore chooses WHICH rectangle the
+normalized coordinates are stretched over; it never rotates them. The rotation
+is a separate option, applied by libinput as a calibration matrix
+(``src/managers/input/InputManager.cpp``, ``setTouchDeviceConfigs``)::
+
+    const int ROTATION = std::clamp(Config::mgr()->getDeviceInt(
+        PTOUCHDEV->m_hlName, "transform", "input:touchdevice:transform"), -1, 7);
+    if (ROTATION > -1)
+        libinput_device_config_calibration_set_matrix(LIBINPUTDEV, MATRICES[ROTATION]);
+
+So ``transform`` is the fix and ``output`` is the belt-and-braces half. Both
+are set here, and both were measured on the Deck rather than reasoned about:
+
+* The digitizer's own frame is **portrait, unrotated**. Read straight off
+  ``/dev/input/event15`` (``FTS3528:00 2808:1015``) with ``EVIOCGABS``
+  2026-08-15: ``ABS_X 0..800``, ``ABS_Y 0..1280`` -- exactly the panel's native
+  800x1280 scan frame, while ``eDP-1`` is presented at ``transform = 3`` as a
+  1280x800 landscape desktop. That mismatch IS the defect.
+* ``transform = 3`` is derived, not guessed, from two independently measured
+  facts that agree: the panel's own Hyprland transform is 3
+  (``deck_monitors.PANEL_TRANSFORM``, itself measured by looking at the screen
+  in session 15), and the kernel command line on the installed Deck carries
+  ``fbcon=rotate:1`` -- 90 degrees CLOCKWISE, per ``Documentation/fb/fbcon.rst``
+  -- to make the console upright in the same native frame. Content is therefore
+  rotated 90 CW into panel-native space, so panel-native touch must be rotated
+  90 CCW to land back on the content, which is libinput's 270-CW calibration
+  matrix, which is ``MATRICES[3]``: ``x' = y``, ``y' = 1 - x``.
+  ⚠️ **The arithmetic is verified; the FINGER is not.** No tap has been landed
+  through this config. If it is wrong it is wrong by a quarter turn, and the
+  only other plausible value is ``1``. Try it live before editing anything::
+
+      hyprctl eval 'hl.config({ input = { touchdevice = { output = "eDP-1", transform = 1 } } })'
+
+  ⚠️ **Not ``hyprctl keyword``.** Omarchy 4.0 configures Hyprland in Lua and
+  ``keyword`` refuses outright -- "keyword can't work with non-legacy parsers.
+  Use eval." -- measured on the Deck 2026-08-15, after writing the wrong recipe
+  into this file's own comment block first. ``hyprctl reload config-only``
+  reverts. Note also that ``hyprctl eval`` reads a leading ``--`` as a FLAG, so
+  pasting this module's whole rendered block into it needs one leading space.
+* ``output = "eDP-1"`` is set explicitly because the shipped default
+  ``[[Auto]]`` does not autodetect: in 0.56.2 that branch's body is commented
+  out behind a ``// FIXME:`` in ``setTouchDeviceConfigs``, so ``[[Auto]]``
+  leaves the device UNBOUND and ``Touch.cpp`` falls back to an empty-name
+  monitor query. With one display that lands on the panel anyway; with a dock
+  attached it is whatever the query happens to return. ``eDP-1`` is the same
+  output name ``deck_monitors.PANEL_OUTPUT`` bets the entire desktop on.
+
+⚠️ **OLED ONLY. This makes no claim about the LCD Deck**, whose touchscreen is
+different hardware (``CLAUDE.md``: "OLED is the only verified hardware... Don't
+claim LCD support anywhere"). It is written so that no claim is needed: these
+are Hyprland's GLOBAL ``input:touchdevice:*`` options, which name **no device**
+and match whatever touchscreen the machine has. Nothing here says "the LCD
+works"; it says "whatever the built-in digitizer is, it shares the panel's
+transform", which is a statement about this config file, not about hardware
+this project has never had in its hands. A per-device
+``hl.device({ name = "fts3528:00-2808:1015", ... })`` rule was the alternative
+and was rejected for exactly this reason: it would have baked the OLED's
+controller ID in and left an LCD Deck with a broken touchscreen and no note
+anywhere saying why.
+
+The one cost of the global form, stated rather than discovered later: an
+EXTERNAL USB touchscreen would also be bound to ``eDP-1`` and rotated. On a
+Deck that is a rare configuration, and the user's own uncommented overrides in
+this same file cannot beat it (our block is always spliced last -- see
+``splice``), so it is an override they would have to make by editing our block.
+Judged worth it against a built-in touchscreen that does not work at all.
 
 WHY T9 §5.1'S "FULL PROPOSED CONTENT" IS NOT PASTED IN VERBATIM
 ==================================================================
@@ -70,10 +155,23 @@ Two things confirm the splice is not merely a stylistic swap:
   divergent answer to a question that function already owns, in the one file
   they both have to share.
 
-So this module's spliced block contains exactly the two NEW additions -- the
-`misc` DPMS lines and the `above_lock` layer rule -- as two ordinary top-level
-Lua statements, plus the parse sentinel. Nothing here reads `/etc/vconsole.conf`
-or touches `kb_layout`.
+So this module's spliced block contains exactly the NEW additions -- the `misc`
+DPMS lines, the `above_lock` layer rule, and the `input.touchdevice` pair -- as
+three ordinary top-level Lua statements, plus the parse sentinel. Nothing here
+reads `/etc/vconsole.conf` or touches `kb_layout`.
+
+⚠️ **A nested `hl.config({ input = { touchdevice = {...} } })` after upstream's
+own `hl.config({ input = {...} })` is a MERGE, not a replacement -- and that was
+measured, not assumed**, because it is the one way this block could have been
+catastrophic (silently dropping `kb_layout`, `kb_options`, `repeat_rate` and the
+whole `touchpad` table on a device with no keyboard). Applied live on the Deck
+2026-08-15 via `hyprctl eval` and read back with `hyprctl getoption`:
+`input:kb_layout`, `input:kb_options`, `input:repeat_rate`,
+`input:touchpad:natural_scroll` and `input:touchpad:scroll_factor` were all
+byte-identical afterwards, while `input:touchdevice:output` went
+`[[Auto]] set: false` -> `eDP-1 set: true` and `input:touchdevice:transform`
+went `0 set: false` -> `3 set: true`. The probe state was reverted with
+`hyprctl reload config-only`.
 
 ⚠️ **A second `hl.config({ misc = {...} })` call after the seed/existing file's
 own `hl.config({ input = {...} })` call is a JUDGMENT CALL, stated rather than
@@ -200,6 +298,24 @@ DECK_OSK_LAYER_NAMESPACE = "deck-osk"
 # took rather than assuming it, per T5-fork-plan.md 5.6's own warning.
 ABOVE_LOCK = 2
 
+# docs/PROGRESS.md 5.37 D5. The Deck's internal panel, by Hyprland's own output
+# name. Duplicated from deck_monitors.PANEL_OUTPUT rather than imported -- this
+# repo has no cross-`deck_*` import anywhere (see the docstring's
+# "self-contained module" note) -- and `test/unit/test-deck-input.py` asserts
+# the two agree, so a drift is a failing test rather than a touchscreen that
+# points at a monitor the desktop is not on.
+PANEL_OUTPUT = "eDP-1"
+
+# 🔴 The libinput calibration matrix index, NOT a copy of the monitor transform
+# that happens to look the same. It is 3 for the reason the docstring's D5
+# section derives from two measurements (the digitizer's 800x1280 portrait
+# ABS ranges and `fbcon=rotate:1`); that it EQUALS deck_monitors.PANEL_TRANSFORM
+# is a consequence, not the argument, and the suite asserts the equality so the
+# coincidence is at least visible. Hyprland clamps this to -1..7 and treats -1
+# as "leave libinput alone".
+TOUCH_TRANSFORM = 3
+VALID_TOUCH_TRANSFORMS = (0, 1, 2, 3, 4, 5, 6, 7)
+
 # ---------------------------------------------------------------------------
 # Where the file lives
 # ---------------------------------------------------------------------------
@@ -224,6 +340,17 @@ HYPR_DIR_REL = str(Path(INPUT_LUA_REL).parent)
 # "-- >>> deck-session.sh: on-screen keyboard XKB layout >>>" pair (same file,
 # different writer) and from deck_monitors.py's monitors.lua pair (different
 # file). A shared marker is how one writer's re-run eats another's block.
+#
+# ⚠️ THESE TWO STRINGS ARE FROZEN. They no longer describe everything the block
+# contains -- the touchscreen transform (docs/PROGRESS.md 5.37 D5) was added to
+# it later and the names were deliberately NOT updated to match. A marker is an
+# identity, not a description: `splice` finds the previous block by exact text,
+# so renaming these would make the module fail to see a block it had already
+# written, leave the old one in place, and append a second copy of every
+# statement. The next re-run's `verify` would then refuse with "carries 2 active
+# misc DPMS blocks" -- loud, but a self-inflicted outage on a Deck that was
+# already correct. The block's own header comment carries the current
+# description; that is the thing to keep in step, not these.
 BEGIN = "-- >>> omarchy-deck: lock wake suppression and above_lock >>>"
 END = "-- <<< omarchy-deck: lock wake suppression and above_lock <<<"
 
@@ -383,6 +510,21 @@ _ABOVE_LOCK_RE = re.compile(
 )
 
 
+_TOUCHDEVICE_RE = re.compile(
+    r"hl\s*\.\s*config\s*\(\s*\{\s*input\s*=\s*\{\s*touchdevice\s*=\s*\{\s*"
+    r'output\s*=\s*"([^"]*)"\s*,\s*'
+    r"transform\s*=\s*(-?\d+)\s*,?\s*"
+    r"\}\s*,?\s*\}\s*,?\s*\}\s*\)"
+)
+
+
+def touchdevice_calls(text: str) -> list[tuple[str, str]]:
+    """Every active `hl.config({ input = { touchdevice = { output = ...,
+    transform = ... } } })` call in our exact shape, as `(output, transform)`
+    tuples, in source order. docs/PROGRESS.md 5.37 D5."""
+    return _TOUCHDEVICE_RE.findall(strip_lua_comments(text))
+
+
 def misc_dpms_calls(text: str) -> list[tuple[str, str]]:
     """Every active (comment-stripped) `key_press_enables_dpms`/
     `mouse_move_enables_dpms` pair written in our exact call shape, as
@@ -404,16 +546,22 @@ def above_lock_calls(text: str) -> list[tuple[str, str]]:
 def render_block() -> list[str]:
     """The marker-delimited block, as lines.
 
-    Two ordinary top-level statements plus the sentinel -- deliberately NOT a
+    Three ordinary top-level statements plus the sentinel -- deliberately NOT a
     whole-file mirror. See the module docstring for why T9 §5.1's fuller
     proposal does not belong here verbatim.
     """
     return [
         BEGIN,
         "-- Installed by configure_deck (omarchy-deck ISO). docs/PROGRESS.md",
-        "-- 5.25 decision #1, docs/findings/T9-lock-wake-and-blank-timing.md 5.1.",
+        "-- 5.25 decision #1, 5.37 D5, and",
+        "-- docs/findings/T9-lock-wake-and-blank-timing.md 5.1.",
         "--",
-        "-- TWO FIXES, ONE FILE, because input.lua REPLACES upstream's shipped",
+        "-- (The markers above still say 'lock wake suppression and above_lock'.",
+        "-- They are an IDENTITY, not a description: renaming them would make",
+        "-- the installer fail to find this block on a re-run and append a",
+        "-- second copy of everything below. Read this header, not them.)",
+        "--",
+        "-- THREE FIXES, ONE FILE, because input.lua REPLACES upstream's shipped",
         "-- default WHOLESALE (Hyprland does not merge a user override with the",
         "-- shipped one) -- see monitors.lua's own module for the identical trap",
         "-- in the neighbouring file. This block owns exactly these two",
@@ -445,6 +593,57 @@ def render_block() -> list[str]:
         "-- (T9-lock-service-mitigation.md T0.4).",
         f'hl.layer_rule({{ match = {{ namespace = "{DECK_OSK_LAYER_NAMESPACE}" }}, '
         f"above_lock = {ABOVE_LOCK} }})",
+        "",
+        "-- FIX 3 -- docs/PROGRESS.md 5.37 D5. Touch did nothing useful in",
+        "-- Desktop Mode: every tap landed a quarter turn from the finger.",
+        "--",
+        "-- transform is the fix; output is the belt and braces. Hyprland maps a",
+        "-- touch point with TOUCH_COORDS = monitor position + (pos * monitor",
+        "-- LOGICAL size) and never consults the monitor's transform, so binding",
+        "-- a touch device to an output chooses WHICH rectangle the normalized",
+        "-- coordinates stretch over -- it does not rotate them. The rotation is",
+        "-- this transform, which libinput applies as a calibration matrix.",
+        "--",
+        "-- MEASURED on this Deck 2026-08-15, not inferred: the digitizer",
+        "-- (FTS3528:00 2808:1015) reports ABS_X 0..800 and ABS_Y 0..1280 -- the",
+        "-- panel's NATIVE PORTRAIT frame, unrotated -- while eDP-1 is presented",
+        "-- at transform 3 as a 1280x800 landscape desktop. The console needs",
+        "-- fbcon=rotate:1 (90 CW) in the same frame, so content is rotated 90 CW",
+        "-- into panel space and touch must come back 90 CCW: libinput's 270",
+        "-- matrix, Hyprland's transform 3.",
+        "--",
+        "-- ⚠️ The arithmetic is verified; no FINGER has been landed through it. If",
+        "-- taps are off, they are off by a quarter turn and the only other",
+        "-- plausible value is 1. Try it live before editing anything:",
+        "--",
+        "--   hyprctl eval 'hl.config({ input = { touchdevice = {"
+        ' output = "eDP-1", transform = 1 } } })\'',
+        "--",
+        "-- NOT 'hyprctl keyword'. Omarchy 4.0 configures Hyprland in Lua, and",
+        "-- keyword answers a non-legacy parser with \"keyword can't work with",
+        '-- non-legacy parsers. Use eval." -- measured on the Deck 2026-08-15.',
+        "-- 'hyprctl reload config-only' puts it back.",
+        "--",
+        "-- ⚠️ OLED ONLY -- and written so no claim about the LCD Deck is needed.",
+        "-- These are Hyprland's GLOBAL input:touchdevice options: they name no",
+        "-- device and match whatever touchscreen the machine has. A per-device",
+        "-- hl.device({ name = \"fts3528:00-2808:1015\", ... }) rule would have",
+        "-- baked the OLED's controller ID in and left other hardware broken with",
+        "-- nothing written down anywhere. Nothing here asserts the LCD works.",
+        "--",
+        "-- output is set explicitly because the shipped [[Auto]] does NOT",
+        "-- autodetect in Hyprland 0.56.2 -- that branch's body is commented out",
+        "-- behind a // FIXME -- so [[Auto]] leaves the device unbound and the",
+        "-- monitor is whatever an empty-name query returns. eDP-1 is the same",
+        "-- output name monitors.lua bets the whole desktop on.",
+        "hl.config({",
+        "  input = {",
+        "    touchdevice = {",
+        f'      output = "{PANEL_OUTPUT}",',
+        f"      transform = {TOUCH_TRANSFORM},",
+        "    },",
+        "  },",
+        "})",
         "",
         "-- Deliberately the LAST statement in this file. Hyprland answers a Lua",
         "-- syntax error ANYWHERE above by discarding the WHOLE file, without",
@@ -783,6 +982,36 @@ def verify(path: Path, label: str) -> dict:
             "re-verifying against a live compositor"
         )
 
+    touch = touchdevice_calls(raw)
+    if not touch:
+        raise DeckInputError(
+            f"{label} carries no ACTIVE input.touchdevice output/transform pair in our call shape. "
+            "Without the transform the digitizer keeps reporting in the panel's native PORTRAIT "
+            "frame while the desktop is landscape, and every tap lands a quarter turn from the "
+            "finger (docs/PROGRESS.md 5.37 D5)"
+        )
+    if len(touch) > 1:
+        raise DeckInputError(
+            f"{label} carries {len(touch)} active input.touchdevice blocks in our shape. Which one "
+            "Hyprland applies last is not something this project has measured for this exact shape, "
+            "so it is asserted against rather than reasoned about"
+        )
+    touch_output, touch_transform = touch[0]
+    if touch_output != PANEL_OUTPUT:
+        raise DeckInputError(
+            f"{label} reads back input.touchdevice.output={touch_output!r}, expected "
+            f"{PANEL_OUTPUT!r}. That is the Deck's internal panel, the same output monitors.lua "
+            "binds the desktop's rotation and scale to; a touch device bound anywhere else is "
+            "stretched across the wrong rectangle"
+        )
+    if touch_transform != str(TOUCH_TRANSFORM):
+        raise DeckInputError(
+            f"{label} reads back input.touchdevice.transform={touch_transform!r}, expected "
+            f"{TOUCH_TRANSFORM}. {TOUCH_TRANSFORM} is what the digitizer's measured 800x1280 "
+            "portrait ABS ranges and the panel's transform require -- do not change it without "
+            "landing a real tap on a real panel first"
+        )
+
     block_text = our_block_text(raw)
     if block_text is None:
         raise DeckInputError(f"{label} does not carry our marker block ('{BEGIN}' .. '{END}') at all")
@@ -801,6 +1030,8 @@ def verify(path: Path, label: str) -> dict:
         "mouse_move_enables_dpms": mouse_move,
         "above_lock": above_lock,
         "namespace": DECK_OSK_LAYER_NAMESPACE,
+        "touch_output": touch_output,
+        "touch_transform": touch_transform,
     }
 
 
@@ -906,9 +1137,33 @@ def verify_live(target, uid: int, runtime_dir_rel: str | None = None, runner=Non
                 "blanked panel while the Deck is locked"
             )
 
+    # docs/PROGRESS.md 5.37 D5. The exact strings `hyprctl getoption` printed on
+    # the Deck 2026-08-15 for these two once the block was applied: "str: eDP-1"
+    # / "set: true" and "int: 3" / "set: true". A default-valued option prints
+    # "str: [[Auto]]" / "int: 0" with "set: false", so the value alone is enough
+    # to tell "we set it" from "nobody did".
+    for option, want in (
+        ("input:touchdevice:output", f"str: {PANEL_OUTPUT}"),
+        ("input:touchdevice:transform", f"int: {TOUCH_TRANSFORM}"),
+    ):
+        code, out = _hyprctl(target, sig, runtime_dir_rel, ["getoption", option], runner)
+        if code != 0:
+            raise DeckInputError(
+                f"could not read 'hyprctl getoption {option}' from instance {sig}: "
+                f"{sanitize_text(out.strip(), limit=300)}"
+            )
+        if want not in out:
+            raise DeckInputError(
+                f"{option} does not read '{want}' in the live compositor "
+                f"({sanitize_text(out.strip(), limit=300)}). The digitizer reports in the panel's "
+                "native PORTRAIT frame, so without this the desktop's touchscreen is a quarter "
+                "turn out and taps land somewhere the finger is not"
+            )
+
     info(
-        f"Deck lock-wake/above_lock: verified live against instance {sig} -- {SENTINEL} is set "
-        "and both misc:*_enables_dpms options read 0"
+        f"Deck lock-wake/above_lock: verified live against instance {sig} -- {SENTINEL} is set, "
+        f"both misc:*_enables_dpms options read 0, and input:touchdevice is bound to "
+        f"{PANEL_OUTPUT} at transform {TOUCH_TRANSFORM}"
     )
     return {"status": "verified", "instance": sig}
 
@@ -926,6 +1181,8 @@ def configure_lock_wake_dpms(ctx, runner=None) -> dict:
         "status": None,
         "namespace": DECK_OSK_LAYER_NAMESPACE,
         "above_lock": ABOVE_LOCK,
+        "touch_output": PANEL_OUTPUT,
+        "touch_transform": TOUCH_TRANSFORM,
         "sentinel": SENTINEL,
         "skel": None,
         "user": None,
@@ -966,7 +1223,8 @@ def configure_lock_wake_dpms(ctx, runner=None) -> dict:
             record["syntax_checked"] = facts["syntax_checked"]
             info(
                 f"Deck lock-wake/above_lock: above_lock={ABOVE_LOCK} for '{DECK_OSK_LAYER_NAMESPACE}', "
-                f"DPMS-on-any-input disabled, in /{INPUT_LUA_SKEL_REL} only (deferred provisioning "
+                f"DPMS-on-any-input disabled, touchdevice bound to {PANEL_OUTPUT} at transform "
+                f"{TOUCH_TRANSFORM}, in /{INPUT_LUA_SKEL_REL} only (deferred provisioning "
                 "creates the account at first boot)"
             )
             for warning in warnings:
@@ -992,8 +1250,9 @@ def configure_lock_wake_dpms(ctx, runner=None) -> dict:
     record["status"] = "configured"
     info(
         f"Deck lock-wake/above_lock: above_lock={ABOVE_LOCK} for '{DECK_OSK_LAYER_NAMESPACE}', "
-        f"key_press_enables_dpms=false, mouse_move_enables_dpms=false, in {record['user_path']} "
-        f"(and /etc/skel), {SENTINEL} last"
+        f"key_press_enables_dpms=false, mouse_move_enables_dpms=false, touchdevice bound to "
+        f"{PANEL_OUTPUT} at transform {TOUCH_TRANSFORM} (UNVERIFIED against a real finger), in "
+        f"{record['user_path']} (and /etc/skel), {SENTINEL} last"
     )
     for warning in warnings:
         error(f"Deck lock-wake/above_lock: {warning}")

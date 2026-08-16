@@ -581,13 +581,21 @@ snap3() { fold -w "$(stty size </dev/tty3 2>/dev/null | cut -d' ' -f2 || echo 80
 # It is the SHIPPED function, imported from the installed module -- not a
 # reimplementation in bash that could drift from the one the unit suite
 # mutation-tests.
+# 🔴 THE REFERENCE MUST BE RENDERED AT THE CONSOLE'S OWN WIDTH (P33/B).
+# Since the grid became adaptive, `render()` derives its cell width from the
+# column count it is given -- so a reference rendered at the default no longer
+# matches a screen drawn at tty3's width, `rows_on_screen` returns 0, and this
+# suite goes red while blaming the mapper. The width below is derived exactly as
+# `snap3` derives the width it FOLDS the capture to; the two must not drift.
 osk_rows() {
-  python3 - "$1" <<'PY'
+  local cols
+  cols=$(stty size </dev/tty3 2>/dev/null | cut -d' ' -f2 || echo 80)
+  python3 - "$1" "${cols:-80}" <<'PY'
 import sys
 sys.path.insert(0, "/usr/local/lib/deck-osk")
 import deck_osk_layout as osk
 import deck_osk_tty as tty
-rows = tty.render(osk.OnScreenKeyboard(), osk.Cursors())
+rows = tty.render(osk.OnScreenKeyboard(), osk.Cursors(), int(sys.argv[2]))
 with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
     print(len(tty.rows_on_screen(fh.read(), rows)))
 PY

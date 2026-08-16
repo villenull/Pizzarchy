@@ -212,6 +212,21 @@ echo "# 2. no chroot branch is quiet, and none is unaccounted for"
 # also contain. A new one that appears without being added here fails this
 # section -- which is the point: the failure being guarded against is the next
 # branch somebody adds without a deferral.
+#
+# THE THIRD CATEGORY, added 2026-08-15 with the PROGRESS.md 5.38 work.
+# `defer` and `refusal` between them cover "a check could not run" and "this
+# machine is the wrong one". They do not cover a branch that does the SAME work
+# BY A DIFFERENT ROUTE because the chroot has no manager to ask -- writing an
+# enablement symlink instead of calling `systemctl enable`, say. Classifying
+# that as `refusal` because its body happens to contain the word `fail` would
+# be the classifier passing for the wrong reason, which is the exact failure
+# this section exists to catch.
+#
+# So `adapted` is its own category with its own requirement: the branch must
+# READ BACK what it did (a `fail` on the artefact it just wrote). "It took the
+# other route" and "the other route worked" are different claims, and an
+# adapted branch that only makes the first is how a silent skip gets in wearing
+# a different hat.
 declare -A CHROOT_FUNCS=(
   [stage_preconditions]=refusal     # refuses a non-root run; warns on non-Deck DMI
   [run_as_desktop_user]=refusal     # drops privilege with setpriv, or fails loudly
@@ -221,6 +236,20 @@ declare -A CHROOT_FUNCS=(
   [stage_lizard_mode]=defer
   [stage_input_mapper]=defer
   [stage_osk_kb_layout]=defer
+  # PROGRESS.md 5.38 D10 -- the backlight cannot be discovered in the
+  # installer's kernel, so the discovery is not attempted and the write path is
+  # handed to a unit that runs on the target's own kernel.
+  [stage_priv_write_helper]=defer
+  # 5.38 D9 -- the power button, now baked. Three branches, three jobs.
+  [power_model_reject]=refusal      # wrong model: warn and skip rather than fail a bake
+  [verify_power_button_ordering]=defer   # /run is the INSTALLER's, so it is not scanned
+  [verify_power_button_premise]=defer    # udev's database is the installer's kernel's
+  [stage_power_button]=adapted           # installs the deferred check's runner
+  # 5.35 -- Steam's first run. Whether the splash DRAWS needs a compositor.
+  [stage_steam_first_run]=defer
+  # The runner itself: no manager to `systemctl enable` with, so the symlink is
+  # written directly and then read back.
+  [install_first_boot_verify]=adapted
 )
 
 mapfile -t all_funcs < <(bash -c 'source "$1"; declare -F | sed "s/^declare -f //"' _ "$SESSION_SH")
@@ -244,6 +273,13 @@ for fn in "${all_funcs[@]}"; do
     refusal)
       [[ $body == *"fail "* || $body == *"warn "* ]] ||
         fail_test "${fn}'s chroot branch refuses or warns rather than proceeding quietly" "$body"
+      ;;
+    adapted)
+      # See the note above CHROOT_FUNCS: taking the other route is not the
+      # same claim as the other route having worked.
+      [[ $body == *"fail "* ]] ||
+        fail_test "${fn}'s chroot branch reads back what it wrote" \
+          "an 'adapted' branch does the work by a different route because the chroot has no manager; without a fail on the artefact it just wrote, 'exited 0' is the only evidence it has -- and that is what an installed-but-not-enabled unit looks like too. Body:"$'\n'"$body"
       ;;
   esac
 done
@@ -547,12 +583,38 @@ pass "the baked list is the install stages minus desktop-settings, plus the XKB 
 
 # The opt-in stages stay opt-in: each of them changes something a human has to
 # have watched work first.
-for opt in stage-default-session stage-boot-default-gaming stage-power-button stage-audit-privileges; do
+#
+# ⚠️ stage-power-button LEFT THIS LIST on 2026-08-15 (PROGRESS.md 5.38 D9). It
+# was here, and being here is what shipped a Deck whose power button does
+# nothing: Omarchy's package-owned 10-ignore-power-button.conf resolves
+# HandlePowerKey=ignore and nothing of ours ever contested it. The assertions
+# below now check the opposite, plus the two properties that made the change
+# safe. Do not "restore" this line without reading that section.
+for opt in stage-default-session stage-boot-default-gaming stage-audit-privileges; do
   printf '%s\n' "${baked[@]}" | grep -qx "$opt" &&
     fail_test "${opt} is not baked by the installer" \
       "it is opt-in on its own argument (see BAKE_STAGES); baking it would arm it on a machine nobody has watched"
 done
-pass "the four opt-in stages are still opt-in -- the installer arms none of them"
+pass "the three remaining opt-in stages are still opt-in -- the installer arms none of them"
+
+# 🔴 THE P32 DEFECT FAMILY, ASSERTED. Written, unit-tested, documented and
+# reached by no code path is this project's most expensive recurring bug (six
+# members and counting). A stage that exists and is not run is worth nothing.
+printf '%s\n' "${baked[@]}" | grep -qx stage-power-button ||
+  fail_test "stage-power-button IS baked" \
+    "it was not, and the result was an installed Deck whose power button does nothing at all -- the key is detected, delivered, and dropped by Omarchy's HandlePowerKey=ignore. PROGRESS.md 5.38 D9."
+pass "stage-power-button is baked, so the T13 work reaches an installed Deck"
+
+printf '%s\n' "${baked[@]}" | grep -qx stage-steam-first-run ||
+  fail_test "stage-steam-first-run IS baked" "the first-run network race and the two silent minutes after it (PROGRESS.md 5.35) are install-time fixes or they are nothing"
+pass "stage-steam-first-run is baked"
+
+# It runs LAST, and after everything that could fail. The one stage that
+# rewires a hardware button should not go first on a machine whose other
+# stages have not yet had their chance to report.
+[[ ${baked[-1]} == stage-power-button ]] ||
+  fail_test "stage-power-button is the last baked stage" "got '${baked[-1]}'; ${baked[*]}"
+pass "and it runs last, after every other stage has had its chance to fail"
 
 # stage-osk-kb-layout is reachable by hand as well, since it is now a stage.
 mapfile -t offered < <(bash "$SESSION_SH" list-stages)
@@ -566,5 +628,192 @@ ds_body=$(bash -c 'source "$1"; declare -f stage_desktop_settings' _ "$SESSION_S
   fail_test "stage-desktop-settings still installs the keyboard rule" \
     "the extraction must not have removed it from the stage a Deck-side run uses"
 pass "stage-desktop-settings still calls it, so a full run on a Deck behaves as it did"
+
+# ===========================================================================
+# 9. THE WRONG KERNEL -- PROGRESS.md 5.38 D10
+# ===========================================================================
+#
+# The real install's stage-priv-write-helper was the one stage that FAILED, and
+# the reason was structural rather than unlucky: arch-chroot bind-mounts /sys
+# from the LIVE ISO, whose stock archiso kernel enumerated the panel as
+# amdgpu_bl1, while the installed Deck's Neptune kernel offers only amdgpu_bl0.
+# The discovery was correct; it was asked of the wrong machine.
+#
+# What must NOT be re-diagnosed (measured and disproved in 0becd4b, and re-
+# measured on hardware 2026-08-15 -- the installed helper accepted
+# /sys/class/backlight/amdgpu_bl0/brightness as user 'deck' and exited 0):
+# the helper's whitelist is a pattern and was never wrong. §7 above still
+# covers it and those assertions are unchanged.
+echo "# 9. the wrong kernel: no hardware discovery inside the chroot"
+
+pw_body=$(bash -c 'source "$1"; declare -f stage_priv_write_helper' _ "$SESSION_SH")
+
+# The structural claim, checked on the source: the chroot arm must be reached
+# BEFORE find_backlight, not after it.
+[[ $pw_body == *"in_chroot"*"BACKLIGHT_CHROOT_SENTINEL"* ]] ||
+  fail_test "stage_priv_write_helper's chroot arm comes before the discovery" \
+    "find_backlight globs /sys, which inside arch-chroot is the INSTALLING machine's. Body:"$'\n'"$pw_body"
+pass "stage_priv_write_helper takes the sentinel in chroot mode instead of globbing the installer's /sys"
+
+# And behaviourally: run the resolution half in chroot mode with a fake /sys
+# that carries a node the TARGET will not have, and prove nothing goes near it.
+mkdir -p "$work/fakesys/amdgpu_bl9"
+echo 1234 >"$work/fakesys/amdgpu_bl9/brightness"
+run_chroot '
+  if [[ -z "" ]] && in_chroot; then
+    backlight=$BACKLIGHT_CHROOT_SENTINEL
+    defer "the backlight node cannot be discovered at install time"
+  fi
+  printf "RESOLVED=%s\n" "$backlight"
+'
+out_has "RESOLVED=${BACKLIGHT_CHROOT_SENTINEL}" ||
+  fail_test "the chroot arm resolves to the sentinel" "$OUT"
+[[ ! -e $BACKLIGHT_CHROOT_SENTINEL ]] ||
+  fail_test "the sentinel is a path that cannot exist" "${BACKLIGHT_CHROOT_SENTINEL} is on this machine"
+pass "the chroot sentinel is whitelist-shaped and cannot exist, so the boundary checks still run and the write does not"
+
+# The deferral has to name where the answer comes from instead. A deferred
+# check whose message does not say who will answer it is a skip with a label.
+# Matched on the LITERAL ${...} text, not on its value: `declare -f` prints the
+# source of a double-quoted string, so the expansion never happens here.
+# shellcheck disable=SC2016
+[[ $pw_body == *'${FIRST_BOOT_VERIFY_NAME}'* ]] ||
+  fail_test "the deferral names the unit that answers it" "$pw_body"
+pass "the deferral names ${FIRST_BOOT_VERIFY_NAME} as what asks the question on the target"
+
+# ---------------------------------------------------------------------------
+# The late-binding verifier itself
+# ---------------------------------------------------------------------------
+fbv="$work/first-boot-verify"
+bash -c 'source "$1"; render_first_boot_verify testuser' _ "$SESSION_SH" >"$fbv"
+bash -n "$fbv" || fail_test "the rendered verifier is valid bash" "$(cat "$fbv")"
+pass "render_first_boot_verify emits syntactically valid bash"
+
+grep -qF -- "$INSTALL_MARKER_TEXT" "$fbv" ||
+  fail_test "the verifier carries the install marker" "without it assert_ours_or_absent cannot recognise its own output on a re-run"
+pass "the verifier carries '${INSTALL_MARKER_TEXT}', so a re-run recognises it"
+
+# It must NOT contain a literal node. That is the constant this project already
+# removed once; re-introducing it in a second file would be the same bug in a
+# new place.
+! grep -qE 'amdgpu_bl[0-9]' "$fbv" ||
+  fail_test "the verifier hardcodes no backlight index" \
+    "the index is DRM enumeration order and differs between kernels on ONE Deck. Found:"$'\n'"$(grep -nE 'amdgpu_bl[0-9]' "$fbv")"
+pass "the verifier globs for the node rather than naming one -- no index survives into the target"
+
+grep -qF -- "runuser -u testuser" "$fbv" ||
+  fail_test "the verifier exercises the helper AS THE DESKTOP USER" \
+    "as root it would take the helper's inner branch and prove nothing about the sudoers grant, which is half of what can break"
+pass "the verifier goes through the desktop user, so sudo -n and the grant are exercised too"
+
+grep -qF -- "rm -f ${POWER_LOGIND_DROPIN}" "$fbv" ||
+  fail_test "the verifier DISARMS the power handler when the udev rule did not match" \
+    "an armed HandlePowerKey with the ACPI duplicate still tagged is the re-suspend loop -- the one state the whole stage exists to avoid, on a device whose only escape is a ten-second hold"
+pass "the verifier removes ${POWER_LOGIND_DROPIN} if the duplicate is still tagged -- it falls back, it does not just report"
+
+# ...and only in that direction. Removing the udev rule instead would be the
+# dangerous half (stage_power_button's own undo instructions say so).
+! grep -qF -- "rm -f ${POWER_UDEV_RULE}" "$fbv" ||
+  fail_test "the verifier never removes the udev rule" \
+    "restoring the tags while the handler is armed is exactly the state the ordering of the writes is designed to make unreachable"
+pass "and it never removes ${POWER_UDEV_RULE} -- the harmless half stays"
+
+# Both checks gate on their own artefact, so a machine that ran only one stage
+# gets one verdict and one 'note:', not a false failure.
+grep -qF -- "if [[ -x ${PRIV_WRITE_HELPER} ]]" "$fbv" ||
+  fail_test "the brightness check gates on the helper existing" "$(cat "$fbv")"
+grep -qF -- "if [[ -e ${POWER_LOGIND_DROPIN} ]]" "$fbv" ||
+  fail_test "the power check gates on the drop-in existing" "$(cat "$fbv")"
+pass "each check gates on its own artefact, so an unrun stage is a 'note:' and not a failure"
+
+# It runs the two checks INDEPENDENTLY. `set -e` here would mean a machine with
+# a brightness problem never gets its power-button verdict.
+grep -qxF -- 'set -uo pipefail' "$fbv" ||
+  fail_test "the verifier does not use set -e" \
+    "the checks are independent and one failing must not hide the other; -u and pipefail are kept"
+pass "the verifier is 'set -uo pipefail', so one failed check does not suppress the next"
+
+# Behaviour: with neither artefact present it says so, twice, and exits 0.
+chmod +x "$fbv"
+fbv_rc=0
+FBV_OUT=$(PATH="$stub_bin:$PATH" "$fbv" 2>&1) || fbv_rc=$?
+[[ $fbv_rc -eq 0 ]] ||
+  fail_test "with nothing installed the verifier passes" "rc=${fbv_rc}"$'\n'"$FBV_OUT"
+[[ $(grep -c '^note:' <<<"$FBV_OUT") -eq 2 ]] ||
+  fail_test "it says out loud that it had nothing to check" "$FBV_OUT"
+pass "with neither artefact installed it reports two 'note:' lines and exits 0 -- not silence"
+
+# ---------------------------------------------------------------------------
+# The power button, baked -- PROGRESS.md 5.38 D9
+# ---------------------------------------------------------------------------
+echo "# 9b. the power button, in a bake"
+
+# On the wrong model a BAKE must SKIP, not fail: the installer runs every baked
+# stage on whatever it is installing onto, including a QEMU VM, and a failed
+# stage there is a false alarm in the install record. The refusal itself is
+# unchanged -- nothing is written on any model but ${POWER_MODEL}.
+run_chroot 'power_model_reject "not a Galileo" && echo REJECT-CONTINUED || echo REJECT-STOPPED'
+out_has "REJECT-STOPPED" ||
+  fail_test "power_model_reject stops the stage in chroot mode" "$OUT"
+out_has "not a Galileo" ||
+  fail_test "and says why" "$OUT"
+pass "in a bake, an unsupported model warns and returns non-zero -- the stage skips instead of failing the install"
+
+run_normal 'power_model_reject "not a Galileo"; echo SHOULD-NOT-REACH'
+[[ $RC -ne 0 ]] && ! out_has "SHOULD-NOT-REACH" ||
+  fail_test "outside a chroot the refusal is still fatal" "rc=${RC}"$'\n'"$OUT"
+pass "outside a chroot it still exits non-zero -- a human on the wrong machine gets a refusal, as before"
+
+# The stage's own skip path: it must say SKIPPED and it must not write.
+pb_body=$(bash -c 'source "$1"; declare -f stage_power_button' _ "$SESSION_SH")
+[[ $pb_body == *"stage-power-button: SKIPPED"* ]] ||
+  fail_test "the stage names its skip" "a stage that returns 0 having done nothing must say so; the install record is the only place anyone will look"
+pass "the skip path is named in the output, so 'ok' never silently means 'did nothing'"
+
+# The sort-order assertion is the one thing that must survive every edit here:
+# a drop-in that sorts at or before Omarchy's 10-ignore-power-button.conf is on
+# disk, reads correctly, and does nothing.
+ord_body=$(bash -c 'source "$1"; declare -f verify_power_button_ordering' _ "$SESSION_SH")
+[[ $ord_body == *power_sorts_after* && $ord_body == *HandlePowerKey* ]] ||
+  fail_test "the logind sort-order check is intact" "$ord_body"
+pass "verify_power_button_ordering still proves ours sorts after every rival HandlePowerKey= assignment"
+
+# ...and it still proves it against the PERSISTENT directories in a chroot.
+# /run is the installer's, so it is excluded -- but excluding /etc or /usr/lib
+# would remove the only place Omarchy's 10- file can be found.
+[[ $ord_body == *'/run/'* ]] ||
+  fail_test "the chroot arm names what it excluded" "$ord_body"
+# It FILTERS, rather than emptying the list: dropping /etc or /usr/lib would
+# remove the only place Omarchy's 10-ignore-power-button.conf can be found, and
+# the sort-order proof would then pass by having nothing to compare against --
+# a check passing for the wrong reason, which is the failure class this whole
+# project keeps paying for.
+[[ $ord_body == *'logind_dirs+='* && $ord_body == *'udev_dirs+='* ]] ||
+  fail_test "the chroot arm filters rather than empties the directory list" "$ord_body"
+run_chroot '
+  ours=${POWER_LOGIND_DROPIN##*/}
+  for d in "${POWER_LOGIND_DIRS[@]}"; do
+    [[ $d == /run/* ]] && continue
+    printf "KEPT %s\n" "$d"
+  done
+  power_sorts_after "$ours" 10-ignore-power-button.conf && echo SORTS-AFTER-OMARCHY
+'
+out_has "KEPT /etc/systemd/logind.conf.d" && out_has "SORTS-AFTER-OMARCHY" ||
+  fail_test "the persistent directories survive the filter, and ours still wins there" "$OUT"
+pass "the chroot arm drops only /run -- /etc and /usr/lib, where Omarchy's 10- drop-in lives, are still scanned, and zz- still beats 10-"
+
+# The premise check defers rather than reading the installer's udev database...
+prem_body=$(bash -c 'source "$1"; declare -f verify_power_button_premise' _ "$SESSION_SH")
+[[ $prem_body == *"in_chroot"*"defer "*"return 0"* ]] ||
+  fail_test "verify_power_button_premise defers in a chroot" "$prem_body"
+pass "the premise check defers in a chroot instead of reading the installer kernel's udev database"
+
+# ...but the CONSTANT self-check runs everywhere, because it is a statement
+# about this file rather than about the machine.
+prem_pre=$(sed -n '/^verify_power_button_premise/,/in_chroot/p' <<<"$prem_body")
+[[ $prem_pre == *POWER_KEEP_ID_PATH* ]] ||
+  fail_test "the self-consistency check runs before the chroot return" \
+    "untagging the node the design keeps would leave logind watching nothing; that is a claim about the constants and must be checked everywhere. Body:"$'\n'"$prem_body"
+pass "the 'never untag the keeper' self-check still runs in a chroot -- it is about the constants, not the machine"
 
 echo "all deck-session.sh chroot-mode and backlight-discovery tests passed (${assertions} assertions)"

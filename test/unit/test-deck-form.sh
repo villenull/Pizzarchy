@@ -209,9 +209,10 @@ echo "--- deck_form_wait_for_marker ------------------------------------------"
 # skipped. DECK_OSK_BOUND_MARKER is not a string this file invented: it is
 # what src/deck-input-mapper.py prints when it is ready to deliver keystrokes
 # (its `BOUND_MARKER`). Two files, two languages, one string, and if they ever
-# drift NOTHING here goes red on its own -- every prompt just waits out its
-# five seconds and degrades, on a real ISO, silently as far as this suite is
-# concerned. Both suites check it, so whichever one the next editor runs fails.
+# drift NOTHING here goes red on its own -- every prompt just waits out
+# DECK_OSK_BIND_DEADLINE and degrades, on a real ISO, silently as far as this
+# suite is concerned. Both suites check it, so whichever one the next editor
+# runs fails.
 mapper_marker=$(sed -n 's/^BOUND_MARKER = "\(.*\)"$/\1/p' "$REPO_ROOT/src/deck-input-mapper.py")
 [[ -n $mapper_marker ]] ||
   fail "could not find 'BOUND_MARKER = ' in src/deck-input-mapper.py -- this cross-check is broken, not the code"
@@ -344,6 +345,202 @@ set -e
 [[ $(cat "$work/lizard5") == Y ]] ||
   fail "text_prompt must still restore lizard mode to Y even when the prompt fn fails"
 pass "text_prompt propagates a failing prompt fn's exit code AND still restores lizard mode"
+
+echo "--- P33 A2: the bind deadline, and a warning that must not be false ----"
+
+# --- the cross-file gate on the NUMBER --------------------------------------
+#
+# Same discipline as DECK_OSK_BOUND_MARKER above, and for a sharper reason.
+# docs/PROGRESS.md §5.34 D2: the deadline was 5, chosen by nobody's
+# measurement, while the mapper's own `pick_device` will sit for up to
+# NO_PAD_GRACE_SECONDS with no pad present before giving up. Any deadline
+# below that can expire on a mapper that is still deliberately waiting and is
+# about to succeed. Read the mapper's number rather than restating it here, so
+# a change on that side turns this red instead of silently re-arming D2.
+mapper_grace=$(sed -n 's/^NO_PAD_GRACE_SECONDS = \([0-9.]*\)$/\1/p' "$REPO_ROOT/src/deck-input-mapper.py")
+[[ -n $mapper_grace ]] ||
+  fail "could not find 'NO_PAD_GRACE_SECONDS = ' in src/deck-input-mapper.py -- this cross-check is broken, not the code"
+awk -v d="$DECK_OSK_BIND_DEADLINE" -v g="$mapper_grace" 'BEGIN { exit !(d >= g) }' ||
+  fail "DECK_OSK_BIND_DEADLINE ($DECK_OSK_BIND_DEADLINE s) is shorter than the mapper's own NO_PAD_GRACE_SECONDS ($mapper_grace s). deck-form.sh would abandon a mapper that is still, by its own design, waiting for a pad to enumerate -- which is docs/PROGRESS.md §5.34 D2 exactly."
+pass "DECK_OSK_BIND_DEADLINE ($DECK_OSK_BIND_DEADLINE s) is at least the mapper's own NO_PAD_GRACE_SECONDS ($mapper_grace s)"
+
+[[ $DECK_OSK_BIND_DEADLINE != 5 ]] ||
+  fail "DECK_OSK_BIND_DEADLINE is back to 5 -- that is the shipped value docs/PROGRESS.md §5.34 D2 measured as too short on hardware"
+pass "the 5 s deadline that shipped is gone"
+
+# --- wait_for_marker's watch-pid: the exit answer, and the race -------------
+#
+# The mapper EXITS on its own when no gamepad exists at all (that same
+# NO_PAD_GRACE_SECONDS path), which is precisely the QEMU case. Detecting the
+# exit is what keeps a deadline sized for hardware from being dead waiting in
+# every VM run.
+: >"$work/mapper-dies.out"
+(sleep 0.05) & dead_pid=$!
+wait "$dead_pid" 2>/dev/null || true
+start=$(date +%s%N)
+set +e
+deck_form_wait_for_marker "$work/mapper-dies.out" "deck-input-mapper: bound" 30 0.05 "$dead_pid"
+rc=$?
+set -e
+end=$(date +%s%N)
+elapsed_ms=$(( (end - start) / 1000000 ))
+[[ $rc -eq 2 ]] ||
+  fail "wait_for_marker must answer 2 ('the process is gone'), distinctly from 1 ('the deadline elapsed')" "got rc=$rc"
+[[ $elapsed_ms -lt 5000 ]] ||
+  fail "wait_for_marker must return as soon as the watched process is gone, not wait out a 30s deadline" "elapsed=${elapsed_ms}ms"
+pass "wait_for_marker returns 2 in ~${elapsed_ms}ms when the watched process has exited, instead of waiting out the deadline"
+
+# 🔴 THE RACE. A mapper can write the marker and exit in the same instant.
+# Answering "it exited" without one more look would report a bind that
+# happened as a bind that did not -- the mirror image of D2's false warning.
+printf 'deck-input-mapper: bound\n' >"$work/mapper-bound-then-dead.out"
+deck_form_wait_for_marker "$work/mapper-bound-then-dead.out" "deck-input-mapper: bound" 5 0.05 "$dead_pid" ||
+  fail "a process that printed the marker and then exited must still be reported BOUND (0), not gone (2)"
+pass "wait_for_marker re-checks the file after the watched process dies, so marker-then-exit is still a bind"
+
+# a still-running process must not short-circuit the deadline answer
+: >"$work/mapper-alive.out"
+(sleep 5) & alive_pid=$!
+set +e
+deck_form_wait_for_marker "$work/mapper-alive.out" "deck-input-mapper: bound" 0.2 0.05 "$alive_pid"
+rc=$?
+set -e
+kill "$alive_pid" 2>/dev/null; wait "$alive_pid" 2>/dev/null || true
+[[ $rc -eq 1 ]] ||
+  fail "with the watched process still alive and no marker, the answer must be 1 (deadline elapsed)" "got rc=$rc"
+pass "a live process with no marker still answers 1 at the deadline (the two outcomes stay distinguishable)"
+
+# --- THE RETRACTION: the warning is made true, not merely rarer ------------
+#
+# docs/PROGRESS.md §5.34 D2's second half. On hardware the deadline expired,
+# the code said "this prompt runs WITHOUT it", and then left the mapper
+# running -- so the keyboard drew a second later underneath a sentence denying
+# it. This is the test that fails if that comes back. It needs no gamepad and
+# no hardware, which is the point: QEMU structurally cannot reproduce D2, so
+# the regression test must not depend on a bind ever happening.
+printf 'Y\n' >"$work/lizard-abandon"
+cat >"$work/fake-mapper-slow" <<'EOF'
+#!/usr/bin/env bash
+# Never binds within any deadline this suite uses, and stays alive afterwards
+# -- exactly the shape that produced the false warning on hardware.
+echo "deck-input-mapper: no gamepad present; waiting up to 30s for one to enumerate" >&2
+sleep 60
+EOF
+chmod +x "$work/fake-mapper-slow"
+out=$(DECK_TEXT_PROMPT_LIZARD_SYSFS="$work/lizard-abandon" \
+      DECK_TEXT_PROMPT_MAPPER_BIN="$work/fake-mapper-slow" \
+      DECK_TEXT_PROMPT_DEADLINE=0.3 \
+      deck_form_text_prompt fake_prompt_ok 2>"$work/warnings-abandon")
+[[ $out == "osk_up=0" ]] ||
+  fail "an abandoned mapper must leave DECK_FORM_OSK_UP=0" "got: $out"
+sleep 0.3
+if pgrep -f "$work/fake-mapper-slow" >/dev/null 2>&1; then
+  fail "🔴 §5.34 D2: text_prompt warned that the prompt runs WITHOUT the on-screen keyboard and then LEFT THE MAPPER RUNNING. The keyboard comes up anyway, underneath a false statement." "$(cat "$work/warnings-abandon")"
+fi
+pass "text_prompt KILLS the mapper when the deadline expires, so 'this prompt runs WITHOUT it' is true by construction (§5.34 D2)"
+
+LC_ALL=C grep -qF "the mapper has been stopped so that stays true" "$work/warnings-abandon" ||
+  fail "the degradation message must say the mapper was stopped -- otherwise the screen states a consequence without its cause" "$(cat "$work/warnings-abandon")"
+[[ $(cat "$work/lizard-abandon") == Y ]] ||
+  fail "🔴 abandoning the mapper MUST restore lizard mode to Y first. Without it the device has no firmware pointer AND no mapper -- no input at all, on a screen the user then cannot leave. That is the state §2.3 exists to prevent."
+pass "abandoning the mapper restores lizard mode to Y immediately, so the device is never left with no input at all"
+
+# The mapper's own last words are the ONLY record of WHY it never bound.
+# deck_form_text_prompt_cleanup deletes the capture file; reporting it first
+# is the difference between a stated degradation and a swallowed one.
+LC_ALL=C grep -qF "no gamepad present" "$work/warnings-abandon" ||
+  fail "the mapper's own output must be reported before the capture file is deleted -- it is the only place the REASON exists" "$(cat "$work/warnings-abandon")"
+pass "the mapper's captured output is reported, not deleted unread, when it is abandoned"
+
+# --- the mapper that exits on its own (the QEMU shape) ----------------------
+printf 'Y\n' >"$work/lizard-exits"
+cat >"$work/fake-mapper-exits" <<'EOF'
+#!/usr/bin/env bash
+echo "deck-input-mapper: no gamepad matched None. Devices: none" >&2
+exit 1
+EOF
+chmod +x "$work/fake-mapper-exits"
+start=$(date +%s%N)
+out=$(DECK_TEXT_PROMPT_LIZARD_SYSFS="$work/lizard-exits" \
+      DECK_TEXT_PROMPT_MAPPER_BIN="$work/fake-mapper-exits" \
+      DECK_TEXT_PROMPT_DEADLINE=30 \
+      deck_form_text_prompt fake_prompt_ok 2>"$work/warnings-exits")
+end=$(date +%s%N)
+elapsed_ms=$(( (end - start) / 1000000 ))
+[[ $out == "osk_up=0" ]] ||
+  fail "a mapper that exits without binding must leave DECK_FORM_OSK_UP=0" "got: $out"
+[[ $elapsed_ms -lt 5000 ]] ||
+  fail "text_prompt must not wait out a 30s deadline for a mapper that has already exited" "elapsed=${elapsed_ms}ms"
+LC_ALL=C grep -qF "exited without ever reporting bound" "$work/warnings-exits" ||
+  fail "'it exited' and 'it is taking too long' are different facts and must be said differently" "$(cat "$work/warnings-exits")"
+[[ $(cat "$work/lizard-exits") == Y ]] ||
+  fail "a mapper that exited on its own must still leave lizard mode restored to Y"
+pass "text_prompt notices a mapper that exited (~${elapsed_ms}ms, not the 30s deadline), says so distinctly, and restores lizard mode"
+
+echo "--- P33 A3: the console font ------------------------------------------"
+
+# 🔴 THE POINT OF PINNING A FONT AT ALL (docs/PROGRESS.md §5.34 D3, and the
+# P33 decision table's "the whole installer is unreadable at 8x16 on a 7 inch
+# panel, not just the keyboard"). The Deck's framebuffer is 800x1280 -- READ
+# off the hardware, /sys/class/graphics/fb0/virtual_size -- so the console
+# default of 8x16 puts 100 columns of 8-pixel glyphs on a handheld.
+#
+# A fake `setfont`, same shape and same reasoning as the fake `loadkeys`
+# above: this suite must never re-font the dev machine's own console.
+mkdir -p "$work/bin-fakefont"
+cat >"$work/bin-fakefont/setfont" <<'FAKEFONT'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-}" >>"${FAKE_SETFONT_LOG:-/dev/null}"
+if [[ -n ${FAKE_SETFONT_FAIL:-} ]]; then
+  printf 'setfont: ERROR reading font file %s\n' "${1:-}" >&2
+  exit "$FAKE_SETFONT_FAIL"
+fi
+exit 0
+FAKEFONT
+chmod +x "$work/bin-fakefont/setfont"
+FONT_PATH="$work/bin-fakefont:$PATH"
+
+: >"$work/sf.log"
+DECK_FORM_TTY_OVERRIDE=/dev/pts/9 FAKE_SETFONT_LOG="$work/sf.log" \
+  PATH="$FONT_PATH" deck_form_pin_console_font ||
+  fail "the font pin must return 0 off a virtual console"
+[[ ! -s "$work/sf.log" ]] ||
+  fail "the font pin must NOT run setfont when tty is not a virtual console" "$(cat "$work/sf.log")"
+pass "deck_form_pin_console_font is a no-op off a virtual console (same guard as the keymap pin)"
+
+: >"$work/sf.log"
+DECK_FORM_TTY_OVERRIDE=/dev/tty1 FAKE_SETFONT_LOG="$work/sf.log" \
+  PATH="$FONT_PATH" deck_form_pin_console_font ||
+  fail "the font pin must succeed on a virtual console with a working setfont"
+[[ $(cat "$work/sf.log") == "$DECK_CONSOLE_FONT" ]] ||
+  fail "the font pin must load exactly DECK_CONSOLE_FONT" "got: $(cat "$work/sf.log")"
+pass "deck_form_pin_console_font loads DECK_CONSOLE_FONT ('$DECK_CONSOLE_FONT') on a virtual console"
+
+# 🔴 NEVER FATAL -- and this is the rule that DIFFERS from the keymap's. A
+# wrong keymap silently substitutes characters in a masked password field; a
+# missing font only means the screen stays small. "A prompt with a small font
+# beats no prompt."
+out=$(DECK_FORM_TTY_OVERRIDE=/dev/tty1 FAKE_SETFONT_FAIL=71 \
+      PATH="$FONT_PATH" deck_form_pin_console_font 2>&1) ||
+  fail "a failed setfont must NOT be fatal -- the screen still has to be drawn"
+LC_ALL=C grep -qF "ERROR reading font file" <<<"$out" ||
+  fail "a failed font pin must forward setfont's OWN message rather than swallowing it" "got: $out"
+LC_ALL=C grep -qF "every screen still works" <<<"$out" ||
+  fail "a failed font pin must say what it means for the user, not just log an errno" "got: $out"
+pass "a failed font pin returns 0, warns loudly, and forwards setfont's own stderr"
+
+# The font must be one that actually exists in the image. `kbd` is already in
+# base (it is what provides loadkeys) and ships this file, so A3 needs no new
+# package -- but only if the NAME is right. Checked against this machine's own
+# kbd when it has one; loudly not-run otherwise, never silently skipped.
+if [[ -d /usr/share/kbd/consolefonts ]]; then
+  font_hits=$(find /usr/share/kbd/consolefonts -maxdepth 1 -name "${DECK_CONSOLE_FONT}.*" | wc -l)
+  [[ $font_hits -gt 0 ]] ||
+    fail "DECK_CONSOLE_FONT='$DECK_CONSOLE_FONT' is not in /usr/share/kbd/consolefonts on this machine -- if kbd does not ship it, the ISO needs a package it does not currently install"
+  pass "DECK_CONSOLE_FONT ('$DECK_CONSOLE_FONT') is a font kbd itself ships -- no new ISO package needed"
+else
+  echo "    [gate NOT RUN] /usr/share/kbd/consolefonts does not exist here, so the font's existence was not checked."
+fi
 
 echo "--- text_prompt's EXIT-trap safety net (the 'including set -e' half) --"
 
@@ -681,6 +878,39 @@ LC_ALL=C grep -qF "UNVERIFIED console keymap" "$work/prompt.err" ||
   fail "a failed pin inside a text prompt must be stated, not swallowed" "$(cat "$work/prompt.err")"
 pass "a failed pin degrades the prompt loudly (body still runs, the doubt is stated)"
 
+# --- P33 A3: the same ordering property, for the FONT ----------------------
+#
+# The font is pinned beside the keymap and BEFORE the mapper starts, so the
+# on-screen keyboard reads the console geometry this sets rather than the one
+# it replaced. A font pinned after the mapper drew would resize the console
+# under a keyboard already laid out for the old width.
+: >"$work/sf.log"
+deck_form_test_font_body() { printf '%s\n' "$(cat "$work/sf.log")" >"$work/font-at-body.log"; printf 'typed\n'; }
+out=$(DECK_FORM_TTY_OVERRIDE=/dev/tty1 FAKE_SETFONT_LOG="$work/sf.log" \
+      PATH="$work/bin-fakefont:$work/bin-fakekeys:$PATH" \
+      DECK_TEXT_PROMPT_LIZARD_SYSFS="$work/no-such-knob" \
+      DECK_TEXT_PROMPT_MAPPER_BIN="$work/no-such-mapper" \
+      deck_form_text_prompt deck_form_test_font_body 2>/dev/null)
+[[ $out == typed ]] || fail "the font-recording body must have run" "got: $out"
+[[ $(cat "$work/font-at-body.log") == "$DECK_CONSOLE_FONT" ]] ||
+  fail "deck_form_text_prompt must pin the console font BEFORE running its body" "got: $(cat "$work/font-at-body.log")"
+pass "deck_form_text_prompt pins the console font before the body runs, at the point of use"
+
+# greeter() is the earliest point in upstream's flow this file owns, so
+# pinning there is what makes S0's disclosure and S1's network list bigger
+# too -- text_prompt's copy only ever reaches the text screens.
+: >"$work/sf.log"
+: >"$work/greeter-tty"
+deck_form_wifi_screen_saved=$(declare -f deck_form_wifi_screen)
+deck_form_wifi_screen() { return 0; }
+DECK_S0_TTY="$work/greeter-tty" DECK_FORM_TTY_OVERRIDE=/dev/tty1 \
+  FAKE_SETFONT_LOG="$work/sf.log" PATH="$FONT_PATH" \
+  greeter >/dev/null 2>&1 || true
+eval "$deck_form_wifi_screen_saved"
+[[ $(cat "$work/sf.log") == "$DECK_CONSOLE_FONT" ]] ||
+  fail "greeter must pin the console font -- S0 and S1 run before any text prompt, and they are unreadable at 8x16 too" "got: '$(cat "$work/sf.log")'"
+pass "greeter pins the console font, so S0 and S1 are drawn at the bigger size as well"
+
 # --- the rest of upstream's loop, kept rather than quietly dropped ---------
 
 printf 'us:10\nlatam:0\n' >"$work/kb.queue"
@@ -914,19 +1144,57 @@ pass "four consecutive invalid username submissions produce a constant-size scre
 
 echo "--- S3 reserved-username list: sourced, never copied ---------------------"
 
-cat >"$work/setup-form-fixture.sh" <<'EOF'
-RESERVED_USERNAMES=(root bin daemon deck-reserved-example)
+# 🔴 THIS SECTION WAS GREEN WHILE THE PRODUCTION PATH WAS DEAD, and that is
+# the most important thing about it (docs/PROGRESS.md §5.34 D1). Every fixture
+# here used to define a bash ARRAY named `RESERVED_USERNAMES` -- the same
+# inference deck-form.sh itself had made and flagged "(INFERRED, NOT READ)".
+# The tests and the code agreed with each other and both disagreed with
+# upstream, so the suite proved only that two guesses matched. A shipped ISO
+# accepted `root` as a username with this section passing.
+#
+# The fixtures below are now shaped like the REAL vendored file, READ
+# 2026-08-15 (session 29) at
+# ~/.cache/omarchy-deck/p32-build/runtime-src/install/provisioning/setup-form.sh
+# line 82: a variable named OMARCHY_RESERVED_USERNAMES whose value is an
+# anchored alternation REGEX STRING, used upstream as
+# `[[ "$username" =~ $OMARCHY_RESERVED_USERNAMES ]]` at that file's line 111.
+# The value below is that line, verbatim.
+readonly REAL_RESERVED_RE='^(root|bin|daemon|mail|ftp|http|nobody|dbus|systemd-coredump|systemd-network|systemd-oom|systemd-journal-remote|systemd-resolve|systemd-timesync|tss|uuidd|alpm|git|avahi|cups|lp|_talkd|polkitd|rtkit|qemu|brltty|gluster|rpc|libvirt-qemu|pcscd|nvidia-persistenced|sddm)$'
+
+cat >"$work/setup-form-fixture.sh" <<EOF
+OMARCHY_RESERVED_USERNAMES='$REAL_RESERVED_RE'
 EOF
 out=$(DECK_SETUP_FORM_SH_OVERRIDE="$work/setup-form-fixture.sh" deck_form_load_reserved_usernames 2>&1)
 rc=$?
-[[ $rc -eq 0 ]] || fail "load_reserved_usernames must succeed against a real fixture" "$out"
+[[ $rc -eq 0 ]] || fail "load_reserved_usernames must succeed against a real-shaped fixture" "$out"
 DECK_SETUP_FORM_SH_OVERRIDE="$work/setup-form-fixture.sh" deck_form_load_reserved_usernames
+[[ $DECK_LOADED_RESERVED_PATTERN == "$REAL_RESERVED_RE" ]] ||
+  fail "the loaded value must be the regex STRING itself, byte for byte -- anything else means it was reshaped on the way out of the subshell" "got: $DECK_LOADED_RESERVED_PATTERN"
+pass "load_reserved_usernames loads upstream's regex string unchanged"
+
+# 🔴 THE HEADLINE ASSERTION OF P33 A1. `root` reaching a real ISO as an
+# accepted username is the defect; this is the test that would have caught it.
 deck_form_username_reserved root ||
-  fail "a name present in the sourced fixture must be reported reserved"
-if deck_form_username_reserved definitely-not-reserved; then
-  fail "a name absent from the fixture must NOT be reported reserved"
-fi
-pass "load_reserved_usernames sources a real fixture and reserved-name membership works"
+  fail "'root' MUST be rejected as a username -- this is docs/PROGRESS.md §5.34 D1 itself, and it shipped"
+pass "'root' is reported reserved (the D1 regression test)"
+
+# Spread across the list rather than one name: a check that only ever asks
+# about the first alternative would pass against a truncated or mis-anchored
+# pattern.
+for reserved_name in root bin daemon http nobody polkitd qemu git sddm; do
+  deck_form_username_reserved "$reserved_name" ||
+    fail "'$reserved_name' is in upstream's own reserved list and must be rejected"
+done
+pass "every sampled name from upstream's list (root bin daemon http nobody polkitd qemu git sddm) is rejected"
+
+for ok_name in deck definitely-not-reserved rooted roo _deck deck2; do
+  if deck_form_username_reserved "$ok_name"; then
+    fail "'$ok_name' is NOT in upstream's list and must be accepted -- rejecting it would strand a user on a screen with no way forward"
+  fi
+done
+# `rooted` and `roo` are the anchor test: an unanchored or substring match
+# would reject both, and upstream's pattern is anchored `^(...)$`.
+pass "names outside the list are accepted, including the anchor cases 'rooted' and 'roo'"
 
 out=$(DECK_SETUP_FORM_SH_OVERRIDE="$work/does-not-exist.sh" deck_form_load_reserved_usernames 2>&1) && \
   fail "load_reserved_usernames must return nonzero when the file is missing"
@@ -938,14 +1206,69 @@ if deck_form_username_reserved root; then
 fi
 pass "load_reserved_usernames degrades loudly (nonzero, says UNAVAILABLE) when the file is missing, and the reserved-check fails open"
 
-cat >"$work/setup-form-no-array.sh" <<'EOF'
+cat >"$work/setup-form-no-var.sh" <<'EOF'
 SOME_OTHER_CONSTANT=1
 EOF
-out=$(DECK_SETUP_FORM_SH_OVERRIDE="$work/setup-form-no-array.sh" deck_form_load_reserved_usernames 2>&1) && \
-  fail "load_reserved_usernames must fail when the sourced file defines no RESERVED_USERNAMES array"
+out=$(DECK_SETUP_FORM_SH_OVERRIDE="$work/setup-form-no-var.sh" deck_form_load_reserved_usernames 2>&1) && \
+  fail "load_reserved_usernames must fail when the sourced file defines no OMARCHY_RESERVED_USERNAMES"
 LC_ALL=C grep -qF "defines no" <<<"$out" ||
-  fail "load_reserved_usernames must explain WHY it failed when the array is missing" "got: $out"
+  fail "load_reserved_usernames must explain WHY it failed when the variable is missing" "got: $out"
 pass "load_reserved_usernames fails loudly (not silently-empty) when the vendored file exists but has the wrong shape"
+
+# The renamed-upstream path, spelled out: this is EXACTLY what D1 was, and
+# what the loud degradation is for. The old name must not quietly work again.
+cat >"$work/setup-form-old-name.sh" <<'EOF'
+RESERVED_USERNAMES=(root bin daemon)
+EOF
+out=$(DECK_SETUP_FORM_SH_OVERRIDE="$work/setup-form-old-name.sh" deck_form_load_reserved_usernames 2>&1) && \
+  fail "a file defining only the OLD (inferred, wrong) array name must be a LOUD failure, not a silent success"
+LC_ALL=C grep -qF "OMARCHY_RESERVED_USERNAMES" <<<"$out" ||
+  fail "the warning must name the variable it looked for, so a future rename is diagnosable from the console alone" "got: $out"
+pass "the old inferred name 'RESERVED_USERNAMES' no longer satisfies the load, and the warning names what was looked for"
+
+# 🔴 An EMPTY regex matches EVERY string. Loading one and using it would
+# reject every username a user could type, on a screen with no way past.
+cat >"$work/setup-form-empty.sh" <<'EOF'
+OMARCHY_RESERVED_USERNAMES=''
+EOF
+out=$(DECK_SETUP_FORM_SH_OVERRIDE="$work/setup-form-empty.sh" deck_form_load_reserved_usernames 2>&1) && \
+  fail "an EMPTY OMARCHY_RESERVED_USERNAMES must be treated as a failed load -- an empty regex matches everything"
+LC_ALL=C grep -qF "EMPTY" <<<"$out" ||
+  fail "the empty-pattern warning must say so" "got: $out"
+if deck_form_username_reserved deck; then
+  fail "after an empty pattern was refused, an ordinary name must still be accepted (the empty regex must never reach the match)"
+fi
+pass "an empty reserved-username pattern is refused loudly and never used to reject every name"
+
+# --- the gate against the REAL vendored file, when one is reachable --------
+#
+# This repo does not vendor setup-form.sh (build-iso.sh copies it out of the
+# omarchy source at build time), so this gate cannot be unconditional. It is
+# NOT skipped silently: it says out loud which file it checked, or that it
+# found none -- the difference between "verified against upstream" and
+# "verified against our own fixture" is the entire subject of this section.
+real_setup_form=''
+for candidate in \
+  "${DECK_REAL_SETUP_FORM_SH:-}" \
+  "$HOME/.cache/omarchy-deck/p32-build/runtime-src/install/provisioning/setup-form.sh" \
+  /usr/share/omarchy/install/provisioning/setup-form.sh; do
+  [[ -n $candidate && -r $candidate ]] && { real_setup_form=$candidate; break; }
+done
+if [[ -n $real_setup_form ]]; then
+  DECK_SETUP_FORM_SH_OVERRIDE="$real_setup_form" deck_form_load_reserved_usernames ||
+    fail "the REAL vendored setup-form.sh at $real_setup_form does not yield '$DECK_RESERVED_USERNAMES_VAR' -- upstream renamed it, and this file's override is dead again exactly the way §5.34 D1 was"
+  deck_form_username_reserved root ||
+    fail "the REAL vendored setup-form.sh at $real_setup_form loaded, but does not reject 'root'" "pattern: $DECK_LOADED_RESERVED_PATTERN"
+  if deck_form_username_reserved deck; then
+    fail "the REAL vendored setup-form.sh rejects 'deck', which is the username this project's own VM harness installs with" "pattern: $DECK_LOADED_RESERVED_PATTERN"
+  fi
+  pass "the REAL vendored setup-form.sh ($real_setup_form) still defines $DECK_RESERVED_USERNAMES_VAR, still rejects 'root', still allows 'deck'"
+else
+  echo "    [gate NOT RUN] no real setup-form.sh found -- the assertions above ran against this suite's own fixture only."
+  echo "                   Set DECK_REAL_SETUP_FORM_SH=<path> to run it. Searched:"
+  echo "                     \$HOME/.cache/omarchy-deck/p32-build/runtime-src/install/provisioning/setup-form.sh"
+  echo "                     /usr/share/omarchy/install/provisioning/setup-form.sh"
+fi
 
 echo "--- T4 bug 1 regression: loading the reserved list must not clobber the overrides ---"
 
@@ -972,19 +1295,19 @@ echo "--- T4 bug 1 regression: loading the reserved list must not clobber the ov
 # process replaying the real configurator's own source order.
 #
 # So this fixture does what the REAL setup-form.sh does: define
-# RESERVED_USERNAMES *and* one of the override names, to prove the fix
-# (sourcing in a subshell, only the array crosses back out) actually holds
-# even when the sourced file collides on a name -- not just when it happens
-# not to.
-cat >"$work/setup-form-hostile.sh" <<'EOF'
-RESERVED_USERNAMES=(root bin daemon)
+# OMARCHY_RESERVED_USERNAMES *and* one of the override names, to prove the fix
+# (sourcing in a subshell, only the pattern text crosses back out) actually
+# holds even when the sourced file collides on a name -- not just when it
+# happens not to.
+cat >"$work/setup-form-hostile.sh" <<EOF
+OMARCHY_RESERVED_USERNAMES='$REAL_RESERVED_RE'
 omarchy_prompt_identity() { printf 'UPSTREAM-IDENTITY-RAN\n'; }
 omarchy_prompt_hostname() { printf 'UPSTREAM-HOSTNAME-RAN\n'; }
 EOF
 before_identity=$(declare -f omarchy_prompt_identity)
 before_hostname=$(declare -f omarchy_prompt_hostname)
 DECK_SETUP_FORM_SH_OVERRIDE="$work/setup-form-hostile.sh" deck_form_load_reserved_usernames ||
-  fail "load_reserved_usernames must still succeed (and load the array) against a fixture that ALSO defines an override name"
+  fail "load_reserved_usernames must still succeed (and load the pattern) against a fixture that ALSO defines an override name"
 after_identity=$(declare -f omarchy_prompt_identity)
 after_hostname=$(declare -f omarchy_prompt_hostname)
 [[ $before_identity == "$after_identity" ]] ||
@@ -992,7 +1315,7 @@ after_hostname=$(declare -f omarchy_prompt_hostname)
 [[ $before_hostname == "$after_hostname" ]] ||
   fail "T4 bug 1: deck_form_load_reserved_usernames let the sourced setup-form.sh redefine omarchy_prompt_hostname in THIS shell" "$after_hostname"
 deck_form_username_reserved root ||
-  fail "the array must still load correctly even though the fixture ALSO redefines a function -- the two are not supposed to trade off"
+  fail "the pattern must still load correctly even though the fixture ALSO redefines a function -- the two are not supposed to trade off"
 pass "loading the reserved-username list never lets the sourced setup-form.sh redefine an override function in this shell (T4 bug 1's exact mechanism)"
 
 echo "--- S3 hostname/identity constants and overrides --------------------------"

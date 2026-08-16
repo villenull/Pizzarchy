@@ -75,10 +75,13 @@
 #      collaborators. The mechanism every text screen needs.
 #   2. S0 Welcome/disclosure.
 #   3. S3 Account -- constants, validation predicates, and the override
-#      functions, with two UNVERIFIED assumptions flagged inline (see
-#      "INFERRED, NOT READ" below): upstream's exact variable-name contract
-#      for what a prompt function sets, and the reserved-username list's
-#      real contents (not available in this repo -- see the load function).
+#      functions. Both of this item's original UNVERIFIED assumptions have
+#      since been READ rather than inferred, and both were WRONG: upstream's
+#      variable-name contract for what a prompt function sets (corrected
+#      below, `$password`/`$hostname`), and the reserved-username list, which
+#      is `OMARCHY_RESERVED_USERNAMES` and a REGEX STRING, not an array named
+#      `RESERVED_USERNAMES` (docs/PROGRESS.md §5.34 D1 -- it shipped dead, and
+#      `root` was an accepted username until P33; see the S3 block).
 #   4. S1 Wi-Fi -- ONLY the pure, testable slice §4 S1 itself calls out for
 #      [U] coverage: the SSID list builder and its iwctl-output parser.
 #      (COMPLETED 2026-08-12 -- see item 9 below.)
@@ -226,7 +229,51 @@ readonly DECK_OSK_BOUND_MARKER="deck-input-mapper: bound"
 # run the prompt, WITHOUT an OSK, and say so. Both paths are unit-tested below
 # against fake mappers (one that prints the marker, one that never does).
 readonly -a DECK_MAPPER_ARGS=(--osk-backend=tty --osk-start-shown)
-readonly DECK_OSK_BIND_DEADLINE=5      # seconds -- §2.3 step 2's "a deadline"
+# --- the bind deadline: DERIVED FROM THE MAPPER, not chosen ----------------
+#
+# 🔴 THIS WAS 5, AND 5 WAS A NUMBER NOBODY MEASURED (docs/PROGRESS.md §5.34
+# D2). On real hardware the mapper bound LATER than 5 s, the wait below
+# expired, and -- because nothing killed the mapper on expiry -- the on-screen
+# keyboard then came up anyway, underneath a warning saying it had not. A
+# false statement, left on screen, next to the thing it denied. QEMU could
+# never catch it: with no gamepad the bind never happens there, so the message
+# was always true in the VM.
+#
+# The number below is not a bigger guess. It is read off the mapper's OWN
+# worst case, which this file must not be shorter than:
+#
+#   src/deck-input-mapper.py: NO_PAD_GRACE_SECONDS = 30.0
+#
+# `pick_device` deliberately tolerates up to that long with NO pad present
+# (its own comment: exiting on the enumeration gap "burned 4 of 5 restarts"),
+# rescanning every 1.0 s, before it gives up and exits. So any deadline under
+# 30 s can, by construction, time out on a mapper that is still patiently
+# doing exactly what it was designed to do and is about to succeed -- which is
+# D2's mechanism, whatever the proximate cause of the delay was on the day.
+# test/unit/test-deck-form.sh reads NO_PAD_GRACE_SECONDS out of the mapper and
+# FAILS if this constant ever drops back below it, so the two cannot drift.
+#
+# The +5 is the rest of the startup, measured on the Deck 2026-08-15 (session
+# 29, over SSH, warm cache): `deck-input-mapper --list` -- full interpreter
+# start, `import evdev`, compiling the 193 KB script -- takes 1.02-1.18 s
+# there, and the OSK module load plus the first tty draw happen after that and
+# before the marker. 5 s covers those with room, plus the 0.1 s poll
+# granularity below. ⚠️ UNVERIFIED, and stated as such: the bind time INSIDE
+# THE LIVE ISO was not measured. The installer's mapper runs from squashfs
+# with no bytecode cache, on a console rather than over SSH, immediately after
+# `lizard_mode` is written -- and none of that is reproducible from a running
+# installed system. The bound above does not depend on that number; it only
+# has to be larger than it, and NO_PAD_GRACE_SECONDS is the largest the mapper
+# itself will ever allow.
+#
+# THE COST OF BEING WRONG IS NOT SYMMETRIC, which is why this errs long. A
+# deadline that is too SHORT abandons a working keyboard on a device with no
+# other way to type (CLAUDE.md: no keyboard or terminal for a standard
+# install). A deadline that is too LONG only makes a genuinely-dead mapper
+# take longer to declare -- and not even that in practice, because the wait
+# below also returns the moment the mapper PROCESS exits, which is what
+# actually happens in QEMU and on every hard failure.
+readonly DECK_OSK_BIND_DEADLINE=35
 readonly DECK_OSK_POLL_INTERVAL=0.1
 
 # --- the console keymap the OSK actually draws (§5.20a) --------------------
@@ -248,6 +295,40 @@ readonly DECK_OSK_POLL_INTERVAL=0.1
 # follow-on), this stops being a constant and starts being the OSK's
 # reported layout -- and nothing else here has to change.
 readonly DECK_CONSOLE_KEYMAP=us
+
+# --- the console FONT (P33 A3) ---------------------------------------------
+#
+# The other half of "the installer is unreadable on a 7 inch panel"
+# (docs/PROGRESS.md §5.34 D3). The Deck's framebuffer is 800x1280 -- READ off
+# the hardware 2026-08-15, `/sys/class/graphics/fb0/virtual_size` = `800,1280`
+# -- and the kernel cmdline carries `fbcon=rotate:1`. At the console default
+# of 8x16 that is 100 columns of 8-pixel-wide glyphs on a handheld screen.
+#
+# ⚠️ THIS IS NOT ONLY THE KEYBOARD'S PROBLEM, which is why it is pinned here
+# and not inside the OSK. Every gum screen in the flow -- the disclosure text,
+# the network list, the timezone picker, the summary -- draws at the same
+# size. Doubling the glyph doubles all of them at once.
+#
+# NO NEW PACKAGE, and that is checked rather than assumed. `kbd` cannot be
+# absent from any Arch live ISO: `pacman -Qi kbd` reports `Required By:
+# systemd`, so it is pulled in by the base system itself, not by anything this
+# project chose. It is also already the source of `loadkeys`, which this file
+# has always called. And it ships this font: VERIFIED 2026-08-15 on the Deck
+# AND on the dev machine --
+# `/usr/share/kbd/consolefonts/latarcyrheb-sun32.psfu.gz`, `pacman -Qo` says
+# `kbd 2.10.0-1`, and `setfont` is `/usr/bin/setfont` from the same package.
+# `solar24x32` is the only other 32-pixel-tall font kbd carries; this one is
+# preferred because it is the same Lat/Ar/Cyr/Heb coverage as the 8x16
+# `latarcyrheb-sun16` the console already defaults to, so no glyph that
+# rendered before stops rendering.
+#
+# 16x32 gives 50 columns and 40 rows where 8x16 gave 100 and 80. FEWER, not
+# more -- that is the coupling docs/PROGRESS.md §5.34 D3 flags: the on-screen
+# keyboard must fit the console it is given rather than assume 80 columns.
+# That is deliberately NOT solved here (P33 Agent B owns `deck_osk_tty.py` and
+# is making the grid derive its width from the real column count). This file
+# only has to not lie about what it did, and to never make the font fatal.
+readonly DECK_CONSOLE_FONT=latarcyrheb-sun32
 
 # deck_form_console_tty
 # Upstream's own guard, kept verbatim in spirit: `loadkeys` only means
@@ -294,6 +375,46 @@ deck_form_pin_console_keymap() {
   return 0
 }
 
+# deck_form_pin_console_font [font]
+#
+# Pinned at the same points, and for the same reason, as
+# deck_form_pin_console_keymap above: at the point of use, so the property
+# holds without depending on any ordering between screens.
+#
+# 🔴 NEVER FATAL, AND THAT IS A DIFFERENT RULE FROM THE KEYMAP'S. A wrong
+# keymap silently substitutes characters in a MASKED password field, so that
+# function returns non-zero and its callers act on it. A missing font changes
+# nothing about what gets typed -- it only means the screen stays small. "A
+# prompt with a small font beats no prompt" (docs/tasks/P33-fix-round.md A3),
+# so this returns 0 on every path a caller can reach and reports the failure
+# by warning, never by stopping a screen from being drawn.
+#
+# Not silent, though: CLAUDE.md's rule is "never swallow a failure", not
+# "never continue past one". `setfont`'s own stderr is forwarded rather than
+# discarded, exactly as the keymap pin forwards `loadkeys`'.
+#
+# Idempotent: setting the font that is already loaded is a no-op the console
+# does not repaint, so calling this before every prompt costs one exec and
+# changes nothing after the first.
+deck_form_pin_console_font() {
+  local font=${1:-$DECK_CONSOLE_FONT}
+  local tty_name err rc=0
+  tty_name=$(deck_form_console_tty)
+  if [[ $tty_name != /dev/tty* ]]; then
+    # Same guard as the keymap: `setfont` addresses a Linux virtual console,
+    # not a terminal emulator. Silent here on purpose -- this branch is the
+    # normal case on a dev machine and in the unit suite, and the keymap pin
+    # beside it already says the same thing once.
+    return 0
+  fi
+  err=$(setfont "$font" 2>&1) || rc=$?
+  if ((rc != 0)); then
+    deck_form_warn "could not set the console font to '$font' (setfont exited $rc: ${err:-no output}). The installer stays at the console default (8x16), which is hard to read on the Deck's panel -- but every screen still works."
+    return 0
+  fi
+  return 0
+}
+
 # deck_form_lizard_write <sysfs-path> <value>
 #
 # §2.3's explicit QEMU branch, quoted directly: "hid_steam may not be loaded
@@ -317,19 +438,48 @@ deck_form_lizard_write() {
   return 0
 }
 
-# deck_form_wait_for_marker <file> <marker> <deadline-seconds> [<poll-interval>]
+# deck_form_wait_for_marker <file> <marker> <deadline-seconds> [<poll-interval>] [<watch-pid>]
 #
-# Polls FILE for a line containing MARKER until it appears or DEADLINE
-# elapses. Never blocks past the deadline -- that bound is what makes a
+# Polls FILE for a line containing MARKER until it appears, the deadline
+# elapses, or (if WATCH_PID is given and non-zero) the process being watched
+# exits. Never blocks past the deadline -- that bound is what makes a
 # hung or dead mapper a DEGRADED prompt (§2.3: "the prompt runs WITHOUT an
 # OSK, which is a degradation the screen must state, not swallow") rather
 # than a device with no way to advance a screen at all.
+#
+# Returns:
+#   0  the marker appeared
+#   1  the deadline elapsed with the process still running
+#   2  the process exited without ever printing the marker
+#
+# WHY 2 EXISTS AS A SEPARATE ANSWER (P33 A2). The two are different facts and
+# the screen says different things about them, so collapsing them would be the
+# same species of mistake as the false warning this whole change is fixing:
+# "it is taking too long" and "it is gone" are not interchangeable. It also
+# matters for cost -- the mapper's own NO_PAD_GRACE_SECONDS makes it EXIT
+# after ~30 s when no gamepad exists at all, which is precisely the QEMU case,
+# so watching the pid is what keeps a 35 s deadline from being 35 s of dead
+# waiting in every VM run.
+#
+# ⚠️ THE RE-CHECK AFTER THE PROCESS DIES IS LOAD-BEARING, not defensive
+# padding. A process can write the marker and exit in the same instant this
+# loop is sleeping -- the unit suite's own fake mappers do exactly that -- and
+# an implementation that answered "it exited" without looking one more time
+# would report a bind that happened as a bind that did not.
 deck_form_wait_for_marker() {
   local file=$1 marker=$2 deadline=$3 interval=${4:-$DECK_OSK_POLL_INTERVAL}
+  local watch_pid=${5:-0}
   local waited=0
   while true; do
     if [[ -r $file ]] && LC_ALL=C command grep -qF -- "$marker" "$file" 2>/dev/null; then
       return 0
+    fi
+    if [[ $watch_pid != 0 ]] && ! kill -0 "$watch_pid" 2>/dev/null; then
+      sleep "$interval"
+      if [[ -r $file ]] && LC_ALL=C command grep -qF -- "$marker" "$file" 2>/dev/null; then
+        return 0
+      fi
+      return 2
     fi
     awk -v w="$waited" -v d="$deadline" 'BEGIN { exit !(w >= d) }' && return 1
     sleep "$interval"
@@ -358,6 +508,50 @@ deck_form_text_prompt_cleanup() {
   deck_form_lizard_write "$sysfs" Y ||
     deck_form_warn "could not restore lizard mode to Y at $sysfs -- the device may be left with no firmware pointer AND no mapper. This is exactly the state §2.3 exists to prevent."
   rm -f "$stderr_file"
+}
+
+# deck_form_abandon_mapper <sysfs-path> <mapper-pid> <stderr-file> <reason>
+#
+# 🔴 THE OTHER HALF OF P33 A2, and the half that is not a number.
+# docs/PROGRESS.md §5.34 D2: on hardware the deadline expired, the code warned
+# "this prompt runs WITHOUT it" -- and then LEFT THE MAPPER RUNNING, so the
+# keyboard drew a second later and the user read a sentence denying the thing
+# they were looking at. Raising the deadline alone would only make that rarer,
+# not wrong less often; a rare false statement is still a false statement, and
+# this project's own rules do not have a rate threshold for one.
+#
+# So the warning is made TRUE BY CONSTRUCTION instead of by hope: on expiry
+# the mapper is killed, and the prompt really does run without it. Nothing on
+# screen has to be retracted because nothing false was said.
+#
+# ⚠️ LIZARD MODE GOES BACK TO Y HERE, IMMEDIATELY -- not at the end of the
+# prompt. Without it this function would produce the exact state §2.3 exists
+# to prevent and deck_form_text_prompt_cleanup already names: no firmware
+# pointer AND no mapper, i.e. a device with no input at all, on a screen the
+# user now has no way to leave. With lizard mode restored they still cannot
+# type (§2.1: no Space, no OSK) but they can still move a cursor and press
+# Enter or Escape, which is the difference between a degraded screen and a
+# dead handheld. Reusing the cleanup function rather than open-coding the
+# three steps is deliberate: it is already idempotent by construction, so the
+# ordinary post-prompt cleanup that runs later is a no-op rather than a race.
+#
+# THE MAPPER'S OWN OUTPUT IS REPORTED, NOT DELETED. It is the only place the
+# REASON lives -- "no gamepad present", "the console is too narrow to draw a
+# row", an unopenable tty -- and the cleanup below removes the file. Throwing
+# that away while announcing a degradation would be swallowing the failure at
+# the exact moment it was finally observable.
+deck_form_abandon_mapper() {
+  local sysfs=$1 mapper_pid=$2 stderr_file=$3 reason=$4
+  local captured=''
+  [[ -r $stderr_file ]] && captured=$(LC_ALL=C tail -n 20 -- "$stderr_file" 2>/dev/null)
+  deck_form_warn "$reason -- this prompt runs WITHOUT the on-screen keyboard, and the mapper has been stopped so that stays true"
+  if [[ -n $captured ]]; then
+    deck_form_log "the on-screen keyboard's helper said, before it was stopped:"
+    printf '%s\n' "$captured" >&2
+  else
+    deck_form_log "the on-screen keyboard's helper produced no output at all, which is itself the only evidence there is"
+  fi
+  deck_form_text_prompt_cleanup "$sysfs" "$mapper_pid" "$stderr_file"
 }
 
 # deck_form_text_prompt <prompt-fn> [args...]
@@ -414,17 +608,38 @@ deck_form_text_prompt() {
   deck_form_pin_console_keymap ||
     deck_form_warn "this prompt runs with an UNVERIFIED console keymap -- what you type may not be what the on-screen keyboard shows"
 
+  # STEP 0b (P33 A3). Beside the keymap, at the point of use, for the identical
+  # reason: no ordering between screens has to hold for it to be true here.
+  # Never gated -- see deck_form_pin_console_font's own "never fatal" note --
+  # and deliberately BEFORE the mapper starts, so the on-screen keyboard reads
+  # the console geometry this sets rather than the one it replaced.
+  deck_form_pin_console_font
+
   deck_form_lizard_write "$sysfs" N ||
     deck_form_warn "could not turn lizard mode off -- this prompt runs WITHOUT the on-screen keyboard"
 
   if [[ -x $mapper_bin ]]; then
     "$mapper_bin" "${DECK_MAPPER_ARGS[@]}" >"$stderr_file" 2>&1 &
     mapper_pid=$!
-    if deck_form_wait_for_marker "$stderr_file" "$DECK_OSK_BOUND_MARKER" "$deadline"; then
-      osk_up=1
-    else
-      deck_form_warn "on-screen keyboard did not report bound within ${deadline}s -- this prompt runs WITHOUT it"
-    fi
+    local wait_rc=0
+    deck_form_wait_for_marker "$stderr_file" "$DECK_OSK_BOUND_MARKER" \
+      "$deadline" "$DECK_OSK_POLL_INTERVAL" "$mapper_pid" || wait_rc=$?
+    case $wait_rc in
+      0) osk_up=1 ;;
+      2)
+        # The mapper is already gone. Nothing to kill, but everything else
+        # abandon does still applies -- lizard mode back to Y, and its own
+        # last words reported instead of deleted unread.
+        deck_form_abandon_mapper "$sysfs" "$mapper_pid" "$stderr_file" \
+          "the on-screen keyboard's helper exited without ever reporting bound"
+        mapper_pid=0
+        ;;
+      *)
+        deck_form_abandon_mapper "$sysfs" "$mapper_pid" "$stderr_file" \
+          "on-screen keyboard did not report bound within ${deadline}s"
+        mapper_pid=0
+        ;;
+    esac
   else
     deck_form_warn "mapper not found at $mapper_bin -- this prompt runs WITHOUT the on-screen keyboard"
   fi
@@ -495,6 +710,13 @@ deck_form_s0_text() {
 # runs `loadkeys`.
 greeter() {
   local tty=${DECK_S0_TTY:-/dev/tty}
+  # P33 A3, and this is the EARLIEST point in upstream's flow this file owns
+  # (see this function's own note above and S1's "WHERE THIS SCREEN IS CALLED
+  # FROM"). Pinning the font here is what makes S0's disclosure text and S1's
+  # network list legible too -- deck_form_text_prompt's copy only ever reaches
+  # the text screens. Never gated: a small font is not a reason to skip a
+  # screen.
+  deck_form_pin_console_font
   deck_form_s0_text
   deck_form_stty_sane "$tty"
   IFS= read -r _ <"$tty" 2>/dev/null
@@ -587,8 +809,9 @@ deck_form_stty_sane() {
 #
 # WHAT IS NOT DONE HERE, and is a real residual risk: `omarchy_prompt_keyboard`
 # is NOT overridden. Upstream's picker keeps running, unmodified. This repo
-# does not vendor `setup-form.sh` (nothing here has its body -- see the S3
-# reserved-username block for the same gap), so its navigability on a
+# does not vendor `setup-form.sh` (nothing here has its body; the S3
+# reserved-username block records what that cost when it was guessed at
+# instead of read), so its navigability on a
 # controller is UNVERIFIED, and if it falls back to `gum filter`'s
 # narrow-by-typing the way `omarchy_prompt_timezone` does (§3 deviation 3)
 # it needs the same treatment. That is a [V] question against a real ISO and
@@ -736,18 +959,43 @@ deck_form_passwords_match() {
 # `source`-based unit testing either. Both are handled the same way: point
 # at a fixture instead of the real path.
 #
-# ⚠️ (INFERRED, NOT READ this session): the array name below,
-# DECK_RESERVED_USERNAMES_VAR's value, is this file's ASSUMPTION about what
-# setup-form.sh calls its own reserved-name list -- the spec says "a
-# 51-name list" but does not name the variable, and this session had no
-# access to the file itself (see docs/tasks/T4-screen-spec.md §10's own
-# "not done" list). Verify the real name against the vendored copy before
-# this ships. Until then this degrades LOUDLY (warns, treats the list as
-# empty) rather than silently validating against nothing while looking like
-# it checked something.
+# ✅ READ, NOT INFERRED (2026-08-15, session 29). This block used to say the
+# variable name below was "(INFERRED, NOT READ this session)" and to ask that
+# it be verified "before this ships". IT SHIPPED UNVERIFIED, and the inference
+# was wrong in two ways at once (docs/PROGRESS.md §5.34 D1): the name was not
+# `RESERVED_USERNAMES`, and the value was not a bash array. Verified now
+# against the real vendored file, at
+# ~/.cache/omarchy-deck/p32-build/runtime-src/install/provisioning/setup-form.sh
+# line 82 -- the exact file `iso/upstream/builder/build-iso.sh` copies to
+# `/usr/share/omarchy-iso/setup-form.sh` (its `cp "$setup_form" ...`, and
+# `$setup_form` is `install/provisioning/setup-form.sh` out of the omarchy
+# source):
+#
+#     OMARCHY_RESERVED_USERNAMES='^(root|bin|daemon|mail|ftp|http|nobody|dbus|
+#     systemd-coredump|...|sddm)$'
+#
+# A REGEX STRING, matched with `[[ $username =~ $OMARCHY_RESERVED_USERNAMES ]]`
+# at that file's own line 111. So the old code's `declare -p` + nameref on an
+# ARRAY failed for every input, `deck_form_username_reserved` returned 1
+# always, and -- because this file replaces `omarchy_prompt_username` wholesale
+# -- upstream's own check never ran either. Both checks were gone and `root`
+# was an accepted username on the shipped ISO.
+#
+# ⚠️ WHY THIS STILL SOURCES INSTEAD OF COPYING THE 31 NAMES. Unchanged from
+# T4-screen-spec.md §4 S3's own verified-by note: "sourced from upstream's own
+# setup-form.sh constants rather than copied -- a copy would pass while
+# upstream's list changed." The bug was the wrong NAME, not the sourcing.
+# The degradation is still loud and still the point: a rename upstream warns
+# and continues rather than silently validating against nothing, which is
+# exactly the behaviour that made D1 findable at all.
 readonly DECK_SETUP_FORM_SH=/usr/share/omarchy-iso/setup-form.sh
-readonly DECK_RESERVED_USERNAMES_VAR=RESERVED_USERNAMES
-declare -a DECK_LOADED_RESERVED_USERNAMES=()
+readonly DECK_RESERVED_USERNAMES_VAR=OMARCHY_RESERVED_USERNAMES
+# The loaded regex, or empty when it could not be loaded. NOT an array: see
+# above. Empty is a meaningful state and is handled explicitly in
+# deck_form_username_reserved -- an empty regex matches EVERY string, so
+# treating "unloaded" as "match against ''" would reject every username the
+# user could possibly type.
+DECK_LOADED_RESERVED_PATTERN=''
 
 # deck_form_load_reserved_usernames
 # Overridable via DECK_SETUP_FORM_SH_OVERRIDE for the unit suite.
@@ -787,33 +1035,58 @@ declare -a DECK_LOADED_RESERVED_USERNAMES=()
 # defined in this process again.
 deck_form_load_reserved_usernames() {
   local setup_form=${DECK_SETUP_FORM_SH_OVERRIDE:-$DECK_SETUP_FORM_SH}
-  DECK_LOADED_RESERVED_USERNAMES=()
+  DECK_LOADED_RESERVED_PATTERN=''
   if [[ ! -r $setup_form ]]; then
     deck_form_warn "cannot read $setup_form -- the reserved-username list is UNAVAILABLE this run (pattern validation still applies)"
     return 1
   fi
-  local names_out rc=0
-  names_out=$(
+  local pattern_out rc=0
+  pattern_out=$(
     # shellcheck disable=SC1090  # a runtime/fixture path, not knowable at lint time
     source "$setup_form" >/dev/null 2>&1
-    declare -p "$DECK_RESERVED_USERNAMES_VAR" >/dev/null 2>&1 || exit 1
-    local -n src_array="$DECK_RESERVED_USERNAMES_VAR"
-    printf '%s\n' "${src_array[@]}"
+    # `-v` rather than `declare -p`: it answers "is this name SET" for a
+    # scalar without also succeeding for a name that exists but is unset, and
+    # without printing anything this subshell would then have to suppress.
+    [[ -v $DECK_RESERVED_USERNAMES_VAR ]] || exit 1
+    # Indirect expansion, not a nameref: `${!VAR}` is the plain-scalar read,
+    # and the ONLY thing that crosses back out of this subshell is its text.
+    # The subshell itself is T4 bug 1's fix and must not be undone -- see this
+    # function's block comment above.
+    printf '%s\n' "${!DECK_RESERVED_USERNAMES_VAR}"
   ) || rc=$?
   if ((rc != 0)); then
-    deck_form_warn "sourced $setup_form but it defines no '$DECK_RESERVED_USERNAMES_VAR' array -- the reserved-username list is UNAVAILABLE this run"
+    deck_form_warn "sourced $setup_form but it defines no '$DECK_RESERVED_USERNAMES_VAR' -- the reserved-username list is UNAVAILABLE this run"
     return 1
   fi
-  [[ -n $names_out ]] && mapfile -t DECK_LOADED_RESERVED_USERNAMES <<<"$names_out"
+  # An empty value is NOT a usable regex (it matches everything), so it is
+  # treated as a failed load rather than quietly turned into "every username
+  # is reserved". Upstream defining the name as the empty string is the same
+  # class of event as upstream renaming it, and gets the same loud answer.
+  if [[ -z $pattern_out ]]; then
+    deck_form_warn "sourced $setup_form and '$DECK_RESERVED_USERNAMES_VAR' is EMPTY -- an empty pattern matches every name, so the reserved-username list is treated as UNAVAILABLE this run"
+    return 1
+  fi
+  DECK_LOADED_RESERVED_PATTERN=$pattern_out
   return 0
 }
 
+# deck_form_username_reserved <name>
+#
+# 0 = reserved (refuse it), 1 = not reserved (or no list to check against).
+#
+# FAILS OPEN, deliberately and unchanged from the array version: with no
+# pattern loaded nothing is reported reserved, because the alternative --
+# rejecting names on a list we could not read -- would strand a user at a
+# screen with no way forward and nothing true to tell them. The unreadable
+# list has already been warned about loudly at the point it failed to load.
 deck_form_username_reserved() {
-  local name=$1 candidate
-  for candidate in ${DECK_LOADED_RESERVED_USERNAMES[@]+"${DECK_LOADED_RESERVED_USERNAMES[@]}"}; do
-    [[ $name == "$candidate" ]] && return 0
-  done
-  return 1
+  local name=$1
+  [[ -n $DECK_LOADED_RESERVED_PATTERN ]] || return 1
+  # UNQUOTED on the right of =~ on purpose: quoting it would make bash match
+  # the pattern LITERALLY, which is upstream's own spelling at setup-form.sh
+  # line 111 and the difference between "reject root" and "reject the literal
+  # string ^(root|bin|...)$".
+  [[ $name =~ $DECK_LOADED_RESERVED_PATTERN ]]
 }
 
 # --- the override functions themselves --------------------------------------
