@@ -1,12 +1,10 @@
 # Pizzarchy: Omarchy on your Steam Deck
 
-**Hot and ready in about twenty minutes — one bootable USB, no keyboard, and
-Gaming Mode is unchanged. Easy as Pizza(rchy) pie.**
+One bootable USB installs [Omarchy](https://omarchy.org) on your Steam Deck with no keyboard/mouse required. Feels exactly like SteamOS except the desktop is Omarchy. Installation is driven entirely by the Deck's buttons and trackpads.
 
-One bootable USB installs [Omarchy](https://omarchy.org) on your Steam Deck with no keyboard/mouse required. Installation is driven entirely by the Deck's buttons and
-trackpads.
+**Hot and ready in about twenty minutes! Easy as Pizza(rchy) pie.**
 
-Afterwards, the Deck behaves like it always did as turning your Deck on lands you in Gaming Mode and power button puts the Deck to sleep/wake. The difference is **Desktop Mode**, which now drops you into an Omarchy/Hyprland desktop. Use the QAM button and menu to go back to Gaming Mode.
+Deck behaves like it always did as turning your Deck on lands you in Gaming Mode and power button puts the Deck to sleep/wake. The difference is **Desktop Mode**, which now drops you into an Omarchy/Hyprland desktop. Use the QAM button and menu to go back to Gaming Mode.
 
 ![Omarchy's desktop running on a Steam Deck](docs/images/hero-desktop.png)
 
@@ -52,7 +50,7 @@ image — see [Recovery](#recovery).
 
 3. **Boot it.** Hold **Volume Down + Power** until the boot menu appears, then pick the USB stick.
 
-4. **Follow the screens.** Keyboard layout, Wi-Fi, your account, then the disk.
+4. **Follow the screens.** Keyboard layout, Wi-Fi, your account, then the disk. Note the Ventoy splash screen is rotated (no fix).
 
 5. **Wait.** Reboots when finished, and comes up in Gaming Mode.
 
@@ -102,18 +100,13 @@ image — see [Recovery](#recovery).
 
 ## Building it yourself
 
-Needs Docker and ~40 minutes. The build is scripted.
+Needs Docker and ~40 minutes. The finished `.iso` lands in the build's `release/` directory with its sha256. Build refuses to proceed if any of its guards fail.
 
 ```bash
 git clone --recursive https://github.com/villenull/Pizzarchy
 cd Pizzarchy
 iso/bin/build
 ```
-
-The finished `.iso` lands in the build's `release/` directory with its sha256.
-
-Build refuses to proceed if any of its guards fail.
-
 ---
 
 ## Reporting a bug
