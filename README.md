@@ -38,6 +38,8 @@ image — see [Recovery](#recovery).
 
 ![Desktop Mode: the Omarchy menu, and the way back to Gaming Mode](docs/images/desktop.png)
 
+![The on-screen keyboard on the desktop, aimed with the trackpads](docs/images/desktop-osk.png)
+
 ---
 
 ## Install
@@ -74,8 +76,6 @@ image — see [Recovery](#recovery).
 | **L2** / **R2** | left / right trackpad click |
 | **STEAM** | apps menu |
 | **QAM** (the ⋯ button) | the Omarchy menu |
-
-![The on-screen keyboard on the desktop, aimed with the trackpads](docs/images/desktop-osk.png)
 
 ---
 

@@ -134,10 +134,10 @@ LC_ALL=C grep -qF "CENTER:Installed Omarchy in 3m 14s" "$TTY_PATH" ||
 # Asserted on SUBSTANCE, not on an exact sentence: a test that pins prose
 # verbatim is what kept a false DSP disclosure on the greeter for a month
 # (105523c). These check that the screen says the three things that matter.
-LC_ALL=C grep -qF "BLACK SCREEN" "$TTY_PATH" ||
-  fail "render_finish must warn that the first boot shows a black screen" "$(cat "$TTY_PATH")"
-LC_ALL=C grep -qiF "two minutes" "$TTY_PATH" ||
-  fail "render_finish must say roughly how long the black screen lasts -- 'wait' with no duration is not actionable" "$(cat "$TTY_PATH")"
+LC_ALL=C grep -qF "BLACK" "$TTY_PATH" ||
+  fail "render_finish must warn that part of the first boot is black" "$(cat "$TTY_PATH")"
+LC_ALL=C grep -qiE "about a minute|[0-9]+ (seconds|minutes)" "$TTY_PATH" ||
+  fail "render_finish must say roughly how long the wait is -- 'wait' with no duration is not actionable" "$(cat "$TTY_PATH")"
 LC_ALL=C grep -qiF "turn me off" "$TTY_PATH" ||
   fail "render_finish must tell the user not to power the Deck off during that wait" "$(cat "$TTY_PATH")"
 pass "S7 warns about the black first boot: what it looks like, how long, and not to power off"
@@ -147,7 +147,7 @@ pass "S7 warns about the black first boot: what it looks like, how long, and not
 # above. On a real tty both redirections behave identically, so only a suite
 # pointing TTY_PATH at a file can see it.
 finish_out="$(cat "$TTY_PATH")"
-[[ ${finish_out%%BLACK SCREEN*} == *"Installed Omarchy in 3m 14s"* ]] ||
+[[ ${finish_out%%reboots on its own*} == *"Installed Omarchy in 3m 14s"* ]] ||
   fail "the reboot warning must FOLLOW the completion summary, not truncate it" "$finish_out"
 pass "the reboot warning is appended below the summary, not written over it"
 pass "render_finish keeps upstream's own duration line"

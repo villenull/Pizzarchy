@@ -3080,19 +3080,29 @@ readonly DECK_SUMMARY_BOOT="Gaming Mode"
 #  reboot and to just wait the two mins etc."
 #
 # 🔴 THE NUMBERS ARE MEASURED, NOT ROUNDED UP FOR COMFORT.
-# docs/PROGRESS.md §5.35, read off Steam's own
-# ~/.local/share/Steam/logs/bootstrap_log.txt on the installed Deck:
 #
-#   15:08:15  Steam launches (-gamepadui), "Downloading Update..."
-#   15:09:51  "Extracting package..."
-#   15:10:14  "Update complete, launching..."
-#   15:10:18  the new client starts          => 2m03s of black panel
+# ⚠️ SUPERSEDED ONCE ALREADY. This block used to say "about two minutes",
+# from docs/PROGRESS.md §5.35 (2m03s, read off Steam's bootstrap_log.txt on
+# the P36-era install). P37 shipped the pre-seeded Steam bootstrap AND the
+# splash, and both landed, so that figure is now wrong in two ways: the wait
+# is shorter, and most of it is no longer black. Re-measured 2026-08-16 on
+# the P37 install over SSH, from `journalctl -b 0 -o short-precise`:
 #
-# and `systemd-analyze` on the same machine says the BOOT is 39.168 s with
-# plymouth-quit at 659 ms. So the two minutes are Steam unpacking itself, not
-# a slow boot, and nothing can paint in that window today: the cmdline is
-# `quiet splash loglevel=0 systemd.show_status=false vt.global_cursor_default=0`.
-# "About two minutes" and "about 40 seconds" below are those two measurements.
+#   16:01:33.99  kernel starts
+#   16:01:42.50  deck-steam-splash draws on gamescope-0   => 8.5s black
+#   16:01:47.91  Steam: "Verifying installation..."
+#   16:02:15.37  Steam: "Update complete, launching Steam..."  => 27.5s
+#   16:02:21.94  splash down, steamwebhelper running     => 39.4s of splash
+#
+# and `systemd-analyze` on the same boot: 4.724s firmware + 7.281s loader +
+# 5.756s kernel + 16.883s userspace = 34.646s. The 12.0s of firmware+loader
+# is black too and precedes the journal entirely, so the black window is
+# ~20s and the whole wait to Gaming Mode is ~60s.
+#
+# "About a minute" below is that ~60s. "About 40 seconds" is the 34.646s.
+# The wording deliberately does NOT name a black-screen duration: the
+# operator's 20-30s was an eyeball estimate, and a second number is a
+# second thing to go stale. Say the wait, say some of it is black, stop.
 #
 # ⚠️ WHERE THIS *SHOULD* LIVE, AND WHY IT DOES NOT. The literal last screen
 # before the reboot is S7 -- `render_finish` / `reboot_prompt`, which live in
@@ -3107,8 +3117,8 @@ readonly DECK_SUMMARY_BOOT="Gaming Mode"
 # this file's owner does not own that file.
 readonly -a DECK_S5_REBOOT_LINES=(
   "When the install finishes the Deck reboots on its own."
-  "The first boot then sits on a BLACK SCREEN for about two minutes while Steam unpacks itself."
-  "That is normal. Don't turn me off -- just wait."
+  "The first boot then takes about a minute while Steam finishes installing itself."
+  "The screen is BLACK for part of it. That is normal. Don't turn me off -- just wait."
   "After that it starts in Gaming Mode, and every later boot takes about 40 seconds."
 )
 

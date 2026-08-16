@@ -212,9 +212,9 @@ render_finish() {
   {
     blank_line
     center "The Deck reboots on its own from here." "$CONTENT_WIDTH"
-    center "The first boot sits on a BLACK SCREEN for about two minutes" "$CONTENT_WIDTH"
-    center "while Steam unpacks itself. That is normal." "$CONTENT_WIDTH"
-    center "Don't turn me off -- just wait." "$CONTENT_WIDTH"
+    center "The first boot takes about a minute while Steam finishes" "$CONTENT_WIDTH"
+    center "installing itself. The screen is BLACK for part of it." "$CONTENT_WIDTH"
+    center "That is normal. Don't turn me off -- just wait." "$CONTENT_WIDTH"
     blank_line
     # ⚠️ APPEND, not truncate. On a real tty `>` and `>>` are the same thing,
     # which is why this is easy to get wrong and impossible to notice on

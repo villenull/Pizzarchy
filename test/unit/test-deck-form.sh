@@ -2543,10 +2543,10 @@ echo "--- P33 L2: the pre-reboot notice ---------------------------------------"
 reboot_text=$(deck_form_reboot_notice_text)
 LC_ALL=C grep -qF "reboots on its own" <<<"$reboot_text" ||
   fail "L2: the notice must say the Deck reboots by itself"
-LC_ALL=C grep -qF "two minutes" <<<"$reboot_text" ||
-  fail "L2: the notice must give the MEASURED duration -- docs/PROGRESS.md §5.35, 15:08:15 -> 15:10:18 is 2m03s of black panel while Steam unpacks its own update"
-LC_ALL=C grep -qF "BLACK SCREEN" <<<"$reboot_text" ||
-  fail "L2: the notice must say the screen goes black -- 'the Deck looks switched off' is the whole reason this screen exists"
+LC_ALL=C grep -qiE "about a minute|[0-9]+ (seconds|minutes)" <<<"$reboot_text" ||
+  fail "L2: the notice must give the MEASURED duration. Re-measured 2026-08-16 on the P37 install: kernel 16:01:33.99 -> steamwebhelper 16:02:21.94, plus 12.0s of firmware+loader, is ~60s. The old assertion pinned the literal words 'two minutes' from the P36-era 2m03s and would have failed this correct fix."
+LC_ALL=C grep -qF "BLACK" <<<"$reboot_text" ||
+  fail "L2: the notice must say part of the wait is black -- 'the Deck looks switched off' is the whole reason this screen exists. It is no longer the WHOLE wait: the splash covers ~39s of the ~60s, so this asserts BLACK, not 'BLACK SCREEN'."
 LC_ALL=C grep -qF "Don't turn me off" <<<"$reboot_text" ||
   fail "L2: the operator asked for this in these words ('something to tell users like don't turn me off. steam is unpacking'), and the splash elsewhere already uses them"
 pass "L2: the pre-reboot notice says it reboots, says the panel goes black for the measured two minutes, and says don't turn me off"
@@ -3383,14 +3383,14 @@ pass "P33 L1: S5 recaps the DETECTED network state, so an ethernet Deck is not w
 
 echo "--- P33 L2: S5 carries the pre-reboot warning on every path --------------"
 
-# Unconditional: every install reboots, and the two-minute black panel is not
+# Unconditional: every install reboots, and the first-boot wait is not
 # conditional on anything the screens above decided. Asserted on BOTH the
 # offline and the connected run's logs, because "shown only when offline" is
 # exactly the kind of accidental coupling a single-case test would miss.
 for log in "$work/s5-say.log" "$work/s5-say2.log" "$work/s5-say3.log"; do
   LC_ALL=C grep -qF "Don't turn me off" "$log" ||
     fail "S5 must carry the pre-reboot warning on every path, including $log" "$(cat "$log")"
-  LC_ALL=C grep -qF "two minutes" "$log" ||
+  LC_ALL=C grep -qiE "about a minute|[0-9]+ (seconds|minutes)" "$log" ||
     fail "S5's pre-reboot warning must give the measured duration on every path ($log)"
 done
 pass "L2: the pre-reboot warning is on the last screen deck-form.sh owns, on every path through it"

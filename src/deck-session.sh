@@ -3881,7 +3881,28 @@ StartLimitIntervalSec=60
 
 [Service]
 Type=simple
-ExecStart=${MAPPER_BIN} --osk-backend=${MAPPER_OSK_BACKEND}
+# ⚠️ --grab is LOAD-BEARING, and only safe because of [Install] above.
+#
+# Without it Hyprland reads the same evdev node we do: `hyprctl devices` lists
+# BOTH `deck-input-mapper-virtual-keyboard-1` (ours) and
+# `valve-software-steam-controller` (the raw pad) as mice. So with the OSK up,
+# the right pad drove the key cursor AND the system pointer at the same time --
+# the pointer wandering across whatever sat behind the keyboard. The suppression
+# at deck-input-mapper.py's pointer branch (`not mapper.osk_active`) was already
+# correct and already working; it just cannot gate a device it does not own.
+#
+# This never showed before P37 because stage-input-mapper was broken, so the
+# unit was never installed and the desktop OSK never ran. The installer's tty
+# OSK has no pointer to fight, which is why that backend's comment claims the
+# question is "answered" -- answered for tty only.
+#
+# 🔴 THE SAFETY ARGUMENT IS [Install], NOT THIS LINE. WantedBy= is
+# wayland-session@hyprland.desktop.target, so this unit starts for the Hyprland
+# session and NOT for gamescope. If anyone ever adds a gamescope target here,
+# --grab takes the pad away from Steam and Gaming Mode stops accepting input
+# entirely. Verified on hardware 2026-08-16: pointer no longer doubles, the
+# keyboard still types, and the pad still drives the pointer with the OSK down.
+ExecStart=${MAPPER_BIN} --osk-backend=${MAPPER_OSK_BACKEND} --grab
 # The pad may not have enumerated yet at session start. Restart rather than
 # fail permanently -- but bounded (above), so a genuinely missing device shows
 # up in the journal instead of spinning silently.
