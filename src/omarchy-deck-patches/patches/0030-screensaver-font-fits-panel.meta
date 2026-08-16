@@ -95,7 +95,7 @@ target: default/foot/screensaver.ini
 
 # Exactly once, and exactly this value. Twice would mean a previous run appended
 # rather than patched.
-assert_count: default/foot/screensaver.ini|^font=JetBrainsMono Nerd Font:size=14$|1
+assert_count: default/foot/screensaver.ini|^font=JetBrainsMono Nerd Font:size=7$|1
 # Nothing left at 16 or above. 1280/16 = 80 columns, one short of the 81-column
 # art -- so any size in that range is the bug, whoever wrote it. Written as a
 # range rather than as `size=18` so an upstream retune to 17, 20 or 24 is caught

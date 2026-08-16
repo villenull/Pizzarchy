@@ -2884,15 +2884,29 @@ if command -v node >/dev/null 2>&1 && [[ -f $menu_model ]]; then
     const row = merged.items[process.argv[4]];
     if (!row) { console.error("the real parser found no row; user rows parsed: " + user.length); process.exit(1); }
     if (row.action !== process.argv[5]) { console.error("action is " + JSON.stringify(row.action)); process.exit(1); }
-    if (row.parent !== "root") { console.error("parent is " + JSON.stringify(row.parent)); process.exit(1); }
+    // 🔴 THE PARENT IS DERIVED FROM THE DOTTED ID, NOT RESTATED. MENU_ROW_ID
+    // moved from `gaming` (root) to `system.gaming` on 2026-08-16, because a
+    // root row shows up in BOTH the apps menu and the Omarchy menu and the
+    // operator saw "Gaming Mode" in both. Asserting a hardcoded "root" here
+    // would have to be edited by hand every time the row moves -- and a test
+    // that must be edited to follow a decision is a test that will one day be
+    // edited to follow a mistake.
+    const dotted = process.argv[4];
+    const wantParent = dotted.includes(".") ? dotted.slice(0, dotted.lastIndexOf(".")) : "root";
+    if (row.parent !== wantParent) { console.error("parent is " + JSON.stringify(row.parent) + ", expected " + JSON.stringify(wantParent)); process.exit(1); }
     if (row.kind !== "action") { console.error("kind is " + JSON.stringify(row.kind)); process.exit(1); }
-    const roots = merged.itemOrder.filter(id => merged.items[id].parent === "root");
-    if (roots[roots.length - 1] !== process.argv[4]) { console.error("root order: " + roots.join(" ")); process.exit(1); }
+    // The parent must be one Omarchy actually declares, or the row is orphaned
+    // and never drawn -- which would look exactly like "the stage did nothing".
+    if (wantParent !== "root" && !def.some(r => r.id === wantParent)) {
+      console.error("no such parent in Omarchy\u0027s own menu: " + wantParent); process.exit(1);
+    }
+    const siblings = merged.itemOrder.filter(id => merged.items[id].parent === wantParent);
+    if (siblings[siblings.length - 1] !== dotted) { console.error("sibling order: " + siblings.join(" ")); process.exit(1); }
   ' "$menu_model" "$user_ext" "$runtime_src/default/omarchy/omarchy-menu.jsonc" \
     "$MENU_ROW_ID" "$RETURN_ACTION" 2>"$work/node.err" ||
-    fail_test "Omarchy's OWN MenuModel.js parses the installed file and finds the row on the root menu" \
+    fail_test "Omarchy's OWN MenuModel.js parses the installed file and finds the row under its declared parent" \
       "$(cat "$work/node.err")"$'\n'"$(cat "$user_ext")"
-  pass "Omarchy's own MenuModel.js parses the installed file: '${MENU_ROW_ID}' is a root ACTION row, last in the root order"
+  pass "Omarchy's own MenuModel.js parses the installed file: '${MENU_ROW_ID}' is an ACTION row under a parent Omarchy declares, last in that parent's order"
 else
   note "node and/or the pinned runtime checkout are absent, so the row was checked against this suite's mirror of stripJsonc and not against Omarchy's real parser (set OMARCHY_DECK_RUNTIME_SRC to enable it)"
 fi

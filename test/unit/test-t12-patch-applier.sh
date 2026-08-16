@@ -195,8 +195,17 @@ fi
 [[ $(grep -cE '^interface_rotation: 90$' "$root/$LIMINE_REL") -eq 1 ]] ||
   fail "the limine template carries interface_rotation: 90 exactly once" "$(cat "$root/$LIMINE_REL")"
 [[ $(status_of 0030-screensaver-font-fits-panel.patch) == ok ]] || fail "0030 is ok" "$(cat "$state")"
-[[ $(grep -cE '^font=JetBrainsMono Nerd Font:size=14$' "$root/$FOOT_REL") -eq 1 ]] ||
-  fail "the screensaver terminal font is size=14 exactly once" "$(cat "$root/$FOOT_REL")"
+# 🔴 READ FROM THE PATCH, NOT RESTATED. This asserted a literal `size=14` and
+# went red the moment the operator asked for a smaller logo -- a test that pins
+# a value it does not own turns every retune into a false failure, and (worse,
+# and seen twice today) can keep a wrong value alive by making the fix look
+# like a break. The patch is the source of truth for what the patch installs.
+foot_size=$(sed -n 's/^+font=JetBrainsMono Nerd Font:size=\([0-9][0-9]*\)$/\1/p' \
+  "$REPO_ROOT/src/omarchy-deck-patches/patches/0030-screensaver-font-fits-panel.patch" | head -1)
+[[ -n $foot_size ]] ||
+  fail "could not read the font size out of 0030's patch -- the assertion below would be vacuous"
+[[ $(grep -cE "^font=JetBrainsMono Nerd Font:size=${foot_size}\$" "$root/$FOOT_REL") -eq 1 ]] ||
+  fail "the screensaver terminal font is size=${foot_size} exactly once" "$(cat "$root/$FOOT_REL")"
 if grep -qE '^font=.*:size=18$' "$root/$FOOT_REL"; then
   fail "the old size=18 is gone" "still present"
 fi

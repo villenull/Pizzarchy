@@ -3,7 +3,7 @@
 @@ -1,5 +1,5 @@
  [main]
 -font=JetBrainsMono Nerd Font:size=18
-+font=JetBrainsMono Nerd Font:size=14
++font=JetBrainsMono Nerd Font:size=7
  pad=0x0
  
  [colors-dark]
