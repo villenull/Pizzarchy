@@ -49,8 +49,8 @@ right on the console.
 setup, so the first boot is a boot — not a long wait on a black screen wondering
 whether it worked.
 
-> _**[ IMAGE — Omarchy desktop, full screenshot ]**_ `docs/images/desktop.png`
->
+![Desktop Mode: Omarchy and Hyprland running on the Deck's own panel](docs/images/desktop.png)
+
 > _**[ IMAGE — Steam menu showing "Switch to Desktop" ]**_ `docs/images/switch-to-desktop.png`
 >
 > _**[ IMAGE — Gaming Mode library, to show it is stock ]**_ `docs/images/gaming-mode.png`
