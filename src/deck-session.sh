@@ -1231,7 +1231,7 @@ readonly -a SLEEP_LOCK_UNIT_DIRS=(/etc/systemd/user /usr/local/lib/systemd/user 
 readonly PIZZA_BIN_DIR=/usr/local/bin
 readonly PIZZA_SHARE_DIR=/usr/local/share/pizza
 readonly PIZZA_DISPATCHER_NAME=pizza
-readonly -a PIZZA_SUBCOMMANDS=(pizza-pizza)
+readonly -a PIZZA_SUBCOMMANDS=(pizza-pizza pizza-ssh)
 # The art the command uses, and the ONLY place the choice is written down.
 # Swapping the pizza is a one-file change: replace src/pizza-art/pizza.txt (the
 # alternates live beside it) and re-run the stage. Nothing here, and nothing in

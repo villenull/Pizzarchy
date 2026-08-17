@@ -3726,7 +3726,18 @@ pass "stage_pizza takes both destinations and its source from arguments, default
 # it is what proves the second entry of PIZZA_ART_SEARCH_DIRS is real.
 pizza_src="$work/pizza-src"
 mkdir -p "$pizza_src"
-cp "$REPO_ROOT/src/pizza" "$REPO_ROOT/src/pizza-pizza" "$pizza_src/"
+# ⚠️ EVERY SUBCOMMAND, READ FROM THE ARRAY -- not a hand-written list. This
+# staged `pizza-pizza` literally and went red the moment `pizza-ssh` joined
+# PIZZA_SUBCOMMANDS, blaming stage_pizza for a fixture that was simply missing
+# a file. iso/bin/build already reads the array rather than naming files; the
+# fixture has to as well, or it fails again on the third subcommand.
+cp "$REPO_ROOT/src/$(sed -n 's/^readonly PIZZA_DISPATCHER_NAME=\(.*\)$/\1/p' \
+  "$REPO_ROOT/src/deck-session.sh" | tr -d "\"'" | head -1)" "$pizza_src/"
+while read -r _sub; do
+  [[ -n $_sub ]] || continue
+  cp "$REPO_ROOT/src/$_sub" "$pizza_src/"
+done < <(grep -m1 '^readonly -a PIZZA_SUBCOMMANDS=(' "$REPO_ROOT/src/deck-session.sh" |
+         sed 's/^readonly -a PIZZA_SUBCOMMANDS=(//; s/).*$//' | tr -d "\"'" | tr ' ' '\n')
 cp "$REPO_ROOT"/src/pizza-art/*.txt "$pizza_src/"
 
 reset_root

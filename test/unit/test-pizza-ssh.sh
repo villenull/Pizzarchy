@@ -717,11 +717,35 @@ install_path=()
   fail "the install path exists to be checked" \
        "neither deck-session.sh nor iso/overlay was found; this check is vacuous"
 
-hits=$(grep -rIn -e 'pizza-ssh' -e 'pizza ssh' "${install_path[@]}" 2>/dev/null || true)
-[[ -z $hits ]] ||
-  fail "the installer and the ISO must never reference pizza-ssh (off by default, always)" \
-       "$hits"
-pass "nothing on the install path (bake, ISO overlay, patches) references pizza-ssh"
+# 🔴 THIS ASSERTED "NO MENTION" AND THAT WAS THE WRONG PROPERTY, twice over.
+#
+# It went red on 2026-08-16 for two references that are both correct:
+#   * deck-dashboard.sh's install tips TELL THE USER THE COMMAND EXISTS. A tip
+#     is documentation. Naming a command is the opposite of running it.
+#   * deck-session.sh's stage-pizza has to COPY src/pizza-ssh onto the target.
+#     Shipping a script is not enabling a service.
+#
+# "Off by default" is a claim about what RUNS, not about what the word count of
+# the tree is. So this now forbids the two things that would actually make it
+# false: invoking the command with an enabling verb, and reaching around it to
+# enable sshd or open the firewall directly. A grep for the mere name could
+# only ever be satisfied by never shipping the feature at all.
+enabling=$(grep -rIn -E \
+  -e '(pizza-ssh|pizza[[:space:]]+ssh)([[:space:]]+(on|start|enable))?[[:space:]]*($|[;&|)])' \
+  "${install_path[@]}" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' |
+  grep -E '(pizza-ssh|pizza[[:space:]]+ssh)[[:space:]]+(on|start|enable)' || true)
+[[ -z $enabling ]] ||
+  fail "the installer must never RUN pizza ssh with an enabling verb (off by default, always)" \
+       "$enabling"
+
+# The reach-around: enabling SSH without going through this script at all.
+reachable=$(grep -rIn -E \
+  -e 'systemctl[^|;]*enable[^|;]*sshd' \
+  -e 'ufw[[:space:]]+allow[^|;]*(22|ssh)' \
+  "${install_path[@]}" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)
+[[ -z $reachable ]] ||
+  fail "the installer must never enable sshd or open port 22 by any route" "$reachable"
+pass "the install path ships pizza-ssh but never runs it, and never opens SSH itself"
 
 # Nor may this script enable itself at boot.
 grep -qE 'systemctl[^\n]*enable[^\n]*pizza' "$SCRIPT" &&

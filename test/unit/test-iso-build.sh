@@ -266,9 +266,19 @@ make_fixture() {
   # target). Stand-ins, like the mapper above -- what is being tested is that
   # the build derives the names from deck-session.sh and stages what it found,
   # not what any particular pizza looks like.
+  # ⚠️ EVERY SUBCOMMAND THE REAL deck-session.sh NAMES, not a hand-written
+  # list. bin/build reads PIZZA_SUBCOMMANDS out of src/deck-session.sh and
+  # refuses to stage a name it cannot find a file for -- which is the correct
+  # behaviour and exactly what a literal fixture cannot keep up with. This
+  # said `pizza-pizza` and went red the moment `pizza-ssh` joined the array.
   printf '#!/usr/bin/env bash\n# Stand-in for src/pizza.\n' >"$root/src/pizza"
-  printf '#!/usr/bin/env bash\n# Stand-in for src/pizza-pizza.\n' >"$root/src/pizza-pizza"
-  chmod +x "$root/src/pizza" "$root/src/pizza-pizza"
+  chmod +x "$root/src/pizza"
+  while read -r _sub; do
+    [[ -n $_sub ]] || continue
+    printf '#!/usr/bin/env bash\n# Stand-in for src/%s.\n' "$_sub" >"$root/src/$_sub"
+    chmod +x "$root/src/$_sub"
+  done < <(grep -m1 '^readonly -a PIZZA_SUBCOMMANDS=(' "$REPO_ROOT/src/deck-session.sh" |
+           sed 's/^readonly -a PIZZA_SUBCOMMANDS=(//; s/).*$//' | tr -d "\"'" | tr ' ' '\n')
   mkdir -p "$root/src/pizza-art"
   printf '####\n####\n' >"$root/src/pizza-art/pizza.txt"
   printf '::::\n::::\n' >"$root/src/pizza-art/pizza-alt-fixture.txt"
