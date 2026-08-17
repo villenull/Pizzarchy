@@ -347,15 +347,27 @@ check("releasing STEAM after the chord emits nothing",
       mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.3), [])
 check("STEAM+X toggles the OSK and opens NO menu", mm.pending_actions, ["toggle-osk"])
 
-# Any partner disarms the tap, not just X: STEAM+A still sends Enter underneath,
-# and letting go afterwards must not also open a menu nobody asked for.
+# Any button disarms the tap, not just the CHORD_PRESSES partners: one that has
+# no chord meaning still emits its own key underneath, and letting go afterwards
+# must not also open a menu nobody asked for.
+#
+# ⚠️ THIS USED TO BE SPELLED WITH STEAM+A, back when A had no chord meaning. A
+# is BROWSER_CHORD_PRESS now and emits nothing under STEAM (covered in its own
+# section below), so the example moved to Start -- which is still KEY_ENTER in
+# BUTTON_MAP and still not a partner, i.e. it makes the point the old one made.
+# The key is read out of BUTTON_MAP rather than retyped, so a remap cannot leave
+# this asserting a keycode the mapper no longer emits.
+_PLAIN_UNDER_STEAM = e.BTN_START
+check("the button this is spelled with is genuinely NOT a chord partner",
+      _PLAIN_UNDER_STEAM in m.CHORD_PRESSES, False)
 mm = fresh()
 mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
-check("A pressed under STEAM still sends Enter",
-      mm.translate(e.EV_KEY, e.BTN_SOUTH, 1, 0.1), [(e.KEY_ENTER, 1)])
-mm.translate(e.EV_KEY, e.BTN_SOUTH, 0, 0.2)
+check("a non-partner pressed under STEAM still sends its own key",
+      mm.translate(e.EV_KEY, _PLAIN_UNDER_STEAM, 1, 0.1),
+      [(m.BUTTON_MAP[_PLAIN_UNDER_STEAM], 1)])
+mm.translate(e.EV_KEY, _PLAIN_UNDER_STEAM, 0, 0.2)
 mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.3)
-check("STEAM+A is a chord, not a tap: no menu", mm.pending_actions, [])
+check("...and it is still a chord, not a tap: no menu", mm.pending_actions, [])
 
 mm = fresh()
 mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
@@ -715,19 +727,28 @@ mm.osk_active = True
 check("a held Y released after the keyboard opened is still released",
       mm.translate(e.EV_KEY, e.BTN_WEST, 0, 0.1), [(e.KEY_SPACE, 0)])
 
-# 🔴 THE TWO CHORD PARTNERS MUST NOT SHARE ONE FLAG. This is what a single
-# boolean gets wrong: X's release clears the flag, and Y's release then finds
-# nothing to pair with and sticks SPACE down. Both held, both released.
+# 🔴 THE CHORD PARTNERS MUST NOT SHARE ONE FLAG. This is what a single boolean
+# gets wrong: X's release clears the flag, and the next partner's release then
+# finds nothing to pair with and sticks its own key down for ever. ALL of them
+# held, STEAM grabbed over the lot, all of them released.
+#
+# ⚠️ DRIVEN FROM `CHORD_PRESSES` ITSELF, not from a list of buttons written out
+# here. A fifth partner added to that table is covered by this the day it lands,
+# which is the only way a test like this stays true of a table that grows.
+_partners = sorted(m.CHORD_PRESSES)
+check("there is more than one partner, or this proves nothing at all",
+      len(_partners) > 1, True)
 mm = fresh()
-check("X down emits Backspace down",
-      mm.translate(e.EV_KEY, e.BTN_NORTH, 1, 0.0), [(e.KEY_BACKSPACE, 1)])
-check("Y down emits Space down",
-      mm.translate(e.EV_KEY, e.BTN_WEST, 1, 0.05), [(e.KEY_SPACE, 1)])
-mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.1)          # STEAM grabbed over both
-check("X's release is still delivered",
-      mm.translate(e.EV_KEY, e.BTN_NORTH, 0, 0.2), [(e.KEY_BACKSPACE, 0)])
-check("🔴 ...and so is Y's -- one shared flag loses this one",
-      mm.translate(e.EV_KEY, e.BTN_WEST, 0, 0.3), [(e.KEY_SPACE, 0)])
+check("every partner's press emits its own plain key",
+      [mm.translate(e.EV_KEY, code, 1, 0.01 * i) for i, code in enumerate(_partners)],
+      [[(m.BUTTON_MAP[code], 1)] for code in _partners])
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.5)          # STEAM grabbed over them all
+check("🔴 ...and every one of those releases is still delivered -- one shared "
+      "flag loses all but the first",
+      [mm.translate(e.EV_KEY, code, 0, 0.6 + 0.01 * i)
+       for i, code in enumerate(_partners)],
+      [[(m.BUTTON_MAP[code], 0)] for code in _partners])
+check("...and none of those releases armed a chord", mm.pending_actions, [])
 
 # The chord stays reachable while the keyboard is up, exactly as STEAM+X is:
 # the chord branch sits ABOVE the `osk_active` routing on purpose.
@@ -763,8 +784,20 @@ check("🔴 a HELD Y closes ONE window, not one per autorepeat",
 # the input loop of the only input path on the device.
 check("every chord partner has a plain key to release",
       sorted(code for code in m.CHORD_PRESSES if code not in m.BUTTON_MAP), [])
-check("CHORD_PRESSES names both chords and nothing else",
-      sorted(m.CHORD_PRESSES.values()), ["close-window", "toggle-osk"])
+# ⚠️ RELATIONSHIPS, NOT A COPY OF THE TABLE. A list of the action names written
+# out here would have to be edited every time a chord is added, which is exactly
+# how a test stops asserting anything and starts being maintained.
+check("no two chords queue the SAME action -- one of them would be unreachable",
+      len(set(m.CHORD_PRESSES.values())), len(m.CHORD_PRESSES))
+# 🔴 run_pending tests `action in MENU_ACTIONS` BEFORE it reaches the close or
+# the launchers, so a chord action name that collided with a menu's would open a
+# menu instead and every behavioural test here would still pass.
+check("no chord action collides with a menu action name",
+      sorted(set(m.CHORD_PRESSES.values()) & set(m.MENU_ACTIONS)), [])
+# The two tables that have to agree: everything LAUNCH_ACTIONS can run must be
+# something a chord can actually queue, or it is a launcher no button reaches.
+check("every launch action is reachable from a chord",
+      sorted(set(m.LAUNCH_ACTIONS) - set(m.CHORD_PRESSES.values())), [])
 
 # --- and the spawn, through the same stub the menus use ----------------------
 
@@ -827,6 +860,223 @@ check("the window close is not smuggled into the menus' table",
       "close-window" in m.MENU_ACTIONS, False)
 
 
+# --- 🆕 STEAM+B OPENS A TERMINAL, STEAM+A A BROWSER --------------------------
+#
+# Operator request. The controller equivalents of Omarchy's SUPER+RETURN and
+# SUPER+SHIFT+B, and the same shape as every binding above: translate() queues a
+# NAME, main() resolves it to an argv, nothing here starts a process.
+#
+# 🔴 WHAT MAKES THESE DIFFERENT FROM THE TWO CHORDS BEFORE THEM: A and B ALREADY
+# HAD PLAIN MEANINGS THE USER USES (Enter and Esc). Every assertion about what
+# they still do alone is therefore load-bearing, not ceremony.
+
+check("B is the terminal chord and A is the browser chord",
+      (m.CHORD_PRESSES.get(m.TERMINAL_CHORD_PRESS),
+       m.CHORD_PRESSES.get(m.BROWSER_CHORD_PRESS)),
+      ("launch-terminal", "launch-browser"))
+check("...and they are physical B and physical A",
+      (m.TERMINAL_CHORD_PRESS, m.BROWSER_CHORD_PRESS), (e.BTN_EAST, e.BTN_SOUTH))
+check("the two chords are different buttons and different commands",
+      (m.TERMINAL_CHORD_PRESS == m.BROWSER_CHORD_PRESS,
+       m.LAUNCH_TERMINAL_ARGV == m.LAUNCH_BROWSER_ARGV),
+      (False, False))
+check("neither collides with the chords that were already bound",
+      sorted({m.TERMINAL_CHORD_PRESS, m.BROWSER_CHORD_PRESS}
+             & {m.OSK_CHORD_PRESS, m.CLOSE_CHORD_PRESS, m.OSK_CHORD_HOLD}), [])
+
+
+# 🔴 THE COMMANDS MUST NOT NAME AN APPLICATION. The operator's instruction was
+# "it should go to whatever is the default terminal": `omarchy-launch-terminal`
+# resolves the user's default through `xdg-terminal-exec` and
+# `omarchy-launch-browser` resolves the xdg default. Hard-coding today's answer
+# (foot, chromium) would be a binding that quietly stops obeying the user the
+# moment they change their default -- and it would still pass every behavioural
+# assertion in this file, because a spawn is a spawn.
+_CONCRETE_APPS = ("foot", "kitty", "alacritty", "ghostty", "wezterm", "konsole",
+                  "chromium", "chrome", "firefox", "brave", "zen")
+
+
+def names_a_concrete_app(argv) -> bool:
+    """True if this argv names a specific application rather than a resolver."""
+    return any(part == app or part.endswith("/" + app)
+               for part in argv for app in _CONCRETE_APPS)
+
+
+# ⚠️ THE POSITIVE CONTROL, IN THE SAME BREATH. An "it does not contain X" check
+# whose predicate is broken passes for ever and looks like a guarantee. These
+# two prove the predicate can actually see a hard-coded application.
+check("the app-name detector really fires on a hard-coded terminal",
+      names_a_concrete_app(["foot", "-e", "bash"]), True)
+check("...and on a hard-coded browser behind a path",
+      names_a_concrete_app(["uwsm-app", "--", "/usr/bin/chromium"]), True)
+check("🔴 the terminal chord names a RESOLVER, never a terminal",
+      names_a_concrete_app(m.LAUNCH_TERMINAL_ARGV), False)
+check("🔴 the browser chord names a RESOLVER, never a browser",
+      names_a_concrete_app(m.LAUNCH_BROWSER_ARGV), False)
+# Both are Omarchy's own launchers, which is what makes the controller land on
+# the same command SUPER+RETURN and SUPER+SHIFT+B already run.
+check("both go through Omarchy's own launcher binaries",
+      [argv[0].startswith("omarchy-launch-")
+       for argv in (m.LAUNCH_TERMINAL_ARGV, m.LAUNCH_BROWSER_ARGV)],
+      [True, True])
+# The resolution happens INSIDE those binaries. An argument list would mean this
+# file had an opinion about the user's default, which is the thing it must not.
+check("neither carries arguments of its own",
+      [len(argv) for argv in (m.LAUNCH_TERMINAL_ARGV, m.LAUNCH_BROWSER_ARGV)],
+      [1, 1])
+# Exec'd, never synthesised -- the same argument CLOSE_WINDOW_ARGV makes, and
+# the same evidence: SUPER is not a key this uinput device has ever declared, so
+# a synthesised SUPER+RETURN would be dropped by the kernel with no error.
+check("no SUPER is emitted, so nothing here could be a synthesised keystroke",
+      (e.KEY_LEFTMETA in m.EMITTED_KEYS, e.KEY_RIGHTMETA in m.EMITTED_KEYS),
+      (False, False))
+check("and the launchers are not smuggled into the menus' table",
+      sorted(set(m.LAUNCH_ACTIONS) & set(m.MENU_ACTIONS)), [])
+
+# 🔴 ACCEPTANCE: the chord launches, and does nothing else.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("B while STEAM is held does not also type Esc",
+      mm.translate(e.EV_KEY, e.BTN_EAST, 1, 0.1), [])
+check("the chord queued a terminal", mm.pending_actions, ["launch-terminal"])
+check("🔴 and toggled no keyboard and closed no window",
+      ("toggle-osk" in mm.pending_actions, "close-window" in mm.pending_actions),
+      (False, False))
+check("releasing the chord's B types nothing either",
+      mm.translate(e.EV_KEY, e.BTN_EAST, 0, 0.15), [])
+check("🔴 and STEAM+B is a CHORD, not a tap: no apps menu underneath it",
+      (mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.2), mm.pending_actions),
+      ([], ["launch-terminal"]))
+
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("A while STEAM is held does not also type Enter",
+      mm.translate(e.EV_KEY, e.BTN_SOUTH, 1, 0.1), [])
+check("the chord queued a browser", mm.pending_actions, ["launch-browser"])
+check("🔴 and STEAM+A is a CHORD, not a tap: no apps menu underneath it",
+      (mm.translate(e.EV_KEY, e.BTN_SOUTH, 0, 0.15),
+       mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.2),
+       mm.pending_actions),
+      ([], [], ["launch-browser"]))
+
+# 🔴 THE COST, ASSERTED RATHER THAN ASSUMED. A and B are the installer's confirm
+# and cancel (BUTTON_MAP), and they keep those meanings everywhere except under
+# a held STEAM. If this ever regresses, the controller stops being able to
+# answer a prompt at all.
+mm = fresh()
+check("A alone is still Enter, down and up",
+      (mm.translate(e.EV_KEY, e.BTN_SOUTH, 1, 0.0),
+       mm.translate(e.EV_KEY, e.BTN_SOUTH, 0, 0.1)),
+      ([(e.KEY_ENTER, 1)], [(e.KEY_ENTER, 0)]))
+check("B alone is still Esc, down and up",
+      (mm.translate(e.EV_KEY, e.BTN_EAST, 1, 0.2),
+       mm.translate(e.EV_KEY, e.BTN_EAST, 0, 0.3)),
+      ([(e.KEY_ESC, 1)], [(e.KEY_ESC, 0)]))
+check("and neither queued anything on its own", mm.pending_actions, [])
+
+# Disarming works the same way it does for X and Y.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.1)
+mm.pending_actions.clear()
+check("B after STEAM is released is Esc again",
+      mm.translate(e.EV_KEY, e.BTN_EAST, 1, 0.2), [(e.KEY_ESC, 1)])
+check("A after STEAM is released is Enter again",
+      mm.translate(e.EV_KEY, e.BTN_SOUTH, 1, 0.25), [(e.KEY_ENTER, 1)])
+check("and nothing was launched", mm.pending_actions, [])
+
+# The pad's own autorepeat under a held STEAM must not fire it repeatedly -- a
+# thumb resting on B would otherwise open a terminal several times a second.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_KEY, e.BTN_EAST, 1, 0.1)
+mm.translate(e.EV_KEY, e.BTN_EAST, 2, 0.2)
+mm.translate(e.EV_KEY, e.BTN_EAST, 2, 0.3)
+check("🔴 a HELD B opens ONE terminal, not one per autorepeat",
+      mm.pending_actions, ["launch-terminal"])
+
+# Reachable with the keyboard up, exactly as STEAM+X and STEAM+Y are: the chord
+# branch sits ABOVE the `osk_active` routing on purpose.
+mm = fresh()
+mm.osk_active = True
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("STEAM+B with the keyboard up opens a terminal rather than reaching the OSK",
+      (mm.translate(e.EV_KEY, e.BTN_EAST, 1, 0.1), mm.pending_actions),
+      ([], ["launch-terminal"]))
+
+# --- and the spawn, through the same stub the menus and the close use --------
+
+_result, _fake, _err = with_fake_subprocess(lambda: m.run_launch_action("launch-terminal"))
+check("the terminal chord spawns the terminal launcher and nothing else",
+      [argv for argv, _kw in _fake.calls], [m.LAUNCH_TERMINAL_ARGV])
+check("and reports that it started", _result, True)
+check("nothing waits on it -- a slow launcher must never freeze the input loop",
+      [p.waited for p in _fake.procs], [False])
+check("and it is an argv, never a shell string",
+      _fake.calls[0][1].get("shell"), None)
+check("its output is discarded rather than mixed into our journal",
+      (_fake.calls[0][1].get("stdout"), _fake.calls[0][1].get("stderr")),
+      (_subprocess.DEVNULL, _subprocess.DEVNULL))
+# 🔴 §5.28 again. `omarchy-launch-terminal` execs `uwsm-app`, which needs the
+# session's own environment; a launcher started with what a cold-booted service
+# inherited is another dead button that says nothing.
+check("it runs with the RESOLVED session environment, not what it inherited",
+      _fake.calls[0][1].get("env") is not None, True)
+check("a successful spawn says nothing on stderr", _err, "")
+
+_result, _fake, _err = with_fake_subprocess(lambda: m.run_launch_action("launch-browser"))
+check("the browser chord spawns the browser launcher",
+      [argv for argv, _kw in _fake.calls], [m.LAUNCH_BROWSER_ARGV])
+
+# 🔴 AND IT BLAMES THE RIGHT BINARY. run_menu_action names omarchy-menu and
+# run_close_window names hyprctl; either sentence printed for a missing launcher
+# sends whoever reads the journal to the wrong package entirely.
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_launch_action("launch-terminal"),
+    error=FileNotFoundError(2, "No such file or directory", "omarchy-launch-terminal"))
+check("a missing launcher does not raise", _result, False)
+check("it is LOUD about it", "could not run" in _err, True)
+check("and names the command it tried", m.LAUNCH_TERMINAL_ARGV[0] in _err, True)
+check("🔴 and blames neither omarchy-menu nor hyprctl",
+      ("omarchy-menu" in _err, "hyprctl" in _err), (False, False))
+check("and says the rest of the mapper is unaffected",
+      "the rest of the mapper is unaffected" in _err, True)
+
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_launch_action("launch-browser"),
+    error=FileNotFoundError(2, "No such file or directory", "omarchy-launch-browser"))
+check("🔴 the browser's failure names the BROWSER launcher, not the terminal's",
+      (m.LAUNCH_BROWSER_ARGV[0] in _err, m.LAUNCH_TERMINAL_ARGV[0] in _err),
+      (True, False))
+
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_launch_action("launch-terminal", dry_run=True))
+check("--dry-run reports it instead of spawning, exactly like every other spawn",
+      (_fake.calls, m.LAUNCH_TERMINAL_ARGV[0] in _err, _result), ([], True, True))
+
+# Unreachable from translate(), which queues only CHORD_PRESSES' names -- and
+# therefore loud rather than an ignored default branch.
+_result, _fake, _err = with_fake_subprocess(lambda: m.run_launch_action("launch-nope"))
+check("an unknown launch action starts nothing and says so",
+      (_fake.calls, _result, "launch-nope" in _err), ([], False, True))
+
+# End to end, the way main() drives it: the chord queues a NAME, the runner
+# resolves it to an argv. Either half alone still passes if the two are crossed.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_KEY, e.BTN_SOUTH, 1, 0.1)
+mm.translate(e.EV_KEY, e.BTN_SOUTH, 0, 0.2)
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.3)
+check("STEAM+A queues exactly one action, and it is the browser",
+      mm.pending_actions, ["launch-browser"])
+_result, _fake, _err = with_fake_subprocess(
+    lambda: [m.run_launch_action(a) for a in mm.pending_actions])
+check("🔴 a STEAM+A chord opens the BROWSER end to end -- not the terminal",
+      [argv for argv, _kw in _fake.calls], [m.LAUNCH_BROWSER_ARGV])
+check("and the mapper still translates afterwards",
+      fresh().translate(e.EV_KEY, e.BTN_TL, 1, 0.0), [(m.BUTTON_MAP[e.BTN_TL], 1)])
+
+
 # --- what startup says, so a dead button is never a mystery ------------------
 #
 # ⚠️ Both buttons exist only with lizard_mode=N (§5.9, §5.21), and QAM's binding
@@ -842,6 +1092,18 @@ check("startup says STEAM+X still works, so nobody thinks the tap replaced it",
       "STEAM+X" in _report_n, True)
 check("startup names the MEASURED QAM button rather than calling it inert",
       ("BTN_BASE" in _report_n, "INERT" in _report_n), (True, False))
+# 🆕 The launchers are in the same report and for the same reason: "I pressed
+# STEAM+B and nothing happened" has to be diagnosable from the journal alone.
+check("startup names both launcher commands",
+      [argv[0] in _report_n
+       for argv in (m.LAUNCH_TERMINAL_ARGV, m.LAUNCH_BROWSER_ARGV)],
+      [True, True])
+check("...and which button runs which",
+      ("STEAM+B" in _report_n, "STEAM+A" in _report_n), (True, True))
+# 🔴 AND WHAT THEY COST. A and B carried Enter and Esc; "STEAM+A stopped
+# confirming" is otherwise a mystery with nothing to read anywhere.
+check("🔴 startup says the two no longer emit Enter and Esc under STEAM",
+      ("Enter" in _report_n, "Esc" in _report_n), (True, True))
 
 # The inert announcement is still the guard against a silent dead button, so it
 # keeps its coverage -- forced, since the shipped constant is no longer None.
@@ -4680,6 +4942,22 @@ check("...and the close honours --dry-run like every other spawn",
       [ast.unparse(kw) for node in ast.walk(pending_def)
        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
        and node.func.id == "run_close_window" for kw in node.keywords],
+      ["dry_run=ui is None"])
+# 🆕 The same guard for the launchers, from the other side. The check above
+# starts at CHORD_PRESSES; this one starts at LAUNCH_ACTIONS, so a launcher
+# added to that table and wired to no branch is caught even if nobody ever binds
+# a button to it -- and `--dry-run` must not open real windows either.
+check("every launch action reaches a branch in run_pending",
+      sorted(name for name in m.LAUNCH_ACTIONS if f"'{name}'" not in pending_src), [])
+check("...and reaches the runner that spawns it",
+      sorted({node.func.id for node in ast.walk(pending_def)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+              and node.func.id == "run_launch_action"}),
+      ["run_launch_action"])
+check("...honouring --dry-run like every other spawn",
+      [ast.unparse(kw) for node in ast.walk(pending_def)
+       if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+       and node.func.id == "run_launch_action" for kw in node.keywords],
       ["dry_run=ui is None"])
 
 # --- 🆕 THE POINTER DISAPPEARS WHILE OUR KEYBOARD IS UP ----------------------

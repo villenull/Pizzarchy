@@ -31,14 +31,21 @@ WITH THE ON-SCREEN KEYBOARD UP, the buttons match Valve's keyboard exactly
     R2 (BTN_TR2)         right pad TOUCHED -> commit the right cursor's key
                          right pad LIFTED  -> Enter
 
-DESKTOP MODE ADDS THREE BUTTONS (docs/PROGRESS.md §5.23, §5.37)
+DESKTOP MODE ADDS THESE BUTTONS (docs/PROGRESS.md §5.23, §5.37)
     STEAM (tap, no chord)  `omarchy-menu toggle apps`  the apps menu
     STEAM + X              the on-screen keyboard      (unchanged)
     STEAM + Y              close the focused window    the controller's SUPER+W
+    STEAM + B              the DEFAULT terminal        the controller's SUPER+RETURN
+    STEAM + A              the DEFAULT web browser     the controller's SUPER+SHIFT+B
     QAM (the ... button)   `omarchy-menu toggle`       the Omarchy menu
 
-    Both need lizard_mode=N, or the firmware swallows the presses and no evdev
-    node ever sees them. Startup says which of those is in force.
+    ⚠️ A AND B ARE CHORD PARTNERS NOW, so STEAM+A no longer emits Enter and
+    STEAM+B no longer emits Esc -- the same trade STEAM+X and STEAM+Y already
+    make with Backspace and Space. Pressed WITHOUT Steam they are unchanged
+    (BUTTON_MAP), which is what the installer profile above depends on.
+
+    All of them need lizard_mode=N, or the firmware swallows the presses and no
+    evdev node ever sees them. Startup says which of those is in force.
 
     --osk-auto-show   additionally opens the keyboard when a text field takes
                       focus, and closes it when focus leaves. OFF by default:
@@ -368,27 +375,49 @@ OSK_CHORD_PRESS = e.BTN_NORTH  # physical X
 
 # --- 🆕 STEAM+Y CLOSES THE FOCUSED WINDOW (operator, docs/PROGRESS.md §5.37) --
 #
-# The controller equivalent of Omarchy's SUPER+W. Y is the only face button
-# STEAM does not already claim: X is the OSK chord above, and every other
-# candidate is spoken for elsewhere in this file -- QAM is BTN_BASE
-# (QAM_BUTTON), L3 is Caps (OSK_CAPS_BUTTON), the pad clicks are
-# BTN_THUMB/BTN_THUMB2 (PAD_CLICK_HALF) and the stick clicks BTN_THUMBL/R.
-# BTN_WEST appears in BUTTON_MAP (Space) and OSK_SHORTCUTS (Space) but in
-# neither case as a CHORD partner, so STEAM+Y was genuinely unbound.
+# The controller equivalent of Omarchy's SUPER+W. Y was the first face button
+# taken after X: X is the OSK chord above, and the non-face candidates are all
+# spoken for elsewhere in this file -- QAM is BTN_BASE (QAM_BUTTON), L3 is Caps
+# (OSK_CAPS_BUTTON), the pad clicks are BTN_THUMB/BTN_THUMB2 (PAD_CLICK_HALF)
+# and the stick clicks BTN_THUMBL/R. BTN_WEST appears in BUTTON_MAP (Space) and
+# OSK_SHORTCUTS (Space) but in neither case as a CHORD partner, so STEAM+Y was
+# genuinely unbound.
+#
+# ⚠️ THIS BLOCK USED TO SAY Y WAS "THE ONLY FACE BUTTON STEAM DOES NOT ALREADY
+# CLAIM". True when it was written and false since the operator asked for the
+# two launchers below: A and B are partners now too, and what they cost is
+# named there. Do not restore the old sentence.
 CLOSE_CHORD_PRESS = e.BTN_WEST  # physical Y
+
+# --- 🆕 STEAM+B OPENS A TERMINAL, STEAM+A A BROWSER (operator request) --------
+#
+# The controller equivalents of Omarchy's SUPER+RETURN and SUPER+SHIFT+B, which
+# is exactly what /usr/share/omarchy/default/hypr/bindings/applications.lua
+# binds these two commands to.
+#
+# 🔴 WHAT THIS COSTS, SAID OUT LOUD: A and B are already in BUTTON_MAP (Enter
+# and Esc), so from here on STEAM+A does NOT also confirm and STEAM+B does NOT
+# also cancel. That is the operator's decision and the same trade X (Backspace)
+# and Y (Space) already make -- pressed on their own the two are untouched, and
+# `chord_keys_down` still pairs a release that arrives after STEAM was grabbed.
+TERMINAL_CHORD_PRESS = e.BTN_EAST   # physical B
+BROWSER_CHORD_PRESS = e.BTN_SOUTH   # physical A
 
 # Every button that means something WHILE STEAM IS HELD, and what it queues.
 #
 # ⚠️ ONE TABLE, BECAUSE THE STUCK-KEY GUARD READS IT. Each of these codes also
-# has a plain meaning in BUTTON_MAP (X is Backspace, Y is Space), so a press
-# that lands BEFORE Steam is grabbed and a release that lands AFTER must still
-# be paired -- see `chord_keys_down` and the guard at the top of `translate`.
+# has a plain meaning in BUTTON_MAP (X is Backspace, Y is Space, B is Esc, A is
+# Enter), so a press that lands BEFORE Steam is grabbed and a release that lands
+# AFTER must still be paired -- see `chord_keys_down` and the guard at the top
+# of `translate`.
 # Adding a chord partner here without adding it to BUTTON_MAP's release path is
 # how a face button gets held down forever; keeping the set in one place is what
 # makes that impossible rather than merely unlikely.
 CHORD_PRESSES: dict[int, str] = {
     OSK_CHORD_PRESS: "toggle-osk",
     CLOSE_CHORD_PRESS: "close-window",
+    TERMINAL_CHORD_PRESS: "launch-terminal",
+    BROWSER_CHORD_PRESS: "launch-browser",
 }
 
 # --- Omarchy's menus on STEAM and QAM (docs/PROGRESS.md §5.23 item 3) --------
@@ -491,6 +520,37 @@ CLOSE_WINDOW_ARGV = ["hyprctl", "dispatch", "hl.dsp.window.close()"]
 # main()'s `run_pending` dispatches to it by name; the suite asserts that
 # wiring against the source, because an action queued and handled by nobody is
 # exactly the P32 "written, tested, never wired" defect.
+
+# --- what STEAM+B and STEAM+A run: the user's OWN default terminal/browser ----
+#
+# ✅ VERIFIED OVER SSH AGAINST THE LIVE DECK running this build, 2026-08-16.
+# Both are Omarchy's own binaries in /usr/bin, and both are exactly what
+# /usr/share/omarchy/default/hypr/bindings/applications.lua binds SUPER+RETURN
+# and SUPER+SHIFT+B to -- so the controller lands on the same command the
+# keyboard already does, not on a second opinion about it.
+#
+# 🔴 NEITHER NAMES AN APPLICATION, AND THAT IS THE POINT. `omarchy-launch-terminal`
+# is `exec setsid uwsm-app -- xdg-terminal-exec --dir="$(omarchy-cmd-terminal-cwd)"`,
+# so it follows whatever the user set as their default terminal (foot today);
+# `omarchy-launch-browser` resolves the xdg default (chromium today) and launches
+# it through uwsm-app. Hard-coding `foot` here would be a binding that stops
+# obeying the user the moment they change their default -- the operator's
+# explicit instruction was "whatever is the default terminal".
+#
+# ⚠️ EXEC'd, NOT SYNTHESISED AS SUPER+RETURN / SUPER+SHIFT+B, for the reason
+# CLOSE_WINDOW_ARGV gives: a synthesised keystroke dies silently the moment a
+# binding moves, and this uinput device has never declared SUPER anyway.
+LAUNCH_TERMINAL_ARGV = ["omarchy-launch-terminal"]
+LAUNCH_BROWSER_ARGV = ["omarchy-launch-browser"]
+
+# ⚠️ A TABLE OF ITS OWN, for the same reason the window close is not in
+# `MENU_ACTIONS`: `run_launch_action`'s failure sentence has to name the binary
+# THAT chord needed. It derives that name from argv[0] rather than repeating it,
+# so a changed command cannot leave a stale sentence behind.
+LAUNCH_ACTIONS: dict[str, list[str]] = {
+    "launch-terminal": LAUNCH_TERMINAL_ARGV,
+    "launch-browser": LAUNCH_BROWSER_ARGV,
+}
 
 # ✅ MEASURED ON HARDWARE 2026-08-11: QAM is BTN_BASE (294), on the "Steam Deck"
 # node (/dev/input/event7), with lizard_mode=N.
@@ -838,7 +898,7 @@ class Mapper:
     # set rather than from whichever event arrived last.
     dpad_held: set[int] = field(default_factory=set)
 
-    # STEAM (BTN_MODE) held, for the STEAM+X chord.
+    # STEAM (BTN_MODE) held, for every STEAM chord in CHORD_PRESSES.
     mode_held: bool = False
     # Whether anything was pressed DURING this hold of STEAM. STEAM is both the
     # chord's hold key and a button of its own (it opens the apps menu), so the
@@ -920,11 +980,12 @@ class Mapper:
     # See translate(): without this, pressing X, then STEAM, then releasing X
     # swallows the release and leaves Backspace held down forever.
     #
-    # 🔴 A SET, NOT A BOOLEAN, SINCE STEAM+Y JOINED THE CHORDS (§5.37). Y is
-    # KEY_SPACE in BUTTON_MAP, so the identical sequence -- press Y, press
-    # STEAM, release Y -- would hold SPACE down for ever, and one boolean
-    # shared by both buttons would have let X's release clear Y's flag. The
-    # membership is per-code so the two cannot interfere.
+    # 🔴 A SET, NOT A BOOLEAN, SINCE STEAM+Y JOINED THE CHORDS (§5.37), and the
+    # reason has only grown: Y is KEY_SPACE in BUTTON_MAP, B is KEY_ESC and A is
+    # KEY_ENTER, so the identical sequence -- press the partner, press STEAM,
+    # release the partner -- would hold that key down for ever, and one boolean
+    # shared by all four would let one release clear another's flag. The
+    # membership is per-code so no two can interfere.
     chord_keys_down: set[int] = field(default_factory=set)
 
     # Whether a BTN_LEFT we emitted from the RIGHT PAD'S CLICK is still down.
@@ -1587,23 +1648,31 @@ class Mapper:
                         self.pending_actions.append("menu-apps")
                 return []
             # Any button pressed while STEAM is down makes this hold a CHORD.
-            # Deliberately EVERY button, not just X: STEAM+A still emits Enter
+            # Deliberately EVERY button, not only the CHORD_PRESSES partners: a
+            # trigger pull or a d-pad press under STEAM still emits its own key
             # underneath, and letting go afterwards must not also open a menu the
             # user never asked for. Axes are excluded on purpose -- a thumb
             # resting on a trackpad is not a chord partner.
+            #
+            # ⚠️ THIS COMMENT USED TO ILLUSTRATE THAT WITH "STEAM+A still emits
+            # Enter underneath". A is a chord partner now (BROWSER_CHORD_PRESS)
+            # and emits nothing, so the example was picked out and replaced
+            # rather than left to mislead the next reader.
             if self.mode_held and value == 1:
                 self.mode_chorded = True
-            # STEAM+X toggles the keyboard, STEAM+Y closes the focused window.
+            # What each partner does is CHORD_PRESSES' business -- today X the
+            # keyboard, Y the window close, B a terminal, A a browser.
             #
-            # ⚠️ ONE BRANCH FOR BOTH, off CHORD_PRESSES, so a partner cannot be
-            # given a chord meaning without also being given the release
-            # pairing above -- the two read the same table.
+            # ⚠️ ONE BRANCH FOR ALL OF THEM, off that one table, so a partner
+            # cannot be given a chord meaning without also being given the
+            # release pairing above -- the two read the same table.
             #
             # ⚠️ REACHED WHILE THE KEYBOARD IS UP TOO, deliberately: this sits
             # above the `osk_active` branch exactly as the OSK chord always
             # has. STEAM+Y therefore closes the window UNDER the keyboard
-            # rather than typing a space, which is the same trade STEAM+X makes
-            # (it dismisses the keyboard instead of typing Backspace).
+            # rather than typing a space, and STEAM+B opens a terminal rather
+            # than typing Esc -- the same trade STEAM+X makes (it dismisses the
+            # keyboard instead of typing Backspace).
             if code in CHORD_PRESSES and self.mode_held:
                 if value == 1:
                     self.pending_actions.append(CHORD_PRESSES[code])
@@ -2427,6 +2496,38 @@ def run_close_window(dry_run: bool = False) -> bool:
     return True
 
 
+def run_launch_action(action: str, dry_run: bool = False) -> bool:
+    """STEAM+B / STEAM+A: start the user's default terminal or browser.
+
+    True if the helper was STARTED -- see `run_close_window`, whose fire-and-
+    forget caveat is this function's as well. `omarchy-launch-*` exits long
+    before the window it asked for appears, and neither this nor anything else
+    in this process is in a position to see that window.
+
+    ⚠️ ITS OWN FAILURE SENTENCE, like the close's, and it NAMES argv[0] rather
+    than a literal: a dead STEAM+B and a dead STEAM+A want different package
+    names, and deriving them means the sentence cannot go stale when the command
+    changes. See LAUNCH_ACTIONS.
+    """
+    argv = LAUNCH_ACTIONS.get(action)
+    if argv is None:
+        # Unreachable from translate(), which queues only CHORD_PRESSES' names
+        # -- which is exactly why it is loud rather than an ignored default.
+        print(f"deck-input-mapper: unknown launch action {action!r}; nothing started",
+              file=sys.stderr, flush=True)
+        return False
+    printable = " ".join(argv)
+    if dry_run:
+        print(f"{action} -> {printable}", file=sys.stderr, flush=True)
+        return True
+    if not spawn_detached(argv, f"run `{printable}`"):
+        print(f"deck-input-mapper: that chord does nothing until `{argv[0]}` is "
+              "installed and on PATH; the rest of the mapper is unaffected",
+              file=sys.stderr, flush=True)
+        return False
+    return True
+
+
 # --- the system pointer, for as long as our own keyboard is up ---------------
 #
 # 🔴 THE POINTER WAS STILL DRAWN OVER THE KEYBOARD. `--grab` on the unit
@@ -2815,6 +2916,14 @@ def menu_binding_report(lizard: str | None) -> list[str]:
         # for the SAME first reason: no STEAM button, no chord. The `hyprctl`
         # caveat is its own and is named where it bites (CLOSE_WINDOW_ARGV).
         f"STEAM+Y (close the focused window) -> `{' '.join(CLOSE_WINDOW_ARGV)}`",
+        # ⚠️ AND WHAT THEY COST, said here rather than only in the source. A and
+        # B carry Enter and Esc when pressed alone, and "STEAM+A stopped
+        # confirming" is otherwise a mystery with nothing to read.
+        f"STEAM+B (the DEFAULT terminal) -> "
+        f"`{' '.join(LAUNCH_ACTIONS['launch-terminal'])}`; "
+        f"STEAM+A (the DEFAULT browser) -> "
+        f"`{' '.join(LAUNCH_ACTIONS['launch-browser'])}`; while STEAM is held "
+        "those two no longer emit Enter and Esc",
     ]
     if QAM_BUTTON is None:
         lines.append(
@@ -3898,6 +4007,19 @@ def main() -> None:
                     print(f"close-window -> {' '.join(CLOSE_WINDOW_ARGV)}",
                           file=sys.stderr, flush=True)
                 run_close_window(dry_run=ui is None)
+                continue
+            # ⚠️ THE NAMES ARE SPELLED OUT HERE, not tested against
+            # LAUNCH_ACTIONS' keys, and that is deliberate: the suite's
+            # dead-button sweep reads THIS FUNCTION'S SOURCE looking for every
+            # name `CHORD_PRESSES` can queue. A bare `action in LAUNCH_ACTIONS`
+            # would satisfy the eye and disarm that guard, which is the only
+            # thing standing between a new chord and a button that queues an
+            # action nobody handles.
+            if action in ("launch-terminal", "launch-browser"):
+                if args.verbose and ui is not None:
+                    print(f"{action} -> {' '.join(LAUNCH_ACTIONS[action])}",
+                          file=sys.stderr, flush=True)
+                run_launch_action(action, dry_run=ui is None)
                 continue
             # An action queued by translate() and handled by nobody is a bug
             # that would otherwise present as a dead button.
