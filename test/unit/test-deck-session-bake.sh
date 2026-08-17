@@ -254,6 +254,14 @@ declare -A CHROOT_FUNCS=(
   # effect: arch-chroot bind-mounts /run, so that question would be answered by
   # the INSTALLER's audio devices.
   [stage_onboard_audio_name]=defer
+  # The Desktop-Mode Steam launcher. The FILES are installed in a chroot exactly
+  # as they are on a Deck -- one root-owned script and two desktop entries, and
+  # run_as_desktop_user already handles the user's copy. What cannot be answered
+  # in here is the only question that matters: does the block actually deny
+  # Steam the controller? arch-chroot bind-mounts /sys and /dev, so `--check`
+  # would enumerate the INSTALLER's hardware and report it as the target's, and
+  # no Steam has ever run on the target anyway.
+  [stage_steam_desktop_launcher]=defer
   # The runner itself: no manager to `systemctl enable` with, so the symlink is
   # written directly and then read back.
   [install_first_boot_verify]=adapted

@@ -705,6 +705,60 @@ readonly SLEEP_LOCK_USER_UNIT_REL=".config/systemd/user/${SLEEP_LOCK_UNIT}"
 readonly SLEEP_LOCK_INERT_EXEC=/usr/bin/true
 readonly SLEEP_LOCK_WANTED_BY=graphical-session.target
 
+# --- Desktop-Mode Steam launcher (P39 Defect 2 / P40 option 4) -------------
+#
+# 🔴 WHAT IT IS FOR. Opening Steam in Desktop Mode destroys the desktop
+# pointer. The chain is MEASURED end to end and there is no argument left in
+# it: Steam opens the controller's CLIENT hidraw node, hid-steam's
+# steam_client_ll_open() unregisters its own input devices (SOURCE, and the
+# unregister is on the OPEN path, not on probe), the native "Steam Deck" pad
+# vanishes, and the mapper -- which holds the only node carrying trackpad axes
+# -- has nothing left to read. lizard_mode=Y does not paper over it: 0 bytes on
+# event5 in 20 s with Steam resident against 49,320 bytes in 3 s without it.
+#
+# So: don't let the open happen. src/${STEAM_LAUNCHER_SRC_NAME} puts the
+# controller's hidraw nodes out of reach of ONE PROCESS TREE, using a private
+# user+mount namespace it creates itself, and then execs Steam.
+#
+# 🔴 WHY A LAUNCHER AND NOT A udev RULE, WHICH IS THE OBVIOUS SHAPE.
+# A udev rule denying the node is the same rule, the same node and the same
+# user in BOTH sessions, and udev has no notion of which session is active. The
+# only way to make it session-aware is a runtime toggle -- deny on Desktop Mode
+# entry, restore on exit -- which needs root and FAILS IN THE WORST DIRECTION:
+# one missed restore (crash, power cut, ordering bug) and the Deck boots into
+# Gaming Mode with a controller Steam cannot claim. This project has shipped
+# that exact shape of defect twice already (P39 Defect 2 is one subsystem
+# over). A per-launch namespace has no restore to miss: it changes nothing
+# global, nothing persistent and nothing on any other process, so its worst
+# case is "Desktop Mode is no better than it is today" and never "Gaming Mode
+# is broken".
+#
+# ⚠️ WHAT IT COSTS, said here rather than discovered later. Steam gets NO
+# controller in Desktop Mode: no gamepad navigation of Steam's own UI (the
+# pointer works, which is the point), no Steam Input, and a game launched from
+# the desktop gets no gamepad from the BUILT-IN controller. A third-party pad
+# plugged in over USB/BT is untouched -- only 28de:1205 is covered -- so
+# Steam Input still works for those. Gaming Mode is not affected in any way.
+readonly STEAM_LAUNCHER_SRC_NAME=deck-steam-desktop.py
+readonly STEAM_LAUNCHER_BIN=/usr/local/bin/deck-steam-desktop
+# The desktop entry that routes the desktop session's Steam through it.
+#
+# 🔴 THIS PATH IS THE WHOLE GAMING-MODE SAFETY ARGUMENT, so read it before
+# moving it. It is a USER-LEVEL XDG data file. It is consulted by desktop
+# application launchers and by nothing else. Gaming Mode does not start Steam
+# from a .desktop file at all -- steam-launcher.service names its binary
+# absolutely -- so no gamescope session can reach this file even in principle.
+# Shadowing /usr/bin/steam on PATH would have covered more launch routes and
+# was rejected for exactly that reason: PATH is shared with Gaming Mode.
+readonly STEAM_LAUNCHER_ENTRY_REL=.local/share/applications/steam.desktop
+readonly STEAM_LAUNCHER_ENTRY_SKEL="/etc/skel/${STEAM_LAUNCHER_ENTRY_REL}"
+# Upstream's own entry, used as the TEMPLATE when it exists: the override is
+# derived from it by rewriting Exec= lines, so MimeType (steam:// links),
+# Actions, translations and icon all carry over instead of being restated and
+# left to rot. Absent (steam not installed yet at this stage's turn), a minimal
+# entry is rendered instead.
+readonly STEAM_UPSTREAM_ENTRY=/usr/share/applications/steam.desktop
+
 # --- Desktop-mode input mapper (ROADMAP P2.1, T3 §4) ----------------------
 readonly MAPPER_SRC_NAME=deck-input-mapper.py
 readonly MAPPER_BIN=/usr/local/bin/deck-input-mapper
@@ -1547,6 +1601,14 @@ readonly -a INSTALL_STAGES=(
   # so it installs a drop-in for a unit that must already exist. Ordering it
   # before the mapper would install a fallback for nothing.
   stage-lizard-mode
+  # Immediately after the lizard-mode fallback, and the adjacency is the point:
+  # this stage exists to stop the event that DISARMS the whole input path --
+  # Steam opening the controller's hidraw node and taking the mapper's device
+  # away with it. Ordering it before the mapper and its fallback would install a
+  # guard for something that was not there yet. It depends on neither at
+  # install time (it writes one root file and two desktop entries), so a
+  # failure here cannot cost the mapper.
+  stage-steam-desktop-launcher
   stage-desktop-settings
   # One file in the desktop user's own ~/.config, no system state, nothing
   # armed. Position is not load-bearing -- it depends on no other stage and no
@@ -1621,6 +1683,11 @@ readonly -a BAKE_STAGES=(
   stage-menu-row
   stage-input-mapper
   stage-lizard-mode
+  # IN, and for the same reason it is in INSTALL_STAGES: it writes one root file
+  # and two desktop entries, arms nothing, and starts nothing. The one check it
+  # cannot make in a chroot -- does the block actually deny Steam the node? --
+  # needs a running session and a real Steam, and is deferred, not skipped.
+  stage-steam-desktop-launcher
   stage-osk-kb-layout
   # IN, and for the same reason stage-osk-kb-layout is: it writes user config
   # that nothing else in the install path writes, and the installer already has
@@ -5790,6 +5857,247 @@ install_sleep_lock_override() {
   grep -qx "WantedBy=${SLEEP_LOCK_WANTED_BY}" "$dest" ||
     fail "${dest} does not say 'WantedBy=${SLEEP_LOCK_WANTED_BY}', so 'systemctl --user enable' would write a .wants symlink somewhere upstream's first-run step does not expect"
   log "verified: ${dest} is a real, inert, enable-able unit (ExecStart=${SLEEP_LOCK_INERT_EXEC}, WantedBy=${SLEEP_LOCK_WANTED_BY}), so ${SLEEP_LOCK_UNIT} starts and does nothing for every user, including ones this image has not created yet"
+}
+
+# ---------------------------------------------------------------------------
+# THE DESKTOP-MODE STEAM LAUNCHER
+# ---------------------------------------------------------------------------
+#
+# Read the STEAM_LAUNCHER_* constants block first; the argument for this
+# existing at all, and for it being a per-launch namespace rather than a udev
+# rule, is there.
+
+# The .desktop override, written to stdout.
+#
+# DERIVED FROM UPSTREAM'S ENTRY when there is one, by rewriting the program
+# token of every Exec= line and leaving every other line alone. That keeps
+# MimeType (steam:// links resolve to this entry), Actions (the launcher's
+# right-click menu: Store, Library, Big Picture...), Icon and every translated
+# Name working, and it means an upstream Steam that grows a new Action gets it
+# on the next run of this stage instead of losing it to a hand-copied file.
+#
+# ⚠️ THE REWRITE IS DELIBERATELY NARROW. Only the FIRST token of an Exec= line
+# is replaced, and only when its basename is `steam`. An Exec= that already
+# names our launcher is left alone (idempotency), and an Exec= that runs
+# something else entirely is left alone and REPORTED -- silently dropping a
+# launcher's real command is exactly the class of failure this file exists to
+# refuse.
+render_steam_desktop_entry() {
+  local upstream=${1:-$STEAM_UPSTREAM_ENTRY}
+
+  if [[ -r $upstream ]]; then
+    python3 - "$upstream" "$STEAM_LAUNCHER_BIN" "$INSTALL_MARKER" "$INSTALL_MARKER_TEXT" <<'PY' ||
+import os, pathlib, sys
+upstream, launcher, marker, marker_text = sys.argv[1:5]
+body = pathlib.Path(upstream).read_text()
+
+out, rewritten, untouched = [], 0, []
+for line in body.splitlines():
+    key, sep, value = line.partition("=")
+    if key.strip() != "Exec" or not sep or not value.strip():
+        out.append(line)
+        continue
+    head, space, tail = value.strip().partition(" ")
+    if head == launcher:
+        out.append(line)          # already ours; a re-run must not double-wrap
+        rewritten += 1
+        continue
+    if os.path.basename(head) != "steam":
+        out.append(line)
+        untouched.append(value.strip())
+        continue
+    out.append(f"{key}={launcher}{space}{tail}")
+    rewritten += 1
+
+if not rewritten:
+    sys.exit(
+        f"{upstream} has no Exec= line that launches steam, so nothing would be "
+        "routed through the wrapper and this override would silently do nothing"
+    )
+for value in untouched:
+    print(f"left alone (not a steam command): {value}", file=sys.stderr)
+
+header = [
+    marker,
+    "#",
+    "# Desktop-Mode Steam, routed through " + launcher + " so the Steam client",
+    "# cannot open the Deck controller's hidraw node and destroy the kernel's own",
+    "# input devices -- which is what kills the desktop pointer. Derived from",
+    "# " + upstream + " by rewriting Exec= only; everything else is upstream's.",
+    "#",
+    "# GAMING MODE DOES NOT READ THIS FILE. It starts Steam from",
+    "# steam-launcher.service, by absolute path.",
+    "#",
+    "# To go back to stock behaviour: delete this file (upstream's entry in",
+    "# /usr/share/applications takes over again), or launch with",
+    "# DECK_STEAM_DESKTOP_BLOCK=off.",
+]
+sys.stdout.write("\n".join(header) + "\n" + "\n".join(out) + "\n")
+assert marker_text in "\n".join(header)
+PY
+      return 1
+    return 0
+  fi
+
+  # No upstream entry -- steam is not installed on this target yet, which is a
+  # real ordering case rather than a hypothetical (the ISO fetches `steam` in a
+  # separate orchestrator step). A minimal entry that carries the one thing that
+  # matters is better than no override at all: when Steam does land, its own
+  # /usr/share entry is SHADOWED by this one and the launch is still ours.
+  cat <<EOF
+${INSTALL_MARKER}
+#
+# Desktop-Mode Steam, routed through ${STEAM_LAUNCHER_BIN}. Written WITHOUT
+# ${STEAM_UPSTREAM_ENTRY} to derive from, because steam was not installed when
+# this ran -- re-run '${PROG}.sh stage-steam-desktop-launcher' once it is and
+# this file is regenerated from upstream's, keeping its Actions and MimeType.
+#
+# GAMING MODE DOES NOT READ THIS FILE. It starts Steam from
+# steam-launcher.service, by absolute path.
+[Desktop Entry]
+Name=Steam
+Comment=Application for managing and playing games on Steam
+Exec=${STEAM_LAUNCHER_BIN} %U
+Icon=steam
+Terminal=false
+Type=Application
+Categories=Network;FileTransfer;Game;
+MimeType=x-scheme-handler/steam;x-scheme-handler/steamlink;
+StartupNotify=true
+EOF
+}
+
+# verify_steam_desktop_entry <path> -- read an INSTALLED entry back.
+#
+# The path is a parameter and the caller passes the USER's copy, never skel's,
+# for the reason verify_menu_row states: a check that reads only /etc/skel is
+# the check that passes on precisely the Deck where the file is missing.
+verify_steam_desktop_entry() {
+  local path=${1:?verify_steam_desktop_entry needs the file to read}
+
+  [[ -f $path ]] || fail "${path} does not exist after being installed"
+
+  # Every Exec= must run the wrapper. Both halves are asserted, and the second
+  # is the one that matters: an entry that carries our line AND a leftover
+  # `Exec=/usr/bin/steam` in an [Desktop Action] group is an entry that opens
+  # Steam the old way from the right-click menu, and would pass a check that
+  # only looked for ours.
+  local execs
+  execs=$(grep -E '^Exec=' -- "$path") ||
+    fail "${path} has no Exec= line at all, so the launcher would show an entry that does nothing"
+
+  grep -qE "^Exec=${STEAM_LAUNCHER_BIN}( |$)" <<<"$execs" ||
+    fail "${path} carries no 'Exec=${STEAM_LAUNCHER_BIN}' line. The override is installed and routes nothing; Steam would take the controller exactly as before."
+
+  local stray
+  stray=$(grep -vE "^Exec=${STEAM_LAUNCHER_BIN}( |$)" <<<"$execs" | grep -E '(^|/)steam( |$)' || true)
+  [[ -z $stray ]] ||
+    fail "${path} still launches Steam directly somewhere: ${stray//$'\n'/ ; }. Every Exec= in this file has to go through ${STEAM_LAUNCHER_BIN}, or one menu entry re-creates the defect."
+
+  grep -qF -- "$INSTALL_MARKER_TEXT" "$path" ||
+    fail "${path} does not carry the install marker, so a re-run of this stage would refuse it as another package's file"
+
+  log "verified: every Exec= in ${path} routes through ${STEAM_LAUNCHER_BIN}"
+}
+
+stage_steam_desktop_launcher() {
+  # A seam, not an option a Deck ever passes: the unit suite points this at a
+  # fixture so it can exercise the derive-from-upstream path without the
+  # developer's own /usr/share/applications deciding the answer. Production
+  # passes nothing. See "THE VERIFICATION SEAM" above verify_update_stub.
+  local upstream=${1:-$STEAM_UPSTREAM_ENTRY}
+
+  local invoking_user; invoking_user=$(desktop_user)
+  [[ -n $invoking_user && $invoking_user != root ]] ||
+    fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
+
+  local entry home
+  entry=$(getent passwd "$invoking_user") ||
+    fail "no '${invoking_user}' in the passwd database, so their applications directory cannot be located"
+  home=$(cut -d: -f6 <<<"$entry")
+  [[ -n $home ]] || fail "empty home directory for ${invoking_user}"
+
+  local src_dir
+  src_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+  [[ -f "${src_dir}/${STEAM_LAUNCHER_SRC_NAME}" ]] ||
+    fail "${STEAM_LAUNCHER_SRC_NAME} not found beside ${PROG}.sh (looked in ${src_dir}). This stage installs it; sync the whole src/ directory, not just this script."
+
+  # python3 is the launcher's interpreter AND this stage's renderer. Checked by
+  # running it, because "the package is installed" and "it runs" are different
+  # claims, and this file has been bitten by the difference before.
+  python3 -c 'import ctypes' >/dev/null 2>&1 ||
+    fail "python3 with ctypes is not usable on this target. ${STEAM_LAUNCHER_BIN} needs it for unshare(2)/mount(2); without it the launcher would fall back to plain Steam on every launch."
+
+  assert_ours_or_absent "$STEAM_LAUNCHER_BIN" "another package's launcher"
+  log "installing ${STEAM_LAUNCHER_BIN}"
+  $SUDO install -D -m 0755 -o root -g root \
+    "${src_dir}/${STEAM_LAUNCHER_SRC_NAME}" "$STEAM_LAUNCHER_BIN" ||
+    fail "could not install ${STEAM_LAUNCHER_BIN}"
+
+  # It must PARSE, on this target's python, before anything points a menu entry
+  # at it. A syntax error here is a Steam icon that does nothing at all.
+  python3 -c 'import py_compile,sys; py_compile.compile(sys.argv[1], doraise=True)' \
+    "$STEAM_LAUNCHER_BIN" >/dev/null 2>&1 ||
+    fail "${STEAM_LAUNCHER_BIN} does not compile under this target's python3. The desktop entry must not point at it until it does."
+  log "verified: ${STEAM_LAUNCHER_BIN} compiles under this target's python3"
+
+  # --- the two desktop entries ---------------------------------------------
+  #
+  # Both surfaces, for the reason stage-menu-row states: /etc/skel is for users
+  # created LATER, and the user the ISO creates already exists by our phase.
+  local user_entry="${home}/${STEAM_LAUNCHER_ENTRY_REL}"
+  local tmp dest
+  for dest in "$user_entry" "$STEAM_LAUNCHER_ENTRY_SKEL"; do
+    assert_ours_or_absent "$dest" "another package or the user"
+    tmp=$(mktemp) || fail "mktemp failed"
+    render_steam_desktop_entry "$upstream" >"$tmp" ||
+      { rm -f "$tmp"; fail "could not render the Steam desktop entry from ${upstream}"; }
+    chmod 0644 "$tmp" || { rm -f "$tmp"; fail "could not stage ${dest}"; }
+
+    if [[ $dest == "$STEAM_LAUNCHER_ENTRY_SKEL" ]]; then
+      $SUDO install -D -m 0644 -o root -g root "$tmp" "$dest" ||
+        { rm -f "$tmp"; fail "could not install ${dest}"; }
+    else
+      run_as_desktop_user "$invoking_user" install -D -m 0644 "$tmp" "$dest" ||
+        { rm -f "$tmp"; fail "could not install ${dest} as ${invoking_user}"; }
+    fi
+    rm -f "$tmp"
+    log "installed ${dest}"
+  done
+
+  verify_steam_desktop_entry "$user_entry"
+
+  if [[ ! -r $upstream ]]; then
+    warn "${upstream} does not exist, so the entry above was written from this file's own minimal template rather than derived from upstream's. That entry works, but it carries no [Desktop Action] rows. Re-run '${PROG}.sh stage-steam-desktop-launcher' after steam is installed to regenerate it from upstream's."
+  fi
+
+  # 🔴 THE ONE THING A CHROOT CANNOT ANSWER, and it is the whole feature: does
+  # the block actually take on this hardware? The launcher answers it itself at
+  # every launch (it drops its capabilities and re-opens a covered node), but
+  # the answer needs the real controller, a real session and a real Steam.
+  if in_chroot; then
+    defer "whether Steam is actually denied the controller cannot be checked at install time: arch-chroot bind-mounts /sys and /dev, so a probe in here reads the INSTALLER's hardware, and no Steam has ever run on this target. ${STEAM_LAUNCHER_BIN} and both desktop entries ARE installed. Confirm in the first desktop session by opening Steam from the launcher and running: ls /sys/bus/hid/devices/0003:28DE:1205.0003/input  -- it must still exist WITH Steam running. journalctl --user -b | grep deck-steam-desktop says what the launcher did."
+  else
+    local report
+    report=$("$STEAM_LAUNCHER_BIN" --check 2>&1) ||
+      fail "${STEAM_LAUNCHER_BIN} --check exited non-zero. It launches nothing and only reports; if it cannot do that, do not trust it to launch Steam."
+    log "${STEAM_LAUNCHER_BIN} --check:"
+    while IFS= read -r line; do log "  ${line}"; done <<<"$report"
+    grep -q 'NONE FOUND' <<<"$report" &&
+      warn "${STEAM_LAUNCHER_BIN} found no controller hidraw node on this machine. On a Deck that means the controller is not enumerated and the launcher will fall back to plain Steam -- loudly, including a desktop notification -- every time."
+  fi
+
+  log "stage-steam-desktop-launcher: ok"
+  log "NOTE: this changes DESKTOP MODE ONLY. Gaming Mode starts Steam from"
+  log "      steam-launcher.service by absolute path and never reads a .desktop"
+  log "      file, so nothing here is on its path."
+  log "NOTE: the cost is real -- with Steam denied the built-in controller,"
+  log "      Steam's UI is pointer-driven rather than gamepad-driven in Desktop"
+  log "      Mode, Steam Input is unavailable there, and a game launched from"
+  log "      the desktop gets no gamepad from the built-in pad. Plugged-in"
+  log "      third-party controllers are untouched."
+  log "NOTE: to undo for one launch: DECK_STEAM_DESKTOP_BLOCK=off steam"
+  log "      to undo for good: rm ~/${STEAM_LAUNCHER_ENTRY_REL}"
 }
 
 stage_desktop_settings() {
