@@ -1290,6 +1290,103 @@ readonly PIZZA_ART_ALT_GLOB='pizza-alt-*.txt'
 # two-layouts arrangement src/deck-input-mapper.py's OSK_SEARCH_DIRS uses.
 readonly -a PIZZA_ART_SEARCH_DIRS=(pizza-art .)
 
+# --- Steam's volume OSD device label (stage-onboard-audio-name) ------------
+#
+# THE DEFECT: in Gaming Mode, moving the volume slider draws Steam's volume OSD
+# with the audio device's name printed under it. On the Deck's own speakers that
+# read "Audio Coprocessor" -- meaningless, and not what stock SteamOS shows.
+# Over Bluetooth it correctly reads the headphones' name, and that is wanted.
+#
+# 🔴 THE MECHANISM IS NOT GUESSWORK -- it was read out of Steam's own shipped
+# UI bundle on the operator's Deck (~/.local/share/Steam/steamui, 2026-08-16).
+# The volume OSD component renders the label under exactly one condition:
+#
+#     const D = !b.BOnboardAudio() && !k;          // k = "is a VR window"
+#     ... D && <div className={VolumeSliderLabel}>{b.GetName(Output)}</div>
+#
+# and BOnboardAudio() is a literal string comparison against two constants in
+# the same bundle:
+#
+#     const Z = "Raven/Raven2/FireFlight/Renoir Audio Processor",
+#           Y = "ACP/ACP3X/ACP6x Audio Coprocessor";
+#     BOnboardAudio(){ switch(this.m_sName){ case Z: case Y: return !0;
+#                                            default: return !1 } }
+#
+# So Steam does NOT suppress the label by knowing which device is built in. It
+# suppresses it when the device's NAME is one of two hard-coded strings. Miss
+# them and the label is drawn, with the raw name in it -- which is the defect,
+# exactly. (The same bundle's s_mapOutputNames maps those two names, plus
+# "Rembrandt Radeon High Definition Audio Controller" and "HD-Audio Generic",
+# onto localised labels; that map is a second consumer of the same strings.)
+#
+# 🔴 WHY THE NAME STOPPED MATCHING, and it is nothing either Valve or this
+# project did. Those constants are pci.ids model strings. PipeWire's ALSA
+# monitor takes device.description from udev's ID_MODEL_FROM_DATABASE, which is
+# a hwdata lookup of the PCI id -- and hwdata RENAMED both of the entries Steam
+# cares about. Measured on the operator's Deck (hwdata 0.410-1):
+#
+#     1022:15e2  ->  "Audio Coprocessor"                     (Steam wants
+#                                                  "ACP/ACP3X/ACP6x Audio Coprocessor")
+#     1002:1640  ->  "Radeon High Definition Audio Controller"  (Steam wants
+#                                       "Rembrandt Radeon High Definition Audio Controller")
+#
+# Both of Steam's Deck-relevant keys are the OLD spellings, truncated upstream.
+# SteamOS does not hit this because its image carries an older hwdata; nothing
+# about SteamOS renames the sink. That is the answer to "does stock rename or
+# suppress": it suppresses, and it suppresses because the name still matches.
+#
+# THE FIX is therefore to hand Steam back the name it tests for, by setting
+# device.description on the ALSA card. Bluetooth is untouched -- a BT device is
+# a bluez_card and this rule matches alsa_card only, so its name still reaches
+# the OSD and the operator keeps the behaviour they like.
+#
+# ⚠️ WHERE THIS FILE GOES, AND WHY IT IS NOT /etc. On this image /etc/wireplumber
+# is a SYMLINK to /run/wireplumber (tmpfs), and steamdeck-dsp's
+# wireplumber-sysconf.service runs /usr/share/wireplumber/hardware-profiles/
+# wireplumber-hwconfig at every boot, which does `rm -rf /run/wireplumber` and
+# regenerates the whole directory from the DMI-matched profile (valve-galileo
+# here). Anything written to /etc/wireplumber/wireplumber.conf.d/ therefore
+# survives until the next reboot and no longer. Valve's own generated README in
+# that directory names the two supported seams: edit the package-owned profile
+# (which pacman would overwrite), or "override in $XDG_CONFIG_DIR/wireplumber/".
+# This takes the second. It is also the highest-precedence location, so it wins
+# over anything the boot-time regeneration puts back.
+#
+# THE COST, stated rather than discovered: the drop-in is per-user. A second
+# account on the same image would not get it. That is accepted here because the
+# ISO creates one desktop user and Gaming Mode runs as that user; making it
+# global would mean writing into a package's /usr/share, which pacman owns.
+readonly AUDIO_NAME_CONF_REL='.config/wireplumber/wireplumber.conf.d/90-omarchy-deck-onboard-audio-name.conf'
+
+# The string Steam's BOnboardAudio() compares against, byte for byte. It is not
+# a label anyone reads as English -- it is a magic value belonging to Steam, and
+# its only job is to be equal to that constant. Changing it re-breaks the OSD.
+readonly AUDIO_ONBOARD_NAME='ACP/ACP3X/ACP6x Audio Coprocessor'
+
+# WHICH CARD THE RULE MATCHES, and it is deliberately only one.
+#
+# `sof-nau8821-max` is the OLED Deck's current audio driver and the only card
+# this was measured on (device.nick on the operator's Deck, 2026-08-16). Valve's
+# own alsa-card1.conf names three -- acp5x (LCD), acp6x (OLED, old driver) and
+# this one -- and the LCD very probably has the identical defect, since 1022:15e2
+# is what both enumerate. It is NOT listed here anyway: CLAUDE.md forbids
+# claiming LCD support that has not been tested, and the failure mode of leaving
+# it out is the safe one -- the rule matches nothing on an unlisted card and the
+# machine keeps today's behaviour. Adding a name is a one-line change for
+# whoever can put the ugly label on a screen and watch it go.
+readonly AUDIO_CARD_NICK='sof-nau8821-max'
+
+# 🔴 device.nick, NOT alsa.card_name, and this cost a wasted restart to learn.
+# Both properties read 'sof-nau8821-max' on the finished device, but a
+# monitor.alsa.rules DEVICE match is evaluated against the properties that exist
+# when the device is created, and alsa.card_name is not among them yet: a rule
+# keyed on it matches nothing, installs cleanly and does nothing -- PLAN.md
+# 8.1's failure mode. Measured both ways on the operator's Deck. Valve's own
+# alsa-card1.conf makes the same distinction (device.nick for its device rules,
+# alsa.card_name for its node rules); this follows it rather than rediscovering
+# it a second time.
+readonly AUDIO_CARD_MATCH_KEY='device.nick'
+
 readonly -a INSTALL_STAGES=(
   stage-preconditions
   stage-session-select
@@ -1316,6 +1413,11 @@ readonly -a INSTALL_STAGES=(
   # before the mapper would install a fallback for nothing.
   stage-lizard-mode
   stage-desktop-settings
+  # One file in the desktop user's own ~/.config, no system state, nothing
+  # armed. Position is not load-bearing -- it depends on no other stage and no
+  # other stage depends on it -- so it sits with the other cosmetic-defect work
+  # rather than anywhere it could be mistaken for a prerequisite.
+  stage-onboard-audio-name
   # Last, and it is the cheapest stage in the file: three root-owned files under
   # /usr/local and no system state at all. It installs the `pizza` command; it
   # does not turn the easter egg on. Ordering it after everything that matters
@@ -1385,6 +1487,13 @@ readonly -a BAKE_STAGES=(
   stage-input-mapper
   stage-lizard-mode
   stage-osk-kb-layout
+  # IN, and for the same reason stage-osk-kb-layout is: it writes user config
+  # that nothing else in the install path writes, and the installer already has
+  # everything it needs to do that (the account exists, DECK_SESSION_USER names
+  # it, run_as_desktop_user drops privilege with setpriv). The one check it
+  # cannot make in a chroot -- did WirePlumber actually take the new name? --
+  # needs a running PipeWire and is deferred, not skipped.
+  stage-onboard-audio-name
   # Before the power button, because everything is. It writes three root-owned
   # files under /usr/local and touches no system state, so it is safe anywhere
   # in this list -- it sits here so the last thing the installer does is still
@@ -6382,6 +6491,193 @@ verify_pizza() {
   log "verified: ${dispatcher} dispatches to every subcommand this stage installed"
 }
 
+# ---------------------------------------------------------------------------
+
+# The WirePlumber drop-in that gives the Deck's onboard audio back the name
+# Steam tests for. Read the AUDIO_* constants above first -- the whole argument
+# is there, including why the match key is device.nick and why the file lands in
+# the user's config rather than /etc.
+#
+# SPA-JSON, and '#' is a comment in it -- Valve's own alsa-card1.conf on this
+# image is written the same way, so the marker line costs nothing.
+render_onboard_audio_name_conf() {
+  cat <<EOF
+${INSTALL_MARKER}
+#
+# Give the Deck's onboard audio card the name Steam's Gaming Mode volume OSD
+# tests for, so the OSD stops printing a device label under the volume slider.
+#
+# Steam's UI draws that label only when its BOnboardAudio() says the current
+# output is NOT built in, and BOnboardAudio() is a literal comparison against
+# two hard-coded strings. udev now reports a SHORTER name for this card than it
+# used to (hwdata renamed pci.ids 1022:15e2 from
+# "${AUDIO_ONBOARD_NAME}" to "Audio Coprocessor"), the
+# comparison misses, and Steam falls back to printing the raw name.
+#
+# Bluetooth is deliberately untouched: a BT device is a bluez_card, this rule
+# matches alsa_card only, and BT output SHOULD name itself in the OSD.
+#
+# TO UNDO: delete this file, then
+#   systemctl --user restart wireplumber
+# The label comes back on the next Gaming Mode start.
+monitor.alsa.rules = [
+  {
+    matches = [
+      {
+        device.name = "~alsa_card.*"
+        ${AUDIO_CARD_MATCH_KEY} = "${AUDIO_CARD_NICK}"
+      }
+    ]
+    actions = {
+      update-props = {
+        device.description  = "${AUDIO_ONBOARD_NAME}"
+        device.product.name = "${AUDIO_ONBOARD_NAME}"
+      }
+    }
+  }
+]
+EOF
+}
+
+# install_onboard_audio_name_conf <desktop-user> <destination>
+#
+# THE DESTINATION IS A PARAMETER -- see "THE VERIFICATION SEAM" above
+# verify_update_stub. Production passes ${home}/${AUDIO_NAME_CONF_REL}; the unit
+# suite passes a path under its fake root, because the read-back below opens the
+# file directly and would otherwise be inspecting a developer's real dotfiles.
+install_onboard_audio_name_conf() {
+  local user=$1
+  local dest=$2
+
+  # Idempotent, and re-running must leave exactly one copy: this is a whole
+  # file of ours, so the whole file is rewritten rather than spliced. Refuse
+  # anything at the path that is not ours -- if a package or the operator ever
+  # puts a WirePlumber drop-in here, theirs is the authoritative one.
+  assert_ours_or_absent "$dest" "another WirePlumber drop-in"
+
+  local tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_onboard_audio_name_conf >"$tmp" ||
+    { rm -f "$tmp"; fail "could not render the onboard-audio name drop-in"; }
+  chmod 0644 "$tmp" || { rm -f "$tmp"; fail "could not make the staged ${dest} readable by ${user}"; }
+
+  log "installing the onboard-audio name drop-in: ${dest}"
+  run_as_desktop_user "$user" install -D -m 0644 "$tmp" "$dest" || {
+    rm -f "$tmp"
+    fail "could not install ${dest} as ${user}"
+  }
+  rm -f "$tmp"
+
+  # Read it back rather than trusting the write. Two properties, separately,
+  # because each fails in its own way and neither would be noisy on its own:
+  #
+  #   1. The magic string is present. It is the entire point of the file; a
+  #      drop-in without it is a rule that renames the card to nothing.
+  #   2. The match key is the one that works. A rule keyed on a property that
+  #      does not exist at device-creation time parses, loads, matches nothing
+  #      and reports success -- the silent failure this project exists to avoid.
+  grep -qF -- "$AUDIO_ONBOARD_NAME" "$dest" ||
+    fail "${dest} does not contain '${AUDIO_ONBOARD_NAME}' after being installed. That string is what Steam's BOnboardAudio() compares against; without it the volume OSD keeps printing a device label over the Deck's own speakers."
+  grep -qF -- "${AUDIO_CARD_MATCH_KEY} = \"${AUDIO_CARD_NICK}\"" "$dest" ||
+    fail "${dest} does not match the audio card on ${AUDIO_CARD_MATCH_KEY}. A monitor.alsa.rules device match keyed on anything WirePlumber has not set yet -- alsa.card_name is the trap here -- matches no device, loads without complaint and does nothing."
+}
+
+# verify_onboard_audio_name <desktop-user> <uid> [runtime-dir]
+#
+# 🔴 THE RUNTIME DIRECTORY IS A PARAMETER, and it is a safety property rather
+# than a testing convenience -- the same one verify_osk_kb_layout carries, and
+# for a sharper reason. With /run/user/<uid> baked in, this function runs
+# `pw-dump` against whatever PipeWire the CALLER's machine has: the unit suite
+# hands it a fake uid of 1000, which on any developer box is the developer, so
+# the check would inspect their own speakers and report the answer as the
+# target's. Caught exactly that way (2026-08-16) before it shipped.
+#
+# Three outcomes, and the middle one is the reason this function exists at all:
+#
+#   - no live PipeWire   -> WARN, with the command to run later. The file is on
+#                           disk and applies at the next WirePlumber start;
+#                           claiming it took effect would be the lie.
+#   - live, name is ours -> the rule matched. This is the only pass.
+#   - live, name is not  -> FAIL, printing what the card actually reports, so
+#                           the next person sees the real string rather than a
+#                           theory about it.
+#
+# ⚠️ It reports on the PipeWire that is RUNNING. A drop-in installed under a
+# live session does not apply until WirePlumber restarts, so a fresh install on
+# a running desktop legitimately lands in the warn arm.
+verify_onboard_audio_name() {
+  local user=$1 uid=$2
+  local runtime=${3:-/run/user/${uid}}
+
+  command -v pw-dump >/dev/null 2>&1 || {
+    warn "pw-dump is not installed, so the onboard-audio name could NOT be checked against a running PipeWire. The drop-in is written. Confirm on a desktop session with: wpctl status  -- the sinks must read '${AUDIO_ONBOARD_NAME} Speaker'."
+    return 0
+  }
+  [[ -S ${runtime}/pipewire-0 ]] || {
+    warn "no PipeWire socket at ${runtime}/pipewire-0, so the onboard-audio name could NOT be checked. The drop-in is written and applies the next time WirePlumber starts for ${user}. Confirm then with: wpctl status"
+    return 0
+  }
+
+  local dump
+  dump=$(run_as_desktop_user "$user" env XDG_RUNTIME_DIR="$runtime" pw-dump 2>/dev/null) || {
+    warn "pw-dump failed against ${runtime}, so the onboard-audio name could NOT be checked. The drop-in is written. Confirm on a desktop session with: wpctl status"
+    return 0
+  }
+
+  # The card may legitimately be absent -- a VM, or a Deck whose audio has not
+  # enumerated yet. That is a warn, not a pass and not a failure: there is
+  # nothing for the rule to have matched.
+  if ! grep -qF "\"${AUDIO_CARD_NICK}\"" <<<"$dump"; then
+    warn "no audio card reporting ${AUDIO_CARD_MATCH_KEY} '${AUDIO_CARD_NICK}' is present, so there was nothing for the drop-in to rename. On an LCD Deck this is expected -- see the AUDIO_CARD_NICK comment. The file is installed and will apply if such a card appears."
+    return 0
+  fi
+
+  grep -qF "\"${AUDIO_ONBOARD_NAME}\"" <<<"$dump" ||
+    fail "the '${AUDIO_CARD_NICK}' card is present and running PipeWire does NOT report it as '${AUDIO_ONBOARD_NAME}'. The drop-in is installed but has not taken effect -- either WirePlumber has not been restarted since it was written, or the match did not fire. Restart it (systemctl --user restart wireplumber) and re-run this stage; if it still fails, read the card's real properties with: wpctl inspect \$(wpctl status | awk '/Devices:/{f=1} f&&/alsa/{print \$2; exit}' | tr -d .)"
+  log "verified: the onboard audio card reports as '${AUDIO_ONBOARD_NAME}' to a running PipeWire, which is the name Steam's volume OSD recognises as built-in"
+}
+
+stage_onboard_audio_name() {
+  # The runtime directory the verifier inspects. Production passes nothing and
+  # gets /run/user/<uid>; the unit suite passes a path under its fake root, for
+  # the reason spelled out above verify_onboard_audio_name.
+  local pw_runtime=${1:-}
+
+  local invoking_user; invoking_user=$(desktop_user)
+  [[ -n $invoking_user && $invoking_user != root ]] ||
+    fail "could not determine the desktop user (got '${invoking_user}'); run this as that user via sudo, not as root directly"
+
+  local entry
+  entry=$(getent passwd "$invoking_user") ||
+    fail "no '${invoking_user}' in the passwd database, so their WirePlumber config directory cannot be located"
+
+  local home uid
+  home=$(cut -d: -f6 <<<"$entry")
+  uid=$(cut -d: -f3 <<<"$entry")
+  [[ -n $home ]] || fail "empty home directory for ${invoking_user}"
+  [[ $uid =~ ^[0-9]+$ ]] ||
+    fail "getent reported a non-numeric uid ('${uid}') for ${invoking_user}; their PipeWire runtime directory cannot be located from it"
+
+  install_onboard_audio_name_conf "$invoking_user" "${home}/${AUDIO_NAME_CONF_REL}"
+
+  # 🔴 In a chroot the live half is DEFERRED, not skipped, and the distinction
+  # matters: arch-chroot bind-mounts /run, so /run/user/${uid} in here is the
+  # INSTALLER's PipeWire. Checking it would be reading the wrong machine's audio
+  # and reporting the answer as the target's.
+  if in_chroot; then
+    defer "whether WirePlumber renames the onboard audio card to '${AUDIO_ONBOARD_NAME}' cannot be checked at install time -- it needs a running PipeWire, and /run in here belongs to the installer. The drop-in IS installed at ${home}/${AUDIO_NAME_CONF_REL}. Confirm on the target with: wpctl status  -- the built-in sinks must read '${AUDIO_ONBOARD_NAME} Speaker'"
+  else
+    verify_onboard_audio_name "$invoking_user" "$uid" ${pw_runtime:+"$pw_runtime"}
+  fi
+
+  log "stage-onboard-audio-name: ok"
+  log "NOTE: Steam's volume OSD reads the device name ONCE per Gaming Mode"
+  log "      session. A Gaming Mode already running when this landed keeps"
+  log "      showing the old label until it is restarted."
+}
+
+# ---------------------------------------------------------------------------
+
 # NOT in INSTALL_STAGES. This installs nothing and is for release verification
 # (T6) and for answering PROGRESS.md 5.17 on a given machine.
 stage_audit_privileges() {
@@ -7395,6 +7691,17 @@ Stages also cover Gaming Mode / display defects (PROGRESS.md 5.11, 5.14, 5.15):
                            with it). Installs only -- it enables nothing. Turn it
                            on from a desktop session with 'pizza pizza', and off
                            again, exactly, with 'pizza pizza off'.
+  stage-onboard-audio-name stops Steam's Gaming Mode volume OSD printing a
+                           device label under the slider on the Deck's own
+                           speakers. Steam hides that label only for names it
+                           recognises as onboard, by literal comparison, and
+                           hwdata renamed the PCI id out from under it; this
+                           writes a WirePlumber drop-in to
+                           ~/${AUDIO_NAME_CONF_REL}
+                           that hands the name back. Bluetooth still names
+                           itself in the OSD, which is wanted. Undo:
+                             rm ~/${AUDIO_NAME_CONF_REL}
+                             systemctl --user restart wireplumber
   stage-lizard-mode        binds the controller firmware's lizard mode to
                            deck-input-mapper.service: off while it runs, on
                            again when it stops, crashes or is killed -- by

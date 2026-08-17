@@ -934,6 +934,7 @@ run_stage_body() {
     # the whole safety design. It stays empty in the suite's own shell, which
     # §1 then asserts.
     SUDO="$FAKE_SUDO_BIN"
+    # shellcheck disable=SC2034  # read by the sourced stage bodies, not here.
     DESKTOP_SESSION=omarchy
     "$fn" "$@"
   ) >"$work/stage.out" 2>"$work/stage.err" || stage_rc=$?
@@ -3947,6 +3948,168 @@ stage_rc=0
   >"$work/stage.out" 2>"$work/stage.err" || stage_rc=$?
 ok_failed "art that is not a usable fastfetch logo fails the stage"
 ok_in_err "pizza check" "and the failure names the command that judged it, so the same check can be re-run by hand"
+
+# ===========================================================================
+# 15b. stage-onboard-audio-name -- the WirePlumber drop-in that stops Steam's
+#      volume OSD printing a device label over the Deck's own speakers
+# ===========================================================================
+#
+# The stage writes ONE file into the desktop user's own ~/.config and touches no
+# system state, so what is worth asserting is the four ways it could be wrong
+# without anyone noticing:
+#
+#   - it writes somewhere other than the user's config directory (the file is
+#     ignored, and the defect stays)
+#   - it writes a rule matched on a property WirePlumber has not set yet (the
+#     rule loads, matches nothing, and reports success -- PLAN.md 8.1)
+#   - it claims the rename took effect when nothing checked (the verifier's
+#     warn arms exist precisely so this cannot happen quietly)
+#   - it stops being idempotent, which the SSH iterate loop and every image
+#     rebuild depend on
+#
+# ⚠️ The literal name Steam compares against is NOT pinned here -- see the same
+# note in test/unit/test-deck-session.sh. It is Valve's constant, not ours.
+
+# --- the seam, statically, before anything is executed ---------------------
+#
+# Same argument as GATE 4: with the destination baked in, this suite would write
+# into the developer's real ~/.config/wireplumber.
+audio_install_body=$(declare -f install_onboard_audio_name_conf)
+[[ -n $audio_install_body ]] ||
+  fail_test "install_onboard_audio_name_conf exists in deck-session.sh" \
+    "without the seam this suite would write a real WirePlumber drop-in"
+# shellcheck disable=SC2016  # the literal text "$AUDIO_NAME_CONF_REL" in the
+# function's source, not this shell's value of it.
+! grep -qE '\$AUDIO_NAME_CONF_REL' <<<"$audio_install_body" ||
+  fail_test "install_onboard_audio_name_conf takes its destination as an argument" \
+    "spelling the path itself would install to a real home regardless of what \$2 says"
+pass "install_onboard_audio_name_conf takes the destination it writes as an argument"
+
+audio_stage_body=$(declare -f stage_onboard_audio_name)
+grep -q 'getent passwd' <<<"$audio_stage_body" ||
+  fail_test "stage_onboard_audio_name resolves the home directory from passwd" \
+    "a guessed /home/<user> is wrong on any image whose home directories are not there"
+pass "stage_onboard_audio_name resolves the desktop user's home from passwd rather than assuming /home"
+
+# 🔴 THE SHARPEST SEAM IN THIS SECTION, and it was found by this suite going red
+# rather than by reading. verify_onboard_audio_name runs `pw-dump` against a
+# runtime directory derived from a uid, and the getent stub hands out uid 1000 --
+# which on a developer's machine is the developer. With the path baked in, this
+# suite inspected the developer's OWN audio devices and reported the verdict as
+# the target's. It takes the directory as an argument for that reason.
+audio_verify_body=$(declare -f verify_onboard_audio_name)
+[[ -n $audio_verify_body ]] ||
+  fail_test "verify_onboard_audio_name exists in deck-session.sh" "without the seam this suite would inspect the real session's PipeWire"
+grep -q '\${3:-' <<<"$audio_verify_body" ||
+  fail_test "verify_onboard_audio_name takes the runtime directory as \$3" \
+    "with /run/user/<uid> baked in it would read whichever PipeWire the caller's machine happens to be running"
+pass "verify_onboard_audio_name takes the PipeWire runtime directory as an argument, so it cannot reach a real session by accident"
+
+# --- the two stage lists must not drift apart ------------------------------
+#
+# The stage is in INSTALL_STAGES (a Deck someone runs the script on) and in
+# BAKE_STAGES (the ISO's installer, inside arch-chroot). A fix landed in one and
+# not the other ships an ISO whose targets still have the defect -- the exact
+# half-fix the sleep-lock work was corrected for.
+printf '%s\n' "${INSTALL_STAGES[@]}" | grep -qx 'stage-onboard-audio-name' ||
+  fail_test "stage-onboard-audio-name is in INSTALL_STAGES" "a bare run would skip it"
+printf '%s\n' "${BAKE_STAGES[@]}" | grep -qx 'stage-onboard-audio-name' ||
+  fail_test "stage-onboard-audio-name is in BAKE_STAGES" \
+    "the ISO's installer would not run it, so every installed Deck would still show the label"
+pass "the stage is in BOTH stage lists -- a bare run and the ISO installer take the same path"
+
+# --- the write arm --------------------------------------------------------
+reset_root
+audio_dest="${FAKE_HOME}/${AUDIO_NAME_CONF_REL}"
+audio_no_pw="$work/no-such-pipewire-runtime"
+run_stage_body stage_onboard_audio_name "$audio_no_pw"
+ok_rc 0 "stage-onboard-audio-name completes against a fake root"
+[[ -f "$audio_dest" ]] ||
+  fail_test "the drop-in lands in the desktop user's WirePlumber config directory" \
+    "expected ${audio_dest}"$'\n'"stderr: $(err)"
+pass "the drop-in lands under the desktop user's ~/.config/wireplumber, which is the only location this image's boot-time regeneration does not wipe"
+[[ $(mode_of "$audio_dest") == 644 ]] ||
+  fail_test "the drop-in is mode 0644" "it is $(mode_of "$audio_dest"); WirePlumber must be able to read it"
+pass "the drop-in is mode 0644 -- config, not a program"
+
+grep -qF -- "$AUDIO_ONBOARD_NAME" "$audio_dest" ||
+  fail_test "the installed file carries the name Steam recognises as onboard audio" \
+    "without it the rule renames the card to nothing and the OSD label stays"
+pass "the installed file carries the name Steam's onboard-audio test compares against"
+
+# 🔴 The verifier must NOT claim success when it could not look. There is no
+# PipeWire socket under the fake root, so this run has to land in a warn arm.
+grep -q 'could NOT be checked' "$work/stage.err" ||
+  fail_test "the stage says out loud that it could not observe the rename" \
+    "with no running PipeWire the only honest report is a warning naming the command to run later"$'\n'"stderr: $(err)"
+ok_in_out "stage-onboard-audio-name: ok" "the stage still completes -- the file is installed and applies at the next WirePlumber start"
+pass "with no PipeWire to ask, the stage WARNS rather than claiming the rename took effect"
+
+# The Gaming Mode caveat is the one thing an operator testing this will hit
+# first: Steam reads the device name once per session.
+ok_in_out "Gaming Mode" "the stage says a running Gaming Mode keeps the old label until it restarts"
+
+# --- idempotency: the re-run requirement (CLAUDE.md) ----------------------
+audio_first=$(cat "$audio_dest")
+run_stage_body stage_onboard_audio_name "$audio_no_pw"
+ok_rc 0 "running the stage a second time succeeds -- it must recognise its own file"
+[[ $(cat "$audio_dest") == "$audio_first" ]] ||
+  fail_test "a second run leaves the file byte-identical" "the re-run rewrote it differently"
+[[ $(grep -cF -- "$INSTALL_MARKER_TEXT" "$audio_dest") -eq 1 ]] ||
+  fail_test "a second run leaves exactly one ownership marker" \
+    "$(grep -cF -- "$INSTALL_MARKER_TEXT" "$audio_dest") copies; the stage is appending rather than replacing"
+pass "re-running leaves one file, byte-identical, with one marker"
+
+# --- it refuses to clobber something that is not ours ---------------------
+printf 'monitor.alsa.rules = [ ]\n' >"$audio_dest"
+run_stage_body stage_onboard_audio_name "$audio_no_pw"
+ok_failed "a WirePlumber drop-in at that path which is NOT ours stops the stage"
+ok_in_err "was not written by" \
+  "somebody else's audio config is the authoritative one; replacing it quietly would be the wrong outcome in a place nobody would look"
+
+# --- an `install` that exits 0 having written nothing ---------------------
+#
+# Not hypothetical here either: this stage's whole value is one file existing,
+# and an exit code is not a file.
+reset_root
+cat >"$stub_bin/install" <<'STUB_INSTALL'
+#!/usr/bin/env bash
+printf 'install %s\n' "$*" >>"$CALLS_LOG"
+exit 0
+STUB_INSTALL
+chmod +x "$stub_bin/install"
+run_stage_body stage_onboard_audio_name "$audio_no_pw"
+rm -f "$stub_bin/install"
+ok_failed "an install that exits 0 without writing the file fails the stage"
+ok_in_err "after being installed" \
+  "the stage re-reads what it wrote instead of trusting install's exit code"
+
+# --- 🔴 the negative control: a rule keyed on the property that is not set --
+#
+# alsa.card_name reads 'sof-nau8821-max' on the finished device and is absent
+# when a monitor.alsa.rules DEVICE match is evaluated. A drop-in keyed on it
+# parses, loads, matches nothing and changes nothing -- and the only thing that
+# catches it is the read-back in install_onboard_audio_name_conf.
+reset_root
+audio_drift="$work/deck-session-audio-drift.sh"
+sed "s/^readonly AUDIO_CARD_MATCH_KEY=.*/readonly AUDIO_CARD_MATCH_KEY='alsa.card_name'/" \
+  "$REPO_ROOT/src/deck-session.sh" >"$audio_drift"
+grep -q "AUDIO_CARD_MATCH_KEY='alsa.card_name'" "$audio_drift" ||
+  fail_test "the drift fixture actually changed AUDIO_CARD_MATCH_KEY" \
+    "sed matched nothing; this case would pass vacuously"
+# A separate bash PROCESS, not a subshell: every constant in this file is
+# readonly and a subshell inherits them, so the drifted copy would be rejected
+# line by line and never reach the check under test. Same move §6b makes.
+#
+# The render function derives the whole rule from the constant, so the drifted
+# copy renders a rule the read-back then has to catch. It is checked by
+# rendering rather than by installing: install_onboard_audio_name_conf's own
+# grep is the thing under test, and it must compare against the SHIPPED key.
+audio_drift_rendered=$(bash -c 'set +e; . "$1"; render_onboard_audio_name_conf' _ "$audio_drift")
+grep -qF "${AUDIO_CARD_MATCH_KEY} = \"${AUDIO_CARD_NICK}\"" <<<"$audio_drift_rendered" &&
+  fail_test "the drifted copy renders a rule the shipped read-back would reject" \
+    "it still contains the shipped match key, so this case proves nothing"
+pass "a drifted match key renders a rule that no longer carries ${AUDIO_CARD_MATCH_KEY}, which is exactly what the stage's read-back refuses"
 
 # ===========================================================================
 # 16. The harness's own safety invariant

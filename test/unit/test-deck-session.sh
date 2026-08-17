@@ -2855,4 +2855,64 @@ grep -q "no device carries ID_PATH=${POWER_KEEP_ID_PATH}" <<<"$pb_out" ||
     "removing it cannot make a dead button work and would hide the cause"
 pass "a missing keeper fails loudly and leaves the drop-in alone, so the cause stays visible"
 
+# ===========================================================================
+# render_onboard_audio_name_conf -- the WirePlumber drop-in that stops Steam's
+# volume OSD printing a device label over the Deck's own speakers
+# ===========================================================================
+#
+# ⚠️ WHAT THIS SUITE DELIBERATELY DOES NOT ASSERT: the literal string
+# "ACP/ACP3X/ACP6x Audio Coprocessor". That value belongs to Steam -- it is a
+# constant compiled into Steam's UI bundle, and Valve may change it in any
+# client update. Pinning it here would turn somebody else's release into our
+# red suite. What IS asserted is the MECHANISM: that whatever
+# ${AUDIO_ONBOARD_NAME} holds reaches the file, that the rule is keyed on a
+# property that exists when the device is created, and that the match cannot
+# reach Bluetooth.
+
+audio_conf=$(render_onboard_audio_name_conf)
+
+grep -qF -- "$INSTALL_MARKER_TEXT" <<<"$audio_conf" ||
+  fail_test "the drop-in carries the ownership marker" \
+    "without it assert_ours_or_absent cannot tell our file from a package's, and a re-run would refuse its own output"
+pass "the drop-in carries the ownership marker, so re-running the stage recognises its own file"
+
+# The constant must actually reach the rendered text. A drop-in that renames
+# the card to anything else is a rule that runs and leaves the defect in place.
+[[ $(grep -cF -- "$AUDIO_ONBOARD_NAME" <<<"$audio_conf") -ge 2 ]] ||
+  fail_test "the onboard-audio name reaches BOTH properties the rule sets" \
+    "device.description and device.product.name must both carry it; Steam compares one of them and this file does not get to guess which"
+pass "the name Steam tests for reaches both device.description and device.product.name"
+
+# 🔴 THE NEGATIVE CONTROL FOR THE BUG THAT COST A RESTART TO FIND. A device
+# match keyed on alsa.card_name parses, loads, matches nothing and reports
+# success -- PLAN.md 8.1's failure mode, in a file whose whole job is one match.
+grep -qF "${AUDIO_CARD_MATCH_KEY} = \"${AUDIO_CARD_NICK}\"" <<<"$audio_conf" ||
+  fail_test "the rule matches the card on ${AUDIO_CARD_MATCH_KEY}" \
+    "measured on the operator's Deck: alsa.card_name is not set on the device object when a monitor.alsa.rules device match is evaluated, so a rule keyed on it is inert"
+! grep -qE '^\s*alsa\.card_name\s*=' <<<"$audio_conf" ||
+  fail_test "the rule does NOT key its device match on alsa.card_name" \
+    "that property is absent at device-creation time; the rule would match no device and do nothing, silently"
+pass "the device match is keyed on ${AUDIO_CARD_MATCH_KEY}, not on the property that is not set yet"
+
+# 🔴 THE BLUETOOTH NON-REGRESSION, asserted structurally rather than by hoping.
+# Over Bluetooth the OSD label is WANTED -- it names the headphones, and the
+# operator asked for that to be left exactly as it is. The only thing standing
+# between this file and that behaviour is the scope of its match.
+grep -qF 'device.name = "~alsa_card.*"' <<<"$audio_conf" ||
+  fail_test "the rule is scoped to ALSA cards" \
+    "an unscoped monitor rule could rename a Bluetooth device and take its name out of the OSD -- the one behaviour that must not change"
+# DIRECTIVES only. The file's own header explains what it deliberately leaves
+# alone, and that explanation names bluez; checking the whole file would refuse
+# our own documentation. Same distinction install_sleep_lock_override draws.
+! grep -v '^#' <<<"$audio_conf" | grep -qi 'bluez' ||
+  fail_test "the drop-in names no Bluetooth device or rule in a directive" \
+    "Bluetooth output must keep naming itself in Steam's volume OSD"
+pass "the rule is scoped to alsa_card and names no bluez rule, so Bluetooth keeps naming itself in the OSD"
+
+# A user with no terminal cannot undo something the file does not explain.
+grep -q 'systemctl --user restart wireplumber' <<<"$audio_conf" ||
+  fail_test "the drop-in says how to undo itself" \
+    "deleting the file alone changes nothing until WirePlumber restarts, and nothing else on the machine says so"
+pass "the drop-in carries its own undo, including the restart that makes the undo take effect"
+
 echo "all deck-session.sh tests passed"

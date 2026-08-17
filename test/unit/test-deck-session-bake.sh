@@ -247,6 +247,13 @@ declare -A CHROOT_FUNCS=(
   [stage_power_button]=adapted           # installs the deferred check's runner
   # 5.35 -- Steam's first run. Whether the splash DRAWS needs a compositor.
   [stage_steam_first_run]=defer
+  # The WirePlumber drop-in that stops Steam's volume OSD labelling the Deck's
+  # own speakers. The FILE is written in a chroot exactly as it is on a Deck --
+  # it is user config, and run_as_desktop_user already handles that. What
+  # cannot be done in here is asking a running PipeWire whether the rename took
+  # effect: arch-chroot bind-mounts /run, so that question would be answered by
+  # the INSTALLER's audio devices.
+  [stage_onboard_audio_name]=defer
   # The runner itself: no manager to `systemctl enable` with, so the symlink is
   # written directly and then read back.
   [install_first_boot_verify]=adapted
