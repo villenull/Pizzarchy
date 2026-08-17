@@ -177,6 +177,14 @@ tips=(
   "Switch themes from Style > Theme in the Omarchy menu"
   # deck-session.sh: stage-power-button
   "The power button suspends the Deck, in Gaming Mode and on the desktop"
+  # 🔴 THESE TWO NAME A COMMAND THAT MUST SHIP IN THE SAME ISO.
+  # src/pizza (dispatcher) -> src/pizza-pizza and src/pizza-ssh. If the bake
+  # stage that installs them is ever dropped, these become the fifth and sixth
+  # false tips this array has carried, and the failure is silent: the screen
+  # still draws, the command just is not there. See the block above for the
+  # four that were false until 2026-08-16.
+  "Type 'pizza pizza' in a terminal to trade the logo for a pizza"
+  "Type 'pizza ssh' in a terminal to reach this Deck from another computer"
 )
 
 # ===========================================================================
