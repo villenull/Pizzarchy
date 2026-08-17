@@ -652,7 +652,7 @@ PAD_CLICK_HALF: dict[int, str] = {
 # this could not do without buzzing the operator's device mid-session. The
 # mapping therefore lives in ONE dict, so flipping it is a one-line change if
 # the operator reports a click on one pad buzzing the other.
-PAD_HAPTIC_MAGNITUDE = 0x8000   # half of the 0..0xFFFF the FF API takes
+PAD_HAPTIC_MAGNITUDE = 0x5000   # of the 0..0xFFFF the FF API takes
 
 # ⚠️ FEEL IS UNTUNED, and this is the honest state of it: 30 ms at half scale
 # is a starting point chosen to be short enough to read as a click rather than
@@ -666,6 +666,63 @@ PAD_HAPTIC_MS = 30
 PAD_HAPTIC_MAGNITUDES: dict[str, tuple[int, int]] = {
     "left": (PAD_HAPTIC_MAGNITUDE, 0),
     "right": (0, PAD_HAPTIC_MAGNITUDE),
+}
+
+# --- 🆕 AND SO DOES A KEY TOUCHED ON THE GLASS (operator, 2026-08-16) ---------
+#
+# Operator: *"when touching the osk to type, the deck should vibrate very
+# slightly (as the real deck does)"*. The pad CLICK has buzzed since 2026-08-12
+# (above) and always did so under BOTH OSK backends -- the buzz hangs off
+# `_osk_event`, which never asked which renderer was drawing. What buzzed
+# nothing at all was the TOUCH path: a finger on the overlay arrives as a key
+# INDEX (`deck_osk_wayland.format_press_line`) and is committed by
+# `Mapper.press_key_index`, which had no buzz in it. Only the `layer` overlay
+# takes touch, so that is the backend where the silence showed.
+#
+# ⛔ ITS OWN EFFECT, NOT THE PAD'S ONE PLAYED TWICE. A finger on the glass has
+# no side -- both actuators fire, so this is one effect carrying both magnitudes
+# and one write, not two writes of the pad effects. Playing THOSE on both sides
+# would also be twice the click's energy for the one gesture the operator asked
+# to be *very slight*. A separate slot is what lets the two be tuned apart.
+#
+# ⚠️ 🎚️ THESE TWO ARE THE TUNING KNOBS, AND NOBODY WHO WROTE THEM HAS FELT
+# THEM -- no tier below the operator's own hands can judge a buzz, exactly as
+# PAD_HAPTIC_MS says of the click. Change them HERE and nowhere else; no test
+# asserts either literal, deliberately, so tuning cannot turn a suite red.
+#
+#   * MAGNITUDE is the FF API's 0..0xFFFF, both actuators at once.
+#   * MS is MILLISECONDS of replay, above the 3.3 ms jiffy CONFIG_HZ=300
+#     schedules ff-memless on (see PAD_HAPTIC_MS).
+#
+# 🔴 TUNED ON THE PANEL BY THE OPERATOR, 2026-08-16, AND THE FIRST GUESS WAS
+# IMPERCEPTIBLE. 0x2000/15ms could not be felt AT ALL. 0x8000/30ms (the click's
+# own values) could. Bisecting down: 0x4000 was slightly under, 0x5000 is right.
+# The duration was probably the larger error -- 15 ms may be too short to feel
+# at any magnitude -- so 30 ms was held fixed while magnitude moved.
+#
+# ⚠️ THIS COMMENT USED TO SAY "a quarter of the pad click" and "half the
+# click's". Both were true when written and are now false twice over: the touch
+# value moved, and then the operator asked for the CLICK to come down to match
+# it, so PAD_HAPTIC_MAGNITUDE is 0x5000 too. Do not restate the ratio here --
+# it is exactly the kind of pinned-value comment this repo keeps having to
+# correct. Read the constants.
+OSK_TOUCH_HAPTIC_MAGNITUDE = 0x5000
+OSK_TOUCH_HAPTIC_MS = 30
+
+# ⚠️ NOT A PAD HALF, but it shares `Haptics.effects`' keyspace with "left" and
+# "right", so it must not collide with either. `Mapper.buzz` takes this the same
+# way it takes a half; the slot is just a name for an uploaded effect.
+OSK_TOUCH_HAPTIC_SLOT = "touch"
+
+# Every effect `Haptics` uploads, in ONE table: slot -> (strong, weak, ms).
+# One table because `start()` arms all-or-nothing and `buzz()` may be asked for
+# any of them -- a second list would let the two drift and leave a slot that is
+# asked for and was never uploaded.
+HAPTIC_EFFECTS: dict[str, tuple[int, int, int]] = {
+    **{half: (strong, weak, PAD_HAPTIC_MS)
+       for half, (strong, weak) in PAD_HAPTIC_MAGNITUDES.items()},
+    OSK_TOUCH_HAPTIC_SLOT: (OSK_TOUCH_HAPTIC_MAGNITUDE,
+                            OSK_TOUCH_HAPTIC_MAGNITUDE, OSK_TOUCH_HAPTIC_MS),
 }
 
 # --- 🆕 WITH THE KEYBOARD DOWN, THE RIGHT PAD'S CLICK IS THE LEFT MOUSE BUTTON
@@ -1359,7 +1416,10 @@ class Mapper:
         return []
 
     def buzz(self, half: str) -> bool:
-        """Confirm a pad click through that pad's actuator. False if silent.
+        """Confirm a press through the actuators. False if nothing was felt.
+
+        `half` is a slot in `HAPTIC_EFFECTS`: a pad half for that pad's click,
+        or OSK_TOUCH_HAPTIC_SLOT for a key touched on the glass.
 
         ⚠️ A SEPARATE CALL FROM THE COMMIT, not a return value folded into it.
         A commit that types nothing is still a commit -- Shift and Caps are real
@@ -1456,6 +1516,18 @@ class Mapper:
         rows = self.osk.layer.rows
         if not 0 <= row < len(rows) or not 0 <= key_index < len(rows[row]):
             return None
+        # 🔴 AND IT TICKS (OSK_TOUCH_HAPTIC_MAGNITUDE). Glass has even less
+        # travel than a trackpad, so the argument that won the pad click its
+        # buzz applies here at full strength: without it the only confirmation a
+        # finger gets is watching for a character to appear.
+        #
+        # ⚠️ AFTER the bounds check, so an index this keyboard does not have --
+        # the overlay and this process disagreeing about the layout, the one
+        # thing `None` is reserved for -- announces a keystroke through the
+        # palms that nothing typed. BEFORE the press, and its answer discarded,
+        # for the reason `Mapper.buzz` gives: a commit that types nothing
+        # (Shift, Caps) is still a commit, and haptics are best-effort.
+        self.buzz(OSK_TOUCH_HAPTIC_SLOT)
         return self._consume_osk_request(self.osk.press(rows[row][key_index]))
 
     def translate(self, etype: int, code: int, value: int, now: float) -> list[tuple[int, int]]:
@@ -2504,7 +2576,8 @@ class AutoShow:
 
 
 class Haptics:
-    """One short buzz on the pad that was clicked. See PAD_HAPTIC_MAGNITUDES.
+    """One short buzz per press -- the pad that was clicked, or both actuators
+    for a key touched on the glass. See HAPTIC_EFFECTS.
 
     🔴 FAIL-SOFT IS THE WHOLE DESIGN, AND IT IS NOT THE USUAL EXCUSE FOR
     SWALLOWING. With lizard_mode=N this process is the ONLY input path on the
@@ -2517,7 +2590,7 @@ class Haptics:
     a line per pad click at 250Hz, which is how a journal becomes unreadable
     and a real message becomes invisible.
 
-    Both effects are uploaded ONCE at start. Uploading per press would put an
+    Every effect is uploaded ONCE at start. Uploading per press would put an
     ioctl and a kernel allocation on the commit path, and the device only has
     16 slots to leak into.
     """
@@ -2553,25 +2626,25 @@ class Haptics:
                      "FF_RUMBLE; the pad click commits SILENTLY (no haptic), "
                      "everything else is unaffected")
             return False
-        for half, (strong, weak) in PAD_HAPTIC_MAGNITUDES.items():
+        for slot, (strong, weak, length_ms) in HAPTIC_EFFECTS.items():
             effect = self.ff.Effect(
                 e.FF_RUMBLE, -1, 0,
                 self.ff.Trigger(0, 0),
-                self.ff.Replay(PAD_HAPTIC_MS, 0),
+                self.ff.Replay(length_ms, 0),
                 self.ff.EffectType(
                     ff_rumble_effect=self.ff.Rumble(strong_magnitude=strong,
                                                    weak_magnitude=weak)),
             )
             try:
-                self.effects[half] = self.device.upload_effect(effect)
+                self.effects[slot] = self.device.upload_effect(effect)
             except (OSError, ValueError) as exc:
                 # ⚠️ Give back whatever went up before the failure. A half-armed
-                # Haptics that buzzed one pad and not the other would read as
-                # "the right pad's click is broken", which is a worse lie than
-                # no haptics at all.
-                self.log(f"uploading the {half} pad's haptic failed ({exc}); "
-                         "the pad click commits SILENTLY, everything else is "
-                         "unaffected")
+                # Haptics that buzzed one pad and not the other -- or the pads
+                # and not the glass -- would read as "the right pad's click is
+                # broken", which is a worse lie than no haptics at all.
+                self.log(f"uploading the {slot} haptic failed ({exc}); "
+                         "the pad click and touch typing commit SILENTLY, "
+                         "everything else is unaffected")
                 self.close()
                 return False
         self.enabled = True
