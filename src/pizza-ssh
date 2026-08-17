@@ -1,0 +1,907 @@
+#!/usr/bin/env bash
+#
+# pizza-ssh — turn SSH on for support, LAN-only, and say exactly how to connect.
+#
+# WHY THIS EXISTS
+# ---------------
+# The README tells a user with a broken install to attach
+# /var/log/omarchy-deck-install.json to their issue. This device has no
+# keyboard, so that instruction was unfollowable: there was no supported way to
+# get a file off it. And docs/PROGRESS.md §5.36 records that wiring SSH by hand
+# cost most of an evening, twice, for reasons that are all mundane and all
+# stack:
+#
+#   * ufw `default deny` produces a TIMEOUT while a missing sshd produces
+#     REFUSED — the first masks the second, and the pair is indistinguishable
+#     from the outside.
+#   * `systemctl is-active` prints `inactive` for a unit that does not exist,
+#     so "never installed" and "not started" look identical. (Verified on the
+#     Deck: `is-active nosuchunit.service` → `inactive`, rc 4.)
+#   * `&&`-chaining ate the failures.
+#   * `~` expanded to the wrong home because the operator was in the wrong
+#     shell, and nobody remembered the username.
+#
+# So: every one of those is made impossible here rather than documented.
+# `status` gives four DISTINCT answers with four distinct exit codes; unit
+# existence is read from `list-unit-files`, never inferred from `is-active`;
+# no step is `&&`-chained; the home directory and username are resolved from
+# the passwd database, never from `~` or `$HOME`; and the connect line is
+# printed literally, ready to type on another machine.
+#
+# CONTRACT WITH THE `pizza` DISPATCHER
+# ------------------------------------
+# This script is standalone. `bash src/pizza-ssh status` works with no
+# dispatcher at all. The dispatcher (src/pizza — owned elsewhere, deliberately
+# NOT edited by this file) is expected to exec us as:
+#
+#     pizza-ssh [on|off|status]
+#
+#   argv       exactly zero or one argument. No argument means `on`.
+#              Anything else is a usage error. We consume no flags, so the
+#              dispatcher may pass its argv tail through verbatim.
+#   stdin      not read. Only consulted via `-t 0` to decide whether it is
+#              safe to let sudo prompt.
+#   stdout     the human-readable report. stderr carries failures only.
+#   exit code  0  `on`/`off` succeeded; for `status`, REACHABLE
+#              1  a step failed, or state could not be determined (said loudly)
+#              2  usage error
+#              3  status: sshd running, but the firewall is closed
+#              4  status: sshd installed, but not running
+#              5  status: sshd not installed
+#
+#   3/4/5 are the three not-reachable answers of §5.36, kept apart on the exit
+#   code as well as in the text so a caller can distinguish them too.
+#
+# DESIGN DECISIONS (operator-approved, do not "simplify" away)
+# -----------------------------------------------------------
+#   * OFF BY DEFAULT, ALWAYS. Nothing in the installer or any first-boot path
+#     calls this. It is a command a user runs deliberately.
+#   * LAN-ONLY. The ufw rule is scoped to the subnet DERIVED from the live
+#     interface, never 0.0.0.0/0 and never a hardcoded RFC1918 range. A café
+#     or hotel network gets whatever /24 the café hands out and no more; a
+#     machine with no address gets a loud refusal and no rule at all.
+#   * WE NEVER INSTALL ANYTHING. openssh ships with the install already
+#     (iso/upstream/builder/archinstall.packages:11, and
+#     openssh-10.5p1-1-x86_64.pkg.tar.zst in the ISO's offline mirror). If it
+#     is somehow absent we say so and stop — see CLAUDE.md on AUR helpers and
+#     auto-install.
+#   * WE NEVER CHANGE THE FIREWALL'S POSTURE. We add and remove one tagged
+#     rule. We do not enable ufw, disable it, or touch its default policy.
+#   * WE NEVER EDIT sshd_config. Turning password auth off is suggested, not
+#     performed: doing it for the user is a lockout risk on a device whose
+#     only other input is a trackpad.
+
+set -euo pipefail
+
+readonly RULE_TAG='pizza-ssh'
+readonly FALLBACK_PORT=22
+
+# Exit codes, named so the call sites read as the four answers of §5.36.
+readonly EX_FAIL=1
+readonly EX_USAGE=2
+readonly EX_FIREWALL_CLOSED=3
+readonly EX_NOT_RUNNING=4
+readonly EX_NOT_INSTALLED=5
+
+# ---------------------------------------------------------------------------
+# output
+# ---------------------------------------------------------------------------
+
+say()  { printf '%s\n' "$*"; }
+warn() { printf 'WARNING: %s\n' "$*" >&2; }
+
+# Loud, and never optional. Every failure path in this file ends here or in an
+# explicit non-zero return; nothing is swallowed.
+die() {
+  printf 'pizza ssh: %s\n' "$1" >&2
+  shift
+  local line
+  for line in "$@"; do printf '  %s\n' "$line" >&2; done
+  exit "$EX_FAIL"
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ---------------------------------------------------------------------------
+# privilege
+#
+# We do NOT re-exec the whole script under sudo. Re-execing is how `~` ends up
+# meaning /root — today's twenty-minute bug. Instead each privileged command
+# goes through run_priv() and the script itself stays as the invoking user, so
+# the home directory and username we print are unambiguously theirs.
+# ---------------------------------------------------------------------------
+
+_sudo_announced=0
+
+announce_sudo() {
+  (( EUID == 0 )) && return 0
+  (( _sudo_announced == 1 )) && return 0
+  _sudo_announced=1
+  say "(this needs root — sudo may ask for your password)"
+}
+
+# Run privileged, prompting if it has to.
+run_priv() {
+  if (( EUID == 0 )); then
+    "$@"
+  else
+    announce_sudo
+    sudo "$@"
+  fi
+}
+
+# Run privileged but NEVER prompt. Used by `status`, which must not hang when
+# it is called from a script or a hook.
+run_priv_quiet() {
+  if (( EUID == 0 )); then
+    "$@"
+  else
+    sudo -n "$@" 2>/dev/null
+  fi
+}
+
+priv_possible() { (( EUID == 0 )) || have sudo; }
+
+# ---------------------------------------------------------------------------
+# who and where
+# ---------------------------------------------------------------------------
+
+# The account someone will actually type after `ssh`. If we were invoked as
+# `sudo pizza ssh`, that is SUDO_USER, not root — printing `ssh root@…` would
+# send the user down a path that PermitRootLogin almost certainly refuses.
+target_user() {
+  local u=${SUDO_USER:-}
+  if [[ -z $u || $u == root ]]; then u=$(id -un); fi
+  printf '%s\n' "$u"
+}
+
+# From the passwd database. NOT from `~` and NOT from $HOME: both of those
+# follow whichever shell you happen to be in, which is exactly how the
+# operator ended up reading root's authorized_keys and concluding there was no
+# key installed.
+target_home() {
+  local u=$1 home
+  home=$(getent passwd "$u" | cut -d: -f6) || home=
+  printf '%s\n' "$home"
+}
+
+# ---------------------------------------------------------------------------
+# network
+# ---------------------------------------------------------------------------
+
+# Network address of ip/prefix, in CIDR. Pure arithmetic, no python, no ipcalc.
+ipv4_network() {
+  local ip=$1 prefix=$2
+  local a b c d
+  IFS=. read -r a b c d <<<"$ip"
+  local num=$(( (a << 24) | (b << 16) | (c << 8) | d ))
+  local mask=$(( (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF ))
+  local net=$(( num & mask ))
+  printf '%d.%d.%d.%d/%d\n' \
+    $(( (net >> 24) & 255 )) $(( (net >> 16) & 255 )) \
+    $(( (net >> 8) & 255 ))  $(( net & 255 )) "$prefix"
+}
+
+# Set by detect_link(). Kept as globals so both `on` and `status` derive the
+# subnet through exactly one code path.
+LINK_IFACE=
+LINK_ADDR=
+LINK_SUBNET=
+LINK_PROBLEM=
+
+# Returns 0 and fills LINK_*, or returns 1 and fills LINK_PROBLEM. It never
+# falls back to a default, and in particular never falls back to something
+# that would open the port wider than intended: "I could not work out the
+# subnet" must end in a refusal, not in 0.0.0.0/0.
+detect_link() {
+  LINK_IFACE=''
+  LINK_ADDR=''
+  LINK_SUBNET=''
+  LINK_PROBLEM=''
+
+  if ! have ip; then
+    LINK_PROBLEM="the 'ip' command is not available, so the local subnet cannot be derived"
+    return 1
+  fi
+
+  local iface
+  iface=$(ip -4 route show default 2>/dev/null |
+          awk '$1 == "default" { for (i = 1; i < NF; i++) if ($i == "dev") { print $(i+1); exit } }') || iface=
+
+  if [[ -z $iface ]]; then
+    # No default route. That is normal on an isolated LAN, so accept it — but
+    # only when there is exactly one candidate. Guessing between two would be
+    # guessing which network to expose the port to.
+    local -a cands=()
+    mapfile -t cands < <(ip -o -4 addr show scope global 2>/dev/null | awk '{ print $2 }' | sort -u)
+    if (( ${#cands[@]} == 1 )); then
+      iface=${cands[0]}
+    elif (( ${#cands[@]} == 0 )); then
+      LINK_PROBLEM="no network interface has an IPv4 address — connect to Wi-Fi first"
+      return 1
+    else
+      LINK_PROBLEM="no default route, and ${#cands[@]} interfaces have addresses (${cands[*]}) — cannot tell which network to open to"
+      return 1
+    fi
+  fi
+
+  local cidr
+  cidr=$(ip -o -4 addr show dev "$iface" scope global 2>/dev/null | awk '{ print $4; exit }') || cidr=
+  if [[ -z $cidr ]]; then
+    LINK_PROBLEM="interface $iface has no IPv4 address yet — connect to Wi-Fi first, or wait for DHCP"
+    return 1
+  fi
+
+  local addr=${cidr%/*} prefix=${cidr#*/}
+  if [[ $addr != *.*.*.* || $prefix != +([0-9]) ]]; then
+    LINK_PROBLEM="could not parse the address on $iface: '$cidr'"
+    return 1
+  fi
+
+  # 169.254/16 means DHCP failed and the kernel invented an address. Treat it
+  # as "no address yet", loudly, rather than opening the port to a link-local
+  # range that reaches every other machine that also failed DHCP.
+  if [[ $addr == 169.254.* ]]; then
+    LINK_PROBLEM="$iface only has a link-local address ($addr) — DHCP has not completed, so there is no LAN to open to"
+    return 1
+  fi
+
+  # Sanity-check the mask in the direction that matters. Anything shorter than
+  # /8 is not a LAN, it is a chunk of the internet.
+  if (( prefix < 8 )); then
+    LINK_PROBLEM="the prefix on $iface is /$prefix, which is far too wide to call a local subnet — refusing to open the port that far"
+    return 1
+  fi
+  # /31 and /32 contain no other hosts, so a rule scoped to them can never let
+  # anyone in. Saying "SSH is on" over that would be a lie.
+  if (( prefix > 30 )); then
+    LINK_PROBLEM="the prefix on $iface is /$prefix, a subnet with no other hosts in it — nothing could reach this machine through such a rule"
+    return 1
+  fi
+
+  LINK_IFACE=$iface
+  LINK_ADDR=$addr
+  LINK_SUBNET=$(ipv4_network "$addr" "$prefix")
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# sshd
+# ---------------------------------------------------------------------------
+
+# §5.36's trap, defused: `is-active` says `inactive` for a unit that was never
+# installed. `list-unit-files` is the only one of the three that distinguishes,
+# so it is the one we ask.
+sshd_unit_present() {
+  systemctl list-unit-files sshd.service --no-legend >/dev/null 2>&1
+}
+
+sshd_binary_present() { have sshd; }
+
+sshd_installed() { sshd_unit_present || sshd_binary_present; }
+
+sshd_active()  { [[ $(systemctl is-active  sshd.service 2>/dev/null || true) == active  ]]; }
+sshd_enabled() { [[ $(systemctl is-enabled sshd.service 2>/dev/null || true) == enabled ]]; }
+
+# The ports sshd will actually listen on, read from its own resolved config —
+# derived, not assumed. Opening 22 while sshd_config says 2222 is the same
+# class of bug as §5.36's masked refusal: the firewall would look right and
+# nothing would connect. `sshd -T` needs root (it reads the host keys), so a
+# non-root `status` will fall back and say so.
+SSHD_PORTS=()
+SSHD_PORTS_DERIVED=0
+
+load_sshd_ports() {
+  SSHD_PORTS=()
+  SSHD_PORTS_DERIVED=0
+  local out
+  if out=$(run_priv_quiet sshd -T 2>/dev/null); then
+    :
+  elif [[ ${1:-} == may-prompt ]] && priv_possible; then
+    out=$(run_priv sshd -T 2>/dev/null) || out=
+  else
+    out=
+  fi
+  if [[ -n $out ]]; then
+    mapfile -t SSHD_PORTS < <(printf '%s\n' "$out" | awk 'tolower($1) == "port" { print $2 }')
+  fi
+  if (( ${#SSHD_PORTS[@]} > 0 )); then
+    SSHD_PORTS_DERIVED=1
+  else
+    SSHD_PORTS=("$FALLBACK_PORT")
+  fi
+}
+
+# yes | no | unknown
+sshd_password_auth() {
+  local out
+  if out=$(run_priv_quiet sshd -T 2>/dev/null) && [[ -n $out ]]; then
+    local v
+    v=$(printf '%s\n' "$out" | awk 'tolower($1) == "passwordauthentication" { print tolower($2); exit }')
+    [[ -n $v ]] && { printf '%s\n' "$v"; return 0; }
+  fi
+  printf 'unknown\n'
+}
+
+# ---------------------------------------------------------------------------
+# firewall
+#
+# ufw is the firewall Omarchy ships and enables (verified on the Deck:
+# ufw 0.36.2, unit enabled and active; and in
+# iso/upstream/manifests/fresh-4.json, is_enabled:ufw → "enabled").
+#
+# The four things this section assumes about ufw's CLI were READ from ufw
+# 0.36.2's own python source on the Deck, not inferred from the man page.
+# Cited so nobody has to do it again:
+#
+#   backend_iptables.py:294,411  a numbered rule line starts at column 0 with
+#                                "[%2d] " — hence the `[ n]` parse below.
+#   backend_iptables.py:419      a comment renders as a trailing " # <text>" —
+#                                hence tagging rules and finding them by tag.
+#   parser.py:182-195            `comment` may appear anywhere in argv and
+#                                consumes the next token, so putting it last is
+#                                valid; parser.py:190 rejects an apostrophe in
+#                                the text, which RULE_TAG does not contain.
+#   parser.py:834-837            `--force` is only honoured as argv[0], so it
+#   frontend.py:591,616-622      must come FIRST; with it, delete_rule() skips
+#                                the "Proceed with operation" prompt. A delete
+#                                that stopped to ask would hang this script.
+# ---------------------------------------------------------------------------
+
+# absent | unknown | active | inactive
+UFW_STATE=
+UFW_STATUS_TEXT=
+
+load_ufw_state() {
+  UFW_STATE=
+  UFW_STATUS_TEXT=
+
+  if ! have ufw; then
+    UFW_STATE=absent
+    return 0
+  fi
+
+  local out
+  if out=$(run_priv_quiet ufw status numbered 2>/dev/null) && [[ -n $out ]]; then
+    :
+  elif [[ ${1:-} == may-prompt ]] && priv_possible; then
+    out=$(run_priv ufw status numbered 2>/dev/null) || out=
+  else
+    out=
+  fi
+
+  if [[ -z $out ]]; then
+    # We could not read it. That is NOT the same as "closed" and NOT the same
+    # as "open"; say so rather than picking one.
+    UFW_STATE=unknown
+    return 0
+  fi
+
+  UFW_STATUS_TEXT=$out
+  if printf '%s\n' "$out" | grep -qi '^Status: active'; then
+    UFW_STATE=active
+  else
+    UFW_STATE=inactive
+  fi
+}
+
+# Rule numbers of every rule we own, highest first so deleting them in order
+# does not renumber the ones still to go.
+our_rule_numbers() {
+  [[ -n $UFW_STATUS_TEXT ]] || return 0
+  printf '%s\n' "$UFW_STATUS_TEXT" |
+    grep -F "# $RULE_TAG" |
+    sed -n 's/^[[:space:]]*\[[[:space:]]*\([0-9]\+\)\].*/\1/p' |
+    sort -rn
+}
+
+our_rule_lines() {
+  [[ -n $UFW_STATUS_TEXT ]] || return 0
+  printf '%s\n' "$UFW_STATUS_TEXT" | grep -F "# $RULE_TAG" || true
+}
+
+# Rules touching an SSH port that we did NOT create. Reported so `off` cannot
+# leave the user believing the port is shut when someone else's rule holds it
+# open — the same masking problem as §5.36, one layer up.
+foreign_ssh_rule_lines() {
+  [[ -n $UFW_STATUS_TEXT ]] || return 0
+  local port pattern=''
+  for port in "${SSHD_PORTS[@]}"; do
+    pattern+="${pattern:+|}(^|[^0-9])${port}(/|[^0-9]|$)"
+  done
+  [[ -n $pattern ]] || return 0
+  printf '%s\n' "$UFW_STATUS_TEXT" |
+    grep -E "$pattern" |
+    grep -v -F "# $RULE_TAG" || true
+}
+
+drop_our_rules() {
+  local -a nums=()
+  mapfile -t nums < <(our_rule_numbers)
+  (( ${#nums[@]} == 0 )) && return 0
+  local n
+  for n in "${nums[@]}"; do
+    if ! run_priv ufw --force delete "$n"; then
+      die "failed to delete ufw rule $n" \
+          "the firewall is now in a state this script did not intend." \
+          "inspect it with: sudo ufw status numbered"
+    fi
+  done
+  # Re-read, so anything downstream sees the truth rather than our intent.
+  load_ufw_state may-prompt
+}
+
+# ---------------------------------------------------------------------------
+# authorized_keys
+# ---------------------------------------------------------------------------
+
+# Prints a count, or -1 when the file is not readable, or -2 when it is absent.
+authorized_key_count() {
+  local file=$1
+  [[ -e $file ]] || { printf '%d\n' -2; return 0; }
+  [[ -r $file ]] || { printf '%d\n' -1; return 0; }
+  local n
+  n=$(grep -cvE '^[[:space:]]*($|#)' "$file") || n=0
+  printf '%d\n' "$n"
+}
+
+# ---------------------------------------------------------------------------
+# reporting
+# ---------------------------------------------------------------------------
+
+print_connect_block() {
+  local user=$1 addr=$2
+  say ""
+  say "Connect from another machine on the same network — type this:"
+  say ""
+  say "    ssh ${user}@${addr}"
+  say ""
+  say "To copy the install record off this device, run there:"
+  say ""
+  say "    scp ${user}@${addr}:/var/log/omarchy-deck-install.json ."
+  say ""
+  say "If that machine refuses with REMOTE HOST IDENTIFICATION HAS CHANGED,"
+  say "this device was reinstalled since it last connected. Clear the stale"
+  say "entry THERE, not here:"
+  say ""
+  say "    ssh-keygen -R ${addr}"
+}
+
+print_auth_advice() {
+  local user=$1 home=$2
+  local akfile="${home:-}/.ssh/authorized_keys"
+  local count pw
+  count=$(authorized_key_count "$akfile")
+  pw=$(sshd_password_auth)
+
+  say ""
+  if [[ -z $home ]]; then
+    warn "could not resolve a home directory for '$user' from the passwd database; cannot check for an installed key"
+  elif (( count > 0 )); then
+    say "Key auth: ${count} key(s) installed in ${akfile}."
+    say "  Use the key. It is stronger than the password and needs no typing."
+    if [[ $pw == yes ]]; then
+      say ""
+      warn "PasswordAuthentication is still ON, and you already have a key."
+      say "  Passwords on this device get typed on a trackpad-driven on-screen"
+      say "  keyboard, so they are short by construction. While SSH is on, that"
+      say "  short password is guessable by anything on this LAN."
+      say "  Since a key already works, you can shut that door:"
+      say "      sudo tee /etc/ssh/sshd_config.d/99-pizza-no-password.conf <<<'PasswordAuthentication no'"
+      say "      sudo systemctl restart sshd"
+      say "  (this script will not do it for you — getting it wrong locks you"
+      say "   out of a machine whose only other input is a trackpad)"
+    fi
+  else
+    if (( count == -2 )); then
+      say "Key auth: NOT set up — ${akfile} does not exist."
+    elif (( count == -1 )); then
+      say "Key auth: ${akfile} exists but could not be read from here."
+    else
+      say "Key auth: NOT set up — ${akfile} contains no keys."
+    fi
+    say ""
+    warn "the password for '$user' is the ONLY thing standing between this"
+    say "  machine and everyone else on this network."
+    say "  Passwords on this device get typed on a trackpad-driven on-screen"
+    say "  keyboard, so they are short by construction — and a short password"
+    say "  exposed to a whole LAN is a bad trade for a café or a hotel."
+    say "  Turn SSH off again the moment you are done:  pizza ssh off"
+    say ""
+    say "  Better: install a key from your other machine, once:"
+    say "      ssh-copy-id ${user}@${LINK_ADDR:-<this device>}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# subcommands
+# ---------------------------------------------------------------------------
+
+cmd_on() {
+  local user home
+  user=$(target_user)
+  home=$(target_home "$user")
+
+  # --- preflight, before anything is changed -------------------------------
+  #
+  # Opening a firewall port for a daemon that is not installed is exactly the
+  # §5.36 confusion, manufactured on purpose: the port would answer with a
+  # refusal that looks like a timeout looks like a wrong address. So we change
+  # nothing at all until both halves are known-good.
+
+  if ! sshd_installed; then
+    printf 'pizza ssh: openssh is not installed on this system.\n' >&2
+    printf '  Nothing was changed — no service was touched and no firewall rule was added.\n' >&2
+    printf '  This is unexpected: openssh ships with every install of this ISO.\n' >&2
+    printf '  Install it yourself if you need it:  sudo pacman -S openssh\n' >&2
+    printf '  (this script will not install packages for you)\n' >&2
+    exit "$EX_NOT_INSTALLED"
+  fi
+
+  if ! detect_link; then
+    die "cannot work out which network to open SSH to, so nothing was changed" \
+        "$LINK_PROBLEM" \
+        "SSH is deliberately restricted to the local subnet. Without an address" \
+        "there is no local subnet, and opening the port to everyone instead is" \
+        "not a fallback this script is willing to make."
+  fi
+
+  say "Turning SSH on, restricted to ${LINK_SUBNET} (this network only)."
+  say ""
+
+  load_sshd_ports may-prompt
+
+  # --- the service ---------------------------------------------------------
+
+  if ! run_priv systemctl enable --now sshd.service; then
+    die "could not enable and start sshd.service" \
+        "nothing else was changed; the firewall was not touched." \
+        "read the reason with: sudo systemctl status sshd.service"
+  fi
+
+  # Trust the observed state, not the exit code of the command we just ran.
+  if ! sshd_active; then
+    die "systemctl reported success but sshd.service is not active" \
+        "the firewall was NOT opened, because a port open to a dead daemon is" \
+        "the exact ambiguity this command exists to remove." \
+        "read the reason with: sudo systemctl status sshd.service"
+  fi
+  say "sshd: running, and enabled at boot."
+
+  # --- the firewall --------------------------------------------------------
+
+  load_ufw_state may-prompt
+
+  case $UFW_STATE in
+    absent)
+      say "firewall: ufw is not installed, so no rule was added."
+      warn "this machine's port(s) ${SSHD_PORTS[*]} are reachable from wherever"
+      say "  the network allows — the LAN-only restriction could not be applied."
+      ;;
+    unknown)
+      die "sshd is now running, but the firewall state could not be read" \
+          "root is required to read 'ufw status', and it was not available." \
+          "SSH may or may not be reachable, and this script will not guess." \
+          "run:  sudo ufw status numbered"
+      ;;
+    active|inactive)
+      # Drop our old rules first. That makes a repeat run idempotent AND
+      # correct after the device moves to a different network — otherwise the
+      # café's /24 would stay allowed after you got home.
+      drop_our_rules
+
+      local port
+      for port in "${SSHD_PORTS[@]}"; do
+        if ! run_priv ufw allow from "$LINK_SUBNET" to any port "$port" proto tcp comment "$RULE_TAG"; then
+          die "could not add the ufw rule for port $port" \
+              "sshd IS now running, but the firewall was not opened, so this is" \
+              "NOT a working SSH setup. Turn it back off with: pizza ssh off" \
+              "then inspect: sudo ufw status numbered"
+        fi
+      done
+
+      # Verify by reading the firewall back. A rule we asked for is not a rule
+      # that exists; this project exists partly because upstream tooling
+      # confused the two.
+      load_ufw_state may-prompt
+      local -a placed=()
+      mapfile -t placed < <(our_rule_numbers)
+      if (( ${#placed[@]} == 0 )); then
+        die "the ufw rule was accepted but does not appear in 'ufw status'" \
+            "sshd is running and the port is NOT open. Do not trust this setup." \
+            "inspect: sudo ufw status numbered"
+      fi
+
+      if [[ $UFW_STATE == active ]]; then
+        say "firewall: ufw active, port(s) ${SSHD_PORTS[*]} allowed from ${LINK_SUBNET} only."
+      else
+        say "firewall: rule added, but ufw itself is INACTIVE."
+        warn "ufw is not enforcing anything, so the LAN-only restriction is not"
+        say "  in effect. The port is reachable from wherever the network allows."
+        say "  The rule is stored and will apply if ufw is enabled later."
+      fi
+      ;;
+  esac
+
+  if (( SSHD_PORTS_DERIVED == 0 )); then
+    say ""
+    warn "sshd's config could not be read, so port ${FALLBACK_PORT} was assumed."
+    say "  If sshd_config sets a different Port, that port is NOT open."
+    say "  Check with: sudo sshd -T | grep '^port '"
+  fi
+
+  print_connect_block "$user" "$LINK_ADDR"
+  print_auth_advice "$user" "$home"
+
+  say ""
+  say "Turn it off again when you are done:  pizza ssh off"
+  return 0
+}
+
+cmd_off() {
+  # `off` must never error just because things are already off — it is the
+  # command a worried user runs twice.
+  local did_something=0
+
+  load_sshd_ports   # never prompts; only used to describe foreign rules
+
+  if sshd_installed; then
+    if ! run_priv systemctl disable --now sshd.service; then
+      die "could not stop and disable sshd.service" \
+          "SSH may still be running. Check: sudo systemctl status sshd.service"
+    fi
+    if sshd_active; then
+      die "systemctl reported success but sshd.service is still active" \
+          "SSH is still running. Check: sudo systemctl status sshd.service"
+    fi
+    say "sshd: stopped, and disabled at boot."
+    did_something=1
+  else
+    say "sshd: not installed — nothing to stop."
+  fi
+
+  # sshd.socket is not how Arch runs sshd by default, but if someone enabled
+  # socket activation then disabling the service alone leaves the port live.
+  if systemctl list-unit-files sshd.socket --no-legend >/dev/null 2>&1; then
+    if [[ $(systemctl is-enabled sshd.socket 2>/dev/null || true) == enabled ]] ||
+       [[ $(systemctl is-active  sshd.socket 2>/dev/null || true) == active  ]]; then
+      if ! run_priv systemctl disable --now sshd.socket; then
+        die "sshd.service was stopped but sshd.socket could not be disabled" \
+            "socket activation will start sshd again on the next connection." \
+            "check: sudo systemctl status sshd.socket"
+      fi
+      say "sshd.socket: stopped and disabled (socket activation would have restarted sshd)."
+      did_something=1
+    fi
+  fi
+
+  if have ufw; then
+    load_ufw_state may-prompt
+    if [[ $UFW_STATE == unknown ]]; then
+      die "sshd was dealt with, but the firewall could not be read" \
+          "root is required to read 'ufw status', and it was not available." \
+          "any rule this command added is still in place. Remove it with:" \
+          "  sudo ufw status numbered   # then: sudo ufw --force delete <n>"
+    fi
+    local -a nums=()
+    mapfile -t nums < <(our_rule_numbers)
+    if (( ${#nums[@]} > 0 )); then
+      drop_our_rules
+      # Read back: the rules must actually be gone.
+      local -a left=()
+      mapfile -t left < <(our_rule_numbers)
+      if (( ${#left[@]} > 0 )); then
+        die "ufw accepted the deletions but ${#left[@]} of our rules are still listed" \
+            "the port may still be open. inspect: sudo ufw status numbered"
+      fi
+      say "firewall: removed ${#nums[@]} rule(s) tagged '${RULE_TAG}'."
+      did_something=1
+    else
+      say "firewall: no rules tagged '${RULE_TAG}' — nothing to remove."
+    fi
+
+    local -a foreign=()
+    mapfile -t foreign < <(foreign_ssh_rule_lines)
+    if (( ${#foreign[@]} > 0 )); then
+      say ""
+      warn "the firewall still has ${#foreign[@]} rule(s) mentioning an SSH port that"
+      say "  this command did not create, and did not remove:"
+      local line
+      for line in "${foreign[@]}"; do say "      $line"; done
+      say "  Port ${SSHD_PORTS[*]} may still be open. Review: sudo ufw status numbered"
+    fi
+  else
+    say "firewall: ufw is not installed — no rule to remove."
+  fi
+
+  say ""
+  if (( did_something == 1 )); then
+    say "SSH is off."
+  else
+    say "SSH was already off. Nothing needed changing."
+  fi
+  return 0
+}
+
+cmd_status() {
+  local user home
+  user=$(target_user)
+  home=$(target_home "$user")
+
+  # --- 1. is it installed at all? -----------------------------------------
+  #
+  # Asked of list-unit-files, because is-active answers `inactive` for a unit
+  # that does not exist and that single fact cost an evening (§5.36).
+  if ! sshd_installed; then
+    say "sshd:      NOT INSTALLED — there is no sshd.service on this system."
+    say "firewall:  not checked (there is nothing to reach)."
+    say ""
+    say "=> NOT REACHABLE, because openssh is not installed."
+    say "   Install it yourself if you need it:  sudo pacman -S openssh"
+    return "$EX_NOT_INSTALLED"
+  fi
+
+  local unit_note=''
+  if sshd_unit_present && ! sshd_binary_present; then
+    unit_note=' (unit present, but the sshd binary was not found on PATH)'
+  elif ! sshd_unit_present && sshd_binary_present; then
+    unit_note=' (binary present, but there is no sshd.service unit)'
+  fi
+
+  load_sshd_ports
+
+  # --- 2. is it running? ---------------------------------------------------
+  local boot_state
+  if sshd_enabled; then boot_state='enabled at boot'; else boot_state='NOT enabled at boot'; fi
+
+  if ! sshd_active; then
+    say "sshd:      installed, NOT RUNNING (${boot_state})${unit_note}"
+    say "firewall:  not checked (nothing is listening)."
+    say ""
+    say "=> NOT REACHABLE, because sshd is installed but stopped."
+    say "   Turn it on with:  pizza ssh"
+    return "$EX_NOT_RUNNING"
+  fi
+  say "sshd:      RUNNING on port(s) ${SSHD_PORTS[*]} (${boot_state})${unit_note}"
+  if (( SSHD_PORTS_DERIVED == 0 )); then
+    say "           (port not confirmed — reading sshd's config needs root; ${FALLBACK_PORT} assumed)"
+  fi
+
+  # --- 3. address ----------------------------------------------------------
+  local addr_ok=0
+  if detect_link; then
+    addr_ok=1
+    say "address:   ${LINK_ADDR} on ${LINK_IFACE} (local subnet ${LINK_SUBNET})"
+  else
+    say "address:   NONE — ${LINK_PROBLEM}"
+  fi
+
+  # --- 4. firewall ---------------------------------------------------------
+  load_ufw_state
+  local fw_open=0 fw_known=1
+  case $UFW_STATE in
+    absent)
+      say "firewall:  ufw is not installed — nothing is filtering the port here."
+      fw_open=1
+      ;;
+    unknown)
+      say "firewall:  UNKNOWN — reading 'ufw status' needs root, and sudo would have prompted."
+      say "           Re-run as:  sudo pizza ssh status"
+      fw_known=0
+      ;;
+    inactive)
+      say "firewall:  ufw is installed but INACTIVE — it is not filtering anything."
+      fw_open=1
+      local -a stored=()
+      mapfile -t stored < <(our_rule_lines)
+      if (( ${#stored[@]} > 0 )); then
+        say "           (${#stored[@]} rule(s) tagged '${RULE_TAG}' are stored but not enforced)"
+      fi
+      ;;
+    active)
+      local -a mine=()
+      mapfile -t mine < <(our_rule_lines)
+      if (( ${#mine[@]} > 0 )); then
+        fw_open=1
+        say "firewall:  ufw active, SSH allowed by ${#mine[@]} rule(s) tagged '${RULE_TAG}':"
+        local line
+        for line in "${mine[@]}"; do say "               ${line}"; done
+      else
+        local -a foreign=()
+        mapfile -t foreign < <(foreign_ssh_rule_lines)
+        if (( ${#foreign[@]} > 0 )); then
+          fw_open=1
+          say "firewall:  ufw active. No '${RULE_TAG}' rule, but ${#foreign[@]} other rule(s) mention an SSH port:"
+          local line
+          for line in "${foreign[@]}"; do say "               ${line}"; done
+        else
+          say "firewall:  ufw ACTIVE and CLOSED — no rule allows port(s) ${SSHD_PORTS[*]}."
+          say "           From another machine this looks like a TIMEOUT, not a refusal."
+        fi
+      fi
+      ;;
+  esac
+
+  # --- 5. auth -------------------------------------------------------------
+  local akfile="${home:-}/.ssh/authorized_keys" count pw
+  count=$(authorized_key_count "$akfile")
+  pw=$(sshd_password_auth)
+  if [[ -z $home ]]; then
+    say "auth:      home directory for '${user}' not found in the passwd database"
+  elif (( count > 0 )); then
+    say "auth:      ${count} key(s) in ${akfile}; PasswordAuthentication=${pw}"
+  elif (( count == -2 )); then
+    say "auth:      no key installed (${akfile} does not exist); PasswordAuthentication=${pw}"
+  elif (( count == -1 )); then
+    say "auth:      ${akfile} not readable from here; PasswordAuthentication=${pw}"
+  else
+    say "auth:      no key installed (${akfile} is empty); PasswordAuthentication=${pw}"
+  fi
+
+  # --- verdict -------------------------------------------------------------
+  #
+  # Four answers, and this is the fourth. The three failing ones returned
+  # above or fall out here, each with its own exit code.
+  say ""
+  if (( fw_known == 0 )); then
+    say "=> UNKNOWN. sshd is running, but the firewall could not be read, so"
+    say "   whether anything can reach it is genuinely not determined here."
+    return "$EX_FAIL"
+  fi
+  if (( fw_open == 0 )); then
+    say "=> NOT REACHABLE. sshd is running, but the firewall is closed."
+    say "   Open it to this network with:  pizza ssh"
+    return "$EX_FIREWALL_CLOSED"
+  fi
+  if (( addr_ok == 0 )); then
+    say "=> NOT REACHABLE. sshd is running and the firewall permits it, but this"
+    say "   machine has no usable address, so there is nothing to connect to."
+    return "$EX_FIREWALL_CLOSED"
+  fi
+
+  say "=> REACHABLE from ${LINK_SUBNET}."
+  say "   (checked from this machine — not proved by an actual connection)"
+  print_connect_block "$user" "$LINK_ADDR"
+  return 0
+}
+
+usage() {
+  cat <<'EOF'
+pizza ssh — turn SSH on for support, restricted to this network only.
+
+  pizza ssh          turn it on: enable sshd, open the port to this subnet
+                     only, and print exactly how to connect
+  pizza ssh off      turn it off: stop sshd, disable it, remove the rule
+  pizza ssh status   is it on, what address, is a key installed, is the port
+                     open — four distinct answers, never conflated
+
+SSH is OFF by default and is never enabled by the installer. Turn it on
+deliberately when you need to get a file off this device, and turn it off
+again afterwards.
+EOF
+}
+
+main() {
+  local cmd=${1:-on}
+  if (( $# > 1 )); then
+    printf 'pizza ssh: too many arguments\n\n' >&2
+    usage >&2
+    exit "$EX_USAGE"
+  fi
+  case $cmd in
+    on)              cmd_on ;;
+    off)             cmd_off ;;
+    status)          cmd_status ;;
+    -h|--help|help)  usage ;;
+    *)
+      printf 'pizza ssh: unknown subcommand %q\n\n' "$cmd" >&2
+      usage >&2
+      exit "$EX_USAGE"
+      ;;
+  esac
+}
+
+# `extglob` is needed for the +([0-9]) prefix check in detect_link().
+shopt -s extglob
+
+main "$@"
