@@ -390,12 +390,19 @@ check("a button released -- not pressed -- during the hold still leaves a tap",
 
 # A resting thumb is NOT a chord partner, or the tap would be unusable on a
 # handheld where both pads are under the thumbs.
+#
+# ⚠️ THIS USED TO PUSH THE STICK TO 25000 IN THE SAME BREATH AS THE TRACKPAD,
+# and assert that neither disturbed the tap. That is no longer true and MUST NOT
+# be: 25000 is a 76% deflection, which is a deliberate push, and STEAM + a
+# deliberate push of the left stick is the brightness ramp (its own section
+# below). What the trackpad half asserted is untouched and kept here; the
+# resting-STICK guarantee is asserted below with a resting stick's real numbers,
+# which is what that line was reaching for.
 mm = fresh()
 mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
 mm.translate(e.EV_ABS, e.ABS_HAT1X, 20000, 0.1)    # right trackpad
-mm.translate(e.EV_ABS, e.ABS_Y, 25000, 0.15)       # and the stick
 mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.2)
-check("pad and stick movement during the hold still leaves a tap",
+check("trackpad movement during the hold still leaves a tap",
       mm.pending_actions, ["menu-apps"])
 
 # The partner flag is armed on every PRESS, so a chord cannot poison the tap
@@ -1077,6 +1084,307 @@ check("and the mapper still translates afterwards",
       fresh().translate(e.EV_KEY, e.BTN_TL, 1, 0.0), [(m.BUTTON_MAP[e.BTN_TL], 1)])
 
 
+# --- 🆕 STEAM + THE LEFT STICK, UP AND DOWN, IS BRIGHTNESS -------------------
+#
+# 🔴 STOCK STEAM DECK PARITY. The operator's own words were "its the same as a
+# normal steamdeck", so the reference for every behaviour here is the stock
+# device, not what was convenient.
+#
+# ✅ THE NUMBERS BELOW ARE MEASURED, read off /dev/input/event7 on 2026-08-16:
+# the left stick is ABS_X/ABS_Y spanning -32767..32767 with fuzz=0 and FLAT=0
+# (no kernel deadzone at all), and an UNTOUCHED stick reported ABS_X=681,
+# ABS_Y=-393. That resting sample is used as INPUT below rather than as a
+# pinned expectation.
+REST_ABS_Y = -393        # measured, stick untouched
+REST_ABS_X = 681         # measured, stick untouched
+FULL_UP = -30000         # a deliberate push; well past any threshold
+FULL_DOWN = 30000
+
+check("brightness rides the LEFT stick's vertical axis",
+      m.BRIGHTNESS_STICK_AXIS in m.STICK_AXES, True)
+check("...and it is the axis the mapper already calls vertical",
+      m.STICK_AXES[m.BRIGHTNESS_STICK_AXIS], e.ABS_HAT0Y)
+# 🔴 UP IS BRIGHTER. Derived from one measured sign so the pair cannot invert
+# independently -- assert the DERIVATION holds, not the two strings.
+check("the two steps are opposite directions of one axis",
+      sorted(m.BRIGHTNESS_STEPS), sorted({m.BRIGHTNESS_STICK_UP, -m.BRIGHTNESS_STICK_UP}))
+check("...up is the brighter one, matching HAT_MAP's proven up-is-negative",
+      (m.BRIGHTNESS_STEPS[m.BRIGHTNESS_STICK_UP],
+       m.HAT_MAP[(e.ABS_HAT0Y, m.BRIGHTNESS_STICK_UP)]),
+      ("brightness-up", e.KEY_UP))
+check("every step name has a command behind it",
+      sorted(set(m.BRIGHTNESS_STEPS.values()) - set(m.BRIGHTNESS_ACTIONS)), [])
+
+# The commands: same binary, opposite steps. Asserted as a RELATIONSHIP -- the
+# exact spellings are upstream's and are pinned in the source's comment, not
+# transcribed here.
+check("both directions drive the same brightness binary",
+      m.BRIGHTNESS_UP_ARGV[0], m.BRIGHTNESS_DOWN_ARGV[0])
+check("...and differ only in the step they ask for",
+      (m.BRIGHTNESS_UP_ARGV[:-1] == m.BRIGHTNESS_DOWN_ARGV[:-1],
+       m.BRIGHTNESS_UP_ARGV[-1] == m.BRIGHTNESS_DOWN_ARGV[-1]),
+      (True, False))
+# 🔴 IT MUST GO THROUGH OMARCHY'S SCRIPT, NOT brightnessctl OR sysfs. The script
+# is what draws the OSD and applies the non-uniform step; either shortcut loses
+# both silently, and every behavioural assertion here would still pass.
+check("🔴 it is not a raw brightnessctl or sysfs write",
+      [part for argv in (m.BRIGHTNESS_UP_ARGV, m.BRIGHTNESS_DOWN_ARGV)
+       for part in argv
+       if "brightnessctl" in part or part.startswith("/sys/")],
+      [])
+check("...and the positive control: that check can see a raw write",
+      [part for part in ["brightnessctl", "set", "/sys/class/backlight/amdgpu_bl0"]
+       if "brightnessctl" in part or part.startswith("/sys/")],
+      ["brightnessctl", "/sys/class/backlight/amdgpu_bl0"])
+
+# 🔴 THE DEADZONE. This is the assertion that stands between the operator and
+# "the brightness changes on its own": the stick's own resting sample, under a
+# held STEAM, must do NOTHING.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("🔴 a RESTING stick under a held STEAM queues nothing at all",
+      (mm.translate(e.EV_ABS, e.ABS_Y, REST_ABS_Y, 0.1), mm.pending_actions),
+      ([], []))
+check("...and neither does the resting horizontal axis",
+      (mm.translate(e.EV_ABS, e.ABS_X, REST_ABS_X, 0.15), mm.pending_actions),
+      ([], []))
+check("...and the ramp is not running", mm.brightness_dir, 0)
+# The positive control for that absence, in the same breath: the same mapper,
+# the same held STEAM, a real push -- proving the path was live the whole time.
+check("🔴 ...while a real push on that very same mapper DOES queue a step",
+      (mm.translate(e.EV_ABS, e.ABS_Y, FULL_UP, 0.2), mm.pending_actions),
+      ([], ["brightness-up"]))
+# Hysteresis is real: release must be lower than engage, or a stick held near
+# the boundary starts and stops the ramp several times a second.
+check("the ramp keeps running below the threshold that started it",
+      m.BRIGHTNESS_STICK_RELEASE < m.BRIGHTNESS_STICK_ENGAGE, True)
+check("...and the deadzone is far above the measured resting deflection",
+      m.BRIGHTNESS_STICK_ENGAGE > 4 * (abs(REST_ABS_Y) / 32767), True)
+
+# Up is brighter, down is dimmer, and neither types anything.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("STEAM + stick UP queues a brightness increase and emits no key",
+      (mm.translate(e.EV_ABS, e.ABS_Y, FULL_UP, 0.1), mm.pending_actions),
+      ([], ["brightness-up"]))
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("STEAM + stick DOWN queues a brightness decrease and emits no key",
+      (mm.translate(e.EV_ABS, e.ABS_Y, FULL_DOWN, 0.1), mm.pending_actions),
+      ([], ["brightness-down"]))
+
+# 🔴 THE STEAM-TAP POISONING BUG. `mode_chorded` is otherwise armed only by a
+# BUTTON press, and an axis deflection is not one -- so without the guard in
+# `_stick_brightness` this sequence would change the brightness AND THEN open
+# the apps menu when STEAM came up.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_ABS, e.ABS_Y, FULL_UP, 0.1)
+mm.translate(e.EV_ABS, e.ABS_Y, REST_ABS_Y, 0.2)     # stick released first
+check("🔴 STEAM+stick is a CHORD, not a tap: no apps menu on the release",
+      (mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.3), mm.pending_actions),
+      ([], ["brightness-up"]))
+# And with the stick STILL PUSHED when STEAM comes up -- the likelier grip.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_ABS, e.ABS_Y, FULL_UP, 0.1)
+check("🔴 ...and still no menu when the stick is let go AFTER steam",
+      (mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.2), mm.pending_actions),
+      ([], ["brightness-up"]))
+check("...and the ramp stopped with the hold", mm.brightness_dir, 0)
+
+# THE RAMP. One step on the edge, then the clock takes over. A stock Deck ramps
+# while you hold; it does not step once per flick.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_ABS, e.ABS_Y, FULL_UP, 0.0)
+check("the edge queues exactly one step", mm.pending_actions, ["brightness-up"])
+mm.pending_actions.clear()
+check("nothing more is due before the ramp delay elapses",
+      (mm.due_brightness(m.BRIGHTNESS_RAMP_DELAY - 0.01), mm.pending_actions), (0, []))
+check("...and one step is due once it has",
+      (mm.due_brightness(m.BRIGHTNESS_RAMP_DELAY + 0.001), mm.pending_actions),
+      (1, ["brightness-up"]))
+mm.pending_actions.clear()
+_t = m.BRIGHTNESS_RAMP_DELAY + 0.001
+check("...then it repeats on the shorter interval, not the delay",
+      (mm.due_brightness(_t + m.BRIGHTNESS_RAMP_INTERVAL - 0.01),
+       mm.due_brightness(_t + m.BRIGHTNESS_RAMP_INTERVAL + 0.001)),
+      (0, 1))
+check("the ramp starts sooner than key auto-repeat does, so it does not read "
+      "as a stuck control", m.BRIGHTNESS_RAMP_DELAY < m.REPEAT_DELAY, True)
+# 🔴 THE INTERVAL IS BOUNDED BY THE SCRIPT'S OWN flock, which exits 0 when it
+# cannot get the lock -- overlapping invocations vanish silently. Measured on
+# the Deck: ~45 ms per invocation, ~10 ms for the OSD draw.
+check("🔴 the ramp interval leaves room for the script's measured ~60ms lock hold",
+      m.BRIGHTNESS_RAMP_INTERVAL > 0.060 * 1.5, True)
+
+# A ramp with no clock is a ramp that never advances: main()'s select() has to
+# be told to wake up for it.
+mm = fresh()
+check("an idle mapper asks for no deadline", mm.next_deadline(), None)
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_ABS, e.ABS_Y, FULL_UP, 0.0)
+check("🔴 a running ramp puts its next step on main()'s select() deadline",
+      mm.next_deadline(), m.BRIGHTNESS_RAMP_DELAY)
+mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.1)
+check("...and stops asking once the ramp is over", mm.next_deadline(), None)
+
+# Returning the stick to centre stops the ramp without releasing STEAM -- the
+# operator nudges brightness repeatedly without letting go.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_ABS, e.ABS_Y, FULL_UP, 0.0)
+mm.translate(e.EV_ABS, e.ABS_Y, REST_ABS_Y, 0.1)
+check("centring the stick stops the ramp", (mm.brightness_dir, mm.next_deadline()),
+      (0, None))
+mm.pending_actions.clear()
+check("...and nothing further is ever due",
+      (mm.due_brightness(99.0), mm.pending_actions), (0, []))
+check("...but pushing again starts a NEW step, it is not a one-shot",
+      (mm.translate(e.EV_ABS, e.ABS_Y, FULL_DOWN, 0.2), mm.pending_actions),
+      ([], ["brightness-down"]))
+
+# Reversing direction mid-hold must retarget, not stack.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_ABS, e.ABS_Y, FULL_UP, 0.0)
+mm.translate(e.EV_ABS, e.ABS_Y, FULL_DOWN, 0.1)
+check("pushing the other way reverses the ramp rather than running two",
+      (mm.brightness_dir, mm.pending_actions),
+      (-m.BRIGHTNESS_STICK_UP, ["brightness-up", "brightness-down"]))
+
+# 🔴 THE STUCK ARROW KEY THIS FEATURE WOULD OTHERWISE CREATE. Push the stick up
+# (KEY_UP goes down and auto-repeats), THEN press STEAM. Every later sample on
+# that axis belongs to the ramp, so nothing would ever emit the release, and
+# due_repeats would type Up for the rest of the session.
+mm = fresh()
+check("stick up alone still presses Up", mm.translate(e.EV_ABS, e.ABS_Y, FULL_UP, 0.0),
+      [(e.KEY_UP, 1)])
+check("🔴 grabbing STEAM mid-push hands the arrow key BACK",
+      mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.1), [(e.KEY_UP, 0)])
+check("...and nothing is left auto-repeating",
+      (mm.due_repeats(9.0), mm.next_deadline()), ([], None))
+# The positive control for that: without a held arrow there is nothing to give
+# back, and the STEAM press must stay silent rather than invent a stray release.
+mm = fresh()
+check("a STEAM press with no arrow held emits nothing",
+      mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0), [])
+
+# 🔴 AND THE RAMP THE DEAD NODE WOULD STRAND. The pad vanishing (ENODEV) sends
+# no centring sample and no STEAM release, and the ramp runs on a CLOCK -- so
+# the screen would walk to full brightness with no stick left to stop it.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_ABS, e.ABS_Y, FULL_UP, 0.0)
+check("a ramp is running before the pad disappears", mm.brightness_dir != 0, True)
+mm.stop_brightness()
+mm.pending_actions.clear()
+check("🔴 stop_brightness abandons it, and the clock goes quiet",
+      (mm.brightness_dir, mm.due_brightness(99.0), mm.next_deadline()),
+      (0, 0, None))
+check("...and it is idempotent", (mm.stop_brightness(), mm.brightness_dir), (None, 0))
+
+# WHAT THE STICK DOES WITHOUT STEAM MUST NOT CHANGE. It has driven the arrow
+# keys since 2026-08-10 and that is the installer's only navigation.
+mm = fresh()
+check("stick up with no STEAM is still KEY_UP",
+      mm.translate(e.EV_ABS, e.ABS_Y, FULL_UP, 0.0), [(e.KEY_UP, 1)])
+check("...and queued no brightness at all", mm.pending_actions, [])
+check("...and auto-repeats exactly as it always did",
+      mm.due_repeats(m.REPEAT_DELAY + 0.001), [(e.KEY_UP, 2)])
+mm = fresh()
+check("stick down with no STEAM is still KEY_DOWN",
+      mm.translate(e.EV_ABS, e.ABS_Y, FULL_DOWN, 0.0), [(e.KEY_DOWN, 1)])
+# The HORIZONTAL axis is untouched by this feature in both states. Stock maps it
+# to volume; the operator did not ask for that, so it must still be arrow keys.
+mm = fresh()
+check("stick left with no STEAM is still KEY_LEFT",
+      mm.translate(e.EV_ABS, e.ABS_X, FULL_UP, 0.0), [(e.KEY_LEFT, 1)])
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("🔴 STEAM + stick LEFT is NOT bound to anything here -- no volume was "
+      "invented, and it still emits its arrow",
+      (mm.translate(e.EV_ABS, e.ABS_X, FULL_UP, 0.1), mm.pending_actions),
+      ([(e.KEY_LEFT, 1)], []))
+
+# The keyboard being up is not a reason for brightness to stop working: a stock
+# Deck adjusts it whatever is on screen. The branch sits above `osk_active`.
+mm = fresh()
+mm.osk_active = True
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("STEAM + stick still sets brightness with the keyboard up",
+      (mm.translate(e.EV_ABS, e.ABS_Y, FULL_UP, 0.1), mm.pending_actions),
+      ([], ["brightness-up"]))
+
+# --- and the spawn, through the same stub every other binding uses -----------
+
+_result, _fake, _err = with_fake_subprocess(lambda: m.run_brightness("brightness-up"))
+check("a brightness step spawns the measured argv",
+      [argv for argv, _kw in _fake.calls], [m.BRIGHTNESS_UP_ARGV])
+check("and reports that it started", _result, True)
+check("nothing waits on it -- the OSD must never freeze the input loop",
+      [p.waited for p in _fake.procs], [False])
+check("and it is an argv, never a shell string",
+      _fake.calls[0][1].get("shell"), None)
+# 🔴 §5.28: the script calls omarchy-hyprland-monitor-focused, which is hyprctl
+# underneath and needs HYPRLAND_INSTANCE_SIGNATURE.
+check("it runs with the RESOLVED session environment, not what it inherited",
+      _fake.calls[0][1].get("env") is not None, True)
+check("a successful step says nothing on stderr", _err, "")
+
+_result, _fake, _err = with_fake_subprocess(lambda: m.run_brightness("brightness-down"))
+check("the other direction spawns the other argv",
+      [argv for argv, _kw in _fake.calls], [m.BRIGHTNESS_DOWN_ARGV])
+
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_brightness("brightness-up", dry_run=True))
+check("--dry-run reports instead of spawning, like every other binding",
+      (_fake.calls, m.BRIGHTNESS_UP_ARGV[0] in _err, _result), ([], True, True))
+
+_result, _fake, _err = with_fake_subprocess(lambda: m.run_brightness("brightness-nope"))
+check("an unknown brightness action changes nothing and says so",
+      (_fake.calls, _result, "brightness-nope" in _err), ([], False, True))
+
+# 🔴 THE LOG MUST NOT SCROLL. This is the ONLY binding that fires on a clock --
+# up to eight times a second -- so a missing binary must be explained ONCE, not
+# once per step. A journal that scrolls is a journal nobody reads, which is the
+# same silence CLAUDE.md forbids arriving from the other direction.
+m._brightness_complained = False
+_missing = FileNotFoundError(2, "No such file or directory", "omarchy-brightness-display")
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_brightness("brightness-up"), error=_missing)
+check("a missing brightness binary does not raise", _result, False)
+check("it is LOUD the first time", "could not run" in _err, True)
+check("...and names the binary it needed", m.BRIGHTNESS_UP_ARGV[0] in _err, True)
+check("...and says the rest of the mapper is unaffected",
+      "the rest of the mapper is unaffected" in _err, True)
+check("...and warns that it will not repeat itself",
+      "will not say this again" in _err, True)
+_result, _fake, _err = with_fake_subprocess(
+    lambda: [m.run_brightness("brightness-up") for _i in range(8)], error=_missing)
+check("🔴 eight further failed steps add NOT ONE more of those sentences",
+      "does nothing until" in _err, False)
+# ...but it never stops TRYING. A package installed mid-session must start
+# working, and a binding that disarmed for ever on one transient fork failure
+# would be worse than a quiet log.
+check("🔴 ...and it still attempted every one of them",
+      len(_fake.calls), 8)
+m._brightness_complained = False
+
+# End to end, the way main() drives it: the stick queues a NAME, the runner
+# resolves it to an argv.
+mm = fresh()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_ABS, e.ABS_Y, FULL_DOWN, 0.0)
+check("STEAM + stick down queues exactly one action",
+      mm.pending_actions, ["brightness-down"])
+_result, _fake, _err = with_fake_subprocess(
+    lambda: [m.run_brightness(a) for a in mm.pending_actions])
+check("🔴 STEAM + stick DOWN dims end to end -- it does not brighten",
+      [argv for argv, _kw in _fake.calls], [m.BRIGHTNESS_DOWN_ARGV])
+
+
 # --- what startup says, so a dead button is never a mystery ------------------
 #
 # ⚠️ Both buttons exist only with lizard_mode=N (§5.9, §5.21), and QAM's binding
@@ -1104,6 +1412,15 @@ check("...and which button runs which",
 # confirming" is otherwise a mystery with nothing to read anywhere.
 check("🔴 startup says the two no longer emit Enter and Esc under STEAM",
       ("Enter" in _report_n, "Esc" in _report_n), (True, True))
+# 🆕 And the brightness ramp, which is the one binding that repeats -- a ramp
+# that stalls is the script dropping overlapping invocations under its own
+# flock, and that failure is silent at the far end.
+check("startup names the brightness command",
+      m.BRIGHTNESS_UP_ARGV[0] in _report_n, True)
+check("...and says it is the left stick",
+      "left stick" in _report_n, True)
+check("...and states the repeat rate, so a stalled ramp is diagnosable",
+      str(m.BRIGHTNESS_RAMP_INTERVAL) in _report_n, True)
 
 # The inert announcement is still the guard against a silent dead button, so it
 # keeps its coverage -- forced, since the shipped constant is no longer None.
@@ -4539,6 +4856,10 @@ class _Reached(Exception):
     device -- this suite has no pad, and pick_device WAITS for one."""
 
 
+# What main() passed pick_device on the last `parsed()` run. See `_stub`.
+parsed_pick_kwargs: dict = {}
+
+
 def parsed(argv: list[str]):
     """Run main()'s argument handling only. Returns (exception, stderr).
 
@@ -4549,7 +4870,18 @@ def parsed(argv: list[str]):
     """
     saved_argv, saved_pick = sys.argv, m.pick_device
     sys.argv = ["deck-input-mapper", *argv]
-    m.pick_device = lambda selector: (_ for _ in ()).throw(_Reached())
+
+    # ⚠️ `**kwargs`, because main() now hands pick_device its lizard-mode
+    # invoker (docs/findings/P39 Defect 2). The kwargs are RECORDED rather than
+    # ignored: `parsed_pick_kwargs` is asserted below, so a main() that stopped
+    # passing the invoker fails the suite here instead of quietly reverting the
+    # ordering fix to the unit's ExecStartPost= behaviour.
+    def _stub(selector, **kwargs):
+        parsed_pick_kwargs.clear()
+        parsed_pick_kwargs.update(kwargs)
+        raise _Reached()
+
+    m.pick_device = _stub
     err = _io.StringIO()
     try:
         with _contextlib.redirect_stderr(err):
@@ -4677,17 +5009,30 @@ def run_main(argv, osk_tty_path):
         return real_write_at(*args, **kwargs)
 
     tty_module.write_at = spy_write_at
-    saved = (sys.argv, m.pick_device, m.UInput, m._load_module)
+    saved = (sys.argv, m.pick_device, m.UInput, m._load_module, m.set_lizard_mode)
     sys.argv = ["deck-input-mapper", f"--osk-tty={osk_tty_path}", *argv]
-    m.pick_device = lambda selector: pad
+    # ⚠️ `**kwargs`: main() hands pick_device its lizard invoker now.
+    m.pick_device = lambda selector, **kwargs: pad
     m.UInput = FakeUInput
+
+    # 🔴 STUBBED, AND NOT OPTIONALLY. This harness runs the REAL main(), whose
+    # exit path now sets lizard mode -- so without this the suite would shell
+    # out to `sudo /usr/local/sbin/deck-lizard-mode` on whatever machine it is
+    # running on. Recorded into the same timeline as the draws and the stderr,
+    # so the ORDER of the lizard call against BOUND_MARKER is assertable.
+    def fake_lizard(want, **kwargs):
+        timeline.append(("lizard", want))
+        return True
+
+    m.set_lizard_mode = fake_lizard
     m._load_module = (lambda name, _real=saved[3]:
                       tty_module if name == "deck_osk_tty" else _real(name))
     try:
         with _contextlib.redirect_stderr(Tape(timeline)):
             m.main()
     finally:
-        sys.argv, m.pick_device, m.UInput, m._load_module = saved
+        (sys.argv, m.pick_device, m.UInput, m._load_module,
+         m.set_lizard_mode) = saved
         tty_module.write_at = real_write_at
         pad.close()
     target = pathlib.Path(osk_tty_path)
@@ -4959,6 +5304,100 @@ check("...honouring --dry-run like every other spawn",
        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
        and node.func.id == "run_launch_action" for kw in node.keywords],
       ["dry_run=ui is None"])
+# 🆕 And the same, for the brightness steps.
+check("every brightness action reaches a branch in run_pending",
+      sorted(name for name in m.BRIGHTNESS_ACTIONS if f"'{name}'" not in pending_src), [])
+check("...honouring --dry-run, or `--dry-run` really changes the brightness",
+      [ast.unparse(kw) for node in ast.walk(pending_def)
+       if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+       and node.func.id == "run_brightness" for kw in node.keywords],
+      ["dry_run=ui is None"])
+
+# 🔴 THE RAMP'S WIRING, AND IT IS THE P32 DEFECT'S FAVOURITE SHAPE. Every
+# behavioural assertion about `due_brightness` above passes with main() never
+# calling it -- the ramp would fire exactly one step and stop, which is
+# indistinguishable from "the operator flicked it" and would ship.
+_due_calls = [node for node in ast.walk(main_def)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+              and node.func.attr == "due_brightness"]
+check("🔴 main() actually ticks the ramp", len(_due_calls), 1)
+# ⚠️ AND OUTSIDE THE `pad.fd in ready_fds` BRANCH. A stick held perfectly still
+# sends no samples at all, so a tick nested under "the pad had something to say"
+# advances only when something ELSE happens to wake the loop. The structural
+# proof: it sits at the same nesting depth as `due_repeats`, which the file's
+# own comment says must run on every pass.
+
+
+def call_depths(block, predicate, depth=0):
+    """Every statement-block nesting depth at which a matching call appears.
+
+    ⚠️ THIS HELPER HAD A BUG THAT MADE THE CHECK BELOW PASS VACUOUSLY -- an
+    earlier version returned None for everything, so `None == None` reported the
+    two calls as equally nested and proved nothing at all. It was caught by the
+    positive control that follows the check, which is the entire reason that
+    control is written. Depths are counted by descending into `body`/`orelse`/
+    `finalbody`/`handlers` explicitly, and a call is attributed to the block it
+    is written in rather than to any block nested inside it.
+    """
+    found = []
+    for stmt in block:
+        sub_blocks = [value for field, value in ast.iter_fields(stmt)
+                      if field in ("body", "orelse", "finalbody", "handlers")
+                      and isinstance(value, list)]
+        nested = {id(node) for b in sub_blocks for s in b for node in ast.walk(s)}
+        found += [depth for node in ast.walk(stmt)
+                  if id(node) not in nested and predicate(node)]
+        for b in sub_blocks:
+            found += call_depths(b, predicate, depth + 1)
+    return found
+
+
+def depth_of(block, predicate):
+    """The shallowest depth a matching call is written at, or None if absent."""
+    depths = call_depths(block, predicate)
+    return min(depths) if depths else None
+
+
+# ⚠️ `while True:`, NAMED EXPLICITLY. A bare `next(... isinstance(node,
+# ast.While))` over `ast.walk` picks up `run_pending`'s own `while actions:`
+# loop first -- that is what this test pointed at until the positive control
+# below caught it -- and every depth measured against it was meaningless.
+_while = next(node for node in ast.walk(main_def)
+              if isinstance(node, ast.While)
+              and isinstance(node.test, ast.Constant) and node.test.value is True)
+
+
+def calls_method(name):
+    return lambda node: (isinstance(node, ast.Call)
+                         and isinstance(node.func, ast.Attribute)
+                         and node.func.attr == name)
+
+
+check("🔴 the ramp tick runs on EVERY pass, like due_repeats -- not only when "
+      "the pad had something to say",
+      depth_of(_while.body, calls_method("due_brightness")),
+      depth_of(_while.body, calls_method("due_repeats")))
+# The positive control: that comparison can tell depths apart. `translate` is
+# genuinely nested deeper (inside the fd branch and the per-event loop).
+check("...and the depth comparison really distinguishes nesting levels",
+      depth_of(_while.body, calls_method("due_brightness"))
+      < depth_of(_while.body, calls_method("translate")), True)
+# A queued step nobody drains is a ramp that never moves: run_pending has to be
+# reachable from the timer path too, not only from the per-event one.
+check("🔴 ...and a step queued by the CLOCK is drained, not left in the list",
+      depth_of(_while.body, lambda node: isinstance(node, ast.Call)
+               and isinstance(node.func, ast.Name)
+               and node.func.id == "run_pending")
+      <= depth_of(_while.body, calls_method("due_brightness")), True)
+
+# 🔴 AND THE STRANDED RAMP. The pad vanishing sends no centring sample and no
+# STEAM release; the ramp is on a clock, so without this the screen walks to
+# full brightness on its own.
+check("🔴 main() abandons a running ramp when the pad disappears",
+      [node.func.attr for node in ast.walk(main_def)
+       if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+       and node.func.attr == "stop_brightness"],
+      ["stop_brightness"])
 
 # --- 🆕 THE POINTER DISAPPEARS WHILE OUR KEYBOARD IS UP ----------------------
 #
@@ -5113,6 +5552,642 @@ _visible_args = [ast.unparse(node.args[0]) for node in ast.walk(_visible_def)
                  and node.func.id == "set_pointer_hidden"]
 check("...and the show/hide call is driven by `visible`, never a bare True",
       [arg for arg in _visible_args if "visible" in arg], _visible_args)
+
+# --- 🆕 THE OSK'S KEY-PRESS SOUND -------------------------------------------
+#
+# Operator: the Steam keyboard ticks on every key, and ours should too.
+#
+# 🔴 THE LICENSING CONSTRAINT IS THE FIRST THING ASSERTED HERE. The .wav is
+# Valve's, owned by no package, downloaded by the Steam client into the user's
+# home. CLAUDE.md forbids depending on anything unlicensed because THE ISO
+# REDISTRIBUTES WHAT IT CARRIES. So it is referenced BY PATH at play time and
+# must never appear in this repo -- including as a test fixture, which is why
+# every test below uses a scripted `exists` predicate and a temporary directory
+# rather than a real sound file.
+
+_SOUND_HOME = "/home/deck"
+_REAL_SOUND = _SOUND_HOME + "/" + m.OSK_TYPING_SOUND_RELPATHS[0]
+
+
+def sound_argv(present=(), home=_SOUND_HOME):
+    """Resolve the tick against a scripted filesystem. Touches no disk."""
+    return m.osk_typing_sound_argv(home=home, exists=lambda p: p in set(present))
+
+
+# 🔴 NOT ONE BYTE OF VALVE'S ASSET IS IN THIS REPO. Asserted, not trusted: the
+# tree is scanned for the filename and for .wav files generally.
+_wavs = [p for p in REPO_ROOT.rglob("*.wav") if ".git" not in p.parts]
+check("🔴 the repo ships no .wav at all, so the tick cannot have been vendored",
+      _wavs, [])
+_sound_name = m.OSK_TYPING_SOUND_RELPATHS[0].rsplit("/", 1)[-1]
+check("...and the source only ever NAMES the file, as a relative path",
+      all(not part.startswith("/") for part in m.OSK_TYPING_SOUND_RELPATHS), True)
+# The positive control: the scan really can see a .wav where one exists.
+with tempfile.TemporaryDirectory() as _td:
+    _probe = pathlib.Path(_td) / _sound_name
+    _probe.write_bytes(b"RIFF")
+    check("...and the vendoring scan can actually find a .wav when there is one",
+          [p.name for p in pathlib.Path(_td).rglob("*.wav")], [_sound_name])
+
+# Resolution: first path that exists wins; nothing found is an ORDINARY None.
+check("🔴 no sound file means None -- silence, not an error",
+      sound_argv(present=()), None)
+check("the first candidate path is used when it is there",
+      sound_argv(present=(_REAL_SOUND,))[-1], _REAL_SOUND)
+_alt = _SOUND_HOME + "/" + m.OSK_TYPING_SOUND_RELPATHS[1]
+check("...and the older ~/.steam layout is found too",
+      sound_argv(present=(_alt,))[-1], _alt)
+check("🔴 the FIRST match wins when both exist, not the last",
+      sound_argv(present=(_REAL_SOUND, _alt))[-1], _REAL_SOUND)
+check("every candidate is anchored under the user's own HOME",
+      [argv[-1].startswith(_SOUND_HOME + "/")
+       for argv in (sound_argv(present=(_REAL_SOUND,)), sound_argv(present=(_alt,)))],
+      [True, True])
+check("a machine with no HOME at all resolves to silence rather than to '/'",
+      sound_argv(present=(_REAL_SOUND,), home=""), None)
+
+# The argv's shape, asserted as relationships. The player and the flag are
+# constants; the volume is the operator's knob and is read from the module.
+_argv = sound_argv(present=(_REAL_SOUND,))
+check("it plays through the configured player", _argv[0], m.OSK_TYPING_SOUND_PLAYER)
+check("...passing the tuning knob's current value, whatever it is",
+      f"{m.OSK_TYPING_SOUND_VOLUME}" in _argv[1], True)
+check("...as the player's own volume flag",
+      _argv[1].startswith(m.OSK_TYPING_SOUND_VOLUME_FLAG + "="), True)
+check("...and the file last, as an argv rather than a shell string",
+      (_argv[-1], len(_argv)), (_REAL_SOUND, 3))
+# 🔴 THE KNOB MUST BE A KNOB. A volume outside the player's range is silence or
+# clipping, and the operator will be turning this dial by hand on hardware.
+check("🔴 the volume constant is in pw-play's range and audible",
+      0.0 < m.OSK_TYPING_SOUND_VOLUME <= 1.0, True)
+# Prove the argv really tracks the constant, so a future edit of the knob cannot
+# leave the emitted volume behind.
+_saved_vol = m.OSK_TYPING_SOUND_VOLUME
+m.OSK_TYPING_SOUND_VOLUME = 0.9
+check("🔴 changing the ONE constant changes what is played",
+      sound_argv(present=(_REAL_SOUND,))[1], f"{m.OSK_TYPING_SOUND_VOLUME_FLAG}=0.9")
+m.OSK_TYPING_SOUND_VOLUME = _saved_vol
+check("...and it was restored", sound_argv(present=(_REAL_SOUND,))[1],
+      f"{m.OSK_TYPING_SOUND_VOLUME_FLAG}={_saved_vol}")
+
+
+class FakeSound:
+    """Counts ticks. Stands in for `TypingSound` on a Mapper."""
+
+    def __init__(self, ok=True):
+        self.plays = 0
+        self.ok = ok
+
+    def play(self):
+        self.plays += 1
+        return self.ok
+
+
+# --- resolve ONCE, say it ONCE ----------------------------------------------
+_probes = []
+
+
+def _counting_resolve(argv=None):
+    _probes.append(1)
+    return argv
+
+
+_snd = m.TypingSound(resolve=lambda: _counting_resolve(None))
+_sink = io.StringIO()
+with contextlib.redirect_stderr(_sink):
+    for _i in range(25):
+        _snd.play()
+check("🔴 a missing sound file is probed ONCE, not once per keystroke",
+      len(_probes), 1)
+check("🔴 ...and reported ONCE, not 25 times",
+      _sink.getvalue().count("no Steam key-press sound"), 1)
+check("...and it says the haptic still fires, so nobody reads it as breakage",
+      "haptic still fires" in _sink.getvalue(), True)
+check("...and explains it is expected, not a defect",
+      "never shipped by us" in _sink.getvalue(), True)
+
+# A player that cannot start: said once, then DISARMED -- this is per-keystroke.
+_spawns = []
+_snd = m.TypingSound(resolve=lambda: ["pw-play", "--volume=0.4", _REAL_SOUND],
+                     spawn=lambda argv, what: (_spawns.append(argv), False)[1])
+_sink = io.StringIO()
+with contextlib.redirect_stderr(_sink):
+    _first = _snd.play()
+    for _i in range(30):
+        _snd.play()
+check("a player that will not start reports failure rather than raising",
+      _first, False)
+check("🔴 it is said once and then the tick DISARMS -- 30 more keys are silent",
+      (_sink.getvalue().count("DISABLED"), len(_spawns)), (1, 1))
+check("...naming the binary it needed", m.OSK_TYPING_SOUND_PLAYER in _sink.getvalue(),
+      True)
+check("...and promising the keyboard is unaffected",
+      "keyboard and its haptic are unaffected" in _sink.getvalue(), True)
+
+# The happy path: one spawn per key, never waited on, never a shell.
+_spawns = []
+_snd = m.TypingSound(resolve=lambda: ["pw-play", "--volume=0.4", _REAL_SOUND],
+                     spawn=lambda argv, what: (_spawns.append(argv), True)[1])
+_sink = io.StringIO()
+with contextlib.redirect_stderr(_sink):
+    _plays = [_snd.play() for _i in range(4)]
+check("four keys tick four times", (_plays, len(_spawns)), ([True] * 4, 4))
+check("...and a working tick says nothing at all", _sink.getvalue(), "")
+# A resolver that raises (a dead automount under HOME) is silence, not a crash.
+_snd = m.TypingSound(resolve=lambda: (_ for _ in ()).throw(OSError("stale NFS")))
+_sink = io.StringIO()
+with contextlib.redirect_stderr(_sink):
+    check("a resolver that RAISES degrades to silence rather than killing the loop",
+          _snd.play(), False)
+
+# --- BOTH commit paths tick, which is the whole point of doing it twice ------
+#
+# 🔴 `commit_at` is the trigger AND the pad click -- how the operator actually
+# types on the panel. `press_key_index` is the touchscreen. Sounding only one
+# gives the trackpad a haptic and no click.
+
+osk_mod = m._load_module("deck_osk_layout")
+
+
+def osk_mapper(sound):
+    """A Mapper with a real OSK layout attached and a fake sound."""
+    mm = fresh()
+    mm.osk = osk_mod.OnScreenKeyboard()
+    mm.cursors = osk_mod.Cursors()
+    mm.sound = sound
+    return mm
+
+
+_fs = FakeSound()
+mm = osk_mapper(_fs)
+mm.press_key_index(0, 0)
+check("🔴 a TOUCH commit ticks", _fs.plays, 1)
+
+_fs = FakeSound()
+mm = osk_mapper(_fs)
+mm.commit_at("left")
+check("🔴 a TRIGGER/PAD-CLICK commit ticks too -- the path the operator uses",
+      _fs.plays, 1)
+
+# ...and the two are independent, so neither can be satisfied by the other.
+_fs = FakeSound()
+mm = osk_mapper(_fs)
+mm.commit_at("left")
+mm.press_key_index(0, 0)
+check("...and the two paths tick once EACH, not once between them", _fs.plays, 2)
+
+# A key that types nothing is still a key. Shift and Caps have no other feedback.
+_fs = FakeSound()
+mm = osk_mapper(_fs)
+_shift_row, _shift_idx = next(
+    ((r, i) for r, row in enumerate(mm.osk.layer.rows)
+     for i, key in enumerate(row) if getattr(key, "label", "") == "Shift"),
+    (None, None))
+check("the layout really has a Shift key to test with", _shift_row is not None, True)
+_out = mm.press_key_index(_shift_row, _shift_idx)
+check("🔴 Shift types nothing but still ticks -- the tick IS its feedback",
+      (_out, _fs.plays), ([], 1))
+
+# An index the keyboard does not have is a DEFECT, and must not announce a
+# keystroke that never happened -- exactly as the haptic must not.
+_fs = FakeSound()
+mm = osk_mapper(_fs)
+check("an out-of-range key returns None...", mm.press_key_index(99, 99), None)
+check("🔴 ...and does NOT tick: no sound for a key that does not exist",
+      _fs.plays, 0)
+
+# No sound object at all -- --dry-run, and every test above that did not ask for
+# one. The keyboard must be entirely unaffected.
+mm = osk_mapper(None)
+check("with no sound wired the commit still types",
+      mm.press_key_index(0, 0) is not None, True)
+check("...and click_sound just answers False", mm.click_sound(), False)
+# A sound that fails must not change what was typed.
+mm = osk_mapper(FakeSound(ok=False))
+check("a FAILING tick still types the key",
+      mm.press_key_index(0, 0) is not None, True)
+
+# --- main()'s wiring, which no behavioural test above can reach --------------
+_sound_assign = [node for node in ast.walk(main_def)
+                 if isinstance(node, ast.Assign)
+                 and any(isinstance(t, ast.Attribute) and t.attr == "sound"
+                         for t in node.targets)]
+check("🔴 main() actually wires a TypingSound onto the mapper", len(_sound_assign), 1)
+_sound_src = ast.unparse(_sound_assign[0])
+check("...constructing the real one", "TypingSound()" in _sound_src, True)
+# 🔴 NOT UNDER --dry-run: a sound is an emission the user HEARS, and --dry-run's
+# promise is that nothing leaves this process.
+check("🔴 ...and never under --dry-run", "args.dry_run" in _sound_src, True)
+
+
+# --- 🔴 LIZARD MODE'S ORDERING: THE BRICKING DEFECT (P39 Defect 2) -----------
+#
+# 🔴 WHAT THIS PREVENTS: opening Steam in Desktop Mode left the Deck with NO
+# INPUT AT ALL -- no pointer, no buttons, no menu -- unrecoverable on-device
+# except by a ~10 s power-button hold, and it recurred every time Steam was
+# opened. On a controller-only handheld that is the worst defect this project
+# can ship, so this block is written to be paranoid rather than tidy.
+#
+# THE MECHANISM, measured by the P39 investigation: Steam does not grab the pad,
+# THE KERNEL DESTROYS IT (`hid-steam` unregisters its input devices when the
+# client opens its hidraw node). The unit's `ExecStartPost=` had already
+# disarmed the firmware fallback at FORK time, and `pick_device` then waits for
+# a native pad that will not come back until Steam closes -- so lizard mode was
+# off with nothing driving, and that state was STABLE. No unit transition, so
+# `ExecStopPost=` and `OnFailure=` could not fire.
+#
+# THE INVARIANT UNDER TEST, and it is the whole fix:
+#
+#     lizard mode may be OFF only while the mapper is HOLDING A NATIVE PAD.
+
+
+class FakePad:
+    """The smallest thing `_match`/`looks_like_gamepad` will accept or refuse."""
+
+    def __init__(self, name, path="/dev/input/event7", gamepad=True):
+        self.name = name
+        self.path = path
+        self._caps = {e.EV_KEY: [e.BTN_SOUTH]} if gamepad else {e.EV_KEY: []}
+
+    def capabilities(self, absinfo=False):
+        return self._caps
+
+
+# The two names that matter, spelled as the hardware spells them.
+NATIVE_PAD = "Steam Deck"
+IMPOSTOR_PAD = "Microsoft X-Box 360 pad 0"
+
+# ⚠️ THE IMPOSTOR MUST STILL BE REFUSED. P39 measured its ABS bitmap (0x3003f,
+# the xpad layout) as carrying NO TRACKPAD AXES, and R-41 measured it emitting
+# nothing at all -- so binding to it would trade "no input" for "no input, and
+# the fallback disarmed because we think we are bound". The bug was never that
+# the mapper refuses it.
+check("🔴 the native pad is accepted", m.looks_like_gamepad(FakePad(NATIVE_PAD)), True)
+check("🔴 Steam's X360 impostor is still REFUSED",
+      m.looks_like_gamepad(FakePad(IMPOSTOR_PAD)), False)
+check("...and it is recognised as Steam's virtual pad, not merely unmatched",
+      m.is_steam_virtual_pad(FakePad(IMPOSTOR_PAD)), True)
+
+
+_TRUE_ARGV = (sys.executable, "-c", "pass")
+
+
+def first(calls):
+    """The first lizard verb, or None. ⚠️ NOT `calls[0]` -- an assertion that
+    INDEXES an empty list raises instead of failing, and a suite that stops
+    early looks a lot like a suite that passed. Two mutations (deleting either
+    re-arm) landed exactly there."""
+    return calls[0] if calls else None
+
+
+def run_pick(timeline, selector=None):
+    """Drive pick_device against a scripted device timeline.
+
+    Returns (device, calls, sleeps). `timeline` is a list of device lists, one
+    per rescan pass; the last entry repeats for ever so a test can end on a
+    state that never resolves. Nothing here touches a real device, a real sudo
+    or a real clock.
+    """
+    calls: list[str] = []
+    sleeps: list[float] = []
+    passes = {"n": 0}
+
+    def enumerate_devices():
+        i = min(passes["n"], len(timeline) - 1)
+        passes["n"] += 1
+        return list(timeline[i])
+
+    def fake_lizard(want):
+        calls.append(want)
+        return True
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        # A timeline that never resolves would otherwise spin for ever.
+        if len(sleeps) > 12:
+            raise _Stop()
+
+    dev = None
+    try:
+        dev = m.pick_device(selector, lizard=fake_lizard,
+                            enumerate_devices=enumerate_devices,
+                            sleep=fake_sleep, clock=lambda: 0.0)
+    except _Stop:
+        pass
+    return dev, calls, sleeps
+
+
+class _Stop(Exception):
+    """Ends a scripted wait that is designed never to resolve."""
+
+
+# --- TIMELINE (i): the native pad is there at start --------------------------
+_dev, _calls, _sleeps = run_pick([[FakePad(NATIVE_PAD)]])
+check("(i) the native pad is bound", getattr(_dev, "name", None), NATIVE_PAD)
+check("🔴 (i) exactly one lizard call, and it DISARMS", _calls, ["off"])
+check("(i) ...and it never waited", _sleeps, [])
+
+# --- TIMELINE (ii): Steam owns the controller at start -----------------------
+_dev, _calls, _sleeps = run_pick([[FakePad(IMPOSTOR_PAD)]])
+check("(ii) it refuses to bind the impostor", _dev, None)
+check("🔴 (ii) it RE-ARMS the firmware fallback", first(_calls), "on")
+# 🔴 THE NEGATIVE, AND IT IS THE WHOLE DEFECT. One stray `off` anywhere in this
+# timeline is a Deck with no input.
+check("🔴 (ii) and NOT ONE `off` anywhere in the whole wait",
+      [want for want in _calls if want == "off"], [])
+# 🔴 BEFORE THE FIRST SLEEP. Re-arming after the sleep would leave the device
+# dead for a full rescan interval on every pass.
+check("🔴 (ii) the re-arm happens BEFORE the first sleep",
+      (len(_calls) >= 1, len(_sleeps) >= 1, first(_calls)), (True, True, "on"))
+# 🔴 EVERY ITERATION, NOT JUST THE FIRST. `announced_wait` governs LOGGING; if
+# the re-arm were gated on it, a user who opened Steam a second time would get
+# one re-arm ever. This is the single most important assertion in the file.
+check("🔴 (ii) it re-arms on EVERY pass, not only the announced first one",
+      (len(_calls), len(_calls) == len(_sleeps)), (len(_sleeps), True))
+check("(ii) ...and every one of those calls was `on`",
+      sorted(set(_calls)), ["on"])
+check("(ii) it rescans on the documented interval",
+      sorted(set(_sleeps)), [m.STEAM_RESCAN_INTERVAL])
+
+# 🔴 THE JOURNAL MUST NOT CLAIM AN OUTCOME NOBODY MEASURED.
+#
+# This line used to say "Lizard mode is back ON, so the firmware drives the
+# trackpads as a mouse". That asserts a USER-VISIBLE RESULT -- a working pointer
+# -- which has never been measured while Steam holds the controller over hidraw,
+# and which the operator's own report of an invisible pointer trapped in the
+# Steam window is in tension with. This project exists partly because upstream
+# tooling claims successes it never verified (docs/PLAN.md §8.1); claiming one
+# here would be that defect wearing our name.
+#
+# What the message MAY say is the module-parameter fact: lizard mode was
+# restored. What it may NOT do is promise what that gives the user.
+_sink = io.StringIO()
+with contextlib.redirect_stderr(_sink):
+    run_pick([[FakePad(IMPOSTOR_PAD)]])
+_wait_msg = _sink.getvalue()
+check("the Steam-owns-it message is emitted at all", "Steam owns the controller" in _wait_msg,
+      True)
+check("...and it states the fact it CAN state: lizard mode was restored",
+      "Lizard mode has been restored" in _wait_msg, True)
+# ⚠️ A phrase list, each entry a way of asserting the unmeasured outcome.
+_UNVERIFIED_CLAIMS = ("drives the trackpads as a mouse",
+                      "so the firmware drives",
+                      "a device a human can always drive",
+                      "the pointer moves")
+check("🔴 ...and claims NOTHING about a working pointer",
+      [claim for claim in _UNVERIFIED_CLAIMS if claim in _wait_msg], [])
+# The positive control, in the same breath: the scan really can catch that
+# sentence if someone writes it back in.
+check("...and the check can actually see such a claim when one is present",
+      [claim for claim in _UNVERIFIED_CLAIMS
+       if claim in "Lizard mode is back ON, so the firmware drives the trackpads "
+                   "as a mouse"],
+      ["drives the trackpads as a mouse", "so the firmware drives"])
+# It must say the honest thing -- and, since 2026-08-16, the MEASURED thing:
+# with Steam resident the firmware mouse emits nothing (0 bytes on
+# /dev/input/event5 under confirmed movement, against 49,320 bytes in 3 s with
+# Steam closed). So the message may not merely decline to promise a pointer; it
+# has to say there is not one.
+check("...and warns that this is a module parameter, not a pointer",
+      "NOT A POINTER" in _wait_msg, True)
+# 🔴 AND IT MUST NAME THE WAY OUT. This is the only line a user or a support
+# reader will find, and the recovery is measured: closing Steam brings the pad
+# back and this process re-binds by itself.
+check("🔴 ...and tells the reader that quitting Steam restores everything",
+      "QUITTING STEAM RESTORES EVERYTHING" in _wait_msg, True)
+
+# The same rule for the per-change line `set_lizard_mode` prints.
+m._lizard_last_said = None
+_ok, _err = say_and_return(lambda: m.set_lizard_mode("on", argv=_TRUE_ARGV))
+check("a successful re-arm reports the parameter, not an outcome",
+      ("lizard mode on" in _err,
+       [c for c in _UNVERIFIED_CLAIMS if c in _err]),
+      (True, []))
+m._lizard_last_said = None
+
+# --- TIMELINE (iii): native pad, then Steam takes it away mid-run ------------
+#
+# The path that actually reaches users: the mapper is bound and driving, the
+# user opens Steam, the kernel destroys the node. pick_device is re-entered and
+# must re-arm -- with no unit transition anywhere to help.
+_dev, _calls, _sleeps = run_pick([[FakePad(NATIVE_PAD)]])
+check("(iii) first bind disarms", _calls, ["off"])
+_dev2, _calls2, _sleeps2 = run_pick([[FakePad(IMPOSTOR_PAD)]])
+check("🔴 (iii) and the re-entry after the pad is destroyed RE-ARMS",
+      (_dev2, first(_calls2)), (None, "on"))
+check("🔴 (iii) the full sequence across the takeover is off-then-on, in order",
+      [first(_calls), first(_calls2)], ["off", "on"])
+
+# --- the enumeration gap: no pad of ANY kind ---------------------------------
+#
+# Measured in P39: the native node is already gone and Steam's impostor has not
+# appeared yet. That is the FIRST instant at which nothing drives the device.
+_dev, _calls, _sleeps = run_pick([[]])
+check("🔴 the no-pad gap re-arms too -- it is the first moment nothing drives",
+      (first(_calls), "off" in _calls), ("on", False))
+check("...and it polls on the shorter grace interval, not the Steam one",
+      sorted(set(_sleeps)), [1.0])
+
+# A pad that is NOT a gamepad at all must not be mistaken for one.
+_dev, _calls, _sleeps = run_pick([[FakePad("Some Keyboard", gamepad=False)]])
+check("a non-gamepad device is not bound, and the fallback is re-armed",
+      (_dev, first(_calls), "off" in _calls), (None, "on", False))
+
+# 🔴 THE FAKE MUST ACTUALLY HAVE BEEN CALLED. An invoker that is never wired up
+# would make every "no stray off" assertion above pass VACUOUSLY -- this
+# project's signature defect, and one this suite has already been bitten by
+# twice tonight in its own helpers.
+_dev, _calls, _sleeps = run_pick([[FakePad(NATIVE_PAD)]])
+check("🔴 POSITIVE CONTROL: the injected invoker really is called, so the "
+      "negative assertions above are not vacuous", len(_calls) > 0, True)
+
+# ...and the same control from the other side: pick_device must NOT silently
+# default to a do-nothing invoker when none is passed.
+check("🔴 pick_device defaults to the REAL invoker, never to a no-op",
+      m.pick_device.__defaults__[0], None)
+_sig_src = ast.unparse(next(
+    node for node in ast.walk(ast.parse(MAPPER_SOURCE.read_text()))
+    if isinstance(node, ast.FunctionDef) and node.name == "pick_device"))
+check("...resolving it to set_lizard_mode when the caller passes nothing",
+      "set_lizard_mode if lizard is None else lizard" in _sig_src, True)
+
+# --- the disarm's POSITION relative to the bind, against the source ----------
+#
+# 🔴 ORDERING IS THE ENTIRE FIX, and no behavioural test above can see it: a
+# `lizard("off")` written BEFORE the match would satisfy every call-sequence
+# assertion and restore the defect exactly.
+_pick_def = next(node for node in ast.walk(ast.parse(MAPPER_SOURCE.read_text()))
+                 if isinstance(node, ast.FunctionDef) and node.name == "pick_device")
+def own_blocks(node):
+    """Every statement list belonging to `node`, NOT descending into nested
+    `def`s -- pick_device defines its own `enumerate_devices` fallback, whose
+    `return` is not a bind and must not be mistaken for one."""
+    for field, value in ast.iter_fields(node):
+        if isinstance(value, list) and value and isinstance(value[0], ast.stmt):
+            yield value
+            for stmt in value:
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                yield from own_blocks(stmt)
+
+
+_bind_returns = [(block, stmt) for block in own_blocks(_pick_def)
+                 for stmt in block if isinstance(stmt, ast.Return)]
+check("every bind path in pick_device hands back a device", len(_bind_returns), 2)
+# The positive control for that count: the nested helper's own `return` exists
+# and was correctly excluded, so this is filtering rather than missing things.
+check("...and the nested helper's return really was excluded, not overlooked",
+      len([n for n in ast.walk(_pick_def) if isinstance(n, ast.Return)]), 3)
+for _block, _ret in _bind_returns:
+    _before = _block[:_block.index(_ret)]
+    check("🔴 each bind is immediately preceded by the DISARM, so the "
+          "fallback is never given up before the pad is in hand",
+          any("lizard('off')" in ast.unparse(s) for s in _before), True)
+# 🔴 AND THE OTHER HALF OF THE ORDERING: no `off` may be reachable on any path
+# that does NOT return a device. There is exactly one `off` per bind and no
+# more.
+check("🔴 pick_device disarms exactly as many times as it can bind, never more",
+      ast.unparse(_pick_def).count("lizard('off')"), len(_bind_returns))
+
+# --- main()'s wiring, which no behavioural test above can reach --------------
+check("🔴 main() hands pick_device its own invoker, not the default",
+      sorted(parsed_pick_kwargs), ["lizard"])
+check("...and it is a callable", callable(parsed_pick_kwargs.get("lizard")), True)
+
+
+def lizard_calls_in(node, want):
+    """`lizard("<want>")` call sites inside `node`."""
+    return [n for n in ast.walk(node)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "lizard" and n.args
+            and isinstance(n.args[0], ast.Constant) and n.args[0].value == want]
+
+
+# 🔴 THE RE-ARM ON THE PATH THAT ACTUALLY BRICKS THE DEVICE. `pick_device`
+# re-arms once it has enumerated and decided; this closes the window between the
+# read loop dying and that decision -- and that window is a handheld with no
+# input. No behavioural test can reach it: it is inside main()'s ENODEV handler,
+# around a live selector.
+_enodev = [handler for node in ast.walk(main_def) if isinstance(node, ast.Try)
+           for handler in node.handlers
+           if any(isinstance(n, ast.Attribute) and n.attr == "ENODEV"
+                  for n in ast.walk(handler))]
+check("main() has the ENODEV recovery handler this depends on", len(_enodev), 1)
+check("🔴 ...and it re-arms the firmware fallback when the pad vanishes",
+      len(lizard_calls_in(_enodev[0], "on")) >= 1, True)
+# ...and it must do so BEFORE it re-enters pick_device, or the window it exists
+# to close is still open.
+_handler_src = ast.unparse(_enodev[0])
+check("🔴 ...before re-entering pick_device, not after",
+      _handler_src.index("lizard('on')") < _handler_src.index("pick_device("), True)
+# The positive control for that ordering comparison: both substrings are really
+# present, so `.index()` is comparing two real positions.
+check("...and both halves of that comparison are actually in the handler",
+      ("lizard('on')" in _handler_src, "pick_device(" in _handler_src),
+      (True, True))
+check("🔴 ...and the re-bind passes the SAME invoker, so --dry-run stays dry",
+      "pick_device(args.device, lizard=lizard)" in _handler_src, True)
+
+# The ordinary exit. ExecStopPost= covers the deaths that skip `finally`; this
+# covers the ones that do not, and covers them before the teardown below can
+# raise and skip everything after it.
+_finally_lizard = [call for handler in ast.walk(main_def)
+                   if isinstance(handler, ast.Try)
+                   for call in lizard_calls_in(
+                       ast.Module(body=handler.finalbody, type_ignores=[]), "on")]
+check("🔴 a `finally` re-arms lizard mode, so no ordinary exit strands it",
+      len(_finally_lizard) >= 1, True)
+# 🔴 AND NOTHING IN main() MAY DISARM. Only pick_device is allowed to, and only
+# after a bind -- a stray `lizard("off")` anywhere else is the whole defect
+# rewritten in a different file.
+check("🔴 main() never disarms lizard mode itself -- only pick_device may",
+      len(lizard_calls_in(main_def, "off")), 0)
+check("...and the positive control: main() does contain lizard calls",
+      len(lizard_calls_in(main_def, "on")) >= 2, True)
+# --dry-run must not touch a system-wide input setting.
+_dry_calls = []
+_saved_run = m.subprocess
+try:
+    _fake_sub = FakeSubprocess()
+    m.subprocess = _fake_sub
+    _sink = io.StringIO()
+    with contextlib.redirect_stderr(_sink):
+        _ok = m.set_lizard_mode("off", dry_run=True)
+    check("--dry-run reports the lizard change instead of making it",
+          (_ok, _fake_sub.calls, "lizard-mode -> off" in _sink.getvalue()),
+          (True, [], True))
+finally:
+    m.subprocess = _saved_run
+
+# The argv itself: `sudo -n`, the absolute helper path, one verb.
+check("the invocation is sudo -n against the absolute helper path",
+      (m.lizard_argv("on")[:3], m.lizard_argv("on")[-1]),
+      ([m.SUDO_BIN, "-n", m.LIZARD_HELPER], "on"))
+check("...and `off` differs only in the verb",
+      (m.lizard_argv("off")[:-1], m.lizard_argv("off")[-1]),
+      (m.lizard_argv("on")[:-1], "off"))
+# 🔴 `-n` IS LOAD-BEARING: a user unit has no terminal, so a sudo that decided
+# to prompt would HANG, holding the fallback in whatever state it was in.
+check("🔴 it can never prompt for a password",
+      "-n" in m.lizard_argv("on"), True)
+check("...and the positive control: that check can see a missing -n",
+      "-n" in [m.SUDO_BIN, m.LIZARD_HELPER, "on"], False)
+# A verb the helper does not take must be refused here, not passed through.
+_sink = io.StringIO()
+with contextlib.redirect_stderr(_sink):
+    _ok = m.set_lizard_mode("sideways", dry_run=True)
+check("an unknown verb is refused loudly, never sent to sudo",
+      (_ok, "refusing" in _sink.getvalue()), (False, True))
+
+# --- what the journal says, since this is the state nobody can see -----------
+m._lizard_last_said = None
+_ok, _err = say_and_return(lambda: m.set_lizard_mode(
+    "on", argv=(sys.executable, "-c", "raise SystemExit(1)")))
+check("a failed RE-ARM is reported as the emergency it is",
+      (_ok, "COULD NOT RESTORE" in _err), (False, True))
+check("...naming the exact command that fixes it over SSH",
+      f"sudo {m.LIZARD_HELPER} on" in _err, True)
+check("...and saying what it costs: no input at all",
+      "NO INPUT" in _err, True)
+# A failed DISARM is a different, much smaller problem, and must not be dressed
+# up as the emergency above -- the firmware keeps driving, so input still works.
+m._lizard_last_said = None
+_ok, _err = say_and_return(lambda: m.set_lizard_mode(
+    "off", argv=(sys.executable, "-c", "raise SystemExit(1)")))
+check("a failed disarm says input still works, and is not the emergency",
+      ("Input still works" in _err, "COULD NOT RESTORE" in _err), (True, False))
+
+# 🔴 THE LOG MUST NOT SCROLL. The re-arm runs every 5 s for as long as Steam is
+# open -- "this can last for hours" -- so a repeated identical outcome is said
+# once. THE CALL ITSELF IS NEVER SUPPRESSED; that would turn the invariant back
+# into an initialisation and reopen the defect.
+m._lizard_last_said = None
+_ok, _err = say_and_return(lambda: m.set_lizard_mode("on", argv=_TRUE_ARGV))
+check("the first re-arm is announced", (_ok, "lizard mode on" in _err), (True, True))
+_ok, _err = say_and_return(
+    lambda: [m.set_lizard_mode("on", argv=_TRUE_ARGV) for _i in range(20)])
+check("🔴 twenty more identical re-arms add nothing to the journal", _err, "")
+# ...but a CHANGE is always said, or a silent flip to the dangerous direction
+# would be invisible.
+_ok, _err = say_and_return(lambda: m.set_lizard_mode("off", argv=_TRUE_ARGV))
+check("🔴 a change of direction is always announced",
+      "lizard mode off" in _err, True)
+m._lizard_last_said = None
+
+# --- and it can never take the process down ---------------------------------
+m._lizard_last_said = None
+_ok, _err = say_and_return(
+    lambda: m.set_lizard_mode("on", argv=("/nonexistent/deck-lizard-mode",)))
+check("a missing helper does not raise, and is loud", (_ok, "COULD NOT" in _err),
+      (False, True))
+m._lizard_last_said = None
+_started = _time.monotonic()
+_ok, _err = say_and_return(lambda: m.set_lizard_mode(
+    "on", argv=(sys.executable, "-c", "import time; time.sleep(30)"), timeout=0.3))
+check("a hung sudo is cut off at the timeout rather than freezing the mapper",
+      (_ok, _time.monotonic() - _started < 3.0), (False, True))
+m._lizard_last_said = None
+
 
 print(f"\n{'PASS' if FAILURES == 0 else 'FAILED'} — {FAILURES} failure(s)")
 sys.exit(1 if FAILURES else 0)

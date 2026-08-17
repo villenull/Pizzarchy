@@ -773,12 +773,22 @@ readonly MAPPER_GLOBAL_WANTS="${MAPPER_UNIT%/*}/${MAPPER_WANTED_BY}.wants/${MAPP
 #   N  those six appear on the pad node and the firmware's pointer disappears,
 #      which makes the mapper the ONLY input path on the device.
 #
-# THE INVARIANT THIS INSTALLS: lizard mode is off IF AND ONLY IF the mapper is
-# running. No persistence file, no modprobe.d option, no boot-time flag -- the
-# knob's lifetime is bound to the service's, by that service's own
-# ExecStartPost=/ExecStopPost=. Boot leaves Y, so a mapper that never starts
-# leaves a usable device, and ExecStopPost= hands input back to the firmware
-# when it dies. The worst case is losing STEAM+X, not losing input.
+# THE INVARIANT THIS INSTALLS: lizard mode is off IF AND ONLY IF THE MAPPER IS
+# HOLDING A NATIVE PAD. No persistence file, no modprobe.d option, no boot-time
+# flag. Boot leaves Y, so a mapper that never starts leaves a usable device.
+#
+# 🔴 "HOLDING A PAD", NOT "RUNNING", AND THE DIFFERENCE IS A BRICKED DECK.
+# This line used to say "off if and only if the mapper is running", and the unit
+# implemented exactly that with an ExecStartPost=. Opening Steam in Desktop Mode
+# then destroyed the native pad (the KERNEL does it -- see render_lizard_dropin)
+# and left the mapper alive, waiting, driving nothing, with the fallback
+# disarmed and no unit transition to notice: a handheld with no input at all,
+# recoverable only by a ~10 s power-button hold. docs/findings/P39 Defect 2.
+#
+# So the DISARM now lives in the mapper, which is the only thing that knows
+# whether it holds a device (src/deck-input-mapper.py, `pick_device`), and this
+# file keeps only the RE-ARM paths -- ExecStopPost= and the OnFailure= unit --
+# which can only ever move lizard mode towards the safe value.
 #
 # ⚠️ WITH ONE MEASURED EXCEPTION -- see render_lizard_dropin. A SIGKILL of the
 # whole cgroup takes ExecStopPost= with it, and lizard mode stays off until the
@@ -4455,17 +4465,34 @@ ${INSTALL_MARKER}
 #   on   -> ${node}=Y
 #           The FIRMWARE provides input: pointer, Enter, Esc, Tab, arrows. It
 #           also swallows X, Y, L1, R1, STEAM and QAM entirely, so
-#           deck-input-mapper is a no-op. This is the SAFE value -- degraded,
-#           but a device a human can always drive.
+#           deck-input-mapper is a no-op. This is the SAFER value: it is the
+#           state the machine boots into, and it is the only one available when
+#           nothing is driving the pad.
+#
+#           🔴 "SAFER", NOT "a device a human can always drive" -- which is what
+#           this said, and which is now MEASURED FALSE while Steam holds the
+#           controller. Reading the firmware mouse directly on 2026-08-16
+#           (\`timeout N cat /dev/input/event5 | wc -c\`, the operator moving the
+#           right trackpad in both windows): Steam RESIDENT + lizard_mode=Y for
+#           20 s -> 0 bytes; Steam CLOSED + lizard_mode=Y for 3 s -> 49,320
+#           bytes. With Steam up, \`on\` restores this parameter and NOT a
+#           pointer. See docs/findings/P39 Defect 2. Do not restore the stronger
+#           sentence.
 #   off  -> ${node}=N
 #           Those six buttons reach the pad node and the firmware's own pointer
 #           disappears. The mapper becomes the ONLY input path on the device.
 #
-# ONLY deck-input-mapper.service should call this. Its ExecStartPost= says
-# \`off\` and its ExecStopPost= says \`on\`; that pair is what binds lizard mode's
-# lifetime to the mapper's. Run by hand, \`off\` will happily leave a handheld
-# with no input at all, and \`${LIZARD_HELPER} on\` is the way back -- over SSH,
-# because by then nothing else works.
+# ONLY deck-input-mapper.service should call this, and \`off\` now comes from the
+# MAPPER ITSELF rather than from the unit: it is invoked once \`pick_device()\`
+# has matched and opened a NATIVE pad, and \`on\` before every rescan sleep while
+# it holds none. The unit keeps \`ExecStopPost=... on\` for the deaths the
+# mapper's own exit path cannot cover. That is what binds lizard mode's lifetime
+# to DEVICE OWNERSHIP rather than to process liveness -- the distinction that
+# docs/findings/P39 Defect 2 turned on.
+#
+# Run by hand, \`off\` will happily leave a handheld with no input at all, and
+# \`${LIZARD_HELPER} on\` is the way back -- over SSH, because by then nothing
+# else works.
 #
 # WHY THERE IS NO EUID CHECK IN HERE: the node is root-writable and world-
 # readable, so an unprivileged caller already gets a loud EACCES from the write
@@ -4646,18 +4673,43 @@ ${INSTALL_MARKER}
 # and covers the ordinary paths; OnFailure= is asynchronous and covers the ones
 # that kill it. Removing either leaves a real gap.
 #
-# NEITHER LINE IS PREFIXED WITH '-', deliberately. If lizard mode cannot be
-# turned off then the mapper is a no-op anyway, and a loud failure that leaves
-# the firmware in charge is the correct outcome -- '-' would make it a silent
-# one, and this unit would then run as a process that reads a permanently
-# silent device.
+# ExecStopPost= IS NOT PREFIXED WITH '-', deliberately. It is the fallback: a
+# silently ignored failure here is the fallback not happening, on the one path
+# that has to work. It must be loud.
 #
-# ⚠️ ExecStartPost= for Type=simple runs as soon as the mapper is FORKED, not
-# once it is reading. There is a short window -- one process start -- where
-# lizard mode is off and the mapper has not opened the pad yet. It is bounded
-# by ExecStopPost=: if the mapper dies in that window the service fails and
-# lizard mode goes straight back on. Closing it properly needs Type=notify and
-# an sd_notify() in deck-input-mapper.py.
+# 🔴 THERE IS DELIBERATELY NO ExecStartPost= HERE ANY MORE, AND PUTTING ONE
+# BACK RE-BRICKS THE DEVICE (docs/findings/P39 Defect 2).
+#
+# It used to read \`ExecStartPost=${SUDO_BIN} -n ${LIZARD_HELPER} off\`, with a
+# comment calling the exposure "a short window -- one process start". THAT
+# COMMENT WAS WRONG, AND ITS WRONGNESS WAS THE DEFECT. ExecStartPost= for
+# Type=simple runs as soon as the mapper is FORKED, before it holds any device,
+# and \`pick_device()\` then waits for the native pad INDEFINITELY -- its own
+# comment says "this can last for hours". So lizard mode was off, the mapper
+# drove nothing, and the state was stable rather than brief.
+#
+# What makes that unrecoverable rather than merely degraded: Steam does not grab
+# the pad, THE KERNEL DESTROYS IT (\`hid-steam\` unregisters its input devices
+# when the client opens its hidraw node), and the \`Microsoft X-Box 360 pad 0\`
+# that replaces it carries no trackpad axes and emits nothing. With lizard off
+# and the native node gone there is no pointer, no buttons, no menu and no TTY
+# switch -- on a handheld with no keyboard, the only control left is a ~10 s
+# power-button hold.
+#
+# 🔴 AND THE COMMON PATH NEEDS NO RESTART AT ALL: mapper running normally, user
+# opens Steam, kernel destroys the pad, mapper re-enters its wait loop -- and
+# lizard is STILL off with NO UNIT STATE TRANSITION, so neither ExecStopPost=
+# below nor OnFailure= can fire. Nothing failed; the mapper is alive and
+# waiting. That is why the disarm cannot live here: this file can only speak
+# about the PROCESS, and the invariant that matters is DEVICE OWNERSHIP.
+#
+#     lizard mode may be OFF only while the mapper is HOLDING A NATIVE PAD.
+#
+# The mapper now owns that: \`pick_device()\` in src/deck-input-mapper.py turns
+# it OFF only after it has matched and opened a native pad, and back ON before
+# every rescan sleep while Steam owns the controller. See the block above
+# \`SUDO_BIN\` there. ExecStopPost= below stays exactly as it was -- it covers
+# the deaths the mapper's own \`finally\` cannot.
 [Unit]
 # The half ExecStopPost= cannot cover. Measured: it fires on every cgroup-kill
 # path, and it fires LAST when the start limit is reached -- so the state a
@@ -4665,7 +4717,6 @@ ${INSTALL_MARKER}
 OnFailure=${LIZARD_RESTORE_UNIT##*/}
 
 [Service]
-ExecStartPost=${SUDO_BIN} -n ${LIZARD_HELPER} off
 ExecStopPost=${SUDO_BIN} -n ${LIZARD_HELPER} on
 EOF
 }
@@ -4853,7 +4904,7 @@ verify_lizard_grant() {
     # 'on' and 'off' explicitly, so asking about the bare path would answer a
     # question nobody asks.
     sudo -n -l "$helper" "$verb" >/dev/null 2>&1 ||
-      fail "installed ${LIZARD_SUDOERS} but sudo will not run '${helper} ${verb}' without a password. deck-input-mapper.service is a USER unit, so its ExecStartPost=/ExecStopPost= run as the desktop user and would hang or fail. Inspect that drop-in."
+      fail "installed ${LIZARD_SUDOERS} but sudo will not run '${helper} ${verb}' without a password. BOTH verbs are needed: deck-input-mapper invokes 'off' itself once it holds a native pad, and re-arms with 'on' whenever it does not; the unit's ExecStopPost= runs 'on' as well. deck-input-mapper.service is a USER unit, so all of those run as the desktop user with no terminal, and a sudo that wanted a password would hang. Inspect that drop-in."
   done
 
   # Honesty check, same as verify_nopasswd's and for the same reason: this Deck

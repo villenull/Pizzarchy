@@ -2666,17 +2666,25 @@ ok_file "$LIZARD_DROPIN" "it installs ${LIZARD_DROPIN}"
 ok_mode "$LIZARD_DROPIN" 644 "the drop-in is mode 0644"
 ok_in_file "$LIZARD_DROPIN" "$INSTALL_MARKER" "the drop-in carries the install marker"
 ok_line "$LIZARD_DROPIN" "[Service]" "the drop-in declares [Service] -- Exec lines outside a section are ignored"
-ok_line "$LIZARD_DROPIN" "ExecStartPost=${SUDO_BIN} -n ${LIZARD_HELPER} off" \
-  "ExecStartPost= turns lizard mode OFF, and only once the mapper has been started"
+# 🔴 NO ExecStartPost=. It disarmed lizard mode at FORK time, before the mapper
+# held any device, and pick_device() then waits for a native pad indefinitely --
+# so opening Steam in Desktop Mode (which makes the KERNEL destroy that pad)
+# left lizard off with nothing driving and no unit transition to notice: a
+# handheld with NO INPUT, recoverable only by a ~10 s power-button hold.
+# docs/findings/P39 Defect 2. The disarm now lives in the mapper, after the bind.
+! grep -qE '^ExecStartPost=' "$root$LIZARD_DROPIN" ||
+  fail_test "the drop-in must NOT disarm lizard mode at start" \
+    "found an ExecStartPost=. That line runs before the mapper holds any device; with Steam resident the native pad never arrives, and lizard off with nothing driving is a device with no input at all. The disarm belongs to pick_device() in src/deck-input-mapper.py"
+pass "🔴 no ExecStartPost= -- the mapper disarms lizard mode itself, once it holds a native pad"
 ok_line "$LIZARD_DROPIN" "ExecStopPost=${SUDO_BIN} -n ${LIZARD_HELPER} on" \
-  "ExecStopPost= turns it back ON -- THE FALLBACK. Measured, systemd 261: it runs on a clean stop, on a non-zero exit, on a SIGKILLed main process, on a missing ExecStart= and on a failed ExecStartPost=. NOT on a cgroup-wide SIGKILL, which is recorded above render_lizard_dropin"
+  "ExecStopPost= turns it back ON -- THE FALLBACK. Measured, systemd 261: it runs on a clean stop, on a non-zero exit, on a SIGKILLed main process and on a missing ExecStart=. NOT on a cgroup-wide SIGKILL, which is recorded above render_lizard_dropin"
 ok_line "$LIZARD_DROPIN" "[Unit]" "the drop-in declares [Unit] -- OnFailure= is a [Unit] setting and is 'Unknown key' under [Service]"
 ok_line "$LIZARD_DROPIN" "OnFailure=${LIZARD_RESTORE_UNIT##*/}" \
   "OnFailure= names the restore unit -- the half that survives 'systemctl kill -s SIGKILL', which is the command a human types while debugging and which kills ExecStopPost= with the cgroup"
 ! grep -qE '^Exec(Start|Stop)Post=-' "$root$LIZARD_DROPIN" ||
-  fail_test "neither Exec line is prefixed with '-'" \
-    "'-' makes systemd ignore the failure: on ExecStartPost= that is a mapper reading a device the firmware still owns, and on ExecStopPost= it is the fallback silently not happening"
-pass "neither Exec line is prefixed with '-' -- a failure in either is loud, which is the whole point"
+  fail_test "the Exec line is not prefixed with '-'" \
+    "'-' makes systemd ignore the failure: on ExecStopPost= that is the fallback silently not happening, and the device has no input"
+pass "ExecStopPost= is not prefixed with '-' -- a failure in the fallback is loud, which is the whole point"
 
 # --- the stage's own verification ran, both ways, and put the node back ---
 ok_in_out "verified: '${root}${LIZARD_HELPER} off' left ${lz_node} at N" \
@@ -2848,7 +2856,7 @@ export FAKE_SUDO_LIST_DENY=deck-lizard-mode
 run_stage_body stage_lizard_mode "$lz_dest" "$lz_node"
 ok_failed "a grant sudo will not honour fails the stage"
 ok_in_err "is a USER unit" \
-  "the failure explains why it matters: ExecStartPost=/ExecStopPost= run as the desktop user, with no terminal to answer a prompt"
+  "the failure explains why it matters: the mapper's own 'off'/'on' calls and the unit's ExecStopPost= all run as the desktop user, with no terminal to answer a prompt"
 
 lz_setup Y
 export FAKE_SUDO_LIST_DENY=/usr/bin/true

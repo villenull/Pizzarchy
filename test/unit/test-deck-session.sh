@@ -1268,12 +1268,29 @@ grep -qx '\[Service\]' "$lz_dropin" ||
   fail_test "the drop-in declares [Service]" "ExecStartPost=/ExecStopPost= outside a section are ignored, and systemd logs nothing useful"
 pass "the drop-in puts its Exec lines under [Service]"
 
-# EXACT lines. A substring match would pass with a '-' prefix in front of the
-# path, which is the one edit that turns a loud failure into a silent one.
-grep -qx "ExecStartPost=${SUDO_BIN} -n ${LIZARD_HELPER} off" "$lz_dropin" ||
-  fail_test "ExecStartPost= turns lizard mode OFF when the mapper starts" \
-    "expected exactly 'ExecStartPost=${SUDO_BIN} -n ${LIZARD_HELPER} off'; file:"$'\n'"$(cat "$lz_dropin")"
-pass "ExecStartPost= runs '${LIZARD_HELPER} off' -- the mapper takes over only once it is started"
+# 🔴 THERE MUST BE NO ExecStartPost= AT ALL (docs/findings/P39 Defect 2).
+#
+# It used to disarm lizard mode here, and that is what bricked the Deck: for
+# Type=simple, ExecStartPost= runs as soon as the mapper is FORKED, before it
+# holds any device, and pick_device() then waits for the native pad
+# indefinitely. Open Steam in Desktop Mode -- the KERNEL destroys the native pad
+# -- and the result was lizard off, nothing driving, no unit transition to
+# notice, and no on-device recovery but a ~10 s power-button hold.
+#
+# The disarm now belongs to the mapper, which is the only thing that knows
+# whether it is holding a pad. This file must never put it back.
+if grep -qE '^ExecStartPost=' "$lz_dropin"; then
+  fail_test "the drop-in must NOT disarm lizard mode at start" \
+    "found an ExecStartPost= in the drop-in. That line runs before the mapper holds any device, and with Steam resident the native pad never arrives -- lizard off with nothing driving is a handheld with NO INPUT. The disarm lives in src/deck-input-mapper.py's pick_device(), after the bind. File:"$'\n'"$(cat "$lz_dropin")"
+fi
+pass "🔴 no ExecStartPost= -- the mapper disarms lizard mode itself, after it has a pad"
+
+# The positive control for that absence: this file really does contain Exec
+# lines, so the check above is reading a rendered drop-in and not an empty file.
+grep -qE '^Exec[A-Za-z]+=' "$lz_dropin" ||
+  fail_test "the drop-in contains Exec lines at all" \
+    "the ExecStartPost= absence check above would pass vacuously against an empty or unrendered file. File:"$'\n'"$(cat "$lz_dropin")"
+pass "...and the drop-in does carry Exec lines, so that absence check is not vacuous"
 
 grep -qx "ExecStopPost=${SUDO_BIN} -n ${LIZARD_HELPER} on" "$lz_dropin" ||
   fail_test "ExecStopPost= turns lizard mode back ON when the mapper stops" \
@@ -1284,9 +1301,9 @@ pass "ExecStopPost= runs '${LIZARD_HELPER} on' -- the path back for a stop, a cr
 # matches above. systemd's '-' means "ignore a failure from this command", and
 # on ExecStopPost= that is the fallback silently not happening.
 ! grep -qE '^Exec(Start|Stop)Post=-' "$lz_dropin" ||
-  fail_test "neither Exec line is prefixed with '-'" \
-    "a '-' makes systemd ignore the failure. If lizard mode cannot be turned off the mapper is a no-op anyway, and if it cannot be turned back on the device has no input -- both must be loud. File:"$'\n'"$(cat "$lz_dropin")"
-pass "neither ExecStartPost= nor ExecStopPost= is prefixed with '-' -- a failure in either is loud"
+  fail_test "the Exec line is not prefixed with '-'" \
+    "a '-' makes systemd ignore the failure. On ExecStopPost= that is the fallback silently not happening, and the device has no input. It must be loud. File:"$'\n'"$(cat "$lz_dropin")"
+pass "ExecStopPost= is not prefixed with '-' -- a failure in the fallback is loud"
 
 # --- OnFailure=, the half ExecStopPost= cannot cover -----------------------
 #

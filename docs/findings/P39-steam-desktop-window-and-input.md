@@ -449,18 +449,131 @@ in Desktop Mode with the mapper running still reproduces it.
   "mapper stopped, lizard=Y" state reported mid-session; something restarted it
   between then and now.
 
+---
+
+## Part 1 + Part 2 are LANDED, and what the live test showed (2026-08-16)
+
+Implemented in `src/deck-input-mapper.py` (the ordering) and
+`src/deck-session.sh` (the unit), together, in one change.
+
+* `pick_device()` now turns lizard mode **off only after it has matched and
+  opened a native pad**, and **on** before every rescan sleep while it holds
+  none — the re-arm deliberately *not* gated by `announced_wait`, which governs
+  logging only. `main()` also re-arms in the ENODEV handler before re-entering
+  `pick_device`, and in its `finally`.
+* `render_lizard_dropin`'s **`ExecStartPost=` is deleted.** `ExecStopPost=` and
+  `OnFailure=` are unchanged — they only ever move lizard mode towards the safe
+  value. Both shell suites were updated to assert the line's **absence**, each
+  with a positive control so the check cannot pass against an unrendered file.
+
+### ✅ Measured on the Deck, and it stands
+
+The operator opened Steam in Desktop Mode deliberately, with SSH held open as
+the recovery path. The mapper logged the re-arm and
+`/sys/module/hid_steam/parameters/lizard_mode` **went to `Y` on its own.** The
+mechanism fires and works. That is the part this code owns.
+
+### 🔴 ANSWERED: `lizard_mode=Y` does NOT restore a pointer while Steam is up
+
+The question this document listed under "Not verified" now has an answer, and it
+is negative.
+
+**Instrument.** `hyprctl cursorpos` was **abandoned** — it failed its own
+positive control, reporting an identical frozen `621, 149` across two
+`hyprctl dispatch movecursor` calls, so it was never reading live state. Two
+earlier samples taken with it are **void and withdrawn**; do not cite them. The
+measurement below reads the **raw kernel device**, with no compositor in the
+path.
+
+**Device.** From `/proc/bus/input/devices`, `"Valve Software Steam Controller"`
+→ `event5 mouse0` is the lizard-mode firmware mouse — matching what this
+document already recorded (only `event5` can carry pointer motion, and only with
+`lizard_mode=Y`).
+
+**Result** — `timeout N cat /dev/input/event5 | wc -c`, a **matched pair**: the
+same input (the operator actively moving the right trackpad, confirmed in both
+windows) under two states differing in exactly one variable.
+
+| state | duration | bytes on `event5` |
+|---|---|---|
+| `lizard_mode=Y`, Steam **resident**, operator moving | 20 s | **0** |
+| `lizard_mode=Y`, Steam **closed**, operator moving | 3 s | **49,320** |
+
+Both controls are present: the 49,320-byte read is the **positive control**
+proving the read works at all, and a 3 s idle read of 0 bytes earlier in the
+same session is the **negative control** proving it is not counting noise.
+
+**Conclusion: with Steam holding the controller, the firmware mouse emits
+nothing.** `lizard_mode=Y` restores the module parameter but not a usable
+pointer. This is consistent with the operator's report of an invisible pointer
+that highlights Steam's own UI and cannot leave the Steam window — Steam driving
+itself over hidraw, with nothing reaching the desktop.
+
+### ✅ What the fix DOES buy, also measured: automatic recovery when Steam exits
+
+Steam was shut down over SSH and the recovery was watched with no intervention:
+
+```
+native pad: input26                                   (the kernel re-created it)
+deck-input-mapper: re-bound to /dev/input/event7 (Steam Deck)
+lizard=N
+```
+
+and the operator confirmed *"mouse is back"*. The pad returns, the mapper
+re-binds, and lizard mode is re-disarmed **in that order**.
+
+So the value of this change is a **clean, automatic recovery the moment Steam
+exits** — the difference between a device that recovers by itself and one that
+needs a ~10 s power-button hold. It is **not** a rescue for a user while Steam
+is still open, and no code or comment landed here says otherwise: the mapper's
+journal line states the module-parameter fact, says plainly that there is no
+desktop cursor in this state, and names quitting Steam as the way out.
+`test-deck-input-mapper.py` carries a guard (with a positive control) that fails
+if the old "the firmware drives the trackpads as a mouse" claim is written back
+in. `deck-session.sh`'s "a device a human can always drive" was downgraded to
+"the SAFER value" with the byte counts beside it.
+
+### 🔴 A second consequence, measured the same session: the screensaver traps
+
+With Steam open in Desktop Mode the Deck reached the Omarchy **screensaver on
+idle, and the operator could not dismiss it with any button**. It had to be
+killed by PID over SSH. Whatever the pointer answer turns out to be, "idle
+screensaver becomes unescapable" is a real consequence of this state and is not
+addressed by anything in this change.
+
+### ⚠️ Methodology note, twice bitten this session
+
+1. An instruction printed into a script the operator could not see produced a
+   confounded measurement (above). If the operator is the instrument, the
+   prompt has to reach *them*.
+2. A `pkill -f screensaver` **matched the investigator's own SSH command line**
+   — which contained that word — and killed the session. Same family as the
+   `pgrep -f` self-match already recorded in `docs/PROGRESS.md`. Split the
+   pattern across a string boundary before matching on process command lines.
+
+---
+
 ## Not verified
 
-* **Whether `lizard_mode=Y` actually restores the firmware mouse while Steam is
-  still resident.** This is the load-bearing assumption under Parts 1–3: Steam
-  holds `/dev/hidraw2` and is known to disable lizard mode itself, so the
-  firmware could re-disable it. It was not tested here because testing it means
-  launching Steam on the operator's Deck while they are using it. **The
-  experiment:** with Steam open and `lizard_mode=N`, run
-  `sudo -n /usr/local/sbin/deck-lizard-mode on` and confirm the trackpad moves
-  the pointer, then confirm it *stays* working for ≥60 s (Steam may re-disable
-  it on its own heartbeat). If it fails, Parts 1–3 still prevent nothing worse
-  than today, but the actual pointer answer becomes **extest** (below).
+* ~~**Whether `lizard_mode=Y` actually restores the firmware mouse while Steam
+  is still resident.**~~ ✅ **ANSWERED 2026-08-16 — NO.** 0 bytes on
+  `/dev/input/event5` under confirmed movement with Steam resident, against
+  49,320 bytes in 3 s with Steam closed. See "ANSWERED" above for the method and
+  both controls. This was the load-bearing assumption under Parts 1–3; it is
+  false, so the ordering fix is worth shipping for the **recovery** it
+  guarantees when Steam exits, and the in-session pointer answer — if one is
+  ever wanted — is **extest** (below).
+
+* **HYPOTHESIS, NOT MEASURED: Steam's own UI may be the in-field escape hatch.**
+  The operator observed Steam's interface responding to the trackpad (elements
+  highlighting as the invisible pointer crossed them) while nothing reached the
+  desktop. If Steam is genuinely drivable in this state, a trapped user could
+  use **Steam's own menu** to quit Steam or to switch to Gaming Mode — which
+  would be the *only* on-device escape that exists today, and it needs no code
+  from us. **Worth testing deliberately**, because the whole severity of this
+  defect rests on there being no way out: can a user, with no keyboard and no
+  desktop cursor, reach and activate Steam's "Exit" from the trackpad alone?
+  Stated here as a hypothesis; do not repeat it as fact.
 * **extest.** `docs/findings/T10-steam-extest-results.md` measured Steam's own
   XTEST output reaching the Wayland pointer through extest's XTEST→uinput
   bridge — *"right trackpad moved the desktop pointer (PASS)"* — with both

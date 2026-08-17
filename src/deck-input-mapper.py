@@ -31,18 +31,29 @@ WITH THE ON-SCREEN KEYBOARD UP, the buttons match Valve's keyboard exactly
     R2 (BTN_TR2)         right pad TOUCHED -> commit the right cursor's key
                          right pad LIFTED  -> Enter
 
+    Every committed key BUZZES and CLICKS, the way Valve's own keyboard does.
+    The click plays Steam's own `deck_ui_typing.wav` FROM THE USER'S STEAM
+    INSTALL and is never shipped by us -- see OSK_TYPING_SOUND_RELPATHS for the
+    licensing constraint, and OSK_TYPING_SOUND_VOLUME for the volume knob. No
+    Steam, no sound, no other difference.
+
 DESKTOP MODE ADDS THESE BUTTONS (docs/PROGRESS.md §5.23, §5.37)
     STEAM (tap, no chord)  `omarchy-menu toggle apps`  the apps menu
     STEAM + X              the on-screen keyboard      (unchanged)
     STEAM + Y              close the focused window    the controller's SUPER+W
     STEAM + B              the DEFAULT terminal        the controller's SUPER+RETURN
     STEAM + A              the DEFAULT web browser     the controller's SUPER+SHIFT+B
+    STEAM + LEFT STICK ↕   screen brightness           stock Steam Deck parity
     QAM (the ... button)   `omarchy-menu toggle`       the Omarchy menu
 
     ⚠️ A AND B ARE CHORD PARTNERS NOW, so STEAM+A no longer emits Enter and
     STEAM+B no longer emits Esc -- the same trade STEAM+X and STEAM+Y already
     make with Backspace and Space. Pressed WITHOUT Steam they are unchanged
-    (BUTTON_MAP), which is what the installer profile above depends on.
+    (BUTTON_MAP), which is what the installer profile above depends on. The
+    same goes for the left stick: STEAM + up/down is brightness and types
+    nothing, and the stick on its own is still the arrow keys. Left/right is
+    untouched in both states -- a stock Deck puts VOLUME there, and that has
+    deliberately NOT been implemented (nobody asked for it yet).
 
     All of them need lizard_mode=N, or the firmware swallows the presses and no
     evdev node ever sees them. Startup says which of those is in force.
@@ -552,6 +563,43 @@ LAUNCH_ACTIONS: dict[str, list[str]] = {
     "launch-browser": LAUNCH_BROWSER_ARGV,
 }
 
+# --- what STEAM + the left stick runs, and why it is not brightnessctl -------
+#
+# ✅ READ OFF THE LIVE DECK 2026-08-16 (/usr/bin/omarchy-brightness-display).
+# Four things that script does which a hand-rolled `brightnessctl` call or a
+# sysfs write would each get wrong:
+#
+#   1. IT DRAWS THE OSD. `omarchy-osd -i brightness -p <pct>` -- so the
+#      controller produces the SAME brightness overlay Omarchy's own keybinds
+#      do. Parity for free, and the operator asked for stock-Deck feel.
+#   2. ITS STEP IS NON-UNIFORM: 1% steps at or below 5%, 5% steps above,
+#      clamped to [1,100]. Hand-rolled 5% steps would make the dim end
+#      unusable -- 5% to 10% is a doubling of the panel's output.
+#   3. IT PICKS THE DEVICE. `omarchy-hw-display` answered `amdgpu_bl0` on this
+#      Deck, and the script also handles external/DDC and Apple displays. The
+#      panel's own sysfs path is NOT hard-coded here, deliberately.
+#   4. IT SELF-THROTTLES -- see BRIGHTNESS_RAMP_INTERVAL, which is chosen
+#      around that behaviour.
+#
+# ⚠️ THE TWO STEP SPELLINGS ARE LOAD-BEARING. `+5%` and `5%-` are the exact
+# strings the script's non-uniform branch matches on; any other spelling of the
+# same intent ("+5", "5%+") falls straight through to `brightnessctl set` and
+# silently loses point 2 above. They are not free-form arguments.
+#
+# ⚠️ AND IT WANTS THE SESSION ENVIRONMENT (§5.28 again): the script calls
+# `omarchy-hyprland-monitor-focused`, which is `hyprctl` underneath and needs
+# HYPRLAND_INSTANCE_SIGNATURE. Without it that lookup fails, the monitor comes
+# back empty and the script falls back to the internal panel -- which happens to
+# be right on a Deck and would be wrong on anything docked. `spawn_detached`
+# passes `session_environ()`, so this is covered; do not "simplify" that away.
+BRIGHTNESS_UP_ARGV = ["omarchy-brightness-display", "+5%"]
+BRIGHTNESS_DOWN_ARGV = ["omarchy-brightness-display", "5%-"]
+
+BRIGHTNESS_ACTIONS: dict[str, list[str]] = {
+    "brightness-up": BRIGHTNESS_UP_ARGV,
+    "brightness-down": BRIGHTNESS_DOWN_ARGV,
+}
+
 # ✅ MEASURED ON HARDWARE 2026-08-11: QAM is BTN_BASE (294), on the "Steam Deck"
 # node (/dev/input/event7), with lizard_mode=N.
 #
@@ -598,6 +646,88 @@ STICK_RELEASE = 0.35
 # Held-direction auto-repeat, tuned to console feel.
 REPEAT_DELAY = 0.40
 REPEAT_INTERVAL = 0.15
+
+# --- 🆕 STEAM + THE LEFT STICK, UP AND DOWN, IS BRIGHTNESS -------------------
+#
+# 🔴 STOCK STEAM DECK PARITY, NOT AN INVENTION. The operator asked for this and
+# then said what it had to feel like: *"its the same as a normal steamdeck"*.
+# Every open question below was therefore answered with "what does a stock Deck
+# do", not with what was easiest here.
+#
+# ✅ MEASURED ON THE DECK 2026-08-16, /dev/input/event7 ("Steam Deck"), by
+# reading the node's own absinfo:
+#
+#     ABS_X / ABS_Y    left stick,  min=-32767 max=32767 fuzz=0 FLAT=0
+#     ABS_RX / ABS_RY  right stick, same ranges -- and unmapped in STICK_AXES,
+#                      i.e. it does nothing in this mapper today
+#
+# ⚠️ THE RANGE IS -32767, NOT -32768, and `flat=0` means THE KERNEL APPLIES NO
+# DEADZONE OF ITS OWN. Ours is the only one there is. The same read caught the
+# untouched stick reporting ABS_X=681, ABS_Y=-393 -- a stick sitting ~2% off
+# centre with nobody near it, which is precisely the "brightness randomly
+# changes" report this constant exists to prevent.
+BRIGHTNESS_STICK_AXIS = e.ABS_Y
+
+# ⚠️ NEGATIVE IS UP. Not an assumption: HAT_MAP binds (ABS_HAT0Y, -1) to KEY_UP,
+# and the left stick has driven those arrow keys on hardware since 2026-08-10.
+# The two step names below are DERIVED from this one sign so that up-is-brighter
+# and down-is-dimmer cannot be inverted independently of each other.
+BRIGHTNESS_STICK_UP = -1
+
+# ⛔ KEYED BY THAT MEASURED SIGN, NOT SPELLED OUT TWICE. Deriving both entries
+# from `BRIGHTNESS_STICK_UP` means up-is-brighter and down-is-dimmer cannot
+# drift apart, and if the sign is ever re-measured the correction lands in both
+# at once. The argv each name resolves to is BRIGHTNESS_ACTIONS, further down
+# with the other command tables.
+BRIGHTNESS_STEPS: dict[int, str] = {
+    BRIGHTNESS_STICK_UP: "brightness-up",
+    -BRIGHTNESS_STICK_UP: "brightness-down",
+}
+
+# Deflection needed to START a ramp, and to keep one running, as fractions of
+# half-range.
+#
+# 🔴 THE DEADZONE, AND IT IS THE ONE THAT BITES THE OPERATOR IF IT IS WRONG.
+# ENGAGE is 24x the ~2% resting deflection measured above, so a stick nobody is
+# touching cannot reach it. RELEASE is lower than ENGAGE on purpose: that gap is
+# hysteresis, and without it a stick held near the boundary would start and stop
+# the ramp several times a second.
+#
+# ⚠️ These deliberately match STICK_ENGAGE/STICK_RELEASE in value, so the throw
+# at which the stick stops meaning "arrow key" is the throw at which it starts
+# meaning "brightness". They are SEPARATE constants because they are separate
+# knobs -- the operator tunes brightness by feel without disturbing navigation.
+BRIGHTNESS_STICK_ENGAGE = 0.5
+BRIGHTNESS_STICK_RELEASE = 0.35
+
+# How long a held stick waits before the ramp starts, and the gap between steps
+# once it is ramping.
+#
+# ⚠️ A SHORTER DELAY THAN KEY REPEAT (REPEAT_DELAY), deliberately. Key repeat
+# waits 0.40 s so that a deliberate single keystroke cannot double up; a
+# brightness ramp that visibly stalls for four tenths of a second before moving
+# reads as a stuck control instead. A flick still yields exactly one step, which
+# is what a stock Deck gives you for a flick.
+BRIGHTNESS_RAMP_DELAY = 0.30
+
+# 🔴 THIS INTERVAL IS BOUNDED FROM BELOW BY THE SCRIPT, NOT BY TASTE.
+# `omarchy-brightness-display` self-throttles with `flock -n` and **exits 0 when
+# it cannot get the lock** -- so an invocation that overlaps its predecessor
+# vanishes with no error anywhere, and the ramp stalls while this process's log
+# looks perfectly healthy. That is this project's own worst failure shape.
+#
+# ✅ TIMED ON THE DECK 2026-08-16: five back-to-back invocations of the real
+# script took 0.223 s wall, i.e. ~45 ms each, and one `omarchy-osd` draw took
+# ~10 ms. Call the lock hold ~60 ms with the panel write included. 0.125 s is
+# roughly double that, which leaves the ramp room to be late without lock
+# collisions, and gives 5% per step = 40% per second: 0 to 100 in about 2.5 s.
+#
+# ⚠️ THE ACHIEVED RATE IS A HARDWARE QUESTION and the timing above was taken
+# over SSH, where `brightnessctl` cannot write at all (no logind seat: it fails
+# "Operation not permitted"). The read, the lock, the monitor lookup and the OSD
+# are all real in that measurement; the sysfs write is not. If the ramp feels
+# slower than it says here, suspect lock collisions FIRST and raise this number.
+BRIGHTNESS_RAMP_INTERVAL = 0.125
 
 # --- the OSK's button profile: Valve's, reproduced (T8 §9g) ------------------
 #
@@ -786,6 +916,55 @@ HAPTIC_EFFECTS: dict[str, tuple[int, int, int]] = {
                             OSK_TOUCH_HAPTIC_MAGNITUDE, OSK_TOUCH_HAPTIC_MS),
 }
 
+# --- 🆕 THE KEY-PRESS SOUND, BESIDE THE KEY-PRESS BUZZ -----------------------
+#
+# Operator: *"steam keyboard makes a sound every time you press a key when in
+# steam mode? can you find that sound file and add it to our own OSK?"* It is
+# the same event the haptic above confirms, so the two fire together -- see
+# `Mapper.click_sound`, called next to `Mapper.buzz` at BOTH commit paths
+# (`commit_at` for a trigger or a pad click, `press_key_index` for a touch).
+# Sounding on only one of them would give the trackpad a tick with no click,
+# which is exactly the half-implemented feel this project keeps catching.
+#
+# 🔴 REFERENCED BY PATH AT PLAY TIME. NEVER COPIED INTO THIS REPO, INTO src/,
+# INTO THE ISO, OR INTO A TEST FIXTURE. THIS IS A LICENSING CONSTRAINT, NOT A
+# PREFERENCE, AND SOMEONE WILL OTHERWISE "HELPFULLY" VENDOR THE FILE.
+#
+#   `pacman -Qo` on it answers "No package owns": it is shipped by no Arch or
+#   SteamOS package. The Steam CLIENT downloads it into the user's own home at
+#   runtime, and it is Valve's proprietary asset. CLAUDE.md forbids depending on
+#   anything unlicensed because THE ISO REDISTRIBUTES WHAT IT CARRIES -- the
+#   same rule that got `28allday/deckshift` dropped (docs/PROGRESS.md §2.4).
+#   Playing a file the user's own Steam install put on the user's own disk
+#   redistributes nothing. Vendoring one byte of it would.
+#
+#   So when it is absent -- a fresh install before Steam has finished
+#   self-updating, or a machine with no Steam at all -- the keyboard is SILENT,
+#   the haptic still fires, and nothing else changes. Do not "fix" that by
+#   bundling it.
+#
+# ✅ FOUND ON THE LIVE DECK: 101912 bytes, mtime 2022-03-21, at the first of the
+# paths below. The second is the older ~/.steam/steam symlink layout.
+OSK_TYPING_SOUND_RELPATHS: tuple[str, ...] = (
+    ".local/share/Steam/steamui/sounds/deck_ui_typing.wav",
+    ".steam/steam/steamui/sounds/deck_ui_typing.wav",
+)
+
+# ✅ /usr/bin/pw-play on the Deck -- PipeWire is the session's audio server.
+# `paplay` is present too and would be the fallback if this ever moves; it takes
+# a DIFFERENT volume flag (an integer 0..65536, not a float), so swapping the
+# binary means changing OSK_TYPING_SOUND_VOLUME_FLAG with it.
+OSK_TYPING_SOUND_PLAYER = "pw-play"
+OSK_TYPING_SOUND_VOLUME_FLAG = "--volume"
+
+# ⬅️⬅️ THE TUNING KNOB. ONE NUMBER. CHANGE IT AND REDEPLOY. ⬅️⬅️
+#
+# `pw-play --volume=`, 0.0 (silent) to 1.0 (the file's own level). Steam's own
+# tick is quiet, so this starts deliberately modest -- and it starts modest for
+# the same reason the haptics did: the operator tunes it by feel on hardware,
+# and nothing else in this file should have to move when they do.
+OSK_TYPING_SOUND_VOLUME = 0.4
+
 # --- 🆕 WITH THE KEYBOARD DOWN, THE RIGHT PAD'S CLICK IS THE LEFT MOUSE BUTTON
 #
 # Operator, on hardware 2026-08-12: *"i should be able to click now with the
@@ -970,6 +1149,11 @@ class Mapper:
     # commit, just without the buzz.
     haptics: "object | None" = None
 
+    # The `TypingSound` above, or None -- None in --dry-run and in every unit
+    # test that does not ask for one, exactly like `haptics` beside it, and with
+    # the same meaning: the key still commits, just without the tick.
+    sound: "object | None" = None
+
     # What `shift` was before L2 was pulled, or None while L2 is not holding it.
     # This is the ONE piece of shift state this object owns, and it is not a
     # mirror: it is what a MOMENTARY modifier has to remember in order to put
@@ -987,6 +1171,19 @@ class Mapper:
     # shared by all four would let one release clear another's flag. The
     # membership is per-code so no two can interfere.
     chord_keys_down: set[int] = field(default_factory=set)
+
+    # --- 🆕 the brightness ramp (STEAM + left stick, up/down) ----------------
+    #
+    # Which way a ramp is currently running (0 = none), and when its next step
+    # is due. TWO fields rather than one, for the same reason `AxisState` keeps
+    # `next_repeat` beside `active_key`: "is it ramping" and "when does it step"
+    # are different questions and main()'s select() timeout asks the second one.
+    #
+    # 🔴 CLEARED BY THE STEAM RELEASE, and it has to be. This is the one piece
+    # of state in this object that keeps QUEUEING WORK with no further input --
+    # a ramp nobody stops is a screen that walks to full brightness on its own.
+    brightness_dir: int = 0
+    brightness_next: float = 0.0
 
     # Whether a BTN_LEFT we emitted from the RIGHT PAD'S CLICK is still down.
     #
@@ -1330,6 +1527,101 @@ class Mapper:
             return -1
         return 0
 
+    def _brightness_direction(self, value: int) -> int:
+        """-1 (up), +1 (down) or 0, from one raw sample of the stick's axis.
+
+        The deadzone AND the hysteresis both live here: while no ramp is running
+        the stick must clear BRIGHTNESS_STICK_ENGAGE to start one, and once one
+        IS running it only has to stay above BRIGHTNESS_STICK_RELEASE to keep it.
+
+        🔴 A RESTING STICK MUST RETURN 0 -- see the constants for the measured
+        ~2% resting deflection this is sized against. Everything else about this
+        feature is recoverable; a deadzone that a motionless stick can cross
+        makes the screen change brightness on its own.
+        """
+        lo, hi = self.axis_ranges.get(BRIGHTNESS_STICK_AXIS, (-32767, 32767))
+        mid = (lo + hi) / 2
+        half = (hi - lo) / 2 or 1
+        frac = (value - mid) / half
+        # Keyed off the RAMP's own engagement, exactly as `_stick_direction`
+        # keys off the stick's -- and for the reason written out there.
+        threshold = (BRIGHTNESS_STICK_RELEASE if self.brightness_dir
+                     else BRIGHTNESS_STICK_ENGAGE)
+        if abs(frac) < threshold:
+            return 0
+        return 1 if frac > 0 else -1
+
+    def _stick_brightness(self, value: int, now: float) -> list[tuple[int, int]]:
+        """STEAM + the left stick's vertical axis. Queues a step; emits no keys.
+
+        Returns [] ALWAYS: this binding types nothing, and the empty list is the
+        whole reason STEAM+stick does not also drive the arrow keys underneath
+        it (a stock Deck does not scroll a menu while you set the brightness).
+
+        ⚠️ FIRES ON THE EDGE, THEN REPEATS ON A CLOCK. One step the instant the
+        stick crosses the threshold, then `due_brightness` takes over. A flick
+        therefore yields exactly one step, and a hold ramps -- which is what the
+        stock behaviour this is copying does.
+        """
+        direction = self._brightness_direction(value)
+        if direction == self.brightness_dir:
+            return []
+        self.brightness_dir = direction
+        if direction:
+            # 🔴 THE TAP-POISONING GUARD, AND IT IS NOT OPTIONAL. `mode_chorded`
+            # is otherwise set only by a BUTTON press (see translate), and an
+            # axis deflection is not a button press -- so without this line the
+            # sequence "hold STEAM, push the stick, let go of STEAM" would
+            # change the brightness AND THEN OPEN THE APPS MENU, because the
+            # hold still looked like a clean tap. Covered by its own test.
+            self.mode_chorded = True
+            self.pending_actions.append(BRIGHTNESS_STEPS[direction])
+            self.brightness_next = now + BRIGHTNESS_RAMP_DELAY
+        return []
+
+    def _release_stick_axis(self, now: float) -> list[tuple[int, int]]:
+        """Hand back an arrow key the stick was holding on the brightness axis.
+
+        🔴 FOR THE STUCK KEY THIS FEATURE WOULD OTHERWISE CREATE: push the stick
+        up (KEY_UP goes down and starts auto-repeating), THEN press STEAM. From
+        that moment every sample on this axis is routed to the brightness ramp,
+        so nothing would ever emit the release -- and `due_repeats` would go on
+        typing Up several times a second for as long as the session lasted. The
+        same hazard `chord_keys_down` answers for the face buttons, arriving
+        through the axis instead.
+
+        Idempotent: with no key held this emits nothing.
+        """
+        hat_axis = STICK_AXES[BRIGHTNESS_STICK_AXIS]
+        self.hats[hat_axis].stick_dir = 0
+        return self._hat_transition(hat_axis, self._effective_direction(hat_axis), now)
+
+    def stop_brightness(self) -> None:
+        """Abandon any ramp in progress. Idempotent.
+
+        🔴 FOR THE STOP SIGNAL THAT NEVER ARRIVES: the pad's node vanishing
+        (ENODEV) mid-ramp. Every ordinary way a ramp ends goes through the STEAM
+        release or the stick returning to centre; a node that is GONE sends
+        neither, ever, and `due_brightness` would keep stepping on the clock
+        with no stick left to stop it. main() calls this before it re-binds --
+        the same shape, and the same reason, as `release_pointer_click`.
+        """
+        self.brightness_dir = 0
+
+    def due_brightness(self, now: float) -> int:
+        """Queue the next step of a held ramp. Returns how many it queued.
+
+        The clock half of the binding, and the direct model is `due_repeats`
+        above: called on EVERY pass of main()'s loop, including passes woken by
+        nothing but the timeout `next_deadline` asked for. A ramp cannot depend
+        on further pad events, because a stick held perfectly still sends none.
+        """
+        if not self.brightness_dir or now < self.brightness_next:
+            return 0
+        self.pending_actions.append(BRIGHTNESS_STEPS[self.brightness_dir])
+        self.brightness_next = now + BRIGHTNESS_RAMP_INTERVAL
+        return 1
+
     def _effective_direction(self, hat_axis: int) -> int:
         """Combine the sources for one axis. Digital input wins over the
         stick, so resting-stick neutrality can never cancel a held d-pad."""
@@ -1492,6 +1784,18 @@ class Mapper:
             return False
         return bool(self.haptics.buzz(half))
 
+    def click_sound(self) -> bool:
+        """Tick, the way Valve's own keyboard does. False if nothing was heard.
+
+        ⚠️ THE SOUND HALF OF `buzz`, AND IT IS CALLED BESIDE IT AT BOTH COMMIT
+        PATHS. Same contract, same discarded return value, same reason: a commit
+        that types nothing (Shift, Caps) is still a commit, and a key that did
+        not sound because audio is missing must still have been typed.
+        """
+        if self.sound is None:
+            return False
+        return bool(self.sound.play())
+
     def release_pointer_click(self) -> list[tuple[int, int]]:
         """Give back a mouse button we are holding. [] if we hold none.
 
@@ -1544,7 +1848,16 @@ class Mapper:
 
         Also drains any renderer-owned request that press queued (the emoji
         key) into `pending_actions` -- see `_consume_osk_request`.
+
+        🆕 AND IT CLICKS, which is why the sound is HERE and not only beside the
+        touch path's buzz. This is the commit a trigger pull and a pad click
+        both come through -- the way the operator actually types on the panel --
+        so sounding only the touch path would give the trackpad a haptic and no
+        click. The BUZZ deliberately does not live here (it is the pad click's
+        alone, see `_osk_event`); the sound is not a confirmation of a switch
+        with travel, it is the keyboard's own voice, and every key has one.
         """
+        self.click_sound()
         return self._consume_osk_request(self.osk.press(
             self.osk.key_at(half, *self.cursors.position(half), self.osk_metric)))
 
@@ -1590,6 +1903,10 @@ class Mapper:
         # for the reason `Mapper.buzz` gives: a commit that types nothing
         # (Shift, Caps) is still a commit, and haptics are best-effort.
         self.buzz(OSK_TOUCH_HAPTIC_SLOT)
+        # 🆕 AND IT CLICKS. Beside the buzz because they are one event -- see
+        # OSK_TYPING_SOUND_VOLUME. The warning above about the touch/click ratio
+        # applies to the HAPTIC's magnitude and is unaffected by this line.
+        self.click_sound()
         return self._consume_osk_request(self.osk.press(rows[row][key_index]))
 
     def translate(self, etype: int, code: int, value: int, now: float) -> list[tuple[int, int]]:
@@ -1638,7 +1955,16 @@ class Mapper:
                 if value == 1:
                     self.mode_held = True
                     self.mode_chorded = False
+                    # 🔴 AND HAND BACK AN ARROW THE STICK IS HOLDING. From this
+                    # instant the stick's vertical axis belongs to the
+                    # brightness ramp, so nothing below would ever emit that
+                    # key's release. See `_release_stick_axis`.
+                    return self._release_stick_axis(now)
                 elif value == 0:
+                    # The ramp ends with the hold. Nothing else can stop it: the
+                    # stick may be perfectly still, in which case no further
+                    # sample is coming. See `stop_brightness`.
+                    self.stop_brightness()
                     # `mode_held` as well as `mode_chorded`: a release we never
                     # saw the press for (re-binding to a pad mid-hold) is not a
                     # tap the user made.
@@ -1684,6 +2010,20 @@ class Mapper:
                 if value == 1:
                     self.pending_actions.append("menu-root")
                 return []
+        # 🆕 STEAM + THE LEFT STICK'S VERTICAL AXIS IS BRIGHTNESS.
+        #
+        # ⚠️ ABOVE THE `osk_active` ROUTING, for the same reason every button
+        # chord is: a stock Deck adjusts the brightness whatever is on screen,
+        # and the keyboard being up is not a reason to stop. Below this line the
+        # stick would be handed to `_osk_event`, which is only interested in the
+        # pads.
+        #
+        # ⚠️ AN EARLY RETURN, so the STICK_AXES branch further down never sees
+        # this axis while STEAM is held. That branch would otherwise ALSO engage
+        # an arrow key -- the binding would set the brightness and scroll the
+        # menu behind it at the same time.
+        if etype == e.EV_ABS and code == BRIGHTNESS_STICK_AXIS and self.mode_held:
+            return self._stick_brightness(value, now)
         # ⚠️ AFTER the chord, BEFORE everything else. The chord has to keep
         # working while the keyboard is up -- it is how a user dismisses one
         # they opened by accident -- and nothing else may reach the navigation
@@ -1779,6 +2119,12 @@ class Mapper:
 
     def next_deadline(self) -> float | None:
         deadlines = [s.next_repeat for s in self.hats.values() if s.active_key is not None]
+        # 🔴 THE RAMP'S DEADLINE BELONGS HERE TOO. A stick held perfectly still
+        # sends no further samples, so without this select() blocks until some
+        # unrelated event wakes the loop and the ramp advances in lurches -- or,
+        # on a Deck sitting untouched but for that one thumb, not at all.
+        if self.brightness_dir:
+            deadlines.append(self.brightness_next)
         return min(deadlines) if deadlines else None
 
 
@@ -2450,6 +2796,89 @@ def spawn_detached(argv: list[str], what: str, env=None) -> bool:
     return True
 
 
+def osk_typing_sound_argv(home: "str | None" = None,
+                          exists=os.path.exists) -> "list[str] | None":
+    """The argv that plays Steam's key tick once, or None if it is not there.
+
+    PURE, and deliberately so: no process, no audio, no state. It is the whole
+    decision -- which file, which player, which volume -- in a form the suite
+    can drive with a scripted filesystem and no hardware.
+
+    None means "this machine has no Steam tick to play", which is an ORDINARY
+    answer (see the constants: the asset is Valve's and is never shipped by us),
+    not an error. The caller degrades to silence.
+    """
+    base = os.path.expanduser("~") if home is None else home
+    if not base:
+        return None
+    for relpath in OSK_TYPING_SOUND_RELPATHS:
+        path = os.path.join(base, relpath)
+        if exists(path):
+            return [OSK_TYPING_SOUND_PLAYER,
+                    f"{OSK_TYPING_SOUND_VOLUME_FLAG}={OSK_TYPING_SOUND_VOLUME}",
+                    path]
+    return None
+
+
+class TypingSound:
+    """Plays the OSK's key tick. Resolved once, best-effort for ever after.
+
+    ⚠️ THE SAME CONTRACT AS `Haptics`, AND FOR THE SAME REASON: this fires on
+    EVERY committed key, so nothing here may block the evdev read loop, raise
+    into it, or write to the journal per keystroke. A sound failure must cost
+    the user nothing at all -- they came to type.
+
+    Three things are cached, each because the alternative is a per-keystroke
+    cost: the resolved argv (one `stat` per candidate path, done once), the
+    "there is nothing to play" answer (said once, then silent for ever), and a
+    DISARM after the first spawn failure -- a missing `pw-play` would otherwise
+    have `spawn_detached` print for every letter typed.
+    """
+
+    def __init__(self, resolve=osk_typing_sound_argv, spawn=None):
+        self._resolve = resolve
+        self._spawn = spawn
+        self.argv: "list[str] | None" = None
+        self.resolved = False
+        self.enabled = True
+
+    def start(self) -> bool:
+        """Work out what to play, once. True if there is something to play."""
+        if self.resolved:
+            return self.argv is not None
+        self.resolved = True
+        try:
+            self.argv = self._resolve()
+        except OSError:
+            # A stat that raises (a broken symlink chain, a dead automount) is
+            # not worth a keystroke. Silence is the correct outcome.
+            self.argv = None
+        if self.argv is None:
+            print("deck-input-mapper: no Steam key-press sound found under "
+                  f"~/{OSK_TYPING_SOUND_RELPATHS[0]}; the on-screen keyboard "
+                  "will be silent (the haptic still fires). That asset belongs "
+                  "to Steam and is never shipped by us, so this is expected on "
+                  "a machine without it.", file=sys.stderr, flush=True)
+        return self.argv is not None
+
+    def play(self) -> bool:
+        """Tick, if we can. True only if a player was actually started."""
+        if not self.enabled or not self.start():
+            return False
+        spawn = spawn_detached if self._spawn is None else self._spawn
+        if not spawn(self.argv, "play the on-screen keyboard's key sound"):
+            # 🔴 SAID ONCE, THEN DISARMED -- `Haptics.start`'s exact trade. This
+            # is called per keystroke, so a missing player would otherwise fill
+            # the journal one line per letter, which is its own kind of silence.
+            self.enabled = False
+            print("deck-input-mapper: could not play the keyboard's key sound, "
+                  f"so it is now DISABLED for this session (needs `{OSK_TYPING_SOUND_PLAYER}` "
+                  "on PATH). The keyboard and its haptic are unaffected.",
+                  file=sys.stderr, flush=True)
+            return False
+        return True
+
+
 def run_menu_action(action: str, dry_run: bool = False) -> bool:
     """Open one of Omarchy's menus. Returns True if the helper was started."""
     argv = MENU_ACTIONS.get(action)
@@ -2524,6 +2953,55 @@ def run_launch_action(action: str, dry_run: bool = False) -> bool:
         print(f"deck-input-mapper: that chord does nothing until `{argv[0]}` is "
               "installed and on PATH; the rest of the mapper is unaffected",
               file=sys.stderr, flush=True)
+        return False
+    return True
+
+
+# Whether the brightness binding has already explained itself. See below.
+_brightness_complained = False
+
+
+def run_brightness(action: str, dry_run: bool = False) -> bool:
+    """STEAM + the left stick: one brightness step. True if it was started.
+
+    ⚠️ ITS OWN RUNNER RATHER THAN `run_launch_action`'S, AND THE REASON IS THE
+    REPEAT. This is the only binding in this file that fires on a CLOCK -- up to
+    eight times a second while the stick is held (BRIGHTNESS_RAMP_INTERVAL) --
+    so a missing binary would print the same failure sentence eight times a
+    second for as long as the operator leaned on the stick. A journal that
+    scrolls is a journal nobody reads, which is the same silence CLAUDE.md
+    forbids, arriving from the other direction.
+
+    So: SAID IN FULL, ONCE, and never repeated. The attempt itself is NOT
+    disarmed -- `spawn_detached` fails on OSError, which a package installed
+    mid-session would fix, and a binding that gave up permanently on one
+    transient fork failure would be worse than a quiet log.
+
+    ⚠️ FIRE AND FORGET, like every other spawn here. `omarchy-brightness-display`
+    drops its own overlapping invocations with `flock -n` and EXITS 0 when it
+    does, so "the process started" is genuinely all this can promise -- see
+    BRIGHTNESS_RAMP_INTERVAL, which is chosen so that dropping is rare.
+    """
+    global _brightness_complained
+    argv = BRIGHTNESS_ACTIONS.get(action)
+    if argv is None:
+        # Unreachable from translate(), which queues only BRIGHTNESS_STEPS'
+        # names -- which is exactly why it is loud rather than ignored.
+        print(f"deck-input-mapper: unknown brightness action {action!r}; "
+              "nothing changed", file=sys.stderr, flush=True)
+        return False
+    printable = " ".join(argv)
+    if dry_run:
+        print(f"{action} -> {printable}", file=sys.stderr, flush=True)
+        return True
+    if not spawn_detached(argv, f"run `{printable}`"):
+        if not _brightness_complained:
+            _brightness_complained = True
+            print(f"deck-input-mapper: STEAM + the left stick does nothing until "
+                  f"`{argv[0]}` is installed and on PATH; the rest of the mapper "
+                  "is unaffected. This binding REPEATS while the stick is held, "
+                  "so it will not say this again.",
+                  file=sys.stderr, flush=True)
         return False
     return True
 
@@ -2924,6 +3402,14 @@ def menu_binding_report(lizard: str | None) -> list[str]:
         f"STEAM+A (the DEFAULT browser) -> "
         f"`{' '.join(LAUNCH_ACTIONS['launch-browser'])}`; while STEAM is held "
         "those two no longer emit Enter and Esc",
+        # ⚠️ THE ONE BINDING THAT REPEATS, so it is worth saying what it runs and
+        # how fast: a ramp that stalls is `omarchy-brightness-display` dropping
+        # overlapping invocations under its own flock, and that failure is
+        # SILENT at the far end (see BRIGHTNESS_RAMP_INTERVAL).
+        f"STEAM + left stick up/down (brightness) -> "
+        f"`{' '.join(BRIGHTNESS_ACTIONS['brightness-up'])}` / "
+        f"`{' '.join(BRIGHTNESS_ACTIONS['brightness-down'])}`, one step then "
+        f"every {BRIGHTNESS_RAMP_INTERVAL:g}s while held",
     ]
     if QAM_BUTTON is None:
         lines.append(
@@ -3192,6 +3678,199 @@ def _match(candidates: list[InputDevice], selector: str | None) -> InputDevice |
     return None
 
 
+# --- 🔴 LIZARD MODE IS THIS PROCESS'S FALLBACK, AND IT OWNS THE ORDERING -----
+#
+# 🔴 THE DEFECT THIS CLOSES (docs/findings/P39 Defect 2): opening Steam in
+# Desktop Mode left the Deck with NO INPUT AT ALL, unrecoverable on-device
+# without a ~10 s power-button hold, and it recurred every time Steam was
+# opened. It is worth writing down exactly, because every obvious fix is wrong.
+#
+# WHAT STEAM ACTUALLY DOES: it does NOT grab the pad. THE KERNEL DESTROYS IT.
+# `hid-steam` unregisters its own input devices the moment userspace opens the
+# client's hidraw node. Measured both ways in one session: with Steam resident
+# `/sys/bus/hid/devices/0003:28DE:1205.0003/input` does not exist, and Steam
+# holds no /dev/input/event* fd at all -- only /dev/hidraw2.
+#
+# SO THE `Microsoft X-Box 360 pad 0` THAT APPEARS IS NOT A REPLACEMENT. Its
+# ABS bitmap (0x3003f, the xpad layout) has sticks, triggers and a hat and NO
+# TRACKPAD AXES; the Deck's trackpads are ABS_HAT0X/Y and ABS_HAT1X/Y on the
+# native node only, and R-41 measured that node emitting nothing at all.
+# `looks_like_gamepad` REFUSING IT IS CORRECT AND MUST STAY -- binding to it
+# would trade "no input" for "no input, and the fallback disarmed because we
+# think we are bound".
+#
+# THE BUG WAS PURELY ORDERING. The unit's `ExecStartPost=` disarmed lizard mode
+# as soon as this process was FORKED -- before it held any device -- and
+# `pick_device` below then waits for the native pad indefinitely (deliberately:
+# exiting would burn StartLimitBurst and leave the mapper permanently dead). So
+# lizard mode was off, this process drove nothing, and the state was STABLE.
+#
+# 🔴 AND THE PATH THAT REACHES USERS NEEDS NO RESTART AND NO CRASH: mapper
+# running normally with lizard_mode=N, user opens Steam, the kernel destroys the
+# pad, this process re-enters the wait loop -- and lizard is STILL N with NO
+# UNIT STATE TRANSITION. `ExecStopPost=` and `OnFailure=` cannot fire, because
+# nothing failed; the mapper is alive and patiently waiting. The net that exists
+# watches PROCESS LIVENESS, and the invariant that matters is DEVICE OWNERSHIP.
+#
+# THE PRINCIPLE, AND IT IS THE WHOLE FIX:
+#
+#     lizard mode may be OFF only while this process is HOLDING A NATIVE PAD.
+#
+# Not "while this process exists". That is why the disarm now lives here, next
+# to the bind, instead of in the unit -- see `render_lizard_dropin` in
+# `src/deck-session.sh`, whose `ExecStartPost=` was REMOVED in the same change.
+# If that line ever comes back, this code cannot save the device: the fallback
+# would be disarmed before this process has an opinion.
+#
+# 🔴 THE RE-ARM DOES **NOT** GIVE THE USER A POINTER BACK, AND THAT IS MEASURED,
+# NOT SUSPECTED. This paragraph replaces one that asserted -- with nothing behind
+# it -- that lizard mode back ON means "the firmware drives the trackpads as a
+# merged relative mouse, so the pointer moves" and the device is "degraded, not
+# dead". THAT SENTENCE IS FALSE. Do not write it, or anything like it, again.
+#
+# ✅ MEASURED ON THE DECK 2026-08-16, by reading the RAW KERNEL DEVICE with no
+# compositor in the path (`timeout N cat /dev/input/event5 | wc -c`, where
+# event5/mouse0 is the lizard-mode firmware mouse named "Valve Software Steam
+# Controller"):
+#
+# A MATCHED PAIR: the same input -- the operator actively moving the right
+# trackpad, confirmed in both windows -- under two states differing in exactly
+# one variable:
+#
+#     lizard_mode=Y, Steam RESIDENT, operator moving, 20 s
+#         ->      0 bytes
+#     lizard_mode=Y, Steam CLOSED,   operator moving,  3 s
+#         -> 49,320 bytes
+#
+# With Steam holding the controller the firmware mouse EMITS NOTHING, so
+# `lizard_mode=Y` restores the module parameter and not a usable pointer. Both
+# controls are present: the 49,320-byte read is the positive control proving the
+# read works at all, and a 3 s idle read of 0 bytes earlier in the same session
+# is the negative control proving it is not merely counting noise.
+#
+# That matches what the operator saw: an invisible pointer that highlights
+# Steam's own UI and cannot leave the Steam window -- i.e. Steam driving itself
+# over hidraw, with nothing reaching the desktop.
+#
+# ⚠️ AND `hyprctl cursorpos` WAS ABANDONED AS AN INSTRUMENT: it failed its own
+# positive control, reporting an identical frozen value across two compositor-
+# side cursor-move dispatches, so every sample taken with it was void. Two
+# earlier readings from it are withdrawn; do not resurrect them. (The exact
+# commands are in docs/findings/P39; they are not written here because the
+# cursor-move dispatcher's bareword spelling is one `test-hyprctl-syntax.sh`
+# refuses to let this file carry, comment or not -- and that scanner is right:
+# it cannot tell prose from a command line, and neither can a copy-paste.)
+#
+# ✅ WHAT THE FIX **DOES** BUY, also measured, by closing Steam and watching:
+# the kernel re-creates the native pad, this process re-binds to it, and lizard
+# mode is disarmed again -- in that order, with no intervention, and the
+# operator confirmed the mouse came back. So the value of this ordering is a
+# CLEAN AUTOMATIC RECOVERY THE MOMENT STEAM EXITS. It is not a rescue for a user
+# while Steam is still open; nothing in this file may pretend otherwise.
+#
+# 🔴 THE RE-ARM IS STILL RIGHT. Leaving the fallback DISARMED is unambiguously
+# worse -- it is the difference between a device that recovers by itself and one
+# that needs a power-button hold -- and lizard mode is the state the machine must
+# be in for that recovery to happen at all.
+SUDO_BIN = "/usr/bin/sudo"
+LIZARD_HELPER = "/usr/local/sbin/deck-lizard-mode"
+
+# ⚠️ `-n`: NEVER PROMPT. This runs from a user unit with no terminal, so a sudo
+# that wanted a password would hang instead of failing. The grant
+# (/etc/sudoers.d/99-deck-lizard-mode, rendered by src/deck-session.sh) covers
+# exactly these two argv and nothing else.
+LIZARD_VERBS = ("on", "off")
+
+
+def lizard_argv(want: str) -> list[str]:
+    """The exact argv for one lizard-mode change. `want` is 'on' or 'off'."""
+    return [SUDO_BIN, "-n", LIZARD_HELPER, want]
+
+
+# ⚠️ BOUNDED AND BLOCKING, and every call site is a COLD path -- the bind, the
+# rescan loop (which is about to sleep 5 s anyway), and the exit paths. None is
+# the read loop. `set_pointer_hidden` makes the same trade for the same reason:
+# what this changes has to have HAPPENED before the next thing runs, and a
+# fire-and-forget child racing a teardown is how state gets stranded.
+LIZARD_TIMEOUT = 5.0
+
+# What the last call said, so a re-arm that runs every 5 s for hours does not
+# write the same sentence to the journal every 5 s for hours. Logging is
+# latched; THE CALL ITSELF IS NOT -- see `set_lizard_mode`.
+_lizard_last_said: "tuple[str, bool] | None" = None
+
+
+def set_lizard_mode(want: str, dry_run: bool = False, argv=None,
+                    timeout: float = LIZARD_TIMEOUT, env=None) -> bool:
+    """Turn the controller firmware's own input emulation on or off.
+
+    True if the helper reported success. NEVER RAISES: this is called from the
+    bind path and from the rescan loop, and an exception in either would take
+    down the process whose whole job is to keep the device usable.
+
+    🔴 IDEMPOTENT AND UNCONDITIONAL BY DESIGN. Callers invoke this on EVERY
+    iteration of the wait loop, not once -- if anything else in the system turns
+    lizard mode off while we are not holding a pad, the next pass puts it back.
+    That is the difference between an invariant and an initialisation.
+
+    ⚠️ ONLY THE LOGGING IS DE-DUPLICATED. A repeated identical outcome is said
+    once; a CHANGE of verb or of outcome is always said. Silencing the call
+    itself would turn this back into initialisation and reopen the defect.
+    """
+    global _lizard_last_said
+    if want not in LIZARD_VERBS:
+        # Unreachable from this file, which passes literals -- which is exactly
+        # why it is loud rather than a silently ignored default.
+        print(f"deck-input-mapper: refusing to set lizard mode to {want!r}; "
+              f"expected one of {LIZARD_VERBS}", file=sys.stderr, flush=True)
+        return False
+    argv = lizard_argv(want) if argv is None else list(argv)
+    if dry_run:
+        print(f"lizard-mode -> {want} ({' '.join(argv)})",
+              file=sys.stderr, flush=True)
+        return True
+    detail = ""
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True,
+                                timeout=timeout,
+                                env=session_environ() if env is None else env)
+        ok = result.returncode == 0
+        if not ok:
+            detail = ((result.stderr or "").strip()
+                      or (result.stdout or "").strip()
+                      or f"exit {result.returncode}")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        ok, detail = False, str(exc)
+    said = (want, ok)
+    if said != _lizard_last_said:
+        _lizard_last_said = said
+        if ok:
+            # ⚠️ SAYS WHAT WAS DONE, NOT WHAT IT ACHIEVES. `off` genuinely does
+            # mean this process drives the pad -- it is holding it by the time
+            # this runs. `on` means ONLY that the module parameter was restored:
+            # whether the firmware then delivers a usable pointer is not
+            # something this process can see, and is an OPEN QUESTION while
+            # Steam holds the controller. See the block above SUDO_BIN.
+            detail_ok = ("restored; this process is no longer driving the pad"
+                         if want == "on" else "this process drives the pad")
+            print(f"deck-input-mapper: lizard mode {want} ({detail_ok})",
+                  file=sys.stderr, flush=True)
+        elif want == "on":
+            # 🔴 THE ONE THAT COSTS THE DEVICE. Failing to RE-ARM means the
+            # fallback is off and nothing is driving: no pointer, no buttons,
+            # no menu, no recovery without SSH or a power-button hold.
+            print(f"deck-input-mapper: 🔴 COULD NOT RESTORE lizard mode ({detail}). "
+                  f"If nothing is driving the pad this device now has NO INPUT -- "
+                  f"run `sudo {LIZARD_HELPER} on` over SSH.",
+                  file=sys.stderr, flush=True)
+        else:
+            print(f"deck-input-mapper: could not turn lizard mode off ({detail}); "
+                  "the firmware keeps the pad, so our chords and the on-screen "
+                  "keyboard are unavailable. Input still works.",
+                  file=sys.stderr, flush=True)
+    return ok
+
+
 # How long to wait between rescans while Steam owns the controller.
 STEAM_RESCAN_INTERVAL = 5.0
 
@@ -3209,7 +3888,8 @@ STEAM_RESCAN_INTERVAL = 5.0
 NO_PAD_GRACE_SECONDS = 30.0
 
 
-def pick_device(selector: str | None) -> InputDevice:
+def pick_device(selector: str | None, lizard=None, enumerate_devices=None,
+                sleep=time.sleep, clock=time.monotonic) -> InputDevice:
     """Find the pad, WAITING (not exiting) while Steam owns the controller.
 
     The distinction matters and is not cosmetic. `Restart=on-failure` with
@@ -3223,16 +3903,50 @@ def pick_device(selector: str | None) -> InputDevice:
     Never collapse those two into one "not found" branch. CLAUDE.md forbids
     swallowing the second, and the unit's restart policy cannot survive the
     first.
+
+    🔴 AND IT OWNS LIZARD MODE'S ORDERING (docs/findings/P39 Defect 2). This
+    function is the ONLY place that knows whether a native pad is actually in
+    hand, so it is the only place that may disarm the firmware fallback:
+
+        found a native pad   -> `lizard off`, and only THEN return it to be bound
+        waiting for one      -> `lizard on`, BEFORE the sleep, EVERY iteration
+
+    The re-arm is deliberately not guarded by `announced_wait`: that flag exists
+    to keep a wait that "can last for hours" from writing to the journal every
+    five seconds, and gating the re-arm on it would restore the exact defect --
+    a user who opens Steam a second time would get one re-arm on the first pass
+    of the first wait and nothing ever again.
+
+    `lizard`, `enumerate_devices`, `sleep` and `clock` are injectable so the
+    suite can script whole device timelines and assert the CALL SEQUENCE without
+    a Deck, a Steam, or a sudo. Production passes none of them.
     """
+    # ⚠️ A NO-OP INVOKER IS NOT THE DEFAULT. Defaulting to "do nothing" would
+    # make a caller that forgot to wire this up look identical to one that did,
+    # which is precisely the wiring defect this project keeps shipping.
+    lizard = set_lizard_mode if lizard is None else lizard
+    if enumerate_devices is None:
+        def enumerate_devices():
+            return [InputDevice(p) for p in list_devices()]
+
     if selector and selector.startswith("/dev/"):
-        return InputDevice(selector)
+        # An explicitly named node. The caller asserted this is the pad, so
+        # holding it is the same promise the matched path makes below.
+        dev = InputDevice(selector)
+        lizard("off")
+        return dev
 
     announced_wait = False
     no_pad_deadline: float | None = None
     while True:
-        candidates = [InputDevice(p) for p in list_devices()]
+        candidates = enumerate_devices()
         dev = _match(candidates, selector)
         if dev is not None:
+            # 🔴 THE DISARM, AND ITS POSITION IS THE ENTIRE FIX. After the match
+            # and after the node is open, before this is handed back to be bound
+            # and to emit BOUND_MARKER. The fallback is never given up until the
+            # replacement is holding the device.
+            lizard("off")
             return dev
 
         steam_pads = [d.name for d in candidates if is_steam_virtual_pad(d)]
@@ -3240,7 +3954,14 @@ def pick_device(selector: str | None) -> InputDevice:
             # No pad of any kind. Usually the enumeration gap during Steam's
             # takeover, so absorb it briefly -- but keep it bounded, because a
             # pad that never arrives is a genuine failure.
-            now = time.monotonic()
+            #
+            # 🔴 RE-ARMED HERE TOO. This branch is reached the instant the
+            # kernel destroys the native node, BEFORE Steam's impostor pad has
+            # enumerated -- so it is the first moment at which nothing is
+            # driving the device, and the first that must hand the firmware
+            # back. Before the sleep, on every pass.
+            lizard("on")
+            now = clock()
             if no_pad_deadline is None:
                 no_pad_deadline = now + NO_PAD_GRACE_SECONDS
                 print(
@@ -3250,7 +3971,7 @@ def pick_device(selector: str | None) -> InputDevice:
                     flush=True,
                 )
             if now < no_pad_deadline:
-                time.sleep(1.0)
+                sleep(1.0)
                 continue
             names = ", ".join(f"{d.path}:{d.name}" for d in candidates) or "none"
             sys.exit(f"deck-input-mapper: no gamepad matched {selector!r}. Devices: {names}")
@@ -3258,16 +3979,28 @@ def pick_device(selector: str | None) -> InputDevice:
         # A pad reappeared (Steam's). Re-arm the grace window so a later gap
         # gets its own full allowance rather than inheriting a spent one.
         no_pad_deadline = None
+        # 🔴 THE SINGLE MOST IMPORTANT LINE IN THIS FILE. Steam owns the
+        # controller, we drive nothing, and the firmware must have the pad back
+        # -- or the user is holding a handheld with no pointer and no buttons.
+        # BEFORE the sleep, and NOT gated by `announced_wait` below.
+        lizard("on")
         if not announced_wait:
             # Say it once, then stay quiet -- this can last for hours.
             print(
                 f"deck-input-mapper: Steam owns the controller ({steam_pads[0]}); "
-                f"waiting for the native pad, rescanning every {STEAM_RESCAN_INTERVAL:.0f}s",
+                f"waiting for the native pad, rescanning every {STEAM_RESCAN_INTERVAL:.0f}s. "
+                f"Lizard mode has been restored. ⚠️ THAT IS A MODULE PARAMETER, NOT A "
+                f"POINTER: measured 2026-08-16, with Steam holding the controller the "
+                f"firmware mouse emits nothing at all, so there is no desktop cursor "
+                f"in this state. Our chords and the on-screen keyboard are unavailable "
+                f"too. QUITTING STEAM RESTORES EVERYTHING -- the kernel re-creates the "
+                f"native pad, this process re-binds to it automatically, and the "
+                f"pointer comes back.",
                 file=sys.stderr,
                 flush=True,
             )
             announced_wait = True
-        time.sleep(STEAM_RESCAN_INTERVAL)
+        sleep(STEAM_RESCAN_INTERVAL)
 
 
 # A freshly created uinput device is not usable the instant UInput() returns:
@@ -3375,7 +4108,17 @@ def main() -> None:
         type_text(args.type, dry_run=args.dry_run)
         return
 
-    pad = pick_device(args.device)
+    # 🔴 THIS PROCESS'S LIZARD-MODE INVOKER (docs/findings/P39 Defect 2).
+    #
+    # ⚠️ NOT UNDER --dry-run. That flag's promise is that nothing leaves this
+    # process, and lizard mode is a system-wide input change felt instantly by
+    # whoever is holding the device -- the same reasoning `arm_haptics` uses,
+    # with more at stake. `set_lizard_mode`'s own dry_run branch prints what it
+    # would have run, so the ordering stays visible in a dry run.
+    def lizard(want: str) -> bool:
+        return set_lizard_mode(want, dry_run=args.dry_run)
+
+    pad = pick_device(args.device, lizard=lizard)
     mapper = Mapper(axis_ranges={
         code: (ai.min, ai.max)
         for code, ai in dict(pad.capabilities().get(e.EV_ABS, [])).items()
@@ -3396,6 +4139,15 @@ def main() -> None:
         return haptics if haptics.start() else None
 
     mapper.haptics = arm_haptics(pad)
+
+    # 🆕 And the key-press SOUND that goes with the buzz.
+    #
+    # ⚠️ NOT UNDER --dry-run, for the reason above: a sound is an emission the
+    # user hears rather than reads. Resolution is LAZY (`TypingSound.start` on
+    # the first commit), so a Steam that finishes self-updating after we started
+    # is picked up without a restart -- and nothing is stat'd on a run where the
+    # keyboard is never opened.
+    mapper.sound = None if args.dry_run else TypingSound()
 
     ui = None
     if not args.dry_run:
@@ -4021,6 +4773,13 @@ def main() -> None:
                           file=sys.stderr, flush=True)
                 run_launch_action(action, dry_run=ui is None)
                 continue
+            # Spelled out for the reason above.
+            if action in ("brightness-up", "brightness-down"):
+                if args.verbose and ui is not None:
+                    print(f"{action} -> {' '.join(BRIGHTNESS_ACTIONS[action])}",
+                          file=sys.stderr, flush=True)
+                run_brightness(action, dry_run=ui is None)
+                continue
             # An action queued by translate() and handled by nobody is a bug
             # that would otherwise present as a dead button.
             print(f"deck-input-mapper: queued action {action!r} has no handler; "
@@ -4190,6 +4949,25 @@ def main() -> None:
                     # keyboard hide below can take a redraw with it.
                     for key, value in mapper.release_pointer_click():
                         emit(key, value)
+                    # 🔴 AND ABANDON A BRIGHTNESS RAMP THE DEAD NODE WAS
+                    # DRIVING, for the same reason and with a worse ending: the
+                    # ramp is on a CLOCK, not on events, so a node that vanishes
+                    # mid-ramp leaves it stepping every eighth of a second with
+                    # no stick left in the world that could stop it. The screen
+                    # would walk to full brightness on its own.
+                    mapper.stop_brightness()
+                    # 🔴 AND HAND THE FIRMWARE BACK, BEFORE ANYTHING SLOW.
+                    # (docs/findings/P39 Defect 2, fix point 3.) The node
+                    # vanishing IS the "user opened Steam" path, and from this
+                    # instant nothing is driving the device. `pick_device` below
+                    # re-arms too, but only once it has enumerated and decided;
+                    # this closes the window in between, and it is the window in
+                    # which a handheld has no pointer and no buttons.
+                    #
+                    # ⚠️ AFTER the two cheap uinput fix-ups above and before the
+                    # keyboard teardown below, which can cost a redraw. This is
+                    # the ordering that gets the device back fastest.
+                    lizard("on")
                     # What was on the screen when the pad went away -- read
                     # BEFORE the hide below, because that hide is ours and not
                     # the user's. It decides two things: whether the keyboard
@@ -4211,7 +4989,11 @@ def main() -> None:
                     if mapper.haptics is not None:
                         mapper.haptics.close()
                         mapper.haptics = None
-                    pad = pick_device(args.device)
+                    # ⚠️ THE SAME INVOKER, not the default. Without it a
+                    # `--dry-run` re-bind would reach out and change the real
+                    # device's lizard mode, and the disarm-after-bind below
+                    # would be invisible to the suite's wiring check.
+                    pad = pick_device(args.device, lizard=lizard)
                     if args.grab:
                         pad.grab()
                     mapper.haptics = arm_haptics(pad)
@@ -4277,6 +5059,18 @@ def main() -> None:
                         osk_layer_send()
             for key, value in mapper.due_repeats(now):
                 emit(key, value)
+            # 🔴 THE BRIGHTNESS RAMP'S CLOCK, and it is OUTSIDE the
+            # `pad.fd in ready_fds` branch for exactly the reason `due_repeats`
+            # above is: a stick held perfectly still sends no samples at all, so
+            # a ramp driven only by pad events would fire once and stop.
+            #
+            # ⚠️ AND `run_pending` HAS TO BE CALLED AGAIN HERE. The other call
+            # site is inside the per-event loop, so an action queued by a TIMER
+            # rather than by an event would otherwise sit in the list until the
+            # user happened to touch something -- the ramp would advance in
+            # lurches whenever an unrelated event woke the loop.
+            mapper.due_brightness(now)
+            run_pending(mapper.pending_actions)
             # ⚠️ OUTSIDE the `pad.fd in ready_fds` branch, like due_repeats
             # above -- this must run on every pass, including the ones woken
             # by nothing but the timeout this class asked for, or an unlock
@@ -4297,6 +5091,18 @@ def main() -> None:
         # compositor's cursor flag it would not.
         if osk_backend == "layer" and osk_drawn_here:
             set_pointer_hidden(False, dry_run=ui is None)
+        # 🔴 SECOND, AND FOR A HARDER REASON THAN THE POINTER ABOVE: this
+        # process is about to stop driving the pad, and if lizard mode is left
+        # off the device has NO INPUT AT ALL (docs/findings/P39 Defect 2, fix
+        # point 3). The unit's `ExecStopPost=` also does this and is NOT
+        # redundant -- it covers the paths that kill this process outright,
+        # where no `finally` runs at all. This covers the ordinary exits, and
+        # covers them BEFORE the teardown below can raise and skip them.
+        #
+        # ⚠️ Idempotent by construction: the helper writes a value and reads it
+        # back, so running it twice is one wasted call, and the direction is
+        # always towards the SAFE state.
+        lizard("on")
         lock_watcher.stop()
         if mapper.haptics is not None:
             # Hand the 16 effect slots back. Not strictly required -- closing
