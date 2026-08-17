@@ -652,7 +652,7 @@ PAD_CLICK_HALF: dict[int, str] = {
 # this could not do without buzzing the operator's device mid-session. The
 # mapping therefore lives in ONE dict, so flipping it is a one-line change if
 # the operator reports a click on one pad buzzing the other.
-PAD_HAPTIC_MAGNITUDE = 0x8000   # half of the 0..0xFFFF the FF API takes
+PAD_HAPTIC_MAGNITUDE = 0x5000   # of the 0..0xFFFF the FF API takes
 
 # ⚠️ FEEL IS UNTUNED, and this is the honest state of it: 30 ms at half scale
 # is a starting point chosen to be short enough to read as a click rather than
@@ -690,15 +690,24 @@ PAD_HAPTIC_MAGNITUDES: dict[str, tuple[int, int]] = {
 # PAD_HAPTIC_MS says of the click. Change them HERE and nowhere else; no test
 # asserts either literal, deliberately, so tuning cannot turn a suite red.
 #
-#   * MAGNITUDE is the FF API's 0..0xFFFF, both actuators at once. A quarter of
-#     the pad click's PAD_HAPTIC_MAGNITUDE, chosen to err quiet: on a handheld
-#     resting against both palms, a tick that is too strong on EVERY keystroke
-#     is worse than no tick at all.
-#   * MS is MILLISECONDS of replay. Half the click's, to read as a tick rather
-#     than a rumble, and still above the 3.3 ms jiffy CONFIG_HZ=300 schedules
-#     ff-memless on (see PAD_HAPTIC_MS).
-OSK_TOUCH_HAPTIC_MAGNITUDE = 0x2000
-OSK_TOUCH_HAPTIC_MS = 15
+#   * MAGNITUDE is the FF API's 0..0xFFFF, both actuators at once.
+#   * MS is MILLISECONDS of replay, above the 3.3 ms jiffy CONFIG_HZ=300
+#     schedules ff-memless on (see PAD_HAPTIC_MS).
+#
+# 🔴 TUNED ON THE PANEL BY THE OPERATOR, 2026-08-16, AND THE FIRST GUESS WAS
+# IMPERCEPTIBLE. 0x2000/15ms could not be felt AT ALL. 0x8000/30ms (the click's
+# own values) could. Bisecting down: 0x4000 was slightly under, 0x5000 is right.
+# The duration was probably the larger error -- 15 ms may be too short to feel
+# at any magnitude -- so 30 ms was held fixed while magnitude moved.
+#
+# ⚠️ THIS COMMENT USED TO SAY "a quarter of the pad click" and "half the
+# click's". Both were true when written and are now false twice over: the touch
+# value moved, and then the operator asked for the CLICK to come down to match
+# it, so PAD_HAPTIC_MAGNITUDE is 0x5000 too. Do not restate the ratio here --
+# it is exactly the kind of pinned-value comment this repo keeps having to
+# correct. Read the constants.
+OSK_TOUCH_HAPTIC_MAGNITUDE = 0x5000
+OSK_TOUCH_HAPTIC_MS = 30
 
 # ⚠️ NOT A PAD HALF, but it shares `Haptics.effects`' keyspace with "left" and
 # "right", so it must not collide with either. `Mapper.buzz` takes this the same
