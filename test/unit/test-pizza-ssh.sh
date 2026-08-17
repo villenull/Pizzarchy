@@ -698,6 +698,39 @@ grep -qi 'warning' <<<"$out" ||
 pass "'off' leaves foreign SSH rules alone but says they are still there"
 
 # ---------------------------------------------------------------------------
+# 11b. 'on' does not CLAIM lan-only when it is not
+#
+# 🔴 CAUGHT ON HARDWARE, NOT HERE. `on` printed "allowed from
+# 192.168.100.0/24 only" on a Deck that also carried two hand-added
+# `22/tcp ALLOW IN Anywhere` rules. `off` had this check; `on` asserted the
+# restriction without ever looking. The words are reassuring in the one
+# direction that costs something: the operator takes the Deck onto a café
+# network believing the port is LAN-scoped.
+#
+# Asserted as "must not say 'only'" plus "must warn", not on the exact
+# sentence -- the wording is not this file's to own.
+# ---------------------------------------------------------------------------
+
+d=$(full_scenario on-foreign-rule)
+ufw_add_rule "$d" '22/tcp|ALLOW IN|Anywhere|'
+rc=0; out=$(run_in "$d" on 2>&1) || rc=$?
+(( rc == 0 )) || fail "'on' succeeds with a foreign SSH rule present" "rc=$rc: $out"
+grep -qi 'warning' <<<"$out" ||
+  fail "'on' must warn that a foreign rule defeats the LAN-only restriction" "$out"
+grep -qiE '\bonly\.' <<<"$out" &&
+  fail "'on' must NOT claim the port is allowed from the local subnet 'only' while a broader rule stands" "$out"
+pass "'on' refuses to claim LAN-only while a foreign rule could widen it"
+
+# The positive control: with NO foreign rule, it may and must say 'only'.
+# Without this, deleting the claim entirely would also pass the check above.
+d=$(full_scenario on-clean)
+rc=0; out=$(run_in "$d" on 2>&1) || rc=$?
+(( rc == 0 )) || fail "'on' succeeds on a clean firewall" "rc=$rc: $out"
+grep -qiE '\bonly\.' <<<"$out" ||
+  fail "'on' must still state the LAN-only restriction when it genuinely holds" "$out"
+pass "'on' still claims LAN-only when nothing contradicts it"
+
+# ---------------------------------------------------------------------------
 # 12. the installer must not call this
 #
 # "off by default, always" is a property of the whole tree, not of this file,

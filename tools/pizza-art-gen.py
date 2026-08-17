@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate src/pizza-art/*.txt -- the notched-square pizza fastfetch logos.
+"""Generate src/pizza-art/*.txt -- the pizza fastfetch logos.
 
 Dev-machine tooling; never shipped. Run it from the repo root:
 
@@ -14,10 +14,11 @@ Pure ASCII output. Colour is expressed only as fastfetch's $1..$9 placeholders,
 never as raw ANSI. Geometry is computed, not hand-drawn, so every row is exactly
 the same display width and the notch edges line up by construction.
 
-The shape is a square pizza with the top-left quadrant cut out. Crust runs along
-the OUTER perimeter only -- the two cut edges are a cross-section, so they show
-sauce, not crust. That is what makes it read as "a square slice was taken out"
-rather than "an L-shaped pizza".
+Two shapes. `build()` makes a SQUARE pizza with the top-left quadrant cut out;
+`build_round()` makes a ROUND one with a single 1/8 wedge gone, which is what
+ships. Both put crust on the OUTER perimeter only -- the cut faces are a
+cross-section, so they show sauce, not crust. That is what makes it read as "a
+slice was taken out" rather than "an L-shaped pizza" or "a pac-man".
 """
 import math
 import sys
@@ -104,7 +105,83 @@ def build(w, h, crust, rim, cheese, pep, cut, spots,
     return render(ch, col, w, h)
 
 
+def build_round(w, h, R, wedge_mid_deg, wedge_deg,
+                crust, rim, cheese, pep, cut, spots,
+                crust_depth, rim_depth, cut_depth, salt):
+    """A disc with ONE wedge removed. x is halved throughout: a terminal cell
+    is about twice as tall as it is wide, so two columns cover one row's
+    ground. Without it the 'circle' is an ellipse and the crust is four
+    columns thick at the sides and one row thick top and bottom."""
+    cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+    a0 = math.radians(wedge_mid_deg - wedge_deg / 2.0)
+    a1 = math.radians(wedge_mid_deg + wedge_deg / 2.0)
+    ch = [[" "] * w for _ in range(h)]
+    col = [[0] * w for _ in range(h)]
+
+    for y in range(h):
+        for x in range(w):
+            X = (x - cx) * 0.5
+            Y = -(y - cy)
+            r = math.hypot(X, Y)
+            if r > R:
+                continue
+            th = math.atan2(Y, X) % (2 * math.pi)
+            lo, hi = a0 % (2 * math.pi), a1 % (2 * math.pi)
+            inside = lo <= th <= hi if lo <= hi else (th >= lo or th <= hi)
+            if inside:
+                continue                      # the missing slice
+
+            d_out = R - r                     # into the pie from the rim
+            # distance to whichever cut face is nearer; the apex is the centre
+            d_cut = r
+            for a in (a0, a1):
+                ux, uy = math.cos(a), math.sin(a)
+                if X * ux + Y * uy >= 0:
+                    d_cut = min(d_cut, abs(X * uy - Y * ux))
+            n = noise(x, y, salt)
+
+            if d_out < crust_depth:
+                pool, colour = crust, 1
+            elif d_out < crust_depth + rim_depth:
+                pool, colour = rim, 2
+            elif d_cut < cut_depth:
+                pool, colour = cut, 3
+            else:
+                hit = False
+                for (px, py, pr) in spots:
+                    rr = math.hypot((x - px) * 0.5, (y - py) * 1.0)
+                    if rr <= pr:
+                        idx = min(len(pep) - 1, int((rr / pr) * len(pep)))
+                        ch[y][x] = pep[idx]
+                        col[y][x] = 3
+                        hit = True
+                        break
+                if hit:
+                    continue
+                pool = cheese
+                colour = 2 if n < 0.68 else 4
+            ch[y][x] = pool[int(n * len(pool)) % len(pool)]
+            col[y][x] = colour
+    return render(ch, col, w, h)
+
+
 CANDIDATES = {}
+
+# --- ROUND: the shipping pizza. A disc with one 1/8 wedge gone -------------
+#
+# Operator, 2026-08-16, after comparing all three squares on the panel: they
+# picked the "gradient" TEXTURE and then asked for "the pizza circular. and the
+# slice not be a whole quarter. rather just a normal 1/8th slice". So this is
+# gradient's texture unchanged; only the geometry moved. The squares stay as
+# alternates.
+CANDIDATES["round"] = build_round(
+    w=48, h=22, R=10.5, wedge_mid_deg=135, wedge_deg=45,
+    crust="%#%##%#%", rim="=+=*+-+=", cheese="...:..-...:.",
+    pep="%%##*=-", cut="-=--=-",
+    spots=[(33, 5, 2.6), (40, 11, 2.4), (12, 15, 2.4),
+           (24, 17, 2.4), (20, 8, 2.4), (30, 13, 2.4)],
+    crust_depth=1.1, rim_depth=0.9, cut_depth=0.9, salt=19,
+)
 
 # --- A: "slab" -- fat crust, calm cheese, four fat pepperoni ---------------
 CANDIDATES["slab"] = build(
@@ -145,11 +222,12 @@ CANDIDATES["bold"] = build(
 
 
 if __name__ == "__main__":
-    # "slab" is the ACTIVE logo and ships as pizza.txt, which is the one name
+    # "round" is the ACTIVE logo and ships as pizza.txt, which is the one name
     # deck-session.sh's PIZZA_ART_NAME knows. The others ship beside it as
     # alternates so a Deck can be re-pizza'd with one `cp`.
     FILENAMES = {
-        "slab": "pizza.txt",
+        "round": "pizza.txt",
+        "slab": "pizza-alt-slab.txt",
         "gradient": "pizza-alt-gradient.txt",
         "bold": "pizza-alt-bold.txt",
     }

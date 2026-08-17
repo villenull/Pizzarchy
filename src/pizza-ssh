@@ -613,7 +613,32 @@ cmd_on() {
       fi
 
       if [[ $UFW_STATE == active ]]; then
-        say "firewall: ufw active, port(s) ${SSHD_PORTS[*]} allowed from ${LINK_SUBNET} only."
+        # 🔴 "only" IS A CLAIM ABOUT THE WHOLE RULESET, NOT ABOUT OUR RULE.
+        #
+        # Caught on hardware 2026-08-16: this printed "allowed from
+        # 192.168.100.0/24 only" on a Deck that also carried two hand-added
+        # `22/tcp ALLOW IN Anywhere` rules. The sentence was false, and falsely
+        # reassuring in the one direction that costs something -- the operator
+        # takes the Deck onto a café network believing the port is LAN-scoped.
+        #
+        # `off` already looked for foreign rules and warned. `on` asserted a
+        # restriction it had never checked. Same check, both directions now.
+        local -a foreign_on=()
+        mapfile -t foreign_on < <(foreign_ssh_rule_lines)
+        if (( ${#foreign_on[@]} > 0 )); then
+          say "firewall: ufw active, and this command's rule allows ${SSHD_PORTS[*]} from ${LINK_SUBNET}."
+          say ""
+          warn "but the firewall ALSO has ${#foreign_on[@]} rule(s) this command did not"
+          say "  create, mentioning an SSH port. THE LAN-ONLY RESTRICTION IS NOT IN"
+          say "  EFFECT while they stand -- the port is reachable from wherever"
+          say "  they allow, on any network this Deck joins:"
+          local line
+          for line in "${foreign_on[@]}"; do say "      $line"; done
+          say "  Review and remove them with: sudo ufw status numbered"
+          say "                               sudo ufw delete <number>"
+        else
+          say "firewall: ufw active, port(s) ${SSHD_PORTS[*]} allowed from ${LINK_SUBNET} only."
+        fi
       else
         say "firewall: rule added, but ufw itself is INACTIVE."
         warn "ufw is not enforcing anything, so the LAN-only restriction is not"

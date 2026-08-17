@@ -119,22 +119,24 @@ if not bad:
         widths.append(len(plain.rstrip()))
         if plain.strip():
             indents.add(len(plain) - len(plain.lstrip(" ")))
+    # 🔴 THIS REQUIRED EVERY ROW FLUSH RIGHT AND AT MOST TWO INDENTS. Both
+    # described the SQUARE pizza rather than the format, and both refused the
+    # ROUND one the operator picked -- a circle is short on nearly every row by
+    # construction. fastfetch pads short rows itself and has no opinion on
+    # shape. Shape is an art decision and this file does not own it.
     if widths:
         w = max(widths)
-        short = [i for i, x in enumerate(widths, 1) if x != w]
-        if short:
-            bad.append("not flush right at %d cols; short lines %s" % (w, short))
         if not (30 <= w <= 60):
             bad.append("%d cols, outside 30..60" % w)
-    if len(indents) > 2 or (len(indents) == 2 and 0 not in indents):
-        bad.append("ragged notch: indented rows start at %s" % sorted(indents))
+        if all(x == 0 for x in widths):
+            bad.append("every row is blank")
     if not (10 <= len(lines) <= 30):
         bad.append("%d rows, outside 10..30" % len(lines))
 print("; ".join(bad))
 PY
 )
   [[ -z $problems ]] || fail_test "${name} satisfies the fastfetch logo contract" "$problems"
-  pass "${name}: pure ASCII, no raw ANSI, only \$1..\$9, flush right, one notch edge, sane size"
+  pass "${name}: pure ASCII, no raw ANSI, only \$1..\$9, no trailing space, sane size"
 done
 
 # The installed command must agree with this suite about what "well-formed"
@@ -471,19 +473,61 @@ unset PZ_ART
 in_err "ESC" "and the refusal says colour belongs in the config's colour mapping"
 pass "art with baked-in ANSI is refused -- colour must degrade to readable monochrome"
 
-# --- ragged art -----------------------------------------------------------
+# --- art too wide for the panel -------------------------------------------
+#
+# 🔴 THIS WAS "ragged art is refused". It guarded the flush-right rule, which
+# is gone with the square pizza. Width is the rule that survived and the one
+# with a real consequence: fastfetch draws the logo LEFT of the info panel, so
+# over-wide art pushes the panel off a 1280x800 screen. Kept as a negative
+# control so the relaxation above cannot quietly become "checks nothing".
 sandbox_reset
-python3 - "$work/ragged-art.txt" <<'PY'
+python3 - "$work/too-wide-art.txt" <<'PYX'
 import sys
-rows = ["#" * 40 for _ in range(12)]
-rows[5] = "#" * 37          # one short row: the defect hand-drawn ASCII has
-open(sys.argv[1], "w").write("\n".join(rows) + "\n")
-PY
-PZ_ART="$work/ragged-art.txt"
-run 1 "art whose rows are not flush right is refused" pz
+open(sys.argv[1], "w").write("\n".join(["#" * 80] * 12) + "\n")
+PYX
+PZ_ART="$work/too-wide-art.txt"
+run 1 "art too wide for the panel is refused" pz
 unset PZ_ART
-in_err "flush right" "and the refusal names the short lines"
-pass "ragged art is refused -- column alignment is checked, not eyeballed"
+in_err "outside 30..60" "and the refusal names the budget it broke"
+pass "over-wide art is refused -- the size rule is still enforced"
+
+# --- bare `pizza pizza` toggles -------------------------------------------
+#
+# Operator, 2026-08-16: "if pizza pizza is turned on, ever running it again
+# should revert to the default omarchy settings". Asserted as a round trip
+# from stock and back, because a toggle that only ever turns ON looks correct
+# on a machine that was already off.
+sandbox_reset
+run 0 "toggle from stock turns it ON" pz
+in_out "The pizza is served" "the first bare run installs"
+run 0 "status agrees it is on" pz status
+in_out "pizza pizza is ON" "both halves present after one bare run"
+
+run 0 "toggling again turns it OFF" pz
+run 0 "status agrees it is off" pz status
+in_out "pizza pizza is OFF" "a second bare run reverted to stock Omarchy"
+cmp -s "$work/home/bashrc" "$work/home/bashrc.stock" ||
+  fail_test "the toggle-off restores the shell rc byte-for-byte" \
+    "diff:"$'\n'"$(diff "$work/home/bashrc.stock" "$work/home/bashrc" || true)"
+pass "bare 'pizza pizza' toggles, and toggling off is byte-exact"
+
+# 🔴 HALF INSTALLED MUST TOGGLE **ON**, NOT OFF. If one block is missing --
+# a half-finished run, a hand-edited rc -- the user running the command wants
+# the pizza, not to have the remaining half silently removed and be told
+# nothing happened. Only BOTH present counts as on.
+run 0 "set up, then break one half" pz
+python3 - "$work/home/bashrc" <<'PYX'
+import sys, re
+p = sys.argv[1]
+t = open(p).read()
+t = re.sub(r"# >>> pizza pizza: fastfetch greeting >>>.*?# <<< pizza pizza: fastfetch greeting <<<\n",
+           "", t, flags=re.S)
+open(p, "w").write(t)
+PYX
+run 0 "toggling a half-installed state completes it" pz
+run 0 "status after completing" pz status
+in_out "pizza pizza is ON" "half-installed toggles ON, it does not remove the other half"
+run 0 "clean up" pz off
 
 # --- a begin marker with no end marker ------------------------------------
 sandbox_reset

@@ -128,8 +128,14 @@ usage_error() { printf '[%s] usage: %s\n' "$PROG" "$*" >&2; exit 2; }
 #     baked into the art, or it sprays escape codes on a terminal that cannot
 #     do colour instead of degrading to readable monochrome.
 #   - only $1..$9: any other `$` is a placeholder typo that fastfetch prints raw.
-#   - flush right and one indent: a ragged notch is the defect hand-drawn ASCII
-#     always has and nobody sees until it is on a panel.
+#   - a sane size: wide enough to be a logo, narrow enough to leave room for
+#     fastfetch's info panel on a 1280x800 handheld.
+#
+# 🔴 IT ALSO REQUIRED FLUSH-RIGHT ROWS AND AT MOST ONE INDENT. That described
+# the SQUARE pizza rather than the format, and it refused the ROUND one the
+# operator chose -- a circle is short on nearly every row by construction.
+# fastfetch pads short rows itself and has no opinion on shape. Do not re-add a
+# geometry rule here: this file does not own what the pizza looks like.
 validate_art() {
   local path=$1
 
@@ -194,16 +200,10 @@ if not problems:
 
     if widths:
         w = max(widths)
-        ragged = [i for i, x in enumerate(widths, 1) if x != w]
-        if ragged:
-            problems.append("rows are not flush right at %d columns; lines %s "
-                            "are short" % (w, ragged))
         if not (30 <= w <= 60):
-            problems.append("%d columns wide, outside the 30..60 a fastfetch "
-                            "logo should be" % w)
-    if len(indents) > 2 or (len(indents) == 2 and 0 not in indents):
-        problems.append("the notch edge is ragged: indented rows start at "
-                        "columns %s" % sorted(indents))
+            problems.append("the widest line is %d columns, outside 30..60" % w)
+        if all(x == 0 for x in widths):
+            problems.append("every line is blank")
     if not (10 <= len(lines) <= 30):
         problems.append("%d rows, outside the 10..30 a fastfetch logo should be"
                         % len(lines))
@@ -652,7 +652,8 @@ usage() {
 ${PROG} -- swap fastfetch's logo for an ASCII pizza, and greet every new
              interactive terminal with it.
 
-  pizza pizza            install both (idempotent -- run it as often as you like)
+  pizza pizza            TOGGLE: install both, or remove both if both are on
+  pizza pizza on         install both, whatever the current state (idempotent)
   pizza pizza off        remove both, restoring stock exactly
   pizza pizza status     say which halves are active, and where
   pizza pizza check      validate the art file; writes nothing
@@ -678,9 +679,26 @@ Exit codes: 0 success, 1 failure, 2 usage error.
 EOF
 }
 
+# Bare `pizza pizza` TOGGLES (operator, 2026-08-16: "if pizza pizza is turned
+# on, ever running it again should revert to the default omarchy settings").
+#
+# ⚠️ HALF-INSTALLED IS NOT "ON". If exactly one of the two blocks is present --
+# an interrupted run, a hand-edited rc -- toggling OFF would leave the user
+# staring at the same half-broken setup they ran the command to fix. Only BOTH
+# present counts as on; anything else completes the install. `on` and `off`
+# stay explicit and non-toggling, so a script can demand a known end state.
+cmd_toggle() {
+  if has_block "$FF_CONFIG" "$FF_BEGIN" && has_block "$BASHRC" "$RC_BEGIN"; then
+    cmd_off
+  else
+    cmd_on
+  fi
+}
+
 main() {
-  case ${1:-on} in
-    on | install | "")      cmd_on ;;
+  case ${1:-toggle} in
+    "" | toggle)            cmd_toggle ;;
+    on | install)           cmd_on ;;
     off | remove | uninstall) cmd_off ;;
     status)                 cmd_status ;;
     check)                  cmd_check ;;
