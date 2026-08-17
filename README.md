@@ -75,10 +75,14 @@ image — see [Recovery](#recovery).
 |---|---|
 | **STEAM + X** | on-screen keyboard |
 | **STEAM + Y** | close the focused window |
+| **STEAM + A** | default browser |
+| **STEAM + B** | terminal |
 | **A** / **B** | confirm / back |
 | **L2** / **R2** | left / right trackpad click |
 | **STEAM** | apps menu |
 | **QAM** (the ⋯ button) | the Omarchy menu |
+
+These are Desktop Mode. In Gaming Mode the buttons do what they always did.
 
 ---
 
