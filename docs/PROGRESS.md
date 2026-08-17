@@ -3721,6 +3721,80 @@ a new ISO. **Until one is built, a reboot of that Deck leaves the power button
 inert in Desktop Mode** — the drop-in is already deleted and the menu bind is
 now gone too. Restoring either by hand is in `stage-power-button`'s printed undo.
 
+### 5.43 🔴 I TOLD THE OPERATOR GAMING MODE COULD NOT BE SCREEN-RECORDED. IT CAN (2026-08-16)
+
+**The claim is wrong and it is in the permanent record** — commit `bc4e5fb`'s
+message asserts that `gpu-screen-recorder` cannot capture Gaming Mode because
+the ScreenCast portal is Hyprland-only. Corrected here because a wrong fact in
+a commit message is worse than no fact: the next person finds it by `git log`
+and believes it.
+
+**What actually happens.** Omarchy's `omarchy-capture-screenrecording` invokes
+`gpu-screen-recorder -w eDP-1` — a **KMS capture of the panel itself**, which
+is compositor-agnostic. It records straight through a session switch: one take
+on the operator's Deck caught the desktop, the Omarchy menu, the OSD, the black
+gap, and Steam's library, unbroken.
+
+**Why I got it wrong.** `gpu-screen-recorder --list-capture-options` printed
+`No such interface "org.freedesktop.portal.ScreenCast"`, and the only installed
+portal backend is `hyprland.portal`. I generalised from a failing *enumeration*
+call to the *capture* path. They are different: enumeration wanted DBus, the
+capture wanted a DRM node.
+
+**The three capture layers on this device, kept apart because they fail
+differently:**
+
+| tool | layer | Desktop | Gaming |
+|---|---|---|---|
+| `grim` | `wlr-screencopy` protocol | ✅ | ❌ "compositor doesn't support the screen capture protocol" |
+| `gamescopectl screenshot <path>` | gamescope's own | ❌ | ✅ (verb is under `gamescopectl help`, NOT `--help`) |
+| `gpu-screen-recorder -w eDP-1` | KMS/DRM | ✅ | ✅ |
+
+⚠️ **`grim` cannot photograph a cursor at all** on this Deck — with or without
+`-c`, and even with `no_hardware_cursors=1`. Proving a cursor-hiding change
+needs a positive control (a virtual mouse generating real motion), not a
+screenshot.
+
+### 5.44 Four facts from the same night, each of which cost measurement (2026-08-16)
+
+**1. Steam's volume OSD names the speakers because `hwdata` renamed a PCI ID.**
+Steam draws the device label under the volume slider only when
+`BOnboardAudio()` is false, and that function is a literal comparison against
+two hard-coded strings (read out of `steamui/chunk~2dcc5aaf7.js` on the Deck):
+`"Raven/Raven2/FireFlight/Renoir Audio Processor"` and
+`"ACP/ACP3X/ACP6x Audio Coprocessor"`. Those are pci.ids model strings, and
+hwdata shortened `1022:15e2` to just `"Audio Coprocessor"`. The comparison
+misses, Steam concludes the speakers are not built in, and prints the raw name.
+Nothing Valve or this project did. Fixed by handing the old name back in a
+WirePlumber `monitor.alsa.rules` drop-in — matched on `alsa_card` only, so
+Bluetooth still names itself, which is correct.
+
+⚠️ `/etc/wireplumber` is **not a usable seam**: it is a symlink to
+`/run/wireplumber` (tmpfs) and steamdeck-dsp's `wireplumber-sysconf.service`
+`rm -rf`s and regenerates it every boot. Valve's own generated README there
+points at `$XDG_CONFIG_DIR`.
+
+**2. `TAGS` is cumulative; `CURRENT_TAGS` is what logind matches.** `TAG-=`
+never removes from `TAGS`, so a check asking "did our udev rule untag this?"
+via `TAGS` **can only ever answer no**. See §5.42 — that check's response was
+to delete the logind drop-in, so it disarmed the power button on every boot
+while reporting a failure that had not happened.
+
+**3. Omarchy's OSD survives its own session teardown only because of ordering.**
+`omarchy-system-logout` backgrounds the destructive action behind a lead-in
+(`nohup bash -c "sleep 2 && uwsm stop" &`) and draws `omarchy-osd` *after*. Copy
+that shape for anything that draws a notice and then tears down the compositor.
+⚠️ **`omarchy-osd` exits 0 even when its shell call fails** (it calls
+`omarchy-shell -q`), so a `|| fallback` guard never fires — the ordering, not
+the guard, is what makes the action unconditional.
+
+**4. `pgrep -f` matches the shell that invoked it.** A check for
+`omarchy-system-sleep-monitor` returned 1 because the `bash -c` running the
+check had the string in its own cmdline. `pgrep` also silently matches nothing
+for a process name over 15 characters, which made a different check report
+"not running" for a recorder that was running. Both are the §7 rule again: **a
+check that proves something is ABSENT must also prove it was LOOKING.**
+
 ---
 
 ## 6. Blocked on human
