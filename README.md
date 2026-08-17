@@ -37,7 +37,9 @@ image — see [Recovery](#recovery).
 
 **Boots straight into Gaming Mode.** Steam is installed *and updated* during setup.
 
-![Desktop Mode: the apps menu, the on-screen keyboard, and the way back to Gaming Mode](docs/images/desktop-demo.gif)
+![Desktop Mode: the apps menu, a terminal, and the on-screen keyboard driven by the trackpads](docs/images/desktop-demo.gif)
+
+![Back to Gaming Mode: the Omarchy menu, System, and Steam comes up](docs/images/gaming-switch.gif)
 
 ![fastfetch on the installed Deck: Valve's Neptune kernel, Hyprland, Omarchy 4.0](docs/images/desktop-fastfetch.png)
 
