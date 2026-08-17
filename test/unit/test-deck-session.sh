@@ -1452,16 +1452,48 @@ pass "no 'options hid_steam ...' line is generated anywhere in src/"
 # shape that ALLOWS them to disagree: a literal path typed into either heredoc.
 # Both halves are needed -- a second literal that happens to be identical today
 # passes the runtime check and is one rename away from failing silently.
+#
+# The two renderers name DIFFERENT constants since 2026-08-16: the .desktop
+# entry's Exec= is the bare command, while the menu row runs it wrapped in
+# Omarchy's OSD sequence. The chain that has to hold is
+# RETURN_ACTION -> MENU_ROW_SWITCH -> MENU_ROW_ACTION, and each link is checked
+# rather than assumed -- see the derivation checks below this loop.
+declare -A renderer_const=(
+  [render_return_desktop]=RETURN_ACTION
+  [render_menu_row_block]=MENU_ROW_ACTION
+)
 for renderer in render_return_desktop render_menu_row_block; do
+  const=${renderer_const[$renderer]}
   body=$(declare -f "$renderer")
-  grep -q 'RETURN_ACTION' <<<"$body" ||
-    fail_test "${renderer} emits the shared \$RETURN_ACTION" \
+  grep -q "$const" <<<"$body" ||
+    fail_test "${renderer} emits the shared \$${const}" \
       "it does not name the constant at all, so the .desktop entry and the menu row can drift apart with nothing to notice:"$'\n'"${body}"
   ! grep -qF -- "${STEAM_SHIM} gamescope" <<<"$body" ||
     fail_test "${renderer} carries no second literal copy of the command" \
       "a literal '${STEAM_SHIM} gamescope' beside the constant is a copy that survives a rename of the constant:"$'\n'"${body}"
-  pass "${renderer} derives the command from \$RETURN_ACTION and carries no literal copy of it"
+  pass "${renderer} derives the command from \$${const} and carries no literal copy of it"
 done
+
+# --- the chain the menu row's constant hangs off --------------------------
+#
+# Values, not text: these constants are expanded at definition, so there is no
+# '${RETURN_ACTION}' left in them to grep for. What matters is the property --
+# the row's command must still contain the shared command, and must still start
+# by scheduling it.
+[[ $MENU_ROW_SWITCH == *"$RETURN_ACTION"* ]] ||
+  fail_test "\$MENU_ROW_SWITCH schedules the shared \$RETURN_ACTION" \
+    "got '${MENU_ROW_SWITCH}', which does not contain '${RETURN_ACTION}'"
+pass "\$MENU_ROW_SWITCH schedules '${RETURN_ACTION}'"
+
+# 🔴 THE ORDERING PROPERTY, AND IT IS THE ONE THAT KEEPS THE DEVICE USABLE.
+# The switch is backgrounded BEFORE the on-screen notice is drawn, so a notice
+# that fails cannot stop it. Anchored at the START deliberately: an inversion
+# that drew the notice first and switched afterwards would still "contain" the
+# command and would still look right in a diff.
+[[ $MENU_ROW_ACTION == "$MENU_ROW_SWITCH"* ]] ||
+  fail_test "\$MENU_ROW_ACTION schedules the switch before anything that can fail" \
+    "it does not begin with \$MENU_ROW_SWITCH:"$'\n'"  action: ${MENU_ROW_ACTION}"$'\n'"  switch: ${MENU_ROW_SWITCH}"
+pass "\$MENU_ROW_ACTION schedules the session switch first, before the notice"
 
 # --- the runtime half, against the real renderers -------------------------
 desktop_exec=$(render_return_desktop | grep '^Exec=' || true)
@@ -1476,6 +1508,55 @@ pass "the rendered .desktop entry runs '${RETURN_ACTION}'"
   fail_test "assert_return_action_agrees passes on the shipped renderers" \
     "$(cat "$work/agree.err")"
 pass "assert_return_action_agrees passes on the shipped renderers"
+
+# --- 🔴 A BROKEN NOTICE MUST NOT COST THE SESSION SWITCH ------------------
+#
+# The checks above are static: they prove the switch is written first. This one
+# RUNS the shipped action with the OSD deliberately sabotaged and watches for
+# the switch to happen anyway. It is the assertion that matters most in this
+# section, because the failure it guards against is losing the only
+# controller-reachable way out of the desktop over a cosmetic toast.
+#
+# The action is taken from the real renderer and ONE substitution is made: the
+# absolute ${RETURN_ACTION} becomes a stub that records that it ran. Nothing
+# else is rewritten, so the ordering, the nohup, the backgrounding and the
+# `|| logger` are all the shipped ones.
+osd_work="$work/osd"; mkdir -p "$osd_work/bin"
+shipped_action=$(rendered_menu_action) ||
+  fail_test "the shipped menu action can be read back for the sabotage test" "rendered_menu_action failed"
+
+printf '#!/usr/bin/env bash\nprintf switched >%q\n' "$osd_work/switched" >"$osd_work/bin/fake-select"
+chmod +x "$osd_work/bin/fake-select"
+
+# bash -c, not -lc as Menu.qml uses: -l sources the login profile, which would
+# reset the PATH this test depends on. The property under test is the ordering
+# inside the action string, which -l does not affect.
+for sabotage in absent failing; do
+  rm -f "$osd_work/switched"
+  rm -f "$osd_work/bin/omarchy-osd"
+  if [[ $sabotage == failing ]]; then
+    printf '#!/usr/bin/env bash\necho "omarchy-osd: broken" >&2\nexit 1\n' >"$osd_work/bin/omarchy-osd"
+    chmod +x "$osd_work/bin/omarchy-osd"
+  fi
+
+  # PATH deliberately holds ONLY the stub dir plus the essentials, so an
+  # omarchy-osd installed on the dev machine cannot rescue the 'absent' case.
+  env -i PATH="$osd_work/bin:/usr/bin:/bin" HOME="$osd_work" \
+    bash -c "${shipped_action//"$RETURN_ACTION"/$osd_work/bin/fake-select}" \
+    >"$osd_work/out" 2>"$osd_work/err" || true
+
+  # Poll rather than sleep a fixed span: the action schedules the switch behind
+  # a lead-in, and this must not encode how long that lead-in is.
+  waited=0
+  while [[ ! -e "$osd_work/switched" && $waited -lt 100 ]]; do
+    sleep 0.1; waited=$((waited + 1))
+  done
+
+  [[ -e "$osd_work/switched" ]] ||
+    fail_test "the session switch still runs when the on-screen notice is ${sabotage}" \
+      "the stub was never invoked, so a failing notice would strand the user in the desktop with no way back to Gaming Mode"$'\n'"stderr: $(cat "$osd_work/err")"
+  pass "the session switch still runs when omarchy-osd is ${sabotage}"
+done
 
 # ---------------------------------------------------------------------------
 # 9a. The menu row block -- the file Quickshell silently discards when wrong
@@ -1515,15 +1596,24 @@ done <"$menu_block"
 pass "every '//' in the block starts its line -- the only comment form stripJsonc removes"
 
 # The row itself must be strict JSON, checked by a parser rather than by eye.
-python3 - "$menu_block" "$MENU_ROW_ID" "$RETURN_ACTION" "$RETURN_LABEL" <<'PY' ||
+#
+# The action is checked BY STRUCTURE, not by equality with a literal: it must
+# schedule the switch first and it must contain the shared command. The notice
+# text, its icon and its duration are Omarchy's business and deliberately go
+# unasserted -- pinning them here would make this suite fail on a wording change
+# that broke nothing.
+python3 - "$menu_block" "$MENU_ROW_ID" "$RETURN_ACTION" "$RETURN_LABEL" "$MENU_ROW_SWITCH" <<'PY' ||
 import json, re, sys
 raw = open(sys.argv[1]).read()
-row_id, action, label = sys.argv[2], sys.argv[3], sys.argv[4]
+row_id, action, label, switch = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 stripped = re.sub(r"^\s*//[^\n]*(\n|$)", "", raw, flags=re.M)
 stripped = re.sub(r",(\s*$)", r"\1", stripped)
 menu = json.loads("{" + stripped + "}")
 assert list(menu) == [row_id], list(menu)
-assert menu[row_id]["action"] == action, menu[row_id]["action"]
+got = menu[row_id]["action"]
+assert got.startswith(switch), \
+    "the row must schedule the switch before the notice, got: %r" % got
+assert action in got, "the row must run %r, got: %r" % (action, got)
 assert menu[row_id]["label"] == label, menu[row_id]["label"]
 # `action` is what makes this a row rather than a submenu: MenuModel.js
 # normalizeItem reads kind = value.action ? "action" : (value.target ? ...).
@@ -1531,7 +1621,7 @@ assert "target" not in menu[row_id], "a target would make it a link, not an acti
 PY
   fail_test "the rendered row is strict JSON with the right id, label and action" \
     "$(cat "$menu_block")"
-pass "the rendered row parses as strict JSON: one id ('${MENU_ROW_ID}'), the shared action, no 'target' that would make it a link"
+pass "the rendered row parses as strict JSON: one id ('${MENU_ROW_ID}'), the switch scheduled ahead of the notice, no 'target' that would make it a link"
 
 # The trailing comma is what lets the block be spliced in at one fixed position
 # whether the rest of the object is empty or full. stripJsonc removes it in the
