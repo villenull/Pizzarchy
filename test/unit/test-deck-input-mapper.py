@@ -1969,22 +1969,53 @@ check("the pulse is a click, not a rumble: well under a tenth of a second",
 check("...and long enough to survive CONFIG_HZ=300's 3.3ms jiffy",
       m.PAD_HAPTIC_MS >= 10, True)
 
-# --- start(): two effects, uploaded once, with the measured magnitudes -------
+# --- 🆕 THE TOUCH TICK (operator, 2026-08-16) -------------------------------
+#
+# *"when touching the osk to type, the deck should vibrate very slightly (as the
+# real deck does)"*. A finger on the glass has no side, so this one effect
+# drives BOTH actuators, and it is its own slot so that its feel can be tuned
+# without touching the pad click's.
+#
+# ⛔ NOT ONE ASSERTION ON HOW STRONG OR HOW LONG IT IS, DELIBERATELY. Only the
+# operator's hands can set that (PAD_HAPTIC_MS says the same of the click), and
+# a suite that pinned a magnitude would go red the first time it is tuned --
+# this repo's most-repeated defect, a test pinning a value it does not own.
+# What is pinned is the STRUCTURE: its own slot, both actuators, one effect
+# uploaded, one play per touch, given back on close.
+check("the touch tick is a slot of its own, not one of the pad halves",
+      m.OSK_TOUCH_HAPTIC_SLOT in m.PAD_HAPTIC_MAGNITUDES, False)
+check("every slot the code can buzz is one start() uploads",
+      sorted(m.HAPTIC_EFFECTS),
+      sorted([*m.PAD_HAPTIC_MAGNITUDES, m.OSK_TOUCH_HAPTIC_SLOT]))
+check("...each pad half keeping exactly the magnitudes measured for it",
+      {half: (strong, weak)
+       for half, (strong, weak, _) in m.HAPTIC_EFFECTS.items()
+       if half in m.PAD_HAPTIC_MAGNITUDES},
+      dict(m.PAD_HAPTIC_MAGNITUDES))
+touch_strong, touch_weak, touch_ms = m.HAPTIC_EFFECTS[m.OSK_TOUCH_HAPTIC_SLOT]
+check("...and the touch tick driving BOTH actuators, a finger having no side",
+      (touch_strong > 0, touch_strong == touch_weak), (True, True))
+check("the tick is inside the FF API's 0..0xFFFF -- the range the API owns",
+      0 < touch_strong <= 0xFFFF, True)
+check("...and is a tick, not a rumble, and clears the 3.3ms jiffy",
+      10 <= touch_ms <= 100, True)
+
+# --- start(): one effect per slot, uploaded once, with its own magnitudes ----
 dev, log = FakeFFDevice(), []
 h = m.Haptics(dev, ff_module=real_ff, log=log.append)
 check("start() arms", (h.start(), h.enabled), (True, True))
-check("...uploading exactly one effect per pad, and no more",
-      len(dev.uploaded), 2)
-check("...as FF_RUMBLE effects of the documented length",
+check("...uploading exactly one effect per slot, and no more",
+      len(dev.uploaded), len(m.HAPTIC_EFFECTS))
+check("...as FF_RUMBLE effects, each of its own slot's length",
       sorted({(f.type, f.ff_replay.length) for f in dev.uploaded}),
-      [(e.FF_RUMBLE, m.PAD_HAPTIC_MS)])
+      sorted({(e.FF_RUMBLE, length) for _, _, length in m.HAPTIC_EFFECTS.values()}))
 # 🔴 BY EFFECT ID, not by upload order. This is what makes the buzz tests below
 # mean something: the slot `buzz("left")` plays is the slot the LEFT pad's
 # magnitudes went into, so a swap anywhere between the constant and the ioctl
 # lands here.
-check("...carrying each pad's own magnitudes, under that pad's own slot",
-      {half: rumble_of(dev, effect_id) for half, effect_id in h.effects.items()},
-      dict(m.PAD_HAPTIC_MAGNITUDES))
+check("...carrying each slot's own magnitudes, under that slot's own id",
+      {slot: rumble_of(dev, effect_id) for slot, effect_id in h.effects.items()},
+      {slot: (strong, weak) for slot, (strong, weak, _) in m.HAPTIC_EFFECTS.items()})
 check("...and saying nothing, because nothing went wrong", log, [])
 
 # --- buzz(): the right slot, on the right side ------------------------------
@@ -1994,6 +2025,13 @@ dev.played.clear()
 check("buzzing the right pad plays the RIGHT one -- the sides are not swapped",
       (h.buzz("right"), dev.played), (True, [(h.effects["right"], 1)]))
 check("the two slots really are different", h.effects["left"] != h.effects["right"], True)
+dev.played.clear()
+check("buzzing the touch slot plays the TOUCH effect, once, not a pad's",
+      (h.buzz(m.OSK_TOUCH_HAPTIC_SLOT), dev.played),
+      (True, [(h.effects[m.OSK_TOUCH_HAPTIC_SLOT], 1)]))
+check("...and it is a third slot, neither pad's",
+      h.effects[m.OSK_TOUCH_HAPTIC_SLOT] in (h.effects["left"], h.effects["right"]),
+      False)
 check("an unknown half buzzes nothing rather than raising", h.buzz("middle"), False)
 armed_slots = sorted(h.effects.values())
 h.close()
@@ -2091,6 +2129,61 @@ mm.cursors.pos["left"] = [0.05, 0.75]              # the left Shift key
 check("clicking a key that TYPES NOTHING still buzzes",
       (mm.translate(e.EV_KEY, e.BTN_THUMB, 1, 0.1), mm.osk.shift, rec.buzzed),
       ([], "once", ["left"]))
+
+# --- 🆕 AND A KEY TOUCHED ON THE GLASS TICKS TOO (operator, 2026-08-16) ------
+#
+# *"when touching the osk to type, the deck should vibrate very slightly"*. The
+# pad click's buzz never depended on which backend was drawing -- it hangs off
+# `_osk_event`, which never asks. What buzzed nothing was `press_key_index`,
+# the TOUCH path, which only the `layer` overlay feeds; that is where the
+# operator met the silence.
+mm, rec = osk_mapper(), Recorder()
+mm.haptics = rec
+touch_rows = mm.osk.layer.rows
+letter_index = next((r, k) for r, row in enumerate(touch_rows)
+                    for k, key in enumerate(row) if key.is_letter)
+check("a touch on a letter types it AND ticks, exactly once",
+      (bool(mm.press_key_index(*letter_index)), rec.buzzed),
+      (True, [m.OSK_TOUCH_HAPTIC_SLOT]))
+check("...and the next key ticks again -- one per key, not one per showing",
+      (bool(mm.press_key_index(*letter_index)), len(rec.buzzed)), (True, 2))
+
+# Shift and Caps type nothing at all, so the tick is their ONLY confirmation --
+# the same reason the pad click's buzz is not gated on emissions.
+mm, rec = osk_mapper(), Recorder()
+mm.haptics = rec
+shift_touch = next((r, k) for r, row in enumerate(touch_rows)
+                   for k, key in enumerate(row) if key.action == "shift")
+check("touching a key that TYPES NOTHING still ticks",
+      (mm.press_key_index(*shift_touch), rec.buzzed),
+      ([], [m.OSK_TOUCH_HAPTIC_SLOT]))
+
+# ⛔ AN INDEX THIS KEYBOARD DOES NOT HAVE TICKS NOTHING. `None` is reserved for
+# the overlay and this process disagreeing about the layout, and a tick there
+# would announce, through the palms, a keystroke that nothing typed.
+mm, rec = osk_mapper(), Recorder()
+mm.haptics = rec
+check("an off-layout index neither types nor ticks",
+      (mm.press_key_index(len(touch_rows), 0), mm.press_key_index(0, -1), rec.buzzed),
+      (None, None, []))
+mm = m.Mapper()
+mm.haptics = rec
+check("...and neither does a touch at a mapper with no keyboard attached",
+      (mm.press_key_index(0, 0), rec.buzzed), (None, []))
+
+# 🔴 AND A DEAD ACTUATOR COSTS THE TICK, NOT THE TYPING -- end to end through
+# the real class, exactly as the pad click's fail-soft test below does it.
+dev, log = FakeFFDevice(), []
+mm = osk_mapper()
+mm.haptics = m.Haptics(dev, ff_module=real_ff, log=log.append)
+mm.haptics.start()
+dev.write_error = True
+touched_key = mm.osk.layer.rows[letter_index[0]][letter_index[1]]
+check("a dead actuator costs the tick and NOT the touched keystroke",
+      mm.press_key_index(*letter_index),
+      [(touched_key.code, 1), (touched_key.code, 0)])
+check("...having said so, once", len(log), 1)
+mm.haptics.close()
 
 # --- 🔴 A BUZZ THAT THROWS MUST NOT TAKE THE INPUT PATH DOWN ----------------
 #
