@@ -305,6 +305,82 @@ readonly MENU_ROW_ID=system.gaming
 # U+F0297. The glyph is md-gamepad_variant -- see the cmap note above.
 readonly MENU_ROW_ICON='\udb80\ude97'
 
+# --- the row's on-screen notice (operator request, 2026-08-16) -------------
+#
+# The switch takes seconds and used to give NO feedback at all: the press
+# appeared to do nothing until gamescope came up. This says it is happening.
+#
+# \ud83d\udd34 OMARCHY'S OWN OSD, NOT A MECHANISM OF OURS, AND NOT A NOTIFICATION EITHER.
+# The operator's requirement was that this "look exactly like the one for
+# logging out in omarchy", so the template is Omarchy's own logout path,
+# /usr/bin/omarchy-system-logout, read off the pinned runtime:
+#
+#     nohup bash -c "sleep 2 && uwsm stop" >/dev/null 2>&1 &
+#     omarchy-osd -i logout -m "Logging out" -d 5000
+#
+# `omarchy-osd` is /usr/bin's, ships with omarchy, and hands a payload to the
+# same Quickshell shell that draws the volume and brightness OSDs. So this
+# looks like the platform because it IS the platform. An earlier draft of this
+# used omarchy-notification-send instead: that renders the blue-bordered
+# notification TOAST in the corner, which is a different Omarchy widget in a
+# different place. The OSD is the centred card logout uses. Do not swap them
+# back, and do not reach for notify-send, hyprctl notify or a daemon of ours --
+# matching what logout already does is the entire requirement.
+#
+# \u26a0\ufe0f -i TAKES A NAME **OR** A GLYPH. OsdModel.js:iconFor maps a vocabulary
+# (logout, volume, brightness, reboot...) and then falls through to
+# `if (n.length > 0) return name` -- an unrecognised value is drawn verbatim.
+# There is no gamepad NAME in that vocabulary, so the glyph is passed directly,
+# and it is ${MENU_ROW_ICON}: the same codepoint the menu row itself shows, so
+# the row and the OSD it raises carry one icon. See MENU_ROW_ICON above for why
+# it is written as a JSON escape and must stay one.
+readonly MENU_ROW_NOTICE="Launching Gaming Mode"
+
+# Upstream's own numbers, deliberately. `omarchy-system-logout` asks for 5000ms
+# and lets the session die under it, which is why the operator perceives the
+# logout OSD as "about 3 seconds" -- the duration is an upper bound the
+# teardown cuts short, not a measured lifetime. Matching the pair is what makes
+# this feel like logout rather than merely resemble it. Neither number is
+# asserted in the suites: they are Omarchy's timing, not ours to pin.
+readonly MENU_ROW_OSD_MS=5000
+
+# \ud83d\udd34 THE ORDERING IS THE WHOLE TRICK, AND IT IS UPSTREAM'S. The switch is
+# BACKGROUNDED WITH A LEAD-IN FIRST and the OSD is drawn second, exactly as
+# omarchy-system-logout backgrounds `sleep 2 && uwsm stop` before drawing its
+# own. Two things fall out of that order, and both are load-bearing:
+#
+#   1. THE OSD GETS TIME TO RENDER. The Quickshell shell drawing it dies with
+#      Hyprland when `systemctl stop sddm` runs, so a switch invoked inline
+#      would tear down the very process being asked to draw. The lead-in is the
+#      window in which it appears; after that the compositor stops and the last
+#      frame it drew -- the one with the OSD in it -- is what stays on screen.
+#   2. THE SWITCH IS UNCONDITIONAL. It is scheduled BEFORE `omarchy-osd` is
+#      ever invoked, in a separate `nohup`'d shell, so nothing the OSD does can
+#      prevent it. If omarchy-osd is missing, renamed or broken, the failure is
+#      logged and the session still switches. That guarantee is STRUCTURAL --
+#      it comes from the ordering, not from the `|| logger` -- which matters
+#      because this notice is cosmetic and losing the only
+#      controller-reachable way back to Gaming Mode would not be.
+#
+# Kept as its own constant so assert_return_action_agrees can require the row
+# to START with it, i.e. can check property (2) rather than trust it.
+readonly MENU_ROW_LEAD=2
+readonly MENU_ROW_SWITCH="nohup bash -c 'sleep ${MENU_ROW_LEAD} && exec ${RETURN_ACTION}' >/dev/null 2>&1 &"
+
+# What the row actually runs.
+#
+# \u26a0\ufe0f ONE LINE, AND SINGLE QUOTES ONLY. This string is emitted inside a JSON
+# string in render_menu_row_block; a `"` or `\` would need escaping there, and
+# a malformed extension file makes Quickshell drop EVERY user row and say
+# nothing (see THE QUICKSHELL MENU ROW below). Everything here is ASCII for the
+# same reason MENU_ROW_ICON is -- PROGRESS.md's locale trap -- including the
+# icon, which stays a JSON escape until Quickshell's own parser decodes it.
+#
+# Menu.qml runs this through `bash -lc` (Commons/Util.qml:54, execDetached), so
+# `&`, `>` and `||` are all honoured. A .desktop Exec= could NOT carry this --
+# see assert_return_action_agrees.
+readonly MENU_ROW_ACTION="${MENU_ROW_SWITCH} omarchy-osd -i '${MENU_ROW_ICON}' -m '${MENU_ROW_NOTICE}' -d ${MENU_ROW_OSD_MS} || logger -t deck-session 'omarchy-osd failed; the Gaming Mode switch was scheduled before it and still runs'"
+
 # The row is spliced into a file this script does not own, between whole-line
 # markers, exactly as install_osk_kb_layout_rule does for Hyprland's Lua. See
 # stage_menu_row for why this is a splice and not a rewrite.
@@ -6062,7 +6138,7 @@ ${INSTALL_MARKER_JSONC}
 // markers is rewritten by ${PROG}.sh; edit outside them.
 // Remove the row by deleting these lines, or by adding your own "${MENU_ROW_ID}"
 // entry below -- a later duplicate key wins in JSON.
-"${MENU_ROW_ID}": {"icon": "${MENU_ROW_ICON}", "label": "${RETURN_LABEL}", "action": "${RETURN_ACTION}", "description": "${RETURN_DESCRIPTION}"},
+"${MENU_ROW_ID}": {"icon": "${MENU_ROW_ICON}", "label": "${RETURN_LABEL}", "action": "${MENU_ROW_ACTION}", "description": "${RETURN_DESCRIPTION}"},
 ${MENU_ROW_END}
 EOF
 }
@@ -6187,6 +6263,45 @@ PY
 # Compared from what is rendered, not from the constants, because a constant
 # both sides agree on proves nothing if one of the heredocs stopped using it.
 # This is cheap and it runs before anything is written.
+#
+# ⚠️ THE MENU ROW IS NO LONGER BYTE-IDENTICAL TO Exec=, and the checks below
+# say exactly how far they are allowed to differ. Since 2026-08-16 the row
+# wraps ${RETURN_ACTION} in Omarchy's own OSD sequence (see MENU_ROW_ACTION),
+# which a .desktop Exec= could not carry anyway: Exec= is argv per the Desktop
+# Entry spec, not a shell line, so `a & b || c` there would be handed to the
+# switch as arguments rather than run. The row goes through `bash -lc` and can.
+#
+# So: Exec= must still be EXACTLY the shared command, and the row must BEGIN
+# with ${MENU_ROW_SWITCH} -- the nohup'd, lead-in'd copy of that same command.
+# Anchoring at the START is the point rather than an implementation detail: it
+# is what proves the switch is scheduled BEFORE the OSD can fail, which is the
+# property that keeps a cosmetic notice from being able to strand the user in
+# the desktop. Anchoring at the end would permit exactly the inversion that
+# would break it.
+# The row's action AS QUICKSHELL WILL SEE IT: render_menu_row_block put through
+# a JSON parse, so every escape in it is decoded exactly once.
+#
+# 🔴 THIS EXISTS SO THE ICON ESCAPE CANNOT BREAK THE COMPARISONS. $MENU_ROW_ACTION
+# carries ${MENU_ROW_ICON} as the ASCII text 󰊗 -- deliberately, per
+# MENU_ROW_ICON's own note -- while anything read back out of a written file has
+# been through json.loads and holds the single character U+F0297 instead. The two
+# are the same action and are NOT the same bytes, so comparing a decoded readback
+# against the raw constant would fail on a correct install. Both sides are put
+# through this one function instead, and neither caller decodes anything itself.
+rendered_menu_action() {
+  render_menu_row_block | python3 -c '
+import json, re, sys
+raw = sys.stdin.read()
+raw = re.sub(r"^\s*//[^\n]*(\n|$)", "", raw, flags=re.M)
+raw = re.sub(r",(\s*$)", r"\1", raw)
+try:
+    row = json.loads("{" + raw + "}")
+except ValueError as exc:
+    sys.exit("the rendered menu row is not valid JSON: %s" % exc)
+sys.stdout.write(list(row.values())[0].get("action", ""))
+'
+}
+
 assert_return_action_agrees() {
   local from_desktop from_menu line
 
@@ -6199,25 +6314,23 @@ assert_return_action_agrees() {
   [[ -n $from_desktop ]] ||
     fail "render_return_desktop emits no Exec= line at all, so the .desktop entry launches nothing. Refusing to install a menu row that claims to match it."
 
-  from_menu=$(render_menu_row_block | python3 -c '
-import json, re, sys
-raw = sys.stdin.read()
-raw = re.sub(r"^\s*//[^\n]*(\n|$)", "", raw, flags=re.M)
-raw = re.sub(r",(\s*$)", r"\1", raw)
-try:
-    row = json.loads("{" + raw + "}")
-except ValueError as exc:
-    sys.exit("the rendered menu row is not valid JSON: %s" % exc)
-sys.stdout.write(list(row.values())[0].get("action", ""))
-') || fail "could not read the action back out of the rendered menu row block"
+  from_menu=$(rendered_menu_action) ||
+    fail "could not read the action back out of the rendered menu row block"
 
   [[ $from_desktop == "$RETURN_ACTION" ]] ||
     fail "${RETURN_DESKTOP_FILE}'s Exec= renders as '${from_desktop}' but the shared constant is '${RETURN_ACTION}'. The two ways back to Gaming Mode have drifted; whichever is wrong does nothing at all and reports no error."
-  [[ $from_menu == "$RETURN_ACTION" ]] ||
-    fail "the Quickshell menu row's action renders as '${from_menu}' but the shared constant is '${RETURN_ACTION}'. The two ways back to Gaming Mode have drifted; whichever is wrong does nothing at all and reports no error."
-  [[ $from_menu == "$from_desktop" ]] ||
-    fail "the .desktop entry runs '${from_desktop}' and the menu row runs '${from_menu}'. They must be the same command."
-  log "verified: the .desktop entry and the menu row both run '${RETURN_ACTION}'"
+  # The scheduled copy must itself still be the shared command -- checked here
+  # so a typo in MENU_ROW_SWITCH cannot make the two checks below vacuous.
+  [[ $MENU_ROW_SWITCH == *"$RETURN_ACTION"* ]] ||
+    fail "MENU_ROW_SWITCH is '${MENU_ROW_SWITCH}', which does not contain the shared command '${RETURN_ACTION}'. The menu row would schedule something else."
+  # The row may DECORATE the switch; it may not reorder it. Anchored at the
+  # START: the switch must already be scheduled before anything that can fail
+  # runs, so a broken OSD cannot leave the user with no way back to Gaming Mode.
+  [[ $from_menu == "$MENU_ROW_SWITCH"* ]] ||
+    fail "the Quickshell menu row runs '${from_menu}', which does not BEGIN with '${MENU_ROW_SWITCH}'. The session switch must be scheduled first, before the on-screen notice, so that a notice that fails cannot stop the switch."
+  [[ $from_menu == *"$from_desktop"* ]] ||
+    fail "the .desktop entry runs '${from_desktop}' and the menu row runs '${from_menu}', which does not contain it. The row may wrap the switch in a notice; it must still run the same command."
+  log "verified: the .desktop entry runs '${RETURN_ACTION}' and the menu row schedules it first, before the notice"
 }
 
 # splice_menu_row <existing-or-absent path> <block file>  -> new content on stdout
@@ -6256,7 +6369,20 @@ sys.stdout.write(list(row.values())[0].get("action", ""))
 splice_menu_row() {
   local target=$1 block=$2
   local begin=${3:-$MENU_ROW_BEGIN} end=${4:-$MENU_ROW_END}
-  local row_id=${5:-$MENU_ROW_ID} action=${6-$RETURN_ACTION}
+  local row_id=${5:-$MENU_ROW_ID} action
+  # ⚠️ DEFAULT IS THE *DECODED* ACTION, not $RETURN_ACTION and not
+  # $MENU_ROW_ACTION -- the latter still carries the icon as a \uXXXX escape at
+  # this point, and Quickshell decodes it before running it. See
+  # rendered_menu_action. ⚠️ `$# >= 6` and not `${6:-}`: the Hibernate caller
+  # passes an EXPLICIT EMPTY action, and that emptiness is the whole mechanism
+  # that makes the row inert. `${6:-}` would substitute the Gaming Mode command
+  # for it and the "disabled" row would silently switch the session.
+  if (( $# >= 6 )); then
+    action=$6
+  else
+    action=$(rendered_menu_action) ||
+      fail "could not read the action back out of the rendered menu row block"
+  fi
 
   python3 - "$target" "$block" "$begin" "$end" \
            "$row_id" "$action" "$INSTALL_MARKER_JSONC" <<'PY'
@@ -6394,7 +6520,15 @@ PY
 # for the reason spelled out above splice_menu_row.
 verify_menu_row() {
   local path=${1:?verify_menu_row needs the file to read}
-  local row_id=${2:-$MENU_ROW_ID} want=${3-$RETURN_ACTION}
+  local row_id=${2:-$MENU_ROW_ID} want
+  # Same two rules as splice_menu_row: the default is the DECODED action, and
+  # an explicitly-passed empty string must survive as empty.
+  if (( $# >= 3 )); then
+    want=$3
+  else
+    want=$(rendered_menu_action) ||
+      fail "could not read the action back out of the rendered menu row block"
+  fi
 
   local got
   got=$(python3 - "$path" "$row_id" <<'PY'
@@ -6417,6 +6551,15 @@ PY
   if [[ -n $want ]]; then
     [[ $got == "$want" ]] ||
       fail "${path} carries a '${row_id}' row whose action is '${got}', not '${want}'. The row would appear in the menu and not switch the session."
+    # Belt and braces on the half that matters: the comparison above is against
+    # what we rendered, so it would still pass if the constant itself had been
+    # edited into something that never switches. A row that only draws a notice
+    # is a row that looks like it works. Only meaningful for the row that IS
+    # supposed to switch -- the Hibernate row takes the empty branch below.
+    if [[ $row_id == "$MENU_ROW_ID" ]]; then
+      [[ $got == *"$RETURN_ACTION"* ]] ||
+        fail "${path}'s '${row_id}' row does not run '${RETURN_ACTION}' at all, so pressing it would draw a notice and never switch the session."
+    fi
     log "verified: ${path} parses as Quickshell parses it and '${row_id}' runs '${want}'"
   else
     [[ -z $got ]] ||
@@ -6534,7 +6677,8 @@ stage_menu_row() {
 
   log "stage-menu-row: ok"
   log "NOTE: the row lands at the END of the root menu (new ids are appended),"
-  log "      it runs '${RETURN_ACTION}', and Omarchy re-reads this file live."
+  log "      it shows Omarchy's own notice and then runs '${RETURN_ACTION}',"
+  log "      and Omarchy re-reads this file live."
   log "NOTE: /etc/skel's copy is for users created LATER. The user the ISO"
   log "      creates already exists by our phase, which is why ${user_ext}"
   log "      is written and verified separately."

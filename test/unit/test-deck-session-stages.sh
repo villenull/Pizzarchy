@@ -3070,14 +3070,22 @@ ok_in_out "verified: ${user_ext}" \
 got=$(menu_action_in "$user_ext") ||
   fail_test "the user's copy parses as Quickshell parses it" \
     "it did not parse at all, which on the device means every row in it silently disappears"$'\n'"$(cat "$user_ext")"
-[[ $got == "$RETURN_ACTION" ]] ||
+# Checked by STRUCTURE, not by equality with a literal. The row wraps the shared
+# command in Omarchy's OSD sequence, so the two properties that matter are: it
+# still runs that command, and it schedules it BEFORE the notice that could
+# fail. The notice's own wording, icon and duration are Omarchy's and are not
+# asserted anywhere -- a suite that pinned them would fail on a copy edit.
+[[ $got == *"$RETURN_ACTION"* ]] ||
   fail_test "the '${MENU_ROW_ID}' row runs the same command as the .desktop entry" \
-    "it runs '${got}', expected '${RETURN_ACTION}'"$'\n'"$(cat "$user_ext")"
-pass "the user's copy parses and its '${MENU_ROW_ID}' row runs '${RETURN_ACTION}'"
+    "it runs '${got}', which does not contain '${RETURN_ACTION}'"$'\n'"$(cat "$user_ext")"
+[[ $got == "$MENU_ROW_SWITCH"* ]] ||
+  fail_test "the '${MENU_ROW_ID}' row schedules the switch before the on-screen notice" \
+    "it runs '${got}', which does not begin with '${MENU_ROW_SWITCH}'"$'\n'"$(cat "$user_ext")"
+pass "the user's copy parses and its '${MENU_ROW_ID}' row schedules '${RETURN_ACTION}' ahead of the notice"
 
 got=$(menu_action_in "$root$skel_ext") ||
   fail_test "skel's copy parses too" "$(cat "$root$skel_ext")"
-[[ $got == "$RETURN_ACTION" ]] ||
+[[ $got == "$MENU_ROW_SWITCH"* && $got == *"$RETURN_ACTION"* ]] ||
   fail_test "skel's copy carries the same row" "it runs '${got}'"
 pass "skel's copy parses and carries the same row"
 
@@ -3098,7 +3106,12 @@ if command -v node >/dev/null 2>&1 && [[ -f $menu_model ]]; then
     const merged = M.mergeMenuSources(def, user);
     const row = merged.items[process.argv[4]];
     if (!row) { console.error("the real parser found no row; user rows parsed: " + user.length); process.exit(1); }
-    if (row.action !== process.argv[5]) { console.error("action is " + JSON.stringify(row.action)); process.exit(1); }
+    // Containment, not equality: the row wraps the shared command in the OSD
+    // sequence Omarchy itself uses. What this check is for is that the REAL
+    // parser hands back a row that still runs the switch -- the ordering
+    // property is asserted against the decoded action above.
+    // (No apostrophes in this script: it is bash-single-quoted.)
+    if (!String(row.action).includes(process.argv[5])) { console.error("action is " + JSON.stringify(row.action)); process.exit(1); }
     // 🔴 THE PARENT IS DERIVED FROM THE DOTTED ID, NOT RESTATED. MENU_ROW_ID
     // moved from `gaming` (root) to `system.gaming` on 2026-08-16, because a
     // root row shows up in BOTH the apps menu and the Omarchy menu and the
@@ -3172,7 +3185,7 @@ got=$(menu_action_in "$user_ext" personal.notes)
     "personal.notes runs '${got}'"$'\n'"$(cat "$user_ext")"
 pass "the user's own rows still parse alongside ours (personal.notes kept its action)"
 got=$(menu_action_in "$user_ext")
-[[ $got == "$RETURN_ACTION" ]] ||
+[[ $got == "$MENU_ROW_SWITCH"* && $got == *"$RETURN_ACTION"* ]] ||
   fail_test "and our row is there too" "it runs '${got}'"
 pass "and our row is in the same file, with the right action"
 
@@ -3212,8 +3225,10 @@ printf '{"%s": {"label":"x","action":"/usr/bin/steamos-session-select desktop"}}
   "$MENU_ROW_ID" >"$bad"
 run_stage_body verify_menu_row "$(sandboxed "$bad")"
 ok_failed "a file that PARSES but whose row runs the wrong command fails verification"
-ok_in_err "not '${RETURN_ACTION}'" \
+ok_in_err "$RETURN_ACTION" \
   "the failure names the command it wanted -- a row that switches to the desktop is the worst outcome here: it is in the menu, it is pressable, and it does not return to Gaming Mode"
+ok_in_err "/usr/bin/steamos-session-select desktop" \
+  "and names the wrong command it actually found, so the two can be compared without opening the file"
 
 printf '{"apps": {"label":"x","action":"true"}}\n' >"$bad"
 run_stage_body verify_menu_row "$(sandboxed "$bad")"
@@ -3268,8 +3283,13 @@ pass "an explicitly empty action is honoured rather than defaulting to the Gamin
 
 # The other half: the row this stage exists for still works. A second splice
 # that ate the first would be invisible to every assertion above.
+# ⚠️ CONTAINS, not equals. The Gaming Mode row's action is no longer the bare
+# command: it now schedules the switch and then draws Omarchy's OSD, so an
+# equality check here pins a composition this file does not own and goes red
+# every time that row gains a step. What must hold is that the row still RUNS
+# the session switch.
 got=$(menu_action_in "$user_ext")
-[[ $got == "$RETURN_ACTION" ]] ||
+[[ $got == *"$RETURN_ACTION"* ]] ||
   fail_test "the Gaming Mode row survives the second splice" \
     "'${MENU_ROW_ID}' runs '${got}'"$'\n'"$(cat "$user_ext")"
 pass "🔴 the Gaming Mode row still runs its command after the Hibernate block is spliced over it"
