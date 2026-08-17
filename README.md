@@ -51,7 +51,7 @@ image — see [Recovery](#recovery).
 
    > _**[ LINK — Internet Archive download + sha256 ]**_
 
-2. **Write it to a USB stick.** [Ventoy](https://www.ventoy.net) gets installed onto the stick once; after that you copy `.iso` files onto it like ordinary files, and it boots to a menu listing whatever you have dropped there. So just copy the `.iso` across — nothing to flash, and the stick stays usable for normal storage.
+2. **Write it to a USB stick.** [Ventoy](https://www.ventoy.net) gets installed onto the stick once; after that you copy `.iso` files onto it like ordinary files, and it boots to a menu listing whatever you have dropped there.
 
 3. **Boot it.** Hold **Volume Down + Power** until the boot menu appears, then pick the USB stick.
 
