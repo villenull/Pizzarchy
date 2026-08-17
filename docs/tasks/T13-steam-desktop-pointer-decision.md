@@ -1,5 +1,36 @@
 # T13 — Steam usable in Desktop Mode: two finished prototypes, one decision
 
+> ## ✅ RESOLVED 2026-08-17 — **B (the hidraw sandbox) won and is merged.**
+>
+> Tested on the operator's Deck through the real apps launcher. Every decisive
+> observable passed, the operator confirmed pointer + chords + OSK + brightness
+> by hand with Steam open, and **Balatro launched and was playable with the
+> mouse** — the one real unknown, since Steam's pressure-vessel builds its own
+> nested namespace inside ours.
+>
+> | test | result |
+> |---|---|
+> | Pad survives Steam launch | ✅ `input25` still present (it vanished before) |
+> | Steam holds no hidraw fd | ✅ `0` |
+> | Steam is in *our* namespace | ✅ `mnt:[4026532598]` vs host `mnt:[4026531841]` |
+> | Mapper keeps its pad | ✅ still holding `event7`, never entered its wait loop |
+> | Pointer / chords / OSK / brightness | ✅ operator confirmed |
+> | Steam itself drivable | ✅ operator confirmed |
+> | **A game launches and plays** | ✅ **Balatro, mouse works in-game** |
+> | Touchscreen unaffected | ✅ `hidraw3` is `hid-multitouch`, never covered |
+>
+> The negative control came for free: the operator launched Steam from the menu
+> *before* the desktop entry was wired up, got yesterday's broken behaviour, and
+> the pad node came back as **`input25` where it had been `input10`** — destroyed
+> and re-created, exactly as predicted.
+>
+> **A (extest) was not merged.** It stays on its worktree branch. It remains the
+> fallback if the sandbox ever breaks, and its licence fix to
+> `tools/build-extest.sh` is worth salvaging independently — see the bottom of
+> this document.
+>
+> Everything below is the decision as it stood before the test, kept for the record.
+
 **Status:** both approaches are BUILT, unit-green, and unmerged, each in its own
 worktree. Neither has a single minute of hardware time — the Deck was powered
 off all night. **They cannot both ship.** This document is the fork and the
