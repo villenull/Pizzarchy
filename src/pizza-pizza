@@ -1,0 +1,694 @@
+#!/usr/bin/env bash
+#
+# pizza-pizza -- `pizza pizza`. The easter egg.
+#
+# Two effects, installed and removed together:
+#
+#   1. fastfetch's logo becomes an ASCII pizza with a square slice taken out of
+#      the top-left corner, coloured through fastfetch's own $1..$9 placeholders.
+#   2. every NEW INTERACTIVE terminal greets you with fastfetch, the way CachyOS
+#      does out of the box.
+#
+# ---------------------------------------------------------------------------
+# WHAT IT EDITS, AND WHY THOSE TWO FILES
+# ---------------------------------------------------------------------------
+#
+# ~/.config/fastfetch/config.jsonc -- READ THIS BEFORE CHANGING THE TARGET.
+#
+# Omarchy 4.0 ships its fastfetch config at /etc/fastfetch/config.jsonc, owned
+# by the omarchy-settings package. Editing THAT would put our block in a
+# package-owned file, where the next update replaces it and leaves a .pacnew
+# nobody reads. Omarchy also already treats the user-level path as the
+# documented override -- omarchy-launch-about has a custom_fastfetch_config()
+# that checks for exactly this file and hands sizing back to the float rule
+# when it exists. So the user copy is the supported seam, and it is the one
+# used here.
+#
+# On a stock install that user file DOES NOT EXIST, so this creates it, seeded
+# from the system config so every Omarchy module (the Hardware / Software /
+# Age panels) survives. `off` deletes the file again when what is left after
+# our block is removed is byte-identical to the system config -- which restores
+# stock exactly, because stock is "no file".
+#
+# ⚠️ THE ONE PARSER FACT THIS DEPENDS ON, and it is measured rather than
+# assumed: fastfetch takes the FIRST of two duplicate keys. Verified on 2.66.0
+# (dev machine) and on the Deck's 2.67.0, with a two-"logo" config whose two
+# entries named different files. That is what lets our block sit at the top of
+# the object and win WITHOUT the seeded copy's own "logo" being edited or
+# deleted -- so deleting our marked block really does restore the seeded file
+# byte-for-byte. It is not trusted blindly: `pizza pizza` re-renders fastfetch
+# after writing and REFUSES the change if the pizza did not appear, so a
+# fastfetch that ever reversed that rule fails loudly here instead of quietly
+# doing nothing.
+#
+# ~/.bashrc -- because bash is the shell this ISO installs.
+#
+# Checked, not remembered: the Omarchy 4.0 package set carries bash 5.3.9 and
+# neither fish nor zsh (iso/upstream/manifests/fresh-4.json), and the test
+# Deck's `deck` account has /usr/bin/bash as its login shell. There is no fish
+# config to write. If a later image ships one, this is the place to branch.
+#
+# 🔴 THE BLOCK IS GUARDED ON $- CONTAINING `i`, AND THAT GUARD IS LOAD-BEARING.
+# Omarchy's own ~/.bashrc returns early for non-interactive shells, so an
+# appended line would already be interactive-only there -- but a bare greeting
+# that depends on someone else's early `return` is one reordered rc file away
+# from printing 20 lines of ASCII into an scp stream, an rsync handshake or a
+# `ssh deck@... command` capture. This repo is shipping an SSH feature; a
+# greeting that corrupts a non-interactive shell would break it. The guard is
+# ours, it does not depend on anything above it, and `pizza pizza` proves it by
+# EXECUTING the installed block non-interactively and refusing to leave it in
+# place if it printed anything at all.
+#
+# ---------------------------------------------------------------------------
+# SEAMS
+# ---------------------------------------------------------------------------
+#
+# Four environment variables relocate every path this touches, so the unit
+# suite exercises the real code against a temp tree instead of a stub of it.
+# Production sets none of them. They are read once, here, and never re-read.
+#
+#   PIZZA_ART                 the art file to install (default below)
+#   PIZZA_FASTFETCH_CONFIG    the user config to splice into
+#   PIZZA_FASTFETCH_TEMPLATE  the system config to seed it from
+#   PIZZA_BASHRC              the shell rc to splice the greeting into
+#
+# Exit codes: 0 success, 1 failure, 2 usage error.
+
+set -euo pipefail
+
+PROG="pizza pizza"
+readonly PROG
+
+# The active art file. SWAPPING THE PIZZA IS A ONE-FILE CHANGE: replace this
+# file's contents (src/pizza-art/pizza.txt in the repo, and there are alternates
+# beside it), re-run `pizza pizza`, and nothing else moves. Nothing in this
+# script or in any test knows what is inside it -- only that it is well-formed.
+readonly ART_DEFAULT=/usr/local/share/pizza/pizza.txt
+
+ART=${PIZZA_ART:-$ART_DEFAULT}
+FF_TEMPLATE=${PIZZA_FASTFETCH_TEMPLATE:-/etc/fastfetch/config.jsonc}
+FF_CONFIG=${PIZZA_FASTFETCH_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/fastfetch/config.jsonc}
+BASHRC=${PIZZA_BASHRC:-$HOME/.bashrc}
+readonly ART FF_TEMPLATE FF_CONFIG BASHRC
+
+# Whether FF_CONFIG is where fastfetch would look for it on its own. When it is
+# not (only the test seam makes that so), the end-to-end render check is skipped
+# and says so rather than passing for the wrong reason.
+FF_CONFIG_IS_DISCOVERABLE=0
+[[ $FF_CONFIG == "${XDG_CONFIG_HOME:-$HOME/.config}/fastfetch/config.jsonc" ]] &&
+  FF_CONFIG_IS_DISCOVERABLE=1
+readonly FF_CONFIG_IS_DISCOVERABLE
+
+# Whole-line markers, the same shape src/deck-session.sh uses for the Quickshell
+# menu row and the Hyprland bindings block. Everything outside them is preserved
+# byte-for-byte; a re-run replaces our block instead of appending a second copy.
+readonly FF_BEGIN="// >>> pizza pizza: ASCII pizza logo >>>"
+readonly FF_END="// <<< pizza pizza: ASCII pizza logo <<<"
+readonly RC_BEGIN="# >>> pizza pizza: fastfetch greeting >>>"
+readonly RC_END="# <<< pizza pizza: fastfetch greeting <<<"
+
+log()  { printf '[%s] %s\n' "$PROG" "$*"; }
+warn() { printf '[%s] WARNING: %s\n' "$PROG" "$*" >&2; }
+fail() { printf '[%s] ERROR: %s\n' "$PROG" "$*" >&2; exit 1; }
+usage_error() { printf '[%s] usage: %s\n' "$PROG" "$*" >&2; exit 2; }
+
+# ---------------------------------------------------------------------------
+# THE ART FILE
+# ---------------------------------------------------------------------------
+#
+# 🔴 A MISSING OR MALFORMED LOGO FILE IS SILENT IN FASTFETCH. Measured: point
+# `logo.source` at a path that does not exist and fastfetch prints its BUILTIN
+# distro logo and exits 0. No warning, nothing on stderr. So the only place this
+# can be caught is here, before anything is written, and it is caught loudly.
+#
+# What "well-formed" means, and every clause is a real failure mode:
+#   - pure ASCII: U+1F512 shipped in the installer an hour ago drew a box on the
+#     Linux console. ASCII renders identically in foot, in Konsole and on a tty.
+#   - no ESC byte: colour belongs in the config's --logo-color-N mapping, not
+#     baked into the art, or it sprays escape codes on a terminal that cannot
+#     do colour instead of degrading to readable monochrome.
+#   - only $1..$9: any other `$` is a placeholder typo that fastfetch prints raw.
+#   - flush right and one indent: a ragged notch is the defect hand-drawn ASCII
+#     always has and nobody sees until it is on a panel.
+validate_art() {
+  local path=$1
+
+  [[ -e $path ]] ||
+    fail "the art file ${path} does not exist. Refusing to install a logo that fastfetch would silently replace with its builtin Arch logo -- it does not warn about a missing source, it just draws something else."
+  [[ -f $path && -r $path ]] ||
+    fail "the art file ${path} is not a readable regular file."
+  [[ -s $path ]] ||
+    fail "the art file ${path} is empty."
+
+  command -v python3 >/dev/null 2>&1 ||
+    fail "python3 not found; the art file must be validated byte by byte, and an unvalidated one is the silent-fallback case above."
+
+  python3 - "$path" <<'PY' || fail "the art file is not usable as a fastfetch logo (see above). Nothing was written."
+import sys
+
+path = sys.argv[1]
+raw = open(path, "rb").read()
+problems = []
+
+for off, b in enumerate(raw):
+    if b == 0x1B:
+        problems.append("raw ESC byte at offset %d -- colour belongs in the "
+                        "config's logo.color mapping, not in the art" % off)
+        break
+    if b > 0x7F:
+        problems.append("non-ASCII byte 0x%02X at offset %d -- the Linux "
+                        "console draws a box for these" % (b, off))
+        break
+    if b < 0x20 and b != 0x0A:
+        problems.append("control byte 0x%02X at offset %d" % (b, off))
+        break
+
+if not problems:
+    text = raw.decode("ascii")
+    if not text.endswith("\n"):
+        problems.append("the file does not end with a newline")
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+
+    placeholders = {"$%d" % n for n in range(1, 10)}
+    widths, indents = [], set()
+    for i, line in enumerate(lines, 1):
+        plain, j = [], 0
+        while j < len(line):
+            if line[j] == "$":
+                if line[j:j + 2] in placeholders:
+                    j += 2
+                    continue
+                problems.append("line %d: a '$' that is not $1..$9 -- fastfetch "
+                                "prints it raw" % i)
+                break
+            plain.append(line[j])
+            j += 1
+        plain = "".join(plain)
+        if plain.rstrip() != plain:
+            problems.append("line %d has trailing whitespace" % i)
+        widths.append(len(plain.rstrip()))
+        if plain.strip():
+            indents.add(len(plain) - len(plain.lstrip(" ")))
+
+    if widths:
+        w = max(widths)
+        ragged = [i for i, x in enumerate(widths, 1) if x != w]
+        if ragged:
+            problems.append("rows are not flush right at %d columns; lines %s "
+                            "are short" % (w, ragged))
+        if not (30 <= w <= 60):
+            problems.append("%d columns wide, outside the 30..60 a fastfetch "
+                            "logo should be" % w)
+    if len(indents) > 2 or (len(indents) == 2 and 0 not in indents):
+        problems.append("the notch edge is ragged: indented rows start at "
+                        "columns %s" % sorted(indents))
+    if not (10 <= len(lines) <= 30):
+        problems.append("%d rows, outside the 10..30 a fastfetch logo should be"
+                        % len(lines))
+
+for p in problems:
+    sys.stderr.write("[pizza pizza] ERROR: %s: %s\n" % (path, p))
+sys.exit(1 if problems else 0)
+PY
+
+  # The path is written into JSON below. Rather than invent an escaper, refuse
+  # anything that would need one.
+  [[ $path =~ ^[A-Za-z0-9._/@+-]+$ ]] ||
+    fail "the art path ${path} contains a character this refuses to embed in JSON. Keep it to letters, digits and . _ / @ + -"
+}
+
+# The longest plain line of the art, used to prove fastfetch actually drew it.
+# Derived from the file, never written down anywhere -- swapping the art must
+# not turn anything red.
+art_signature() {
+  python3 - "$1" <<'PY'
+import re, sys
+best = ""
+for line in open(sys.argv[1], encoding="ascii"):
+    plain = re.sub(r"\$[1-9]", "", line).rstrip()
+    if len(plain.strip()) > len(best.strip()):
+        best = plain
+sys.stdout.write(best.strip())
+PY
+}
+
+# ---------------------------------------------------------------------------
+# THE TWO BLOCKS
+# ---------------------------------------------------------------------------
+
+render_fastfetch_block() {
+  cat <<EOF
+${FF_BEGIN}
+// installed-by: pizza pizza
+// Everything between these two markers is rewritten by \`pizza pizza\` and
+// removed by \`pizza pizza off\`. Edit outside them.
+//
+// fastfetch takes the FIRST of two duplicate keys (measured on 2.66.0 and
+// 2.67.0), so this "logo" wins over the one below WITHOUT that one being
+// touched -- which is what makes deleting this block a byte-exact restore.
+"logo": {
+  "type": "file",
+  "source": "${ART}",
+  "color": { "1": "yellow", "2": "light_yellow", "3": "red", "4": "light_red" },
+  "padding": { "top": 2, "right": 6, "left": 2 }
+},
+${FF_END}
+EOF
+}
+
+render_bashrc_block() {
+  cat <<EOF
+${RC_BEGIN}
+# installed-by: pizza pizza -- remove with \`pizza pizza off\`
+#
+# INTERACTIVE SHELLS ONLY. Without this guard the greeting would print into
+# scp, rsync and \`ssh host command\`, all of which read that stream as data.
+# The guard is deliberately self-contained: it does not rely on the early
+# \`return\` further up this file still being there.
+case \$- in
+  *i*)
+    if command -v fastfetch >/dev/null 2>&1; then
+      fastfetch || printf 'pizza: fastfetch exited %s\\n' "\$?" >&2
+    fi
+    ;;
+esac
+${RC_END}
+EOF
+}
+
+# splice <target> <block-file> <begin> <end> <template-or-empty> <where>
+#
+# <where> is `object` (immediately after the first `{`, for JSONC) or `append`
+# (at the end of the file, for a shell rc). Writes the result to stdout.
+#
+# Preserves every byte outside its own markers, seeds an absent target from the
+# template, and refuses -- loudly -- on a begin marker with no end marker rather
+# than guessing where the old block finished.
+splice() {
+  local target=$1 block=$2 begin=$3 end=$4 template=$5 where=$6
+
+  python3 - "$target" "$block" "$begin" "$end" "$template" "$where" <<'PY'
+import pathlib, sys
+
+target, block = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+begin, end, template, where = sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
+
+if target.exists():
+    body, source = target.read_text(), "existing"
+elif template and pathlib.Path(template).exists():
+    body, source = pathlib.Path(template).read_text(), "template:" + template
+else:
+    body, source = ("{\n}\n" if where == "object" else ""), "empty"
+
+kept, skipping, seen = [], False, False
+for line in body.split("\n"):
+    if line.strip() == begin:
+        skipping, seen = True, True
+        continue
+    if skipping:
+        if line.strip() == end:
+            skipping = False
+        continue
+    kept.append(line)
+if skipping:
+    sys.exit("%s carries our start marker with no end marker. Refusing to guess "
+             "where the old block ended -- remove it by hand and re-run." % target)
+while kept and kept[-1] == "":
+    kept.pop()
+
+block_lines = block.read_text().rstrip("\n").split("\n")
+
+if where == "append":
+    out = kept + ([""] if kept else []) + block_lines
+else:
+    opener = None
+    for i, line in enumerate(kept):
+        bare = line.strip()
+        if not bare or bare.startswith("//"):
+            continue
+        if not bare.startswith("{"):
+            sys.exit("%s does not open with a JSON object (first content line is "
+                     "%r). Refusing to splice a logo into something that is not a "
+                     "fastfetch config." % (target, line))
+        opener = (i, line.index("{"))
+        break
+    if opener is None:
+        out = kept + ["{"] + block_lines + ["}"]
+    else:
+        i, col = opener
+        rest = kept[i][col + 1:]
+        out = kept[:i] + [kept[i][:col + 1]] + block_lines
+        if rest.strip():
+            out.append(rest)
+        out += kept[i + 1:]
+
+sys.stdout.write("\n".join(out).rstrip("\n") + "\n")
+sys.stderr.write("seeded-from:%s %s\n"
+                 % (source, "replaced-block" if seen else "inserted-block"))
+PY
+}
+
+# unsplice <target> <begin> <end> -> the file with our block removed, on stdout.
+# Exits 3 and writes nothing when the target has no block of ours.
+unsplice() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import pathlib, sys
+target, begin, end = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+if not target.exists():
+    sys.exit(3)
+body = target.read_text()
+kept, skipping, seen = [], False, False
+for line in body.split("\n"):
+    if line.strip() == begin:
+        skipping, seen = True, True
+        continue
+    if skipping:
+        if line.strip() == end:
+            skipping = False
+        continue
+    kept.append(line)
+if skipping:
+    sys.exit("%s carries our start marker with no end marker. Refusing to guess "
+             "where the old block ended -- remove it by hand." % target)
+if not seen:
+    sys.exit(3)
+while kept and kept[-1] == "":
+    kept.pop()
+sys.stdout.write(("\n".join(kept).rstrip("\n") + "\n") if kept else "")
+PY
+}
+
+has_block() { [[ -f $1 ]] && grep -qxF -- "$2" "$1"; }
+
+# ---------------------------------------------------------------------------
+# THE TWO CHECKS THAT RUN AFTER WRITING
+# ---------------------------------------------------------------------------
+
+# Prove fastfetch DREW the pizza. Two passes, and the second is the one that
+# proves the feature rather than the file: the first renders the config by path
+# (does the duplicate-key rule still hold?), the second renders fastfetch the
+# way a terminal does, with no --config at all (does fastfetch find our file?).
+verify_render() {
+  local signature=$1 out=""
+
+  out=$(fastfetch --config "$FF_CONFIG" --pipe 2>&1) ||
+    fail "fastfetch could not render ${FF_CONFIG}: ${out}"
+  grep -qF -- "$signature" <<<"$out" ||
+    fail "fastfetch read ${FF_CONFIG} and did NOT draw the pizza. The most likely cause is that this fastfetch resolves duplicate JSON keys last-wins rather than first-wins, which would make our block a no-op. Nothing is left half-installed; the previous config has been restored."
+  log "verified: fastfetch renders the pizza from ${FF_CONFIG}"
+
+  if [[ $FF_CONFIG_IS_DISCOVERABLE -eq 1 ]]; then
+    out=$(fastfetch --pipe 2>&1) ||
+      fail "fastfetch failed when run the way a terminal runs it: ${out}"
+    grep -qF -- "$signature" <<<"$out" ||
+      fail "fastfetch renders the pizza when handed ${FF_CONFIG} explicitly, but NOT when run bare -- so it is not picking that file up, and every terminal would still show the stock logo. Restored."
+    log "verified: bare 'fastfetch' picks up ${FF_CONFIG} and draws the pizza"
+  else
+    warn "${FF_CONFIG} is not on fastfetch's own search path (PIZZA_FASTFETCH_CONFIG is set), so the end-to-end 'does a bare fastfetch find it' check was NOT run. That check is the one that proves the feature."
+  fi
+}
+
+# Prove the greeting is silent in a non-interactive shell. Runs the INSTALLED
+# block, not a copy of the renderer, because what matters is the bytes on disk.
+verify_rc_is_quiet() {
+  local target=$1 block out rc=0
+
+  block=$(python3 - "$target" "$RC_BEGIN" "$RC_END" <<'PY'
+import pathlib, sys
+lines, keep = pathlib.Path(sys.argv[1]).read_text().split("\n"), False
+out = []
+for line in lines:
+    if line.strip() == sys.argv[2]:
+        keep = True
+        continue
+    if keep:
+        if line.strip() == sys.argv[3]:
+            break
+        out.append(line)
+sys.stdout.write("\n".join(out))
+PY
+  ) || fail "could not read our greeting block back out of ${target}"
+
+  [[ -n $block ]] ||
+    fail "${target} has our markers but nothing between them after being written."
+
+  out=$(bash --noprofile --norc -c "$block" </dev/null 2>&1) || rc=$?
+  [[ $rc -eq 0 ]] ||
+    fail "the greeting block exits ${rc} in a non-interactive shell. Every scp, rsync and 'ssh host command' would inherit that. Restored."
+  [[ -z $out ]] ||
+    fail "the greeting block PRINTED in a non-interactive shell, which corrupts scp, rsync and 'ssh host command'. It emitted: ${out}. Restored."
+  log "verified: the greeting prints nothing in a non-interactive shell"
+}
+
+# ---------------------------------------------------------------------------
+# COMMANDS
+# ---------------------------------------------------------------------------
+
+# Backups, so a failed verification restores exactly what was there -- including
+# "there was no file", which is the stock state of the fastfetch config.
+BACKUP_DIR=""
+cleanup_backup() { [[ -n $BACKUP_DIR ]] && rm -rf -- "$BACKUP_DIR"; return 0; }
+
+stash() {
+  local tag=$1 path=$2
+  if [[ -e $path ]]; then
+    cp -p -- "$path" "${BACKUP_DIR}/${tag}"
+  else
+    : >"${BACKUP_DIR}/${tag}.absent"
+  fi
+}
+
+restore() {
+  local tag=$1 path=$2
+  if [[ -e "${BACKUP_DIR}/${tag}.absent" ]]; then
+    rm -f -- "$path"
+  elif [[ -e "${BACKUP_DIR}/${tag}" ]]; then
+    cp -p -- "${BACKUP_DIR}/${tag}" "$path"
+  fi
+}
+
+restore_all() {
+  restore fastfetch "$FF_CONFIG"
+  restore bashrc "$BASHRC"
+}
+
+cmd_on() {
+  command -v fastfetch >/dev/null 2>&1 ||
+    fail "fastfetch is not installed, so there is no logo to replace and nothing worth greeting a terminal with. Install it first."
+  command -v python3 >/dev/null 2>&1 ||
+    fail "python3 not found; both files are spliced between markers, which is not a job for sed."
+
+  validate_art "$ART"
+
+  local signature
+  signature=$(art_signature "$ART") ||
+    fail "could not derive a signature line from ${ART}"
+  [[ ${#signature} -ge 8 ]] ||
+    fail "the widest line of ${ART} is only ${#signature} characters, which is too short to prove fastfetch drew it."
+
+  BACKUP_DIR=$(mktemp -d) || fail "mktemp -d failed"
+  trap cleanup_backup EXIT
+  stash fastfetch "$FF_CONFIG"
+  stash bashrc "$BASHRC"
+
+  local block tmp seeded
+  block=$(mktemp) || fail "mktemp failed"
+  tmp=$(mktemp) || fail "mktemp failed"
+
+  # --- the logo ---
+  [[ -f $FF_TEMPLATE ]] ||
+    warn "${FF_TEMPLATE} does not exist, so ${FF_CONFIG} cannot be seeded from Omarchy's own config. The pizza will render with fastfetch's DEFAULT module list, not Omarchy's Hardware/Software/Age panels."
+  render_fastfetch_block >"$block" || fail "could not render the fastfetch block"
+  seeded=$(splice "$FF_CONFIG" "$block" "$FF_BEGIN" "$FF_END" "$FF_TEMPLATE" object 2>&1 >"$tmp") ||
+    fail "could not splice the logo into ${FF_CONFIG}: ${seeded}"
+  mkdir -p -- "$(dirname -- "$FF_CONFIG")" ||
+    fail "could not create $(dirname -- "$FF_CONFIG")"
+  install -m 0644 -- "$tmp" "$FF_CONFIG" || fail "could not write ${FF_CONFIG}"
+  log "logo: ${FF_CONFIG} (${seeded})"
+
+  # --- the greeting ---
+  render_bashrc_block >"$block" || fail "could not render the greeting block"
+  seeded=$(splice "$BASHRC" "$block" "$RC_BEGIN" "$RC_END" "" append 2>&1 >"$tmp") ||
+    fail "could not splice the greeting into ${BASHRC}: ${seeded}"
+  install -m 0644 -- "$tmp" "$BASHRC" || fail "could not write ${BASHRC}"
+  log "greeting: ${BASHRC} (${seeded})"
+  rm -f -- "$block" "$tmp"
+
+  # --- and only now, the checks; any failure puts both files back ---
+  local rc=0
+  ( verify_render "$signature" && verify_rc_is_quiet "$BASHRC" ) || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    restore_all
+    log "both files were restored to exactly what they were before this run."
+    exit "$rc"
+  fi
+
+  has_block "$FF_CONFIG" "$FF_END" ||
+    fail "${FF_CONFIG} does not carry '${FF_END}' after being written. The write reported success and the block is not in the file."
+  has_block "$BASHRC" "$RC_END" ||
+    fail "${BASHRC} does not carry '${RC_END}' after being written. The write reported success and the block is not in the file."
+
+  log "ok. The pizza is served."
+  log "Open a NEW terminal to be greeted by it -- this shell already read its rc."
+  log "Undo everything with: pizza pizza off"
+}
+
+cmd_off() {
+  local tmp changed=0
+  tmp=$(mktemp) || fail "mktemp failed"
+
+  # --- the logo ---
+  local rc=0
+  unsplice "$FF_CONFIG" "$FF_BEGIN" "$FF_END" >"$tmp" || rc=$?
+  case $rc in
+    0)
+      changed=1
+      # Stock is "this file does not exist". If what is left is byte-identical
+      # to the system config we seeded from, the file is carrying nothing of
+      # anyone's, so removing it restores stock exactly rather than leaving a
+      # redundant copy behind that would drift from the package's own.
+      if [[ -f $FF_TEMPLATE ]] && cmp -s -- "$tmp" "$FF_TEMPLATE"; then
+        rm -f -- "$FF_CONFIG"
+        log "logo: removed ${FF_CONFIG} -- with our block gone it was a byte-for-byte copy of ${FF_TEMPLATE}, and stock Omarchy has no user config at all."
+        local dir; dir=$(dirname -- "$FF_CONFIG")
+        if [[ -d $dir ]] && rmdir -- "$dir" 2>/dev/null; then
+          log "logo: removed the now-empty ${dir}"
+        fi
+      else
+        install -m 0644 -- "$tmp" "$FF_CONFIG" || fail "could not write ${FF_CONFIG}"
+        log "logo: removed our block from ${FF_CONFIG}. The file was KEPT because what is left is not a plain copy of ${FF_TEMPLATE} -- something else in it is yours."
+      fi
+      ;;
+    3) log "logo: ${FF_CONFIG} carries no block of ours; nothing to remove." ;;
+    *) fail "could not remove our block from ${FF_CONFIG}" ;;
+  esac
+
+  # --- the greeting ---
+  rc=0
+  unsplice "$BASHRC" "$RC_BEGIN" "$RC_END" >"$tmp" || rc=$?
+  case $rc in
+    0)
+      changed=1
+      install -m 0644 -- "$tmp" "$BASHRC" || fail "could not write ${BASHRC}"
+      log "greeting: removed our block from ${BASHRC}"
+      ;;
+    3) log "greeting: ${BASHRC} carries no block of ours; nothing to remove." ;;
+    *) fail "could not remove our block from ${BASHRC}" ;;
+  esac
+  rm -f -- "$tmp"
+
+  # `&&` would abort under `set -e` on the (normal) false case, so these are
+  # written as `if`. The check is worth keeping: a removal that reported success
+  # and left the marker behind is the failure this project exists to attack.
+  if has_block "$FF_CONFIG" "$FF_BEGIN"; then
+    fail "${FF_CONFIG} still carries '${FF_BEGIN}' after removal."
+  fi
+  if has_block "$BASHRC" "$RC_BEGIN"; then
+    fail "${BASHRC} still carries '${RC_BEGIN}' after removal."
+  fi
+
+  if [[ $changed -eq 1 ]]; then
+    log "ok. Stock logo restored. Open a NEW terminal to lose the greeting."
+  else
+    log "ok. Nothing was installed, so nothing was removed."
+  fi
+}
+
+cmd_status() {
+  local logo=off greeting=off source=""
+
+  if has_block "$FF_CONFIG" "$FF_BEGIN"; then
+    logo=on
+    source=$(sed -n 's/^ *"source": *"\(.*\)".*$/\1/p' "$FF_CONFIG" | head -n 1)
+  fi
+  has_block "$BASHRC" "$RC_BEGIN" && greeting=on
+
+  printf 'logo      %-3s  %s\n' "$logo" "$FF_CONFIG"
+  printf 'greeting  %-3s  %s\n' "$greeting" "$BASHRC"
+  if [[ $logo == on ]]; then
+    printf 'art            %s\n' "${source:-<no source line in our block>}"
+    if [[ -n $source && ! -e $source ]]; then
+      warn "the art file ${source} does not exist. fastfetch does NOT report that -- it silently draws its builtin Arch logo instead. Re-run 'pizza pizza' once the file is back, or 'pizza pizza off'."
+    fi
+  fi
+
+  if [[ $logo == on && $greeting == on ]]; then
+    printf '\npizza pizza is ON. Turn it off with: pizza pizza off\n'
+  elif [[ $logo == off && $greeting == off ]]; then
+    printf '\npizza pizza is OFF (stock). Turn it on with: pizza pizza\n'
+  else
+    printf '\npizza pizza is HALF INSTALLED -- one of the two blocks is missing.\n'
+    printf 'Re-run '"'"'pizza pizza'"'"' to complete it, or '"'"'pizza pizza off'"'"' to clear it.\n'
+  fi
+}
+
+cmd_check() {
+  validate_art "$ART"
+  local signature; signature=$(art_signature "$ART")
+  log "ok: ${ART} is a well-formed fastfetch logo (widest line ${#signature} cols)"
+  render_fastfetch_block >/dev/null || fail "the fastfetch block does not render"
+  render_bashrc_block >/dev/null || fail "the greeting block does not render"
+
+  # The guard, checked on the RENDERED text rather than on an installed file, so
+  # the bake stage can run this inside a chroot with no home directory to touch.
+  # The marker lines need no stripping: both begin with '#', so bash reads them
+  # as comments -- which is also why the shell rc markers use '#' and not '//'.
+  #
+  # ⚠️ NOT `render_bashrc_block | bash -s </dev/null`: the redirect makes bash
+  # read an empty script and exit before the pipe is drained, so the renderer
+  # takes SIGPIPE and `pipefail` reports 141 -- a green check that ran nothing.
+  local text out rc=0
+  text=$(render_bashrc_block) || fail "could not render the greeting block"
+  out=$(bash --noprofile --norc -c "$text" </dev/null 2>&1) || rc=$?
+  [[ $rc -eq 0 && -z $out ]] ||
+    fail "the greeting block is not silent in a non-interactive shell (exit ${rc}, output: ${out})"
+  log "ok: the greeting block renders and prints nothing non-interactively"
+}
+
+usage() {
+  cat <<EOF
+${PROG} -- swap fastfetch's logo for an ASCII pizza, and greet every new
+             interactive terminal with it.
+
+  pizza pizza            install both (idempotent -- run it as often as you like)
+  pizza pizza off        remove both, restoring stock exactly
+  pizza pizza status     say which halves are active, and where
+  pizza pizza check      validate the art file; writes nothing
+  pizza pizza help       this text
+
+It edits two files, between begin/end markers, preserving every byte outside
+them:
+
+  ${FF_CONFIG}
+      the user-level fastfetch config Omarchy documents as the override. Created
+      from ${FF_TEMPLATE} when absent, so Omarchy's own
+      panels survive, and deleted again by 'off' when nothing of yours is left
+      in it.
+
+  ${BASHRC}
+      the greeting, guarded on an interactive shell so it never prints into
+      scp, rsync or 'ssh host command'.
+
+The art lives at ${ART}. Swapping it is a one-file change; re-run 'pizza pizza'
+afterwards so the change is re-verified.
+
+Exit codes: 0 success, 1 failure, 2 usage error.
+EOF
+}
+
+main() {
+  case ${1:-on} in
+    on | install | "")      cmd_on ;;
+    off | remove | uninstall) cmd_off ;;
+    status)                 cmd_status ;;
+    check)                  cmd_check ;;
+    -h | --help | help)     usage ;;
+    *) usage_error "unknown argument '${1}'. Expected one of: (nothing), off, status, check, help." ;;
+  esac
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi

@@ -1209,6 +1209,45 @@ readonly POWER_DMI_PRODUCT=/sys/class/dmi/id/product_name
 # ahead of all three and is per-user, so it is not in this list.
 readonly -a SLEEP_LOCK_UNIT_DIRS=(/etc/systemd/user /usr/local/lib/systemd/user /usr/lib/systemd/user)
 
+# --- the pizza (stage-pizza) ----------------------------------------------
+#
+# `pizza` is the project's own command on the installed system: a dispatcher
+# that execs a separate `pizza-<subcommand>` executable, so a subcommand can be
+# written, tested and shipped on its own. src/pizza's own header is the contract.
+#
+# This stage installs the dispatcher, the `pizza pizza` subcommand and the art.
+# It does NOT run `pizza pizza`: that writes ~/.config/fastfetch/config.jsonc
+# and ~/.bashrc, and doing it from a chroot would be writing user config on
+# behalf of a user who has never logged in -- and then verifying it by rendering
+# fastfetch, which in here would read the INSTALLER's machine. The command
+# lands; a human turns it on.
+#
+# ⚠️ THE OTHER SUBCOMMAND IN src/ IS DELIBERATELY NOT LISTED HERE, and this
+# comment does not name it either -- its own unit suite greps this file and
+# iso/overlay for its name and fails on any hit, because "off by default,
+# always" is a property of the whole install path rather than of one script.
+# `pizza help` already reports it as missing rather than hiding it. Adding it
+# here is a one-line change, for its owner to make when it should ship.
+readonly PIZZA_BIN_DIR=/usr/local/bin
+readonly PIZZA_SHARE_DIR=/usr/local/share/pizza
+readonly PIZZA_DISPATCHER_NAME=pizza
+readonly -a PIZZA_SUBCOMMANDS=(pizza-pizza)
+# The art the command uses, and the ONLY place the choice is written down.
+# Swapping the pizza is a one-file change: replace src/pizza-art/pizza.txt (the
+# alternates live beside it) and re-run the stage. Nothing here, and nothing in
+# any test, knows what is inside it.
+readonly PIZZA_ART_NAME=pizza.txt
+readonly PIZZA_ART_ALT_GLOB='pizza-alt-*.txt'
+
+# ⚠️ TWO PLACES, AND THE SECOND IS NOT A FALLBACK -- it is the shape the ISO
+# actually ships. deck_session_bake.stage_payload() copies "every regular file
+# in asset_dir, FLAT" (its own docstring), so the build stages src/pizza-art/*
+# alongside deck-session.sh rather than under a subdirectory, and a target-side
+# run finds the art beside the script. A dev-machine run finds it in the repo
+# layout. Both are real; neither is a guess. This is the same one-authority /
+# two-layouts arrangement src/deck-input-mapper.py's OSK_SEARCH_DIRS uses.
+readonly -a PIZZA_ART_SEARCH_DIRS=(pizza-art .)
+
 readonly -a INSTALL_STAGES=(
   stage-preconditions
   stage-session-select
@@ -1235,6 +1274,11 @@ readonly -a INSTALL_STAGES=(
   # before the mapper would install a fallback for nothing.
   stage-lizard-mode
   stage-desktop-settings
+  # Last, and it is the cheapest stage in the file: three root-owned files under
+  # /usr/local and no system state at all. It installs the `pizza` command; it
+  # does not turn the easter egg on. Ordering it after everything that matters
+  # means a failure here can never be mistaken for a failure of the install.
+  stage-pizza
 )
 
 # The stages the ISO's installer bakes into a target, in run order. Read out of
@@ -1299,6 +1343,11 @@ readonly -a BAKE_STAGES=(
   stage-input-mapper
   stage-lizard-mode
   stage-osk-kb-layout
+  # Before the power button, because everything is. It writes three root-owned
+  # files under /usr/local and touches no system state, so it is safe anywhere
+  # in this list -- it sits here so the last thing the installer does is still
+  # the hardware-button stage below.
+  stage-pizza
   # Last, and the ordering is not arbitrary: it writes the two files that
   # change what a hardware button does, and every other stage should already
   # have had its chance to fail before anything rewires the power key. It also
@@ -6070,6 +6119,141 @@ sudoers_line_is_nopasswd() {
   [[ $line == *NOPASSWD:* ]]
 }
 
+# ---------------------------------------------------------------------------
+# THE PIZZA
+# ---------------------------------------------------------------------------
+#
+# Installs the `pizza` command. Read the PIZZA constants block above for what
+# this does NOT do (it does not turn the easter egg on) and why.
+#
+# Every file it writes is root-owned under /usr/local, which is what makes this
+# stage identical in a chroot and on a live Deck: no user, no home directory, no
+# service, no reload. So there is no in_chroot branch here and no defer() -- the
+# artefact IS the whole stage, and its verification runs the thing it just
+# installed rather than checking that a write returned zero.
+stage_pizza() {
+  # THE TWO DESTINATIONS ARE PARAMETERS -- see "THE VERIFICATION SEAM" above
+  # verify_update_stub. Production passes nothing and gets the constants; the
+  # unit suite passes sandbox directories, so the verification below executes
+  # the copy it just installed under a fake root instead of whatever the machine
+  # running the tests happens to have in /usr/local/bin.
+  local bin_dir=${1:-$PIZZA_BIN_DIR}
+  local share_dir=${2:-$PIZZA_SHARE_DIR}
+
+  # THE SOURCE DIRECTORY IS A PARAMETER TOO, and for a reason the two above do
+  # not have: `install` reads its source as root through $SUDO, and the unit
+  # suite's sudo double rewrites every absolute path that is not already inside
+  # its sandbox -- source paths included. Without this the suite could not run
+  # this stage at all. Production passes nothing and reads from beside the
+  # script, which is where a deck-sync and the ISO's payload both put it.
+  local src_dir=${3:-}
+  if [[ -z $src_dir ]]; then
+    src_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+  fi
+
+  local dispatcher="${src_dir}/${PIZZA_DISPATCHER_NAME}"
+  [[ -f $dispatcher ]] ||
+    fail "${PIZZA_DISPATCHER_NAME} not found beside ${PROG}.sh (looked in ${src_dir}). This stage installs it; sync the whole src/ directory, not just this script."
+
+  local sub
+  for sub in "${PIZZA_SUBCOMMANDS[@]}"; do
+    [[ -f "${src_dir}/${sub}" ]] ||
+      fail "${sub} not found beside ${PROG}.sh (looked in ${src_dir}). The dispatcher execs it by name; installing one without the other ships a command that reports its own subcommand as missing."
+  done
+
+  local art="" art_dir="" candidate
+  for candidate in "${PIZZA_ART_SEARCH_DIRS[@]}"; do
+    if [[ -f "${src_dir}/${candidate}/${PIZZA_ART_NAME}" ]]; then
+      art_dir="${src_dir}/${candidate}"
+      art="${art_dir}/${PIZZA_ART_NAME}"
+      break
+    fi
+  done
+  [[ -n $art ]] ||
+    fail "the pizza art ${PIZZA_ART_NAME} is in none of ${PIZZA_ART_SEARCH_DIRS[*]} under ${src_dir}. fastfetch does NOT warn about a logo file it cannot read -- it silently draws its builtin distro logo instead -- so shipping the command without its art would install a feature that appears to work and does nothing."
+
+  # bash -n on every shipped script BEFORE anything is copied. A syntax error in
+  # a /usr/local/bin file is only found when a human runs it, which for an
+  # easter egg could be months.
+  local script
+  for script in "$dispatcher" "${PIZZA_SUBCOMMANDS[@]/#/${src_dir}/}"; do
+    bash -n "$script" ||
+      fail "${script} is not valid bash. Refusing to install it."
+  done
+
+  log "installing the pizza art: ${share_dir}/${PIZZA_ART_NAME}"
+  $SUDO install -d -m 0755 -o root -g root "$share_dir" ||
+    fail "could not create ${share_dir}"
+  $SUDO install -m 0644 -o root -g root "$art" "${share_dir}/${PIZZA_ART_NAME}" ||
+    fail "could not install ${share_dir}/${PIZZA_ART_NAME}"
+
+  # The alternates travel with it, so swapping the pizza on an installed Deck is
+  # one `cp` and a re-run rather than a re-sync of the repo.
+  local alt
+  for alt in "${art_dir}"/${PIZZA_ART_ALT_GLOB}; do
+    [[ -f $alt ]] || continue
+    $SUDO install -m 0644 -o root -g root "$alt" "${share_dir}/$(basename -- "$alt")" ||
+      fail "could not install ${share_dir}/$(basename -- "$alt")"
+  done
+
+  log "installing the pizza command: ${bin_dir}/${PIZZA_DISPATCHER_NAME}"
+  $SUDO install -d -m 0755 -o root -g root "$bin_dir" ||
+    fail "could not create ${bin_dir}"
+  $SUDO install -m 0755 -o root -g root "$dispatcher" "${bin_dir}/${PIZZA_DISPATCHER_NAME}" ||
+    fail "could not install ${bin_dir}/${PIZZA_DISPATCHER_NAME}"
+  for sub in "${PIZZA_SUBCOMMANDS[@]}"; do
+    log "installing the pizza subcommand: ${bin_dir}/${sub}"
+    $SUDO install -m 0755 -o root -g root "${src_dir}/${sub}" "${bin_dir}/${sub}" ||
+      fail "could not install ${bin_dir}/${sub}"
+  done
+
+  verify_pizza "${bin_dir}/${PIZZA_DISPATCHER_NAME}" "${share_dir}/${PIZZA_ART_NAME}"
+
+  log "stage-pizza: ok"
+  log "NOTHING IS ENABLED. The command is installed and the logo is untouched."
+  log "   In a desktop session, as the desktop user:  pizza pizza"
+  log "   and to put it back exactly:                 pizza pizza off"
+}
+
+# verify_pizza <installed dispatcher> <installed art>
+#
+# The path is a PARAMETER for the reason set out in "THE VERIFICATION SEAM"
+# above verify_update_stub: with the constant baked in, the unit suite would
+# exercise whatever is really in /usr/local/bin on the machine running it.
+#
+# It RUNS what was installed, twice, because both halves fail silently:
+#   - `pizza pizza check` validates the art byte by byte (fastfetch treats an
+#     unreadable logo as "draw something else", with nothing on stderr);
+#   - `pizza` with no arguments must name every subcommand, which is what proves
+#     the dispatcher found the file it dispatches to.
+verify_pizza() {
+  local dispatcher=${1:?verify_pizza needs the installed dispatcher}
+  local art=${2:?verify_pizza needs the installed art}
+
+  local out
+  out=$(PIZZA_ART="$art" "$dispatcher" pizza check 2>&1) ||
+    fail "the installed '${dispatcher} pizza check' failed against ${art}: ${out}"
+  log "verified: ${art} is a well-formed fastfetch logo, per the installed command"
+
+  out=$("$dispatcher" 2>&1) ||
+    fail "'${dispatcher}' with no arguments exited non-zero. It must print its help."
+
+  # Per SUBCOMMAND LINE, not per substring of the whole help: the word "pizza"
+  # appears in the help's own title, so a whole-output match for it would pass
+  # with no subcommands listed at all.
+  local sub name line
+  for sub in "${PIZZA_SUBCOMMANDS[@]}"; do
+    name=${sub#pizza-}
+    line=$(grep -E "^[[:space:]]+${name}[[:space:]]" <<<"$out" | head -n 1) ||
+      line=""
+    [[ -n $line ]] ||
+      fail "'${dispatcher}' does not list a '${name}' subcommand in its help, so the dispatcher is not seeing ${sub} even though it was just installed."
+    [[ $line != *"NOT INSTALLED"* ]] ||
+      fail "'${dispatcher}' reports its own '${name}' subcommand as NOT INSTALLED: '${line}'. The dispatcher and ${sub} are in different directories, or ${sub} is not executable."
+  done
+  log "verified: ${dispatcher} dispatches to every subcommand this stage installed"
+}
+
 # NOT in INSTALL_STAGES. This installs nothing and is for release verification
 # (T6) and for answering PROGRESS.md 5.17 on a given machine.
 stage_audit_privileges() {
@@ -7059,6 +7243,12 @@ Stages also cover Gaming Mode / display defects (PROGRESS.md 5.11, 5.14, 5.15):
                            The user's desktop needs a matching transform in
                            ~/.config/hypr/monitors.lua; the Limine menu and
                            the TTY are NOT covered here.
+  stage-pizza              installs the 'pizza' command (a dispatcher plus
+                           'pizza pizza', which swaps fastfetch's logo for an
+                           ASCII pizza and greets every new interactive terminal
+                           with it). Installs only -- it enables nothing. Turn it
+                           on from a desktop session with 'pizza pizza', and off
+                           again, exactly, with 'pizza pizza off'.
   stage-lizard-mode        binds the controller firmware's lizard mode to
                            deck-input-mapper.service: off while it runs, on
                            again when it stops, crashes or is killed -- by

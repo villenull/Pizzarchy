@@ -728,6 +728,57 @@ done
 
 build_log "staged the session layer: $SESSION_DEST_DIR/{deck-session.sh,$SESSION_MAPPER_NAME} + ${#SESSION_OSK_MODULES[@]} OSK module(s) (${SESSION_OSK_MODULES[*]}), for configure_deck's session_bake step"
 
+# --- 5c(ii). The `pizza` command, into the SAME payload directory -----------
+#
+# deck-session.sh's stage-pizza installs /usr/local/bin/pizza, its subcommands
+# and the ASCII art onto the target, and it reads all of them from beside
+# itself. Nothing else carries them, so without this step that stage aborts the
+# bake -- the P32 family again, except loudly this time, which is the only
+# reason it would be found.
+#
+# 🔴 FLAT, INCLUDING THE ART. deck_session_bake.stage_payload() copies "every
+# regular file in asset_dir", and only files: a src/pizza-art/ subdirectory
+# would be silently dropped on the way into the target. So the art is staged
+# beside the script, which is the second entry in deck-session.sh's own
+# PIZZA_ART_SEARCH_DIRS -- read that comment before changing either side.
+#
+# The names are DERIVED from deck-session.sh, like everything else in 5c: a
+# hand-kept list here is the copy that goes stale against a rename.
+session_pizza_dispatcher=$(sed -n 's/^readonly PIZZA_DISPATCHER_NAME=\(.*\)$/\1/p' "$SESSION_SRC" | tr -d "\"'" | head -1)
+[[ -n $session_pizza_dispatcher ]] ||
+  build_fail "cannot stage the pizza command: no 'readonly PIZZA_DISPATCHER_NAME=<file>' in src/deck-session.sh. stage-pizza installs that file onto the target and reads it from beside the script; refusing to guess its name."
+
+session_pizza_subs_line=$(grep -m1 '^readonly -a PIZZA_SUBCOMMANDS=(' "$SESSION_SRC") ||
+  build_fail "cannot stage the pizza command: no 'readonly -a PIZZA_SUBCOMMANDS=(' array in src/deck-session.sh."
+read -r -a SESSION_PIZZA_SUBS <<<"$(printf '%s' "$session_pizza_subs_line" | sed 's/^readonly -a PIZZA_SUBCOMMANDS=(//; s/).*$//' | tr -d "\"'")"
+(( ${#SESSION_PIZZA_SUBS[@]} > 0 )) ||
+  build_fail "cannot stage the pizza command: src/deck-session.sh's PIZZA_SUBCOMMANDS=( array is empty. A dispatcher with nothing to dispatch to is not a shippable command."
+
+session_pizza_art=$(sed -n 's/^readonly PIZZA_ART_NAME=\(.*\)$/\1/p' "$SESSION_SRC" | tr -d "\"'" | head -1)
+[[ -n $session_pizza_art ]] ||
+  build_fail "cannot stage the pizza command: no 'readonly PIZZA_ART_NAME=<file>' in src/deck-session.sh."
+
+session_pizza_art_dir="$REPO_ROOT/src/pizza-art"
+[[ -f "$session_pizza_art_dir/$session_pizza_art" ]] ||
+  build_fail "cannot stage the pizza command: src/deck-session.sh names $session_pizza_art as the logo and there is no src/pizza-art/$session_pizza_art. fastfetch does not report a logo file it cannot read -- it silently draws something else -- so an image missing this ships a feature that appears to work."
+
+session_pizza_staged=()
+for session_pizza_file in "$session_pizza_dispatcher" "${SESSION_PIZZA_SUBS[@]}"; do
+  [[ -f "$REPO_ROOT/src/$session_pizza_file" ]] ||
+    build_fail "cannot stage the pizza command: src/deck-session.sh names $session_pizza_file and there is no src/$session_pizza_file."
+  install -Dm0644 "$REPO_ROOT/src/$session_pizza_file" "$session_staged_dir/$session_pizza_file" ||
+    build_fail "could not stage src/$session_pizza_file into the airootfs at $SESSION_DEST_DIR"
+  session_pizza_staged+=("$session_pizza_file")
+done
+for session_pizza_file in "$session_pizza_art_dir"/*.txt; do
+  [[ -f $session_pizza_file ]] || continue
+  install -Dm0644 "$session_pizza_file" "$session_staged_dir/$(basename -- "$session_pizza_file")" ||
+    build_fail "could not stage $session_pizza_file into the airootfs at $SESSION_DEST_DIR"
+  session_pizza_staged+=("$(basename -- "$session_pizza_file")")
+done
+
+build_log "staged the pizza command: $SESSION_DEST_DIR/{${session_pizza_staged[*]}}, for stage-pizza"
+
 # ---------------------------------------------------------------------------
 # 6. The guards. 6.1 already ran above (it gates which env vars reach Docker
 #    at all, so it has to run before this point). 6.3 is structural -- it is

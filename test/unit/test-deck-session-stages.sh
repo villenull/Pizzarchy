@@ -3672,7 +3672,121 @@ ok_in_out "masked for every user" \
   "the stage reports the mask it verified, so 'resumes unlocked' is a checked property rather than an assumption"
 
 # ===========================================================================
-# 15. The harness's own safety invariant
+# 15. stage-pizza -- the `pizza` command lands, and enables nothing
+# ===========================================================================
+#
+# The stage installs three kinds of file under /usr/local and runs no service,
+# so what is worth asserting is narrow and specific:
+#
+#   - the dispatcher and its subcommand arrive TOGETHER and executable. A
+#     dispatcher without its subcommand is a command that reports its own
+#     feature as missing, which is exactly what the stage's verifier catches.
+#   - the art arrives, because fastfetch does not report a logo file it cannot
+#     read -- it silently draws its builtin distro logo instead.
+#   - NOTHING user-facing is switched on. The stage must not write a fastfetch
+#     config or a shell rc: `pizza pizza` does that, from a desktop session, as
+#     the user, and doing it from a chroot would be writing user config on
+#     behalf of somebody who has never logged in.
+#
+# ⚠️ The art's CONTENT is deliberately not asserted anywhere in this file.
+# Swapping the pizza must not turn a suite red. What is asserted is that the
+# file arrived and that the installed command judges it well-formed.
+
+# --- the seam, statically, before anything is executed ---------------------
+#
+# Same argument as GATE 4: verify_pizza EXECUTES what was installed, and with
+# the constants baked in that would be whatever this machine really has in
+# /usr/local/bin. It takes both paths from arguments, and stage_pizza takes both
+# destinations from arguments so it can hand them on.
+pizza_seam_body=$(declare -f verify_pizza)
+[[ -n $pizza_seam_body ]] ||
+  fail_test "verify_pizza exists in deck-session.sh" "without the seam this suite would execute the real /usr/local/bin/pizza"
+grep -q '\${1:?' <<<"$pizza_seam_body" ||
+  fail_test "verify_pizza takes the dispatcher to run as \$1" "no '\${1:?...}' in its body"
+grep -q '\${2:?' <<<"$pizza_seam_body" ||
+  fail_test "verify_pizza takes the art to validate as \$2" "no '\${2:?...}' in its body"
+! grep -qE '"\$PIZZA_(BIN_DIR|SHARE_DIR)"' <<<"$pizza_seam_body" ||
+  fail_test "verify_pizza never names the absolute constants" "it would execute them regardless of its arguments:"$'\n'"${pizza_seam_body}"
+pass "verify_pizza takes both paths from arguments and names neither absolute constant"
+
+pizza_stage_body=$(declare -f stage_pizza)
+grep -q '\${1:-\$PIZZA_BIN_DIR}' <<<"$pizza_stage_body" ||
+  fail_test "stage_pizza takes its bin directory from \$1" "otherwise the suite cannot keep it out of the real /usr/local/bin"
+grep -q '\${2:-\$PIZZA_SHARE_DIR}' <<<"$pizza_stage_body" ||
+  fail_test "stage_pizza takes its share directory from \$2" "otherwise the suite cannot keep it out of the real /usr/local/share"
+grep -q '\${3:-}' <<<"$pizza_stage_body" ||
+  fail_test "stage_pizza takes its source directory from \$3" "fake-sudo rewrites source paths outside its sandbox, so without this the stage cannot be run here at all"
+pass "stage_pizza takes both destinations and its source from arguments, defaulting to the constants"
+
+# --- the stage itself ------------------------------------------------------
+#
+# The payload is staged FLAT, which is not a testing convenience: it is the
+# layout the ISO actually ships, because deck_session_bake.stage_payload()
+# copies regular files only and drops subdirectories. Running the stage against
+# it is what proves the second entry of PIZZA_ART_SEARCH_DIRS is real.
+pizza_src="$work/pizza-src"
+mkdir -p "$pizza_src"
+cp "$REPO_ROOT/src/pizza" "$REPO_ROOT/src/pizza-pizza" "$pizza_src/"
+cp "$REPO_ROOT"/src/pizza-art/*.txt "$pizza_src/"
+
+reset_root
+run_stage_body stage_pizza \
+  "$(sandboxed "$root/usr/local/bin")" "$(sandboxed "$root/usr/local/share/pizza")" \
+  "$(sandboxed "$pizza_src")"
+ok_rc 0 "stage-pizza completes against a fake root"
+ok_file /usr/local/bin/pizza "it installs the dispatcher"
+ok_mode /usr/local/bin/pizza 755 "the dispatcher is mode 0755 -- a command nobody can run is not installed"
+ok_file /usr/local/bin/pizza-pizza "it installs the pizza-pizza subcommand beside it"
+ok_mode /usr/local/bin/pizza-pizza 755 "the subcommand is mode 0755; the dispatcher execs it"
+ok_file /usr/local/share/pizza/pizza.txt "it installs the art the logo is drawn from"
+ok_mode /usr/local/share/pizza/pizza.txt 644 "the art is mode 0644 -- data, not a program"
+ok_called "install -m 0755 -o root -g root" "the command is installed root-owned; a user-writable file on PATH runs as whatever it says"
+ok_in_out "verified: " "the stage verifies by RUNNING what it installed, not by trusting the write"
+ok_in_out "NOTHING IS ENABLED" "and says out loud that it switched nothing on"
+
+# The alternates travel with it, so swapping the pizza on a Deck is one `cp`.
+# Counted rather than named: which alternates exist is an art decision.
+pizza_alts=$(find "$root/usr/local/share/pizza" -name 'pizza-alt-*.txt' | wc -l)
+[[ $pizza_alts -ge 1 ]] ||
+  fail_test "the alternate art files travel with it" "found none in ${root}/usr/local/share/pizza"
+pass "the alternate art files are installed too (${pizza_alts} of them), so swapping the pizza on a Deck needs no repo"
+
+# 🔴 THE STAGE ENABLES NOTHING. Asserted against the fake root as a whole,
+# because "it did not write a config" is only worth checking where a config
+# could have been written.
+pizza_touched=$(find "$root" \( -name 'config.jsonc' -o -name '.bashrc' \) -print)
+[[ -z $pizza_touched ]] ||
+  fail_test "stage-pizza writes no fastfetch config and no shell rc" \
+    "it created:"$'\n'"${pizza_touched}"
+pass "stage-pizza writes no fastfetch config and no shell rc -- 'pizza pizza' is a human's decision, not the installer's"
+
+# --- the verifier's failing arm -------------------------------------------
+#
+# A dispatcher installed WITHOUT its subcommand. The command still runs and
+# still prints help, so nothing fails on its own; what catches it is the
+# verifier reading the subcommand's line out of that help.
+pizza_lonely="$work/lonely-bin"
+mkdir -p "$pizza_lonely"
+cp "$REPO_ROOT/src/pizza" "$pizza_lonely/pizza"
+chmod 0755 "$pizza_lonely/pizza"
+stage_rc=0
+( verify_pizza "$(sandboxed "$pizza_lonely/pizza")" \
+               "$(sandboxed "$root/usr/local/share/pizza/pizza.txt")" ) \
+  >"$work/stage.out" 2>"$work/stage.err" || stage_rc=$?
+ok_failed "a dispatcher installed without its subcommand fails the stage"
+ok_in_err "NOT INSTALLED" "and the failure names the subcommand the dispatcher cannot see"
+
+# And a malformed art file, which is the silent one: fastfetch would draw its
+# builtin logo and report nothing at all.
+printf 'not a logo\n' >"$work/bad-art.txt"
+stage_rc=0
+( verify_pizza "$(sandboxed "$root/usr/local/bin/pizza")" "$(sandboxed "$work/bad-art.txt")" ) \
+  >"$work/stage.out" 2>"$work/stage.err" || stage_rc=$?
+ok_failed "art that is not a usable fastfetch logo fails the stage"
+ok_in_err "pizza check" "and the failure names the command that judged it, so the same check can be re-run by hand"
+
+# ===========================================================================
+# 16. The harness's own safety invariant
 # ===========================================================================
 #
 # Everything above is only trustworthy if none of it touched the real system.

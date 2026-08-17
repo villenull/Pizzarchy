@@ -259,6 +259,20 @@ make_fixture() {
   # compositor. The fixture symlinks the real deck-session.sh (below), so its
   # array is the real one and the wayland module has to exist here too.
   printf '"""Stand-in for src/deck_osk_wayland.py."""\n' >"$root/src/deck_osk_wayland.py"
+
+  # Step 5c(ii)'s inputs: the `pizza` command and its art, which bin/build
+  # stages FLAT into the same session payload directory (stage_payload copies
+  # regular files only, so a subdirectory would be dropped on the way into the
+  # target). Stand-ins, like the mapper above -- what is being tested is that
+  # the build derives the names from deck-session.sh and stages what it found,
+  # not what any particular pizza looks like.
+  printf '#!/usr/bin/env bash\n# Stand-in for src/pizza.\n' >"$root/src/pizza"
+  printf '#!/usr/bin/env bash\n# Stand-in for src/pizza-pizza.\n' >"$root/src/pizza-pizza"
+  chmod +x "$root/src/pizza" "$root/src/pizza-pizza"
+  mkdir -p "$root/src/pizza-art"
+  printf '####\n####\n' >"$root/src/pizza-art/pizza.txt"
+  printf '::::\n::::\n' >"$root/src/pizza-art/pizza-alt-fixture.txt"
+
   mkdir -p "$root/iso/overlay/configs/airootfs/usr/share/omarchy-iso" \
            "$root/iso/overlay/configs/deck"
   printf '%s' "$FIXTURE_DECK_FORM_SH" \

@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+#
+# pizza -- the Pizzarchy command. A dispatcher, and nothing else.
+#
+# ---------------------------------------------------------------------------
+# THE SUBCOMMAND CONTRACT -- read this before adding one
+# ---------------------------------------------------------------------------
+#
+# `pizza <name> [args...]` execs a SEPARATE EXECUTABLE named `pizza-<name>`,
+# handing it every remaining argument unchanged. That is the whole interface.
+# There is no plugin registry to edit, no `case` arm to add, and no shared
+# library to source: a subcommand is one self-contained file that can be
+# written, tested and shipped by itself.
+#
+#   pizza pizza      ->  pizza-pizza      (this repo, src/pizza-pizza)
+#   pizza ssh        ->  pizza-ssh        (this repo, src/pizza-ssh)
+#
+# `pizza-ssh` is owned by a different author and is NOT installed by the same
+# stage as this file. It is listed in the help below regardless, and the help
+# says out loud when it is not on the box -- a command that is missing should
+# be reported as missing, not omitted so nobody can tell it was meant to exist.
+#
+# Where it looks, in order, and it stops at the first hit:
+#
+#   1. $PIZZA_SUBCOMMAND_DIR, when set. The test seam. Production never sets it.
+#   2. the directory holding THIS script, so a synced-but-not-installed src/
+#      tree works without a PATH change (`./src/pizza pizza status`).
+#   3. $PATH, which is how the installed copy in /usr/local/bin finds its
+#      siblings.
+#
+# The name is validated against [a-z][a-z0-9-]* before any of that happens, so
+# `pizza ../../bin/sh` is a usage error rather than a path.
+#
+# Exit codes: 0 success, 2 usage error, otherwise the subcommand's own status.
+
+set -euo pipefail
+
+PROG=pizza
+readonly PROG
+
+# Subcommands this repo knows the name of. Two columns, tab-separated: the
+# subcommand and one line about it. A name in here that is not installed is
+# reported as missing by `pizza help`; a name that is installed but not in here
+# still dispatches -- the list is documentation, not a whitelist.
+readonly -a KNOWN_SUBCOMMANDS=(
+  $'pizza\tturn the fastfetch logo into an ASCII pizza, and greet every new terminal with it'
+  $'ssh\tthe SSH half of the Deck iterate-in-place loop'
+)
+
+warn() { printf '[%s] WARNING: %s\n' "$PROG" "$*" >&2; }
+usage_error() { printf '[%s] usage: %s\n' "$PROG" "$*" >&2; exit 2; }
+
+script_dir() { cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd; }
+
+# resolve_subcommand <name> -> absolute path on stdout, or nothing and rc 1.
+resolve_subcommand() {
+  local name=$1 candidate
+
+  if [[ -n ${PIZZA_SUBCOMMAND_DIR:-} ]]; then
+    candidate="${PIZZA_SUBCOMMAND_DIR%/}/${PROG}-${name}"
+    if [[ -x $candidate ]]; then printf '%s' "$candidate"; return 0; fi
+  fi
+
+  candidate="$(script_dir)/${PROG}-${name}"
+  if [[ -x $candidate ]]; then printf '%s' "$candidate"; return 0; fi
+
+  if candidate=$(command -v -- "${PROG}-${name}" 2>/dev/null) && [[ -x $candidate ]]; then
+    printf '%s' "$candidate"; return 0
+  fi
+
+  return 1
+}
+
+usage() {
+  local line name blurb status
+  printf '%s -- the Pizzarchy command\n\n' "$PROG"
+  printf '  %s <subcommand> [args...]\n' "$PROG"
+  printf '  %s help\n\n' "$PROG"
+  printf 'Subcommands:\n'
+  for line in "${KNOWN_SUBCOMMANDS[@]}"; do
+    name=${line%%$'\t'*}
+    blurb=${line#*$'\t'}
+    if resolve_subcommand "$name" >/dev/null; then
+      status=""
+    else
+      status="   (NOT INSTALLED -- ${PROG}-${name} is not on this system)"
+    fi
+    printf '  %-8s %s%s\n' "$name" "$blurb" "$status"
+  done
+  printf '\n'
+  printf 'Each subcommand is a separate executable named %s-<subcommand>; run\n' "$PROG"
+  printf "'%s <subcommand> --help' for its own options.\n" "$PROG"
+  printf '\nExit codes: 0 success, 2 usage error, otherwise the subcommand'"'"'s own.\n'
+}
+
+main() {
+  case ${1:-} in
+    "" | -h | --help | help)
+      usage
+      return 0
+      ;;
+  esac
+
+  local name=$1
+  shift
+
+  [[ $name =~ ^[a-z][a-z0-9-]*$ ]] ||
+    usage_error "'${name}' is not a subcommand name. Names are lowercase letters, digits and dashes, starting with a letter -- this is not a path, and nothing here will treat it as one."
+
+  local target
+  target=$(resolve_subcommand "$name") || {
+    printf '[%s] ERROR: no subcommand '"'"'%s'"'"' -- looked for an executable named %s-%s ' "$PROG" "$name" "$PROG" "$name" >&2
+    printf 'beside %s and on $PATH, and found neither.\n' "$(script_dir)/${PROG}" >&2
+    printf '\n' >&2
+    usage >&2
+    exit 2
+  }
+
+  exec "$target" "$@"
+}
+
+# Sourcing this file defines its functions and runs nothing, so the unit suite
+# can call resolve_subcommand and usage directly. Note `set -euo pipefail` and
+# the readonly constants above are inherited by a sourcing shell -- source once.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi
