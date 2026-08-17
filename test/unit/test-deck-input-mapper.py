@@ -4682,5 +4682,159 @@ check("...and the close honours --dry-run like every other spawn",
        and node.func.id == "run_close_window" for kw in node.keywords],
       ["dry_run=ui is None"])
 
+# --- 🆕 THE POINTER DISAPPEARS WHILE OUR KEYBOARD IS UP ----------------------
+#
+# The residual half of the doubled-pointer defect. `--grab` on the unit stopped
+# the pad MOVING Hyprland's pointer with the OSK up; the cursor was still DRAWN
+# where it had been left, sometimes on top of a key. Motion and visibility are
+# two defects and this covers the second.
+#
+# ⚠️ WHAT IS PINNED HERE IS THE SHAPE, NOT THE SENTENCE. The exact Lua Hyprland
+# accepts is its business and can change under us; what this repo owns is that
+# the call is `eval` and not `keyword` (0.56.2 rejects `keyword` for a Lua
+# config -- docs/PROGRESS.md §7), that the two directions really are different
+# commands, and that every failure is loud. Measured live on the Deck
+# 2026-08-16: `hyprctl getoption cursor:invisible` reads the flag back, with
+# `cursor:deck_nope` -> "no such option" as its negative control, and `eval`
+# exits 7 on a key Hyprland does not know.
+
+def say_and_return(fn):
+    """Run fn(), returning (result, stderr). Real processes, real output --
+    this helper stubs nothing, unlike with_fake_subprocess above."""
+    sink = io.StringIO()
+    with contextlib.redirect_stderr(sink):
+        result = fn()
+    return result, sink.getvalue()
+
+
+_hide = m.cursor_invisible_argv(True)
+_show = m.cursor_invisible_argv(False)
+check("the pointer is toggled through `hyprctl eval`, never `keyword`",
+      (_hide[:2], any("keyword" in part for part in _hide)),
+      (["hyprctl", "eval"], False))
+check("...with a Lua expression, the only form this Hyprland accepts",
+      _hide[-1].startswith("hl.config("), True)
+# Hiding and showing must not be the same command. A builder that ignored its
+# argument would satisfy every other assertion here and never give the pointer
+# back.
+check("🔴 hiding and restoring are genuinely different commands",
+      _hide != _show, True)
+check("...and they differ in the boolean, not in anything else",
+      (_hide[-1].replace("true", "?"), _show[-1].replace("false", "?")),
+      (_show[-1].replace("false", "?"), _hide[-1].replace("true", "?")))
+
+# The call itself, through real processes -- the same technique read_lock_state
+# is tested with, and for the same reason: this one blocks the input loop.
+check("a hyprctl that succeeds is reported as success",
+      m.set_pointer_hidden(True, argv=(sys.executable, "-c", "pass")), True)
+_result, _err = say_and_return(lambda: m.set_pointer_hidden(
+    True, argv=(sys.executable, "-c", "pass")))
+check("...and says nothing when it worked", _err, "")
+
+_result, _err = say_and_return(lambda: m.set_pointer_hidden(
+    False, argv=(sys.executable, "-c",
+                 "import sys; sys.stderr.write('unknown config key\\n'); "
+                 "sys.exit(7)")))
+check("a nonzero hyprctl is a FAILURE, not a shrug", _result, False)
+check("...and it is loud about it", "could not" in _err, True)
+check("...naming which direction failed, so a stuck pointer is diagnosable",
+      "give the pointer back" in _err, True)
+check("...and quoting what hyprctl actually said",
+      "unknown config key" in _err, True)
+# 🔴 The failure must not take the keyboard with it. This is the sentence that
+# tells whoever reads the journal that the rest of the mapper is still alive.
+check("...and says the keyboard is unaffected", "keyboard is unaffected" in _err, True)
+
+_result, _err = say_and_return(
+    lambda: m.set_pointer_hidden(True, argv=("/nonexistent/hyprctl",)))
+check("a missing hyprctl does not raise", _result, False)
+check("...and is still loud", "could not" in _err, True)
+
+# ⚠️ THE CLOCK, NOT THE ANSWER -- read_lock_state's note applies verbatim. This
+# runs inside the input loop of the only input path on the device, so a
+# set_pointer_hidden that ignored `timeout` would freeze a handheld.
+_started = _time.monotonic()
+check("a hyprctl that outlasts the bound fails instead of blocking for ever",
+      m.set_pointer_hidden(True, argv=(sys.executable, "-c", "import time; time.sleep(5)"),
+                           timeout=0.2),
+      False)
+check("...and it was CUT OFF at the bound, not merely answered late",
+      _time.monotonic() - _started < 2.0, True)
+
+_result, _err = say_and_return(lambda: m.set_pointer_hidden(True, dry_run=True))
+check("--dry-run reports instead of running hyprctl, like every other spawn",
+      (_result, "hl.config(" in _err), (True, True))
+
+# §5.28 again: hyprctl is dead without HYPRLAND_INSTANCE_SIGNATURE, which this
+# service does not inherit. The AST sweep above enforces that every subprocess
+# call NAMES an env; this pins that the default is the resolver.
+_marked = (sys.executable, "-c",
+           f"import os, sys; sys.exit(0 if os.environ.get({MARK!r}) else 3)")
+check("the pointer toggle runs with the RESOLVED session environment",
+      m.set_pointer_hidden(True, argv=_marked, env={**os.environ, MARK: "1"}), True)
+check("...and its default is the resolver, not a bare inherit",
+      say_and_return(lambda: m.set_pointer_hidden(True, argv=_marked))[0], False)
+
+# --- and the wiring, against the SOURCE --------------------------------------
+#
+# 🔴 THE WHOLE FIX IS WIRING. Every assertion above passes with
+# set_pointer_hidden never called from anywhere -- P32's "written, tested,
+# never wired" defect, in a function main() is too large to enter. Each call
+# site below is one of the ways the pointer could be stranded; the comment on
+# set_pointer_hidden in the source enumerates them.
+_pointer_calls = [node for node in ast.walk(main_def)
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                  and node.func.id == "set_pointer_hidden"]
+check("main() actually calls it -- at least show/hide, fallback, startup, exit",
+      len(_pointer_calls) >= 4, True)
+
+_visible_def = next(node for node in ast.walk(main_def)
+                    if isinstance(node, ast.FunctionDef) and node.name == "set_osk_visible")
+check("🔴 showing or hiding the keyboard toggles the pointer with it",
+      any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+          and node.func.id == "set_pointer_hidden"
+          for node in ast.walk(_visible_def)), True)
+
+# The overlay dying does NOT go through set_osk_visible. Without a restore
+# here, a crashed keyboard leaves a Deck with no cursor and hands over to
+# squeekboard, which is a keyboard you drive WITH the cursor.
+_fallback_def = next(node for node in ast.walk(main_def)
+                     if isinstance(node, ast.FunctionDef) and node.name == "osk_fall_back")
+check("🔴 the fallback to squeekboard gives the pointer back first",
+      any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+          and node.func.id == "set_pointer_hidden"
+          for node in ast.walk(_fallback_def)), True)
+
+# The exit path. `finally` is what covers a normal stop AND the SIGTERM below;
+# a restore written anywhere else in main() is skipped by every early exit.
+_finally_calls = [node for handler in ast.walk(main_def)
+                  if isinstance(handler, ast.Try)
+                  for node in ast.walk(ast.Module(body=handler.finalbody, type_ignores=[]))
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                  and node.func.id == "set_pointer_hidden"]
+check("🔴 a `finally` restores it, so no ordinary exit can strand the pointer",
+      len(_finally_calls) >= 1, True)
+
+# 🔴 AND THE SIGNAL THAT WOULD OTHERWISE SKIP THAT `finally`. SIGTERM's default
+# disposition kills the process without unwinding, and SIGTERM is how this
+# service is normally stopped, restarted, and ended with the session. Without a
+# handler the restore above is dead code on the path that matters most.
+_sigterm = [node for node in ast.walk(main_def)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "signal"
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == "signal"]
+check("🔴 SIGTERM is turned into an unwind, so `finally` runs on a normal stop",
+      [ast.unparse(node.args[0]) for node in _sigterm], ["signal.SIGTERM"])
+
+# ⚠️ IT MIRRORS, IT DOES NOT COUNT. A counter would fall out of balance on
+# "show, show, hide" and leave the pointer hidden; the source's own comment
+# says so, and this pins that the show/hide call takes a boolean EXPRESSION of
+# the visible flag rather than a bare literal that could only ever hide.
+_visible_args = [ast.unparse(node.args[0]) for node in ast.walk(_visible_def)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == "set_pointer_hidden"]
+check("...and the show/hide call is driven by `visible`, never a bare True",
+      [arg for arg in _visible_args if "visible" in arg], _visible_args)
+
 print(f"\n{'PASS' if FAILURES == 0 else 'FAILED'} — {FAILURES} failure(s)")
 sys.exit(1 if FAILURES else 0)
