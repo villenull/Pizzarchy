@@ -69,7 +69,7 @@ image — see [Recovery](#recovery).
 
 ---
 
-## Controls
+## Controls (applicable in Desktop Mode)
 
 | | |
 |---|---|
@@ -82,8 +82,6 @@ image — see [Recovery](#recovery).
 | **L2** / **R2** | left / right trackpad click |
 | **STEAM** | apps menu |
 | **QAM** (the ⋯ button) | the Omarchy menu |
-
-These are Desktop Mode. In Gaming Mode the buttons do what they always did.
 
 ---
 
