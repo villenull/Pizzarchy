@@ -82,6 +82,7 @@ import os
 import pathlib
 import selectors
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -2354,6 +2355,114 @@ def run_close_window(dry_run: bool = False) -> bool:
     return True
 
 
+# --- the system pointer, for as long as our own keyboard is up ---------------
+#
+# 🔴 THE POINTER WAS STILL DRAWN OVER THE KEYBOARD. `--grab` on the unit
+# (deck-session.sh) stopped the pad MOVING Hyprland's pointer while the OSK is
+# up, and `mapper.osk_active` stops us emitting motion of our own -- but
+# neither is a reason for the compositor to stop DRAWING the cursor. It sat
+# wherever it was last left, sometimes on top of a key. Motion and visibility
+# are two separate defects and this is the second one.
+#
+# ⚠️ THE MECHANISM IS HYPRLAND'S OWN OPTION, SET LIVE. Measured on the Deck
+# 2026-08-16, Hyprland 0.56.2:
+#
+#     $ hyprctl getoption cursor:deck_nope        # negative control
+#     no such option
+#     $ hyprctl getoption cursor:invisible
+#     bool: false
+#     set: false
+#     $ hyprctl eval 'hl.config({ cursor = { invisible = true } })'
+#     ok
+#     $ hyprctl getoption cursor:invisible
+#     bool: true
+#     set: true
+#
+# ⚠️ `hyprctl keyword` CANNOT DO THIS. Omarchy 4.0 configures Hyprland in Lua
+# and 0.56.2 answers `keyword` with "use eval" (docs/PROGRESS.md §7). And
+# unlike the dead sentinel readback that hazard 3 of
+# test/unit/test-hyprctl-syntax.sh describes, this pair has BOTH channels: eval
+# exits 7 with a Lua error on a key it does not know (measured --
+# `cursor.deck_nope` gives `unknown config key`), and `getoption` reads the
+# value back with a working negative control. A typo is loud at both ends.
+#
+# 🔴 THIS IS COMPOSITOR STATE, NOT PROCESS STATE, SO IT NEEDS A WAY BACK. A
+# pointer hidden for ever is far worse than one drawn in the wrong place, so
+# every path that could strand it is covered on purpose:
+#
+#   normal exit, SIGINT, SIGTERM  main()'s `finally` restores it. SIGTERM is
+#                                 turned into an ordinary unwind for exactly
+#                                 this reason -- its default disposition kills
+#                                 the process without running `finally`, and
+#                                 `systemctl stop`/`restart` and the session
+#                                 ending all send it.
+#   SIGKILL                       NOT recoverable in-process, by definition.
+#                                 Covered from the OTHER end: main() clears the
+#                                 flag at STARTUP on the layer backend, and the
+#                                 unit is Restart=on-failure, so the successor
+#                                 of a killed mapper un-hides the pointer.
+#   our keyboard fails at runtime  `osk_fall_back` restores before handing the
+#                                 job to squeekboard -- which is a keyboard you
+#                                 drive WITH the pointer.
+#   Hyprland restarts or reloads  the option reverts to the config file, which
+#                                 does not set it. Measured: after `hyprctl
+#                                 reload`, `cursor:invisible` reads `set: false`
+#                                 again.
+#   show, show, then one hide     this MIRRORS the visible flag, it does not
+#                                 count, so the pair cannot fall out of balance
+#                                 and calling it twice costs one extra hyprctl.
+#
+# ⚠️ RESTORING MEANS "false", NOT "whatever it was". Reading the old value first
+# would be another bounded hyprctl, another way to fail, and it would faithfully
+# restore an invisible pointer if it ever found one. The safe direction is
+# unconditional.
+POINTER_STATE_TIMEOUT = 0.3   # bounded like LOCK_STATE_TIMEOUT; hyprctl is ~10 ms
+
+
+def cursor_invisible_argv(hidden: bool) -> list[str]:
+    """The `hyprctl` that hides Hyprland's pointer, or gives it back."""
+    return ["hyprctl", "eval",
+            "hl.config({ cursor = { invisible = "
+            f"{'true' if hidden else 'false'} }} }})"]
+
+
+def set_pointer_hidden(hidden: bool, dry_run: bool = False, argv=None,
+                       timeout: float = POINTER_STATE_TIMEOUT, env=None) -> bool:
+    """Hide the system pointer, or give it back. True if hyprctl said ok.
+
+    ⚠️ SYNCHRONOUS, unlike every other helper we spawn, and bounded for the
+    same reason `read_lock_state` is. This has to have HAPPENED before main()'s
+    `finally` returns: a `spawn_detached` child racing the service's own
+    teardown is precisely how the pointer would be left hidden with nothing
+    alive to restore it. `timeout` caps what a hung hyprctl can cost.
+
+    ⚠️ NEVER FATAL, NEVER SILENT. Losing the pointer hide must not take the
+    keyboard down with it, so every failure prints and returns False. A silent
+    one here is invisible until someone is holding a Deck with no cursor.
+    """
+    argv = cursor_invisible_argv(hidden) if argv is None else list(argv)
+    what = "hide the pointer" if hidden else "give the pointer back"
+    if dry_run:
+        print(f"pointer -> {'hide' if hidden else 'show'} ({' '.join(argv)})",
+              file=sys.stderr, flush=True)
+        return True
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True,
+                                timeout=timeout,
+                                env=session_environ() if env is None else env)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"deck-input-mapper: could not {what} ({exc}); the keyboard is "
+              "unaffected", file=sys.stderr, flush=True)
+        return False
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip() or (result.stdout or "").strip()
+        print(f"deck-input-mapper: could not {what} (hyprctl exit "
+              f"{result.returncode}: {detail}); the keyboard is unaffected",
+              file=sys.stderr, flush=True)
+        return False
+    return True
+
+
 # --- focus-triggered auto-show (T8 step 8) -----------------------------------
 
 
@@ -3573,6 +3682,13 @@ def main() -> None:
         print(f"deck-input-mapper: the {osk_backend} keyboard failed ({reason}); "
               "falling back to squeekboard over DBus for the rest of this session",
               file=sys.stderr, flush=True)
+        # 🔴 GIVE THE POINTER BACK BEFORE HANDING OVER. This is reached from
+        # `osk_layer_send`/`osk_layer_died` with the keyboard ON SCREEN and
+        # hidden pointer, and it does NOT go through set_osk_visible -- so
+        # without this the overlay dying is a Deck with no cursor and a
+        # squeekboard you can only drive WITH the cursor.
+        if osk_backend == "layer":
+            set_pointer_hidden(False, dry_run=ui is None)
         osk_backend = "dbus"
         mapper.osk_active = False
 
@@ -3621,6 +3737,13 @@ def main() -> None:
                 lock_watcher.start(time.monotonic())
             else:
                 lock_watcher.stop()
+            # The pointer belongs to the compositor, and --grab only stopped it
+            # MOVING; nothing stopped it being DRAWN on top of a key. Hidden
+            # for exactly the span this showing covers, and -- like the watcher
+            # above -- only while STILL "layer", because the fallback a few
+            # lines up hands the job to squeekboard, which needs the pointer.
+            set_pointer_hidden(osk_backend == "layer" and visible,
+                               dry_run=ui is None)
             return
         if osk_backend == "dbus":
             osk_dbus_toggle(visible)
@@ -3742,6 +3865,19 @@ def main() -> None:
             f"{', '.join(SESSION_ENV.missing())}); menus and the keyboard stay "
             "dead until it arrives, which is what this polls for (§5.28)")
 
+    # 🔴 CLEAR A PREDECESSOR'S HIDE. A mapper SIGKILLed with the keyboard up
+    # cannot give the pointer back itself, and the unit is Restart=on-failure,
+    # so its successor is the only thing that can -- see set_pointer_hidden.
+    # Idempotent: in the ordinary case the flag is already false and setting it
+    # false again costs one bounded hyprctl.
+    #
+    # ⚠️ GATED ON A RESOLVED ENVIRONMENT, not on nothing. Without the signature
+    # hyprctl exits non-zero, and this would print a failure on EVERY cold boot
+    # (§5.28) -- loud noise for a state that cannot exist yet, because a
+    # compositor this service has outrun has not had a keyboard shown on it.
+    if osk_backend == "layer" and osk_drawn_here and SESSION_ENV.resolved:
+        set_pointer_hidden(False, dry_run=ui is None)
+
     sel = selectors.DefaultSelector()
     sel.register(pad.fd, selectors.EVENT_READ)
     auto_fd = auto.fileno() if auto is not None else None
@@ -3756,6 +3892,20 @@ def main() -> None:
     if args.osk_start_shown:
         set_osk_visible(True)
     report_bound(args.osk_start_shown)
+    # 🔴 SIGTERM MUST UNWIND, OR THE `finally` BELOW NEVER RUNS. Its default
+    # disposition kills the process outright, and SIGTERM is the ORDINARY way
+    # this service ends -- `systemctl --user stop`, `restart`, and the session
+    # going away all send it. Without this, every one of those would leave the
+    # compositor's cursor hidden if the keyboard happened to be up, with
+    # nothing left alive to give it back. Turning it into SystemExit makes it
+    # an ordinary unwind through the same cleanup a normal exit uses, all of
+    # which is bounded (`osk_layer_stop` waits 2 s then kills; the hyprctl
+    # above is capped at POINTER_STATE_TIMEOUT), so this cannot stall shutdown.
+    #
+    # ⚠️ INSTALLED IN main(), NOT AT IMPORT. The unit suite imports this module
+    # and must not have process-wide handlers installed under it -- the same
+    # rule the `_spawned` reaping note above is written to.
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
     try:
         while True:
             deadline = mapper.next_deadline()
@@ -3945,6 +4095,13 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        # 🔴 FIRST IN THE BLOCK, because a statement below that raises would
+        # skip everything after it, and this is the only one whose omission
+        # leaves state behind in ANOTHER process. Everything else here frees
+        # something the kernel would free anyway when this pid dies; the
+        # compositor's cursor flag it would not.
+        if osk_backend == "layer" and osk_drawn_here:
+            set_pointer_hidden(False, dry_run=ui is None)
         lock_watcher.stop()
         if mapper.haptics is not None:
             # Hand the 16 effect slots back. Not strictly required -- closing
