@@ -617,21 +617,128 @@ def idle_policy_step(ctx) -> None:
     """``DeckStep`` entry point. Records under ``idle_policy``."""
     record_result(ctx.target, "idle_policy", configure_idle_policy(ctx))
 
+SLEEP_LOCK_UNIT = "omarchy-sleep-lock.service"
+SLEEP_LOCK_OVERRIDE_REL = f"etc/systemd/user/{SLEEP_LOCK_UNIT}"
+SLEEP_LOCK_INERT_EXEC = "/usr/bin/true"
+SLEEP_LOCK_WANTED_BY = "graphical-session.target"
+
+# 🔴 BYTE-IDENTICAL TO ``render_sleep_lock_override`` IN ``src/deck-session.sh``.
+#
+# This is the install-time half of a pair. ``src/deck-session.sh``'s
+# ``install_sleep_lock_override`` writes the same file from the same reasoning
+# for a bare run and for the SSH iterate loop; this writes it into a target that
+# has no ``deck-session.sh`` yet. ``test/unit/test-deck-session-stages.sh``
+# renders the shell half and diffs it against this constant, so the two cannot
+# drift -- change one and that suite goes red until you change the other.
+#
+# WHY AN INERT UNIT AND NOT A MASK, in one paragraph; the long form is in the
+# ``SLEEP_LOCK_*`` block of ``src/deck-session.sh``. This Deck must resume from
+# sleep UNLOCKED (no keyboard, no unlock IPC, ``docs/PROGRESS.md`` §5.24), and a
+# ``-> /dev/null`` mask achieves that. It also makes
+# ``systemctl --user enable --now`` REFUSE the unit, which killed upstream's
+# ``install/user/first-run/enable-user-units.sh`` under ``set -euo pipefail``,
+# left ``omarchy-provision-first-run``'s done marker unwritten, and replayed the
+# whole first-run sequence -- "Update System", "Learn Keybindings" -- on EVERY
+# login. A real unit at the same winning path stops the lock just as completely
+# (upstream's fragment is never read, so its ``systemd-inhibit`` is never taken)
+# and ``enable --now`` succeeds.
+SLEEP_LOCK_OVERRIDE_UNIT = f"""\
+# installed-by: deck-session.sh
+#
+# INERT OVERRIDE of Omarchy's {SLEEP_LOCK_UNIT}, installed by deck-session.sh.
+#
+# This Steam Deck RESUMES FROM SLEEP UNLOCKED, on purpose: it has no keyboard,
+# and Omarchy's shell exposes no unlock IPC, so a lock screen on resume is not
+# "type your password", it is a lost session. See docs/PROGRESS.md §5.24 and
+# docs/findings/T13-power-button-and-sleep.md §5.3.
+#
+# systemd resolves a user unit by name through ~/.config/systemd/user, then
+# /etc/systemd/user, then /usr/lib/systemd/user, first fragment wins. This file
+# therefore replaces upstream's, whose ExecStart runs
+# omarchy-system-sleep-monitor -- a systemd-inhibit on logind's PrepareForSleep
+# that calls omarchy-system-sleep-lock. That path is not reachable while this
+# file is here.
+#
+# It is a real unit rather than a mask (-> /dev/null) because a mask makes
+# `systemctl --user enable --now` fail, which killed upstream's first-run step
+# and made the first-run notifications replay on every single login.
+#
+# TO RESTORE UPSTREAM'S BEHAVIOUR: delete this file, then
+#   systemctl --user daemon-reload && systemctl --user restart {SLEEP_LOCK_UNIT}
+# The Deck will lock on suspend again. Read §5.24 before you do.
+[Unit]
+Description=Omarchy sleep lock (neutralised: this Deck resumes unlocked)
+Documentation=file:///{SLEEP_LOCK_OVERRIDE_REL}
+
+[Service]
+Type=oneshot
+ExecStart={SLEEP_LOCK_INERT_EXEC}
+RemainAfterExit=yes
+
+[Install]
+WantedBy={SLEEP_LOCK_WANTED_BY}
+"""
+
+
 def configure_sleep_lock_mask(ctx) -> dict:
+    """Install the inert ``omarchy-sleep-lock.service`` override onto the target.
+
+    Named for its step id (``mask_sleep_lock``), which is a recorded result key
+    in shipped install reports and stays put; what it installs has not been a
+    mask since the first-run defect above was found.
+    """
     target = Path(ctx.target)
     record = {"status": "configured", "error": None}
-    mask_path = target / "etc" / "systemd" / "user" / "omarchy-sleep-lock.service"
+    override_path = target / SLEEP_LOCK_OVERRIDE_REL
     try:
-        mask_path.parent.mkdir(parents=True, exist_ok=True)
-        if mask_path.exists() or mask_path.is_symlink():
-            mask_path.unlink()
-        mask_path.symlink_to("/dev/null")
-        info("Masked omarchy-sleep-lock.service globally.")
-    except OSError as exc:
+        override_path.parent.mkdir(parents=True, exist_ok=True)
+        # Unlink rather than write through: the path may be a symlink today --
+        # a mask this project installed before the fix, or an older install's
+        # -- and writing to it would follow it to /dev/null and land nothing.
+        if override_path.exists() or override_path.is_symlink():
+            override_path.unlink()
+        override_path.write_text(SLEEP_LOCK_OVERRIDE_UNIT, encoding="utf-8")
+        override_path.chmod(0o644)
+
+        # Read back rather than trust the write, and check by SHAPE. The three
+        # failure modes are distinct and all silent: a symlink here is the mask
+        # regression that replays the first-run notifications; a missing or
+        # wrong ExecStart means upstream's lock-on-suspend path is still what
+        # resolves; a missing [Install] makes `systemctl --user enable` refuse,
+        # which is the same defect wearing a different hat.
+        if override_path.is_symlink():
+            raise DeckSettingsError(
+                f"{override_path} is a symlink after writing it; a mask there breaks "
+                "'systemctl --user enable --now' and replays Omarchy's first-run notifications"
+            )
+        written = override_path.read_text(encoding="utf-8")
+        if written != SLEEP_LOCK_OVERRIDE_UNIT:
+            raise DeckSettingsError(f"{override_path} does not read back as the unit that was written")
+        for needed in (
+            f"ExecStart={SLEEP_LOCK_INERT_EXEC}",
+            "[Install]",
+            f"WantedBy={SLEEP_LOCK_WANTED_BY}",
+        ):
+            if needed not in written.splitlines():
+                raise DeckSettingsError(f"{override_path} is missing the line '{needed}'")
+        if "omarchy-system-sleep-monitor" in "\n".join(
+            line for line in written.splitlines() if not line.startswith("#")
+        ):
+            raise DeckSettingsError(
+                f"{override_path} still names omarchy-system-sleep-monitor outside a comment; "
+                "that is upstream's lock-on-suspend path, not an inert override"
+            )
+        info(
+            f"Installed the inert {SLEEP_LOCK_UNIT} override globally "
+            f"(ExecStart={SLEEP_LOCK_INERT_EXEC}): the Deck resumes unlocked and "
+            "'systemctl --user enable --now' still succeeds."
+        )
+    except (OSError, DeckSettingsError) as exc:
         record["status"] = "failed"
         record["error"] = str(exc)
-        error(f"Deck sleep lock mask: {exc}")
+        error(f"Deck sleep lock override: {exc}")
     return record
+
 
 def mask_sleep_lock_step(ctx) -> None:
     record_result(ctx.target, "mask_sleep_lock", configure_sleep_lock_mask(ctx))

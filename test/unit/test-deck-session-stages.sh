@@ -791,12 +791,12 @@ seam_check verify_priv_write_helper         PRIV_WRITE_HELPER
 seam_check verify_greeter_compositor_command SDDM_GREETER_DROPIN
 seam_check verify_lizard_helper             LIZARD_HELPER
 seam_check verify_lizard_grant              LIZARD_HELPER
-# The mask carries less execution risk than the others -- nothing here RUNS the
-# installed artefact -- but the same seam, for a different reason: it reads its
-# symlink back at an absolute path, and off-Deck that path is the developer's
-# own /etc/systemd/user. Without the seam §6c would be asserting against a
-# machine's real systemd configuration rather than the fake root.
-seam_check install_sleep_lock_mask          SLEEP_LOCK_GLOBAL_MASK
+# The sleep-lock override carries less execution risk than the others --
+# nothing here RUNS the installed artefact -- but the same seam, for a different
+# reason: it reads the file back at an absolute path, and off-Deck that path is
+# the developer's own /etc/systemd/user. Without the seam §6c would be asserting
+# against a machine's real systemd configuration rather than the fake root.
+seam_check install_sleep_lock_override      SLEEP_LOCK_GLOBAL_OVERRIDE
 
 # --- GATE 4b ---------------------------------------------------------------
 #
@@ -884,28 +884,28 @@ grep -q '\${1:-' <<<"$power_stage_body" ||
     "the default belongs to the verifier; a copy here is a second path the argument cannot override"
 pass "stage_power_button forwards a runtime-directory seam and names no /run/user path of its own"
 
-# The stage's SECOND seam, the sleep-lock mask. Same two halves: it has to
+# The stage's SECOND seam, the sleep-lock override. Same two halves: it has to
 # accept $2, and it must not name /etc/systemd/user itself -- that default
 # belongs to the constant, and a copy here would be a path §6 could not steer.
 # shellcheck disable=SC2016  # the literal text ${2:-, not this shell's $2.
 grep -q '\${2:-' <<<"$osk_stage_body" ||
-  fail_test "stage_desktop_settings takes the sleep-lock mask path as \$2" \
+  fail_test "stage_desktop_settings takes the sleep-lock override path as \$2" \
     "without it §6 would read back the developer's own /etc/systemd/user"
-# The FULL mask path, not the directory: the stage's shadow warning explains
+# The FULL unit path, not the directory: the stage's shadow warning explains
 # that ~/.config/systemd/user is searched before /etc/systemd/user, and naming
 # the directory in a message is documentation, not a second code path. What
-# would be a second code path is the mask FILE, or the constant itself used
+# would be a second code path is the unit FILE, or the constant itself used
 # somewhere $2 cannot reach -- both of which are checked, and neither of which
 # any prose in this stage has a reason to contain.
 ! grep -qF "/etc/systemd/user/${SLEEP_LOCK_UNIT}" <<<"$osk_stage_body" ||
-  fail_test "stage_desktop_settings does not spell out the mask path itself" \
-    "the default belongs to SLEEP_LOCK_GLOBAL_MASK; a literal copy here is a path the argument cannot override"
-# shellcheck disable=SC2016  # the literal text "$SLEEP_LOCK_GLOBAL_MASK" in the
-# function's source, not this shell's value of it.
-! grep -qE '"\$SLEEP_LOCK_GLOBAL_MASK"' <<<"$osk_stage_body" ||
-  fail_test "stage_desktop_settings does not use \$SLEEP_LOCK_GLOBAL_MASK directly" \
+  fail_test "stage_desktop_settings does not spell out the override path itself" \
+    "the default belongs to SLEEP_LOCK_GLOBAL_OVERRIDE; a literal copy here is a path the argument cannot override"
+# shellcheck disable=SC2016  # the literal text "$SLEEP_LOCK_GLOBAL_OVERRIDE" in
+# the function's source, not this shell's value of it.
+! grep -qE '"\$SLEEP_LOCK_GLOBAL_OVERRIDE"' <<<"$osk_stage_body" ||
+  fail_test "stage_desktop_settings does not use \$SLEEP_LOCK_GLOBAL_OVERRIDE directly" \
     "it would install to the real path regardless of what \$2 says"
-pass "stage_desktop_settings forwards a sleep-lock-mask seam and spells out no mask path of its own"
+pass "stage_desktop_settings forwards a sleep-lock-override seam and spells out no unit path of its own"
 
 # ===========================================================================
 # THE STAGE RUNNER
@@ -1430,15 +1430,16 @@ fi
 hypr_dead="$work/hypr-runtime-empty"
 mkdir -p "$hypr_dead"
 
-# The stage's other seam: where the omarchy-sleep-lock mask lands. EVERY call
-# to stage_desktop_settings below passes it, and that is not optional tidiness
-# -- a call that omitted it would install the symlink under the fake root (that
-# much fake-sudo guarantees) and then read the result back from the developer's
-# REAL /etc/systemd/user, where it is absent, failing the stage for a reason
-# that has nothing to do with the case under test. §6c drives the mask's own
-# contracts; here it is pinned so the rest of §6 stays about dconf and
-# shell.json. /etc/systemd/user is a STOCK_DIR, so its existence is fixture.
-sleep_mask=$(sandboxed "$root/etc/systemd/user/$SLEEP_LOCK_UNIT")
+# The stage's other seam: where the omarchy-sleep-lock override lands. EVERY
+# call to stage_desktop_settings below passes it, and that is not optional
+# tidiness -- a call that omitted it would install the unit under the fake root
+# (that much fake-sudo guarantees) and then read the result back from the
+# developer's REAL /etc/systemd/user, where it is absent, failing the stage for
+# a reason that has nothing to do with the case under test. §6c drives the
+# override's own contracts; here it is pinned so the rest of §6 stays about
+# dconf and shell.json. /etc/systemd/user is a STOCK_DIR, so its existence is
+# fixture.
+sleep_override=$(sandboxed "$root/etc/systemd/user/$SLEEP_LOCK_UNIT")
 
 # A Deck-shaped device list: one physical keyboard on the session layout, our
 # virtual one, and the POINTER half of our uinput device holding the -1 name --
@@ -1480,7 +1481,7 @@ case $host_profile in
     # stage refuses to guess at merge order, which is the correct behaviour --
     # assert that, and skip the rest of this section.
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_override"
     ok_failed "stage-desktop-settings refuses a dconf profile that does not list system-db:local"
     ok_in_err "merge it by hand" "the refusal says profile order is precedence and it will not guess"
     note "the rest of §6 needs a host without /etc/dconf/profile/user, or one that already lists system-db:local"
@@ -1488,7 +1489,7 @@ case $host_profile in
   *)
     [[ $host_profile != ok ]] || export FAKE_DCONF_HOST_PROFILE_OK=1
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_override"
     ok_rc 0 "stage-desktop-settings completes against a fake root"
 
     if [[ $host_profile == absent ]]; then
@@ -1533,43 +1534,65 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
 
     # --- the OTHER lock producer, wired into the same stage --------------
     #
-    # T13 §5.2 / P22 §3.1. The idle policy above and this mask are independent
-    # producers of the same artefact -- a password prompt on a device with no
-    # keyboard -- and neither covers the other. §6c drives the mask's own
-    # contracts; these three assertions are about the WIRING, i.e. that a plain
-    # run of this stage installs it at all. Without them the mask could be
-    # perfect and never called.
-    [[ -L $sleep_mask ]] ||
-      fail_test "stage-desktop-settings installs the ${SLEEP_LOCK_UNIT} mask" \
-        "no symlink at ${sleep_mask}; the idle producer would be neutered and the SUSPEND producer left live"$'\n'"stderr: $(err)"
-    [[ $(readlink -- "$sleep_mask") == /dev/null ]] ||
-      fail_test "the installed mask points at /dev/null" \
-        "it points at '$(readlink -- "$sleep_mask")'; systemd masks a unit ONLY via a symlink to /dev/null"
-    pass "stage-desktop-settings masks ${SLEEP_LOCK_UNIT} at ${SLEEP_LOCK_GLOBAL_MASK}, so a suspended Deck resumes unlocked"
-    ok_called "ln -sfn /dev/null" "the mask is created as a symlink, through \$SUDO"
+    # T13 §5.2 / P22 §3.1. The idle policy above and this override are
+    # independent producers of the same artefact -- a password prompt on a
+    # device with no keyboard -- and neither covers the other. §6c drives the
+    # override's own contracts; these assertions are about the WIRING, i.e.
+    # that a plain run of this stage installs it at all. Without them the
+    # override could be perfect and never called.
+    [[ -f $sleep_override && ! -L $sleep_override ]] ||
+      fail_test "stage-desktop-settings installs the ${SLEEP_LOCK_UNIT} override" \
+        "no regular file at ${sleep_override}; the idle producer would be neutered and the SUSPEND producer left live"$'\n'"stderr: $(err)"
+    grep -qx "ExecStart=${SLEEP_LOCK_INERT_EXEC}" "$sleep_override" ||
+      fail_test "the installed override runs nothing" \
+        "it does not carry ExecStart=${SLEEP_LOCK_INERT_EXEC}, so it is not the inert unit"
+    pass "stage-desktop-settings installs the inert ${SLEEP_LOCK_UNIT} override at ${SLEEP_LOCK_GLOBAL_OVERRIDE}, so a suspended Deck resumes unlocked"
 
-    # A per-user unit file SHADOWS /etc/systemd/user. The operator's own Deck
-    # carries a hand-made mask at exactly this path, so agreeing files must NOT
-    # warn -- a warning that fires on every run is one nobody reads.
+    # 🔴 THE NEGATIVE CONTROL FOR THE DEFECT THIS REPLACED. Masking the unit
+    # also stops the lock, so every "does it lock?" assertion above passes
+    # against a mask -- which is exactly how the mask shipped. What a mask does
+    # NOT survive is `systemctl --user enable --now`, and that is what broke
+    # upstream's first-run step and replayed its notifications on every login
+    # (docs/PROGRESS.md §5.24). Assert the shape that distinguishes them.
+    ! grep -qF 'ln -sfn /dev/null' "$calls" ||
+      fail_test "the stage does NOT mask ${SLEEP_LOCK_UNIT}" \
+        "it created a /dev/null symlink; a masked unit makes 'systemctl --user enable --now' refuse, which fails Omarchy's first-run step and replays its notifications on every login"$'\n'"$(cat "$calls")"
+    pass "no mask is created -- the regression that replays the first-run notifications cannot slip back in unseen"
+
+    # A per-user unit file SHADOWS /etc/systemd/user, so a per-user MASK
+    # re-creates the enable failure even with our override installed. It used to
+    # be reported as "redundant, not wrong"; that expired with the mask itself.
     reset_root; seed_shell_json
     mkdir -p "$(dirname "${FAKE_HOME}/${SLEEP_LOCK_USER_UNIT_REL}")"
     ln -sfn /dev/null "${FAKE_HOME}/${SLEEP_LOCK_USER_UNIT_REL}"
-    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
-    ok_rc 0 "a per-user mask that agrees with ours is not an error"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_override"
+    ok_rc 0 "a leftover per-user mask is a warning, not a failure"
+    ok_in_err "the first-run notifications on every login" \
+      "the warning names the consequence that makes a per-user mask wrong now -- it shadows our override and 'enable --now' refuses again"
+    ok_in_err "${FAKE_HOME}/${SLEEP_LOCK_USER_UNIT_REL}" \
+      "the warning names the file to remove rather than describing it"
+
+    # A per-user COPY of our own override agrees with us and must not warn -- a
+    # warning that fires on a file which agrees is one nobody reads.
+    reset_root; seed_shell_json
+    mkdir -p "$(dirname "${FAKE_HOME}/${SLEEP_LOCK_USER_UNIT_REL}")"
+    render_sleep_lock_override >"${FAKE_HOME}/${SLEEP_LOCK_USER_UNIT_REL}"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_override"
+    ok_rc 0 "a per-user copy of our own override is not an error"
     ok_in_out "it agrees with ours and is now redundant" \
-      "an agreeing per-user mask is reported, not warned about -- this is the state the operator's Deck is in today"
-    ! grep -qF "shadows the mask" "$work/stage.err" ||
-      fail_test "an agreeing per-user mask produces no shadow warning" \
+      "a per-user file carrying our marker is reported, not warned about"
+    ! grep -qF "shadows the override" "$work/stage.err" ||
+      fail_test "a per-user copy of our override produces no shadow warning" \
         "it warned anyway, which trains the operator to ignore the message"$'\n'"stderr: $(err)"
-    pass "no shadow warning is emitted for a per-user file that is itself a mask"
+    pass "no shadow warning is emitted for a per-user file that is our own override"
 
     reset_root; seed_shell_json
     mkdir -p "$(dirname "${FAKE_HOME}/${SLEEP_LOCK_USER_UNIT_REL}")"
     printf '[Unit]\nDescription=someone re-enabled this by hand\n' \
       >"${FAKE_HOME}/${SLEEP_LOCK_USER_UNIT_REL}"
-    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
-    ok_rc 0 "a per-user unit file shadowing the mask is a warning, not a failure"
-    ok_in_err "shadows the mask this stage just installed" \
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_override"
+    ok_rc 0 "a per-user unit file shadowing the override is a warning, not a failure"
+    ok_in_err "shadows the override this stage just installed" \
       "the warning says WHY it matters -- ~/.config/systemd/user comes before /etc/systemd/user, so the Deck could still lock on resume"
     rm -rf "${FAKE_HOME:?}/.config/systemd"
 
@@ -1577,14 +1600,14 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     export FAKE_DCONF_USER_KEY="$OSK_KEY"
     export FAKE_DCONF_USER_VALUE=false
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_override"
     ok_rc 0 "a user value shadowing the site default is a warning, not a failure"
     ok_in_err "is shadowing it" "the warning says a user-level value is shadowing the default, and how to reset it"
     unset FAKE_DCONF_USER_KEY FAKE_DCONF_USER_VALUE
 
     export FAKE_DCONF_UPDATE_RC=1
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_override"
     ok_failed "a failed 'dconf update' stops the stage"
     ok_in_err "on disk but not compiled" "the failure distinguishes 'written' from 'compiled', which is the state that does nothing"
     unset FAKE_DCONF_UPDATE_RC
@@ -1595,7 +1618,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # against the expected value catches it.
     export FAKE_DCONF_STALE_VALUE=false
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_override"
     ok_failed "a site database that answers with the OLD value fails the stage"
     ok_in_err "the OSK would never auto-show for a new user" \
       "the read-back compares against the expected value, not merely 'did dconf answer'"
@@ -1604,7 +1627,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # An unparseable shell.json must not be rewritten from scratch.
     reset_root; seed_shell_json
     printf 'not json at all\n' >"$FAKE_HOME/$OMARCHY_SHELL_JSON_REL"
-    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_override"
     ok_failed "a shell.json that is not JSON stops the stage rather than being replaced"
     ok_in_err "could not patch the idle policy" "the failure names the file it would not overwrite"
 
@@ -1614,7 +1637,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # Latin American, so ';' types 'n-tilde'. Every assertion below is about a
     # way the rule could be installed and do NOTHING.
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_override"
     ok_rc 0 "the stage still completes with the keyboard-layout rule in it"
     osk_lua="${FAKE_HOME}/${HYPR_INPUT_LUA_REL}"
     [[ -f $osk_lua ]] ||
@@ -1636,7 +1659,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # 🔴 The whole point of a stage rather than a hand edit: it is re-runnable.
     # An append-only implementation would grow a second block on every run and
     # eventually be two rules disagreeing with each other.
-    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_override"
     ok_rc 0 "the stage is re-runnable with the rule already installed"
     [[ $(grep -cxF -- "$OSK_KB_RULE_BEGIN" "$osk_lua") -eq 1 ]] ||
       fail_test "a second run replaces the block instead of appending another" \
@@ -1650,7 +1673,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     reset_root; seed_shell_json
     mkdir -p "$(dirname "$osk_lua")"
     printf -- '-- the user'"'"'s own file\nhl.layer_rule({ match = { namespace = "deck-osk" }, above_lock = 2 })\n' >"$osk_lua"
-    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_override"
     ok_rc 0 "the stage completes against an input.lua that already has user content"
     grep -qF 'above_lock = 2' "$osk_lua" ||
       fail_test "the user's existing input.lua content survives the patch" \
@@ -1662,7 +1685,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     reset_root; seed_shell_json
     mkdir -p "$(dirname "$osk_lua")"
     printf '%s\nhl.device({ name = "x" })\n' "$OSK_KB_RULE_BEGIN" >"$osk_lua"
-    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_override"
     ok_failed "a start marker with no end marker stops the stage"
     ok_in_err "could not splice" "the failure names the splice rather than reporting a generic write error"
 
@@ -1670,7 +1693,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # the requirement -- 5.30b's lesson is that a rule nobody has seen work is
     # not a rule that works.
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_override"
     ok_in_err "has NOT been observed working" \
       "with no live compositor the stage says the rule is unverified instead of reporting success"
     ok_in_err "$OSK_HYPR_DEVICE" "the warning names the device to look for, so the operator can check it by hand"
@@ -1686,7 +1709,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
       fail_test "the suite can create a fake compositor socket" "python3 could not bind an AF_UNIX socket"
 
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_override"
     ok_rc 0 "with a live compositor and a device on '${OSK_KB_LAYOUT}', the stage completes"
     ok_in_out "the whole rule block executed" "the sentinel assertion is reported as a verification, not assumed"
     ok_in_out "kept the session layout" "the check also confirms the OTHER keyboards did not change -- per-device, not session-wide"
@@ -1698,7 +1721,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # like this. It must be a failure, not a warning.
     export FAKE_HYPR_SENTINEL=absent
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_override"
     ok_failed "a compositor without the sentinel fails the stage"
     ok_in_err "did not run to the end" "the failure says the BLOCK did not complete, which is what a raised hl.device looks like"
     unset FAKE_HYPR_SENTINEL
@@ -1708,7 +1731,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # failure a sentinel alone cannot see.
     export FAKE_HYPR_DEVICES='{"mice":[],"keyboards":[{"name":"at-translated-set-2-keyboard","layout":"latam"},{"name":"deck-input-mapper-virtual-keyboard","layout":"latam"}]}'
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_override"
     ok_failed "a device that loaded the rule and still reads the session layout fails the stage"
     ok_in_err "reads layout 'latam'" "the failure reports what the device ACTUALLY says, not merely that it disagreed"
     export FAKE_HYPR_DEVICES="$HYPR_DEVICES_GOOD"
@@ -1718,7 +1741,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # session's own layout is not 'us' means the physical keyboards changed too.
     export FAKE_HYPR_DEVICES='{"mice":[],"keyboards":[{"name":"at-translated-set-2-keyboard","layout":"us"},{"name":"deck-input-mapper-virtual-keyboard","layout":"us"}]}'
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_override"
     ok_failed "a rule that changed every keyboard's layout fails the stage"
     ok_in_err "went SESSION-WIDE" "the failure names the per-device requirement rather than reporting a generic mismatch"
     export FAKE_HYPR_DEVICES="$HYPR_DEVICES_GOOD"
@@ -1732,7 +1755,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # would read as "no such keyboard" rather than as a failure.
     export FAKE_HYPR_DEVICES='{"mice":[{"name":"deck-input-mapper-virtual-keyboard"}],"keyboards":[{"name":"at-translated-set-2-keyboard","layout":"latam"},{"name":"deck-input-mapper-virtual-keyboard-1","layout":"us"}]}'
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_override"
     ok_rc 0 "the rule still verifies when the keyboard holds the -1 name and the pointer holds the bare one"
     ok_in_out "kept the session layout" \
       "the check follows the suffixed aliases too; matching only the bare name would report the keyboard as simply not present"
@@ -1743,7 +1766,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # broken query into a reassuring warning.
     export FAKE_HYPR_DEVICES='{"mice":[],"keyboards":[]}'
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_override"
     ok_failed "a compositor reporting no keyboards at all fails the stage"
     ok_in_err "could not read the keyboard layouts back" \
       "an empty device list is a check that could not run, not a device that is absent"
@@ -1754,7 +1777,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # believing the answer.
     rm -rf "$work/hypr-runtime-stale"; mkdir -p "$work/hypr-runtime-stale/hypr/deadbeef_1"
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$work/hypr-runtime-stale" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$work/hypr-runtime-stale" "$sleep_override"
     ok_rc 0 "a stale instance directory with no socket is not treated as a live compositor"
     ok_in_err "no live Hyprland instance" \
       "the socket is what makes an instance live; a leftover directory would otherwise be 'verified' against a compositor that is not there"
@@ -1763,7 +1786,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # not bound. Warn, do not fail -- and do not claim success either.
     export FAKE_HYPR_DEVICES='{"mice":[],"keyboards":[{"name":"at-translated-set-2-keyboard","layout":"latam"}]}'
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_override"
     ok_rc 0 "a stopped input mapper is a warning, not a failure -- the rule is correct and inert"
     ok_in_err "could not be observed taking effect" "the warning distinguishes 'not bound' from 'not working'"
     export FAKE_HYPR_DEVICES="$HYPR_DEVICES_GOOD"
@@ -1773,7 +1796,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # that must never be reported as success.
     export FAKE_HYPRCTL_RELOAD_RC=1
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_live" "$sleep_override"
     ok_failed "a failed 'hyprctl reload' stops the stage"
     ok_in_err "has not picked it up" "the failure distinguishes 'written to disk' from 'loaded by the session'"
     unset FAKE_HYPRCTL_RELOAD_RC
@@ -1783,7 +1806,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
     # verification that quietly downgrades itself to a warning.
     export FAKE_GETENT_UID=not-a-number
     reset_root; seed_shell_json
-    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
+    run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_override"
     ok_failed "a non-numeric uid stops the stage"
     ok_in_err "non-numeric uid" "the failure names the uid rather than building a runtime path out of it"
     unset FAKE_GETENT_UID
@@ -1795,7 +1818,7 @@ print(cfg['idle']['screensaver'], cfg['idle']['lock'], sorted(cfg))
       reset_root; seed_shell_json
       mkdir -p "$(dirname "$osk_lua")"
       printf 'this is not lua at all ((\n' >"$osk_lua"
-      run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_mask"
+      run_stage_body stage_desktop_settings "$hypr_dead" "$sleep_override"
       ok_failed "an input.lua that does not parse as Lua stops the stage"
       ok_in_err "not valid Lua" \
         "Hyprland discards an unparseable config WITHOUT logging a reason, so installing one would silently drop the above_lock rule too"
@@ -1845,132 +1868,238 @@ STUB_INSTALL
 esac
 
 # ===========================================================================
-# 6c. install_sleep_lock_mask -- the artefact that makes a suspended Deck
-#     resume unlocked, and survive a wiped home
+# 6c. install_sleep_lock_override -- the artefact that makes a suspended Deck
+#     resume unlocked, survive a wiped home, AND still let upstream's
+#     first-run step enable the unit
 # ===========================================================================
 #
-# docs/findings/T13-power-button-and-sleep.md §5.2 row B and
-# docs/findings/P22-deck-conformance-sweep.md §3.1. The defect this closes is
-# not a missing feature, it is state in the wrong place: the operator's Deck
-# was masked BY HAND at ~/.config/systemd/user, dated Aug 11 17:54, with the
-# unit's preset still `enabled` and its enablement symlink still sitting
-# underneath. A fresh install, a second user or a wiped home re-arms it, and
-# what it re-arms is a password prompt on a device with no keyboard and no
-# unlock IPC -- which is not "type your password", it is "hold power for ten
-# seconds and lose your work" (T13 §5.3).
+# docs/findings/T13-power-button-and-sleep.md §5.2 row B,
+# docs/findings/P22-deck-conformance-sweep.md §3.1 and docs/PROGRESS.md §5.24.
+# TWO defects meet at this one path, and an implementation that closes one by
+# reopening the other is the whole hazard:
+#
+#   A. The screen must never lock. The Deck has no keyboard and Omarchy's shell
+#      exposes no unlock IPC, so a lock on resume is not "type your password",
+#      it is "hold power for ten seconds and lose your work" (T13 §5.3). It also
+#      has to be image-level state: the operator's Deck was masked BY HAND at
+#      ~/.config/systemd/user, and a fresh install, a second user or a wiped
+#      home re-arms the lock.
+#
+#   B. 🔴 `systemctl --user enable --now` must still SUCCEED. Upstream's
+#      /usr/share/omarchy/install/user/first-run/enable-user-units.sh enables
+#      six units in one command under `set -euo pipefail`. A MASK at this path
+#      makes that command refuse, which failed the step, left
+#      omarchy-provision-first-run's done marker unwritten, and replayed the
+#      whole first-run sequence -- "Update System", "Learn Keybindings" -- on
+#      EVERY login. Closing A with a mask is what shipped B.
+#
+# So the artefact is a real, inert unit at the winning fragment path, and the
+# assertions below are split accordingly: the ones that keep A honest read
+# ExecStart, and the ones that keep B honest read the file's SHAPE and its
+# [Install] section. A test that only checked "the Deck cannot lock" would pass
+# against the mask that caused B, which is exactly how B shipped.
 #
 # OUTSIDE the host_profile case above, deliberately: none of this depends on
-# the developer's dconf profile, and the mask is the load-bearing half of the
-# stage. §6 covers the WIRING (that a plain stage run installs it); this
+# the developer's dconf profile, and the override is the load-bearing half of
+# the stage. §6 covers the WIRING (that a plain stage run installs it); this
 # covers the artefact's own contracts, through the seam GATE 4 already
 # verified, so nothing here touches the real /etc/systemd/user.
-#
-# THE SHAPE IS THE WHOLE POINT and is why every assertion reads the symlink
-# rather than the path: systemd masks a unit only via a symlink to /dev/null.
-# A regular empty file at the same path loads as a unit with no directives --
-# not masked, starting nothing, indistinguishable in `ls` -- so an
-# implementation that produced one would be a silent no-op that ships a Deck
-# locking itself out on the first suspend.
-mask_probe=$(sandboxed "$root/etc/systemd/user/$SLEEP_LOCK_UNIT")
+override_probe=$(sandboxed "$root/etc/systemd/user/$SLEEP_LOCK_UNIT")
 
 reset_root
-run_stage_body install_sleep_lock_mask "$mask_probe"
-ok_rc 0 "install_sleep_lock_mask completes against a fake root"
-[[ -L $mask_probe ]] ||
-  fail_test "it creates a symlink at ${SLEEP_LOCK_GLOBAL_MASK}" \
-    "nothing at ${mask_probe}"$'\n'"stderr: $(err)"
-[[ ! -f $mask_probe || -L $mask_probe ]] ||
-  fail_test "the artefact is a symlink, not a regular file" \
-    "a regular file there is a unit with no directives, which is not a mask"
-pass "the mask is a SYMLINK -- the only shape systemd treats as masked"
-[[ $(readlink -- "$mask_probe") == /dev/null ]] ||
-  fail_test "the symlink points at /dev/null" \
-    "it points at '$(readlink -- "$mask_probe")'"
-pass "the symlink points at /dev/null, which is byte-for-byte what 'systemctl --global mask' writes"
-ok_called "ln -sfn /dev/null" "the symlink is created through \$SUDO, so an unprivileged install fails loudly rather than half-working"
+run_stage_body install_sleep_lock_override "$override_probe"
+ok_rc 0 "install_sleep_lock_override completes against a fake root"
+[[ -e $override_probe ]] ||
+  fail_test "it creates ${SLEEP_LOCK_GLOBAL_OVERRIDE}" \
+    "nothing at ${override_probe}"$'\n'"stderr: $(err)"
+
+# --- (A) it cannot lock: the resolved unit runs nothing --------------------
+grep -qx "ExecStart=${SLEEP_LOCK_INERT_EXEC}" "$override_probe" ||
+  fail_test "the override's ExecStart is the inert one" \
+    "got: $(grep -c . "$override_probe") lines, ExecStart=$(grep -m1 '^ExecStart=' "$override_probe" || echo '<none>')"
+pass "the override runs ${SLEEP_LOCK_INERT_EXEC} -- starting it does nothing at all"
+# Upstream's ExecStart is what execs `systemd-inhibit --what=sleep` and calls
+# omarchy-system-sleep-lock on PrepareForSleep. It must not appear in an
+# executed position; the file's own comment may explain what it replaced, so
+# this reads the DIRECTIVES rather than the whole file.
+! grep -v '^#' "$override_probe" | grep -q 'omarchy-system-sleep-monitor' ||
+  fail_test "no directive names omarchy-system-sleep-monitor" \
+    "upstream's lock-on-suspend path is still reachable from this unit"
+pass "no directive names upstream's sleep monitor -- the PrepareForSleep path is not merely stopped, it is not present"
+
+# --- (B) `systemctl --user enable` can still accept it ---------------------
+#
+# The half a mask fails. Both lines are needed: without [Install] `enable`
+# refuses outright, and without a WantedBy matching upstream's it writes the
+# .wants symlink somewhere upstream's first-run step does not expect.
+[[ ! -L $override_probe ]] ||
+  fail_test "the artefact is a real file, not a symlink" \
+    "a symlink here is a mask, and a masked unit makes 'systemctl --user enable --now' refuse -- the defect this replaced"
+pass "the artefact is a REGULAR FILE -- the shape 'systemctl --user enable --now' accepts"
+grep -qx '\[Install\]' "$override_probe" ||
+  fail_test "the override carries an [Install] section" \
+    "without one 'systemctl --user enable' refuses it just as loudly as a mask did"
+grep -qx "WantedBy=${SLEEP_LOCK_WANTED_BY}" "$override_probe" ||
+  fail_test "the override is WantedBy=${SLEEP_LOCK_WANTED_BY}" \
+    "it must match upstream's [Install] so 'enable' writes the .wants symlink upstream's first-run step expects"
+pass "the override is enable-able and lands in the same .wants target upstream's does"
+
+ok_in_file "/etc/systemd/user/$SLEEP_LOCK_UNIT" "$INSTALL_MARKER" \
+  "the override carries the install marker, so a re-run recognises its own output and a human can tell whose file it is"
+ok_called "install -m 0644 -o root -g root" "the unit is installed root-owned and world-readable, through \$SUDO"
 ok_called "install -d -m 0755 -o root -g root" "the unit directory is created rather than assumed"
+
+# --- it is explicable and removable ---------------------------------------
+#
+# CLAUDE.md: anything left in /etc is ours and must be explicable. Assert that
+# the file says how to undo it, without pinning the prose -- the assertion is
+# that a reader is told the command, not that it is phrased a particular way.
+grep -q 'systemctl --user daemon-reload' "$override_probe" ||
+  fail_test "the override documents how to restore upstream's behaviour" \
+    "it leaves a file in /etc/systemd/user with no instructions for removing it"
+pass "the installed unit explains, in itself, what it replaced and how to undo it"
 
 # /etc, not $HOME. This is the entire durability claim: a home directory can be
 # wiped and a second user has none of the first user's state.
-[[ $mask_probe == "$root"/etc/systemd/user/* ]] ||
-  fail_test "the mask lands under /etc/systemd/user" "got ${mask_probe}"
+[[ $override_probe == "$root"/etc/systemd/user/* ]] ||
+  fail_test "the override lands under /etc/systemd/user" "got ${override_probe}"
 ! grep -qF "$FAKE_HOME" "$calls" ||
-  fail_test "installing the mask writes nothing into a home directory" \
+  fail_test "installing the override writes nothing into a home directory" \
     "a per-user path appeared in the call log, which is the fragility this replaces:"$'\n'"$(cat "$calls")"
-pass "the mask is image-level state under /etc/systemd/user and touches no home directory"
+pass "the override is image-level state under /etc/systemd/user and touches no home directory"
 
 # --- idempotent, which the SSH iterate loop and every image rebuild need ---
-run_stage_body install_sleep_lock_mask "$mask_probe"
-ok_rc 0 "a second run against an existing mask succeeds"
-ok_in_out "is already masked" "the re-run reports the existing mask rather than silently redoing the work"
-[[ $(readlink -- "$mask_probe") == /dev/null ]] ||
-  fail_test "the mask is unchanged after a re-run" "it now points at '$(readlink -- "$mask_probe")'"
-pass "a re-run leaves the same symlink to /dev/null"
-! grep -qF 'ln -sfn' "$calls" ||
-  fail_test "the re-run does not re-create the symlink" \
-    "it called ln again; the 'already masked' branch is not the one that ran, so the check above passed for the wrong reason"$'\n'"$(cat "$calls")"
-pass "the re-run takes the 'already masked' branch -- no ln call at all"
+before=$(cat "$override_probe")
+run_stage_body install_sleep_lock_override "$override_probe"
+ok_rc 0 "a second run against an existing override succeeds"
+[[ $(cat "$override_probe") == "$before" ]] ||
+  fail_test "a re-run leaves byte-identical content" "the file changed on the second run"
+pass "a re-run leaves the same unit, byte for byte"
+
+# --- 🔴 THE NEGATIVE CONTROL: a regression back to masking -----------------
+#
+# Two directions, because the mask can come back either way.
+#
+# First: it must never PRODUCE one. Every "the Deck cannot lock" assertion above
+# passes against `ln -sfn /dev/null`, so without this the suite would go green
+# on the exact artefact that replays Omarchy's first-run notifications on every
+# login. Read the call log, not the file: a shape check alone would pass an
+# implementation that masked and then overwrote.
+! grep -qF '/dev/null' "$calls" ||
+  fail_test "nothing in the install path touches /dev/null" \
+    "a mask was created or attempted; a masked unit makes 'systemctl --user enable --now' refuse, fails upstream's first-run step, and replays its notifications every login"$'\n'"$(cat "$calls")"
+pass "no /dev/null appears anywhere in the install path -- masking cannot creep back in"
+
+# Second: it must REPLACE one it finds. A Deck installed by an older ISO of ours
+# carries the mask, and assert_ours_or_absent cannot read a marker out of
+# /dev/null -- so without an explicit branch the fix would fail on every re-run
+# and never reach the machines that have the defect.
+reset_root
+ln -sfn /dev/null "$override_probe"
+run_stage_body install_sleep_lock_override "$override_probe"
+ok_rc 0 "an existing mask -- our own previous output -- is replaced, not refused"
+ok_in_out "old-style MASK" "the log says what it found and why it is going away, rather than silently swapping a file in /etc"
+[[ ! -L $override_probe && -f $override_probe ]] ||
+  fail_test "the mask is gone and a real unit is in its place" \
+    "still a symlink at ${override_probe}"$'\n'"stderr: $(err)"
+grep -qx "ExecStart=${SLEEP_LOCK_INERT_EXEC}" "$override_probe" ||
+  fail_test "what replaced the mask is the inert override" "it does not carry the inert ExecStart"
+pass "an older release's mask is upgraded in place -- the machines with the defect are the ones that get the fix"
 
 # --- it refuses to clobber something that is not ours ----------------------
 #
 # A symlink at this path pointing somewhere else is an ALIAS or a drop-in
-# somebody installed on purpose. 'ln -sfn' alone would replace it without a
-# word, which is the silent-overwrite class this project forbids.
+# somebody installed on purpose, and a regular file is another package's unit.
+# Overwriting either without a word is the silent-overwrite class this project
+# forbids -- and only the /dev/null case above is ours to reclaim.
 reset_root
-ln -sfn /usr/lib/systemd/user/somebody-elses.service "$mask_probe"
-run_stage_body install_sleep_lock_mask "$mask_probe"
+ln -sfn /usr/lib/systemd/user/somebody-elses.service "$override_probe"
+run_stage_body install_sleep_lock_override "$override_probe"
 ok_failed "a symlink pointing somewhere other than /dev/null stops the stage"
 ok_in_err "Refusing to replace it" "the refusal says it will not guess, and names what it found"
-[[ $(readlink -- "$mask_probe") == /usr/lib/systemd/user/somebody-elses.service ]] ||
+[[ $(readlink -- "$override_probe") == /usr/lib/systemd/user/somebody-elses.service ]] ||
   fail_test "the foreign symlink is left exactly as it was" \
-    "it now points at '$(readlink -- "$mask_probe")' -- it was replaced before failing"
+    "it now points at '$(readlink -- "$override_probe")' -- it was replaced before failing"
 pass "the foreign symlink is untouched"
 
 reset_root
-printf '[Unit]\nDescription=a real override, not a mask\n' >"$mask_probe"
-run_stage_body install_sleep_lock_mask "$mask_probe"
-ok_failed "a regular unit file at the mask path stops the stage"
-ok_in_err "is not a symlink" "the refusal distinguishes a real unit override from a mask"
-grep -qF 'a real override, not a mask' "$mask_probe" ||
+printf '[Unit]\nDescription=another package got here first\n' >"$override_probe"
+run_stage_body install_sleep_lock_override "$override_probe"
+ok_failed "a regular unit file that is not ours stops the stage"
+ok_in_err "was not written by" "the refusal is assert_ours_or_absent's, and names the path"
+grep -qF 'another package got here first' "$override_probe" ||
   fail_test "the existing unit file is left byte-for-byte alone" "its contents changed before the stage failed"
-pass "an existing unit file is not overwritten"
+pass "another package's unit is not overwritten"
 
-# --- an `ln` that exits 0 having created nothing ---------------------------
+# --- an `install` that exits 0 having written nothing ----------------------
 #
-# The read-back's whole reason for existing, and the same mutation §6 runs
-# against `install`: an exit code is not a symlink. Without the read-back this
-# ships a Deck that locks on resume with every log line claiming success.
+# The read-back's whole reason for existing: an exit code is not a file. Without
+# it this ships a Deck that locks on resume with every log line claiming success.
 reset_root
-cat >"$stub_bin/ln" <<'STUB_LN'
+cat >"$stub_bin/install" <<'STUB_INSTALL'
 #!/usr/bin/env bash
-printf 'ln %s\n' "$*" >>"$CALLS_LOG"
+printf 'install %s\n' "$*" >>"$CALLS_LOG"
 exit 0
-STUB_LN
-chmod +x "$stub_bin/ln"
-run_stage_body install_sleep_lock_mask "$mask_probe"
-rm -f "$stub_bin/ln"
-ok_failed "an ln that exits 0 without creating the symlink fails the stage"
-ok_in_err "is not a symlink after installing it" \
-  "the stage reads the symlink back instead of trusting ln's exit code"
+STUB_INSTALL
+chmod +x "$stub_bin/install"
+run_stage_body install_sleep_lock_override "$override_probe"
+rm -f "$stub_bin/install"
+ok_failed "an install that exits 0 without writing the unit fails the stage"
+ok_in_err "not a regular file after installing it" \
+  "the stage reads the file back instead of trusting install's exit code"
 
-# --- and the shape that is a mask-looking no-op ---------------------------
+# --- and the shape that is a lock-shaped no-op -----------------------------
 #
-# The most dangerous near-miss: a regular EMPTY file where the symlink should
-# be. It is what a `touch`-shaped implementation produces, it passes any
-# 'does the path exist' check, and it does not mask anything.
+# The most dangerous near-miss, and the reason the read-back checks ExecStart
+# rather than existence: a file that lands, parses, and is upstream's. It passes
+# any 'does the path exist' check and locks the Deck on the first suspend.
 reset_root
-cat >"$stub_bin/ln" <<'STUB_LN'
+cat >"$stub_bin/install" <<'STUB_INSTALL'
 #!/usr/bin/env bash
-printf 'ln %s\n' "$*" >>"$CALLS_LOG"
-: >"${@: -1}"
+printf 'install %s\n' "$*" >>"$CALLS_LOG"
+if [[ $1 == -m ]]; then
+  printf '[Service]\nExecStart=/usr/bin/omarchy-system-sleep-monitor\n' >"${@: -1}"
+fi
 exit 0
-STUB_LN
-chmod +x "$stub_bin/ln"
-run_stage_body install_sleep_lock_mask "$mask_probe"
-rm -f "$stub_bin/ln"
-ok_failed "an ln that leaves a regular empty file instead of a symlink fails the stage"
-ok_in_err "is not a symlink after installing it" \
-  "an empty regular unit file loads with no directives and masks NOTHING; the check rejects it by shape"
+STUB_INSTALL
+chmod +x "$stub_bin/install"
+run_stage_body install_sleep_lock_override "$override_probe"
+rm -f "$stub_bin/install"
+ok_failed "an install that lands upstream's unit instead of ours fails the stage"
+ok_in_err "ExecStart=${SLEEP_LOCK_INERT_EXEC}" \
+  "the check is on the ExecStart that landed, not on the file existing -- a unit that locks the Deck is the failure this catches"
+
+# --- 🔴 the two halves must not drift apart -------------------------------
+#
+# The ISO's installer writes this same unit into a target that has no
+# deck-session.sh, from deck_session_settings.py's SLEEP_LOCK_OVERRIDE_UNIT.
+# Two hand-written copies of a load-bearing file is how one gets fixed and the
+# other does not -- which is precisely the shape of this defect's own history,
+# where the mask went into stage-desktop-settings and reached the live-ISO
+# install path late. Read both sources and diff them, rather than pinning either
+# one's text here.
+settings_py=$REPO_ROOT/iso/overlay/configs/airootfs/usr/share/omarchy-iso/orchestrator/deck_session_settings.py
+if [[ -r $settings_py ]] && command -v python3 >/dev/null 2>&1; then
+  baked=$(python3 - "$settings_py" <<'PY'
+import ast, sys
+mod = ast.parse(open(sys.argv[1]).read())
+want = {"SLEEP_LOCK_UNIT", "SLEEP_LOCK_OVERRIDE_REL", "SLEEP_LOCK_INERT_EXEC",
+        "SLEEP_LOCK_WANTED_BY", "SLEEP_LOCK_OVERRIDE_UNIT"}
+body = [n for n in mod.body
+        if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", None) in want]
+ns = {}
+exec(compile(ast.Module(body=body, type_ignores=[]), "<settings>", "exec"), ns)
+sys.stdout.write(ns["SLEEP_LOCK_OVERRIDE_UNIT"])
+PY
+  ) || fail_test "deck_session_settings.py still defines SLEEP_LOCK_OVERRIDE_UNIT" \
+       "the installer's half of the sleep-lock override could not be read"
+  [[ $baked == "$(render_sleep_lock_override)" ]] ||
+    fail_test "the two halves of the sleep-lock override are byte-identical" \
+      "render_sleep_lock_override and deck_session_settings.py's SLEEP_LOCK_OVERRIDE_UNIT differ:"$'\n'"$(diff <(render_sleep_lock_override) <(printf '%s' "$baked") || true)"
+  pass "the bare-run half and the ISO-installer half render the same unit, byte for byte"
+else
+  note "deck_session_settings.py or python3 is unavailable, so the two-halves diff is skipped"
+fi
 
 reset_root
 
@@ -3303,8 +3432,13 @@ power_reset() {
 
   printf '%s\n' "$POWER_MODEL" >"$root/sys/class/dmi/id/product_name"
 
-  printf '[Unit]\nDescription=lock on sleep\n' >"$root/usr/lib/systemd/user/${SLEEP_LOCK_UNIT}"
-  ln -sfn /dev/null "$root$SLEEP_LOCK_GLOBAL_MASK"
+  printf '[Unit]\nDescription=lock on sleep\n[Service]\nExecStart=/usr/bin/omarchy-system-sleep-monitor\n' \
+    >"$root/usr/lib/systemd/user/${SLEEP_LOCK_UNIT}"
+  # Our inert override, rendered from the source of truth rather than
+  # hand-written here: the fixture is "a Deck stage-desktop-settings has already
+  # run on", and a hand-written copy would keep passing after the real artefact
+  # changed shape -- which is how a mask survived in this fixture for a release.
+  render_sleep_lock_override >"$root$SLEEP_LOCK_GLOBAL_OVERRIDE"
 
   power_node event0 acpi-PNP0C0C:00                # ACPI, silent, tagged
   power_node event1 acpi-PNP0C0D:00                # the Lid Switch
@@ -3646,30 +3780,48 @@ ok_in_err "found no udev rule" \
 # --- the lock that no keyboard can answer ---------------------------------
 #
 # 🔴 Blast radius R2. This Deck resumes from sleep UNLOCKED on purpose,
-# because it has no keyboard; that holds only while omarchy-sleep-lock stays
-# masked. A power button that suspends while that unit is live turns every
-# press into an unanswerable password prompt. The stage cannot see a per-user
-# mask from root, so it WARNS with the exact command that settles it rather
-# than failing on half an answer.
+# because it has no keyboard; that holds only while omarchy-sleep-lock resolves
+# to our inert override. A power button that suspends while UPSTREAM's unit is
+# what resolves turns every press into an unanswerable password prompt. The
+# stage cannot see a per-user file from root, so it WARNS with the exact
+# command that settles it rather than failing on half an answer.
 power_reset
-rm -f "$root$SLEEP_LOCK_GLOBAL_MASK"
+rm -f "$root$SLEEP_LOCK_GLOBAL_OVERRIDE"
 run_stage_body stage_power_button "$hypr_dead"
-ok_rc 0 "an unmasked ${SLEEP_LOCK_UNIT} does not stop the stage -- the other half of the answer is per-user and unreadable from here"
+ok_rc 0 "an un-overridden ${SLEEP_LOCK_UNIT} does not stop the stage -- the other half of the answer is per-user and unreadable from here"
 ok_in_err "$SLEEP_LOCK_UNIT" "but it warns, naming the unit"
 ok_in_err "no keyboard" "and says why it matters on this device specifically"
-ok_in_err "systemctl --user is-enabled" "and prints the one command that settles it, to run before the first press"
+ok_in_err "systemctl --user show -p FragmentPath" \
+  "and prints the one command that settles it, to run before the first press -- which fragment actually wins"
 
 power_reset
-rm -f "$root$SLEEP_LOCK_GLOBAL_MASK" "$root/usr/lib/systemd/user/${SLEEP_LOCK_UNIT}"
+rm -f "$root$SLEEP_LOCK_GLOBAL_OVERRIDE" "$root/usr/lib/systemd/user/${SLEEP_LOCK_UNIT}"
 run_stage_body stage_power_button "$hypr_dead"
 ok_rc 0 "a machine with no ${SLEEP_LOCK_UNIT} at all installs cleanly"
 ok_in_out "is not installed on this machine" "and says so, rather than warning about a unit that does not exist"
 
 power_reset
 run_stage_body stage_power_button "$hypr_dead"
-ok_rc 0 "and the masked case is the one the fixture ships"
-ok_in_out "masked for every user" \
-  "the stage reports the mask it verified, so 'resumes unlocked' is a checked property rather than an assumption"
+ok_rc 0 "and the overridden case is the one the fixture ships"
+ok_in_out "resolves to our inert override" \
+  "the stage reports the override it verified, so 'resumes unlocked' is a checked property rather than an assumption"
+
+# 🔴 THE OLD MASK IS NOT A PASS. A Deck installed by a previous release of this
+# project carries `-> /dev/null` here. It cannot lock, so every safety
+# assertion above is satisfied -- and it is the state that replays Omarchy's
+# first-run notifications on every login. Reporting it as verified would hide a
+# live defect behind a green line, so it gets its own verdict.
+power_reset
+rm -f "$root$SLEEP_LOCK_GLOBAL_OVERRIDE"
+ln -sfn /dev/null "$root$SLEEP_LOCK_GLOBAL_OVERRIDE"
+run_stage_body stage_power_button "$hypr_dead"
+ok_rc 0 "an older release's mask does not stop the stage -- the power button is still safe"
+ok_in_err "OLD MASK" "but it is reported as the defect it is, not as a verified override"
+ok_in_err "first-run notifications" "and the warning names the consequence: they replay on every login"
+! grep -qF "resolves to our inert override" "$work/stage.out" ||
+  fail_test "a mask is NOT reported as a verified override" \
+    "the stage printed its success line for an artefact that breaks Omarchy's first-run step"$'\n'"stdout: $(cat "$work/stage.out")"
+pass "a mask gets its own verdict rather than passing as ours -- the negative control for a regression"
 
 # ===========================================================================
 # 15. stage-pizza -- the `pizza` command lands, and enables nothing

@@ -478,8 +478,8 @@ readonly OSK_KB_SENTINEL=DECK_OSK_KB_LAYOUT
 # An earlier version of this comment claimed the settings below mean the
 # handheld "can never be shown an unanswerable password prompt". That was
 # false when it was written. The settings below are necessary, not sufficient.
-# The suspend producer is now covered by SLEEP_LOCK_GLOBAL_MASK below; the menu row is
-# deliberately left alone -- a lock the user ASKS for is not a lockout.
+# The suspend producer is now covered by SLEEP_LOCK_GLOBAL_OVERRIDE below; the
+# menu row is deliberately left alone -- a lock the user ASKS for is not a lockout.
 readonly OMARCHY_SHELL_JSON_REL=.config/omarchy/shell.json
 readonly OMARCHY_SHELL_JSON_DEFAULTS=/usr/share/omarchy/config/omarchy/shell.json
 readonly IDLE_SCREENSAVER_SECONDS=150
@@ -515,32 +515,70 @@ readonly IDLE_LOCK_SECONDS=86400
 #
 # WHY /etc AND NOT $HOME. The operator's Deck was masked BY HAND on 2026-08-11
 # with `~/.config/systemd/user/omarchy-sleep-lock.service -> /dev/null`
-# (docs/findings/P22-deck-conformance-sweep.md §3.1, measured). That mask is
+# (docs/findings/P22-deck-conformance-sweep.md §3.1, measured). That is
 # per-user state: a fresh install, a second user or a wiped home loses it, and
 # the unit's PRESET is `enabled`, so `systemctl --user preset-all` or simply a
-# new user re-arms it. The enablement symlink is still sitting under the mask
-# in that same home. An installer's artefact has to outlive all of that, so it
-# goes in /etc/systemd/user -- which is byte-for-byte what
-# `systemctl --global mask` writes, and is the reason that path exists.
+# new user re-arms it. An installer's artefact has to outlive all of that, so
+# it goes in /etc/systemd/user, the system-wide override directory for USER
+# units, and the reason that path exists at all.
 #
 # ⚠️ PRECEDENCE, because it is what makes this work: systemd resolves a user
 # unit BY NAME through ~/.config/systemd/user, then /etc/systemd/user, then
-# /usr/lib/systemd/user, and a symlink to /dev/null anywhere in that chain
-# masks it. A `.wants/` symlink from an enable/preset does not inject a
-# fragment path, so an enabled-but-masked unit stays masked -- which is
-# exactly the state measured on the Deck, one level up in $HOME. That the same
-# holds one level down in /etc is INFERRED from the search order, not yet
-# measured on hardware; verify with `systemctl --user is-enabled` returning
-# `masked` for a user whose home carries no mask of its own.
+# /usr/lib/systemd/user, and the FIRST fragment found wins outright -- the
+# later ones are never read. A `.wants/` symlink from an enable/preset does not
+# inject a fragment path, so an enabled unit still resolves through that same
+# search. Measured on the operator's Deck 2026-08-16: with only /etc/systemd/user
+# carrying a file, `systemctl --user is-enabled` reported it, and /usr/lib's
+# fragment did not run -- so /etc beating /usr/lib for this unit is now a
+# measurement, not the inference this comment used to record.
 #
-# ⚠️ NOT `systemctl --global mask`: the symlink has to be bakeable into an
-# image by a build that has no running systemd for the target (T5), and `ln`
-# needs none. The artefact is identical either way.
+# 🔴 IT IS AN INERT OVERRIDE, NOT A MASK, AND THE DIFFERENCE IS A SHIPPED
+# DEFECT. Masking (the `-> /dev/null` symlink this used to install) does stop
+# the lock -- and it also makes `systemctl --user enable --now` REFUSE:
+#
+#   Failed to enable unit: Unit /etc/systemd/user/omarchy-sleep-lock.service is masked
+#
+# Upstream's first-run step
+# /usr/share/omarchy/install/user/first-run/enable-user-units.sh enables six
+# units in ONE `enable --now`, under `set -euo pipefail`, so our mask killed
+# the whole step. omarchy-provision-first-run then logged
+# "Failed: enable user systemd units (exit code: 1)", never wrote its
+# first-run-user done marker, and REPLAYED THE ENTIRE FIRST-RUN SEQUENCE ON
+# EVERY LOGIN -- including the "Update System" and "Learn Keybindings"
+# notifications, which are supposed to fire once and which reappeared every
+# time the operator entered Desktop Mode. Confirmed end to end on the
+# operator's Deck 2026-08-16 (docs/PROGRESS.md §5.24).
+#
+# So we ship a real unit of our own at the winning path instead: valid, so
+# `enable --now` accepts and starts it; inert, so starting it does nothing.
+# Upstream's fragment -- `ExecStart=/usr/bin/omarchy-system-sleep-monitor`,
+# which execs `systemd-inhibit --what=sleep --mode=delay` and runs
+# `omarchy-system-sleep-lock` on logind's PrepareForSleep -- is never read, so
+# the inhibitor is never taken and the lock is never called. That is a stronger
+# statement than "the service did not start": there is no code path from
+# PrepareForSleep to the lock screen left anywhere in the resolved unit.
+# Measured on the Deck 2026-08-16: after `enable --now`, ExecStart resolved to
+# /usr/bin/true, `systemd-inhibit --list` carried no "Lock screen before
+# suspend" holder, and no omarchy-system-sleep-monitor process existed.
+#
+# ⚠️ [Install] MUST MATCH UPSTREAM'S (`WantedBy=graphical-session.target`).
+# `enable` writes .wants symlinks from whatever [Install] says; a unit with no
+# [Install] makes `enable` fail just as loudly as a mask did, which is the same
+# defect wearing a different hat.
+#
+# ⚠️ A PER-USER MASK NOW BREAKS THIS. ~/.config/systemd/user is searched FIRST,
+# so a leftover hand-made `-> /dev/null` there shadows our override and
+# re-creates the enable failure above. stage-desktop-settings says so out loud.
 readonly SLEEP_LOCK_UNIT=omarchy-sleep-lock.service
-readonly SLEEP_LOCK_GLOBAL_MASK="/etc/systemd/user/${SLEEP_LOCK_UNIT}"
-# Where a per-user mask would sit, relative to a home directory. Ours does not
-# go here -- this is only what gets checked for a user file SHADOWING /etc.
+readonly SLEEP_LOCK_GLOBAL_OVERRIDE="/etc/systemd/user/${SLEEP_LOCK_UNIT}"
+# Where a per-user unit file would sit, relative to a home directory. Ours does
+# not go here -- this is only what gets checked for a user file SHADOWING /etc.
 readonly SLEEP_LOCK_USER_UNIT_REL=".config/systemd/user/${SLEEP_LOCK_UNIT}"
+# What an inert unit has to run. Absolute (systemd requires it), and coreutils'
+# `true` is present on any Arch/Omarchy target. Named as a constant so the
+# renderer and its verification cannot drift apart.
+readonly SLEEP_LOCK_INERT_EXEC=/usr/bin/true
+readonly SLEEP_LOCK_WANTED_BY=graphical-session.target
 
 # --- Desktop-mode input mapper (ROADMAP P2.1, T3 §4) ----------------------
 readonly MAPPER_SRC_NAME=deck-input-mapper.py
@@ -1191,22 +1229,26 @@ readonly POWER_DMI_PRODUCT=/sys/class/dmi/id/product_name
 # 🔴 The interaction that could strand the operator, and it is NOT this stage's
 # to fix: suspend on this Deck must resume UNLOCKED, deliberately, because the
 # device has no keyboard (T5 §5.6, T13 §5.3). That holds only while
-# omarchy-sleep-lock.service stays masked -- it is what locks the screen on
-# PrepareForSleep. Making the power button suspend while that unit is live
-# turns every press into an unanswerable password prompt (blast-radius R2 in
-# T13 §7), so the stage says so out loud before it finishes.
+# omarchy-sleep-lock.service resolves to our inert override -- upstream's
+# fragment is what locks the screen on PrepareForSleep. Making the power button
+# suspend while upstream's unit is the one that resolves turns every press into
+# an unanswerable password prompt (blast-radius R2 in T13 §7), so the stage says
+# so out loud before it finishes.
 #
-# ⚠️ THE UNIT AND ITS MASK PATH ARE DECLARED ONCE, WAY ABOVE, as SLEEP_LOCK_UNIT
-# and SLEEP_LOCK_GLOBAL_MASK -- read the WHY there. This block used to redeclare
-# both, and used to say the mask was "HAND-APPLIED on the test Deck and not
-# shipped from src/ at all". That expired: install_sleep_lock_mask ships it from
-# stage-desktop-settings. What has NOT changed is that this stage must still
-# check rather than assume -- the stages can be run one at a time, and a Deck
-# whose power button suspends before its mask is installed is the bad ordering.
+# ⚠️ THE UNIT AND ITS OVERRIDE PATH ARE DECLARED ONCE, WAY ABOVE, as
+# SLEEP_LOCK_UNIT and SLEEP_LOCK_GLOBAL_OVERRIDE -- read the WHY there,
+# including why it is a real inert unit and not a mask. This block used to
+# redeclare both, and used to say the mask was "HAND-APPLIED on the test Deck
+# and not shipped from src/ at all". That expired: install_sleep_lock_override
+# ships it from stage-desktop-settings. What has NOT changed is that this stage
+# must still check rather than assume -- the stages can be run one at a time,
+# and a Deck whose power button suspends before the override is installed is
+# the bad ordering.
 #
-# The search path, in systemd's own precedence order, for answering "is it
-# masked HERE" rather than "did we install ours". ~/.config/systemd/user comes
-# ahead of all three and is per-user, so it is not in this list.
+# The search path, in systemd's own precedence order, for answering "which
+# fragment would win HERE" rather than "did we install ours".
+# ~/.config/systemd/user comes ahead of all three and is per-user, so it is not
+# in this list.
 readonly -a SLEEP_LOCK_UNIT_DIRS=(/etc/systemd/user /usr/local/lib/systemd/user /usr/lib/systemd/user)
 
 # --- the pizza (stage-pizza) ----------------------------------------------
@@ -5336,58 +5378,133 @@ PY
   esac
 }
 
-# Mask omarchy-sleep-lock.service for every user of this image. Read the
-# SLEEP_LOCK_* constants above first -- the WHY is there, and it is a security
-# decision, not a tidy-up.
+# The inert override that replaces omarchy-sleep-lock.service. Written to
+# stdout so the unit suite can check its shape with no Deck, no root and no VM
+# -- the same move render_update_stub and render_power_udev_rule made, and the
+# reason the ISO installer's own half can assert byte agreement with this one
+# instead of two hand-written copies drifting apart.
+#
+# Read the SLEEP_LOCK_* constants above first. Every line below is load-bearing
+# and the WHY for each is there:
+#   * no ExecStart of upstream's -> nothing ever inhibits sleep or calls the lock
+#   * Type=oneshot + RemainAfterExit -> `enable --now` starts it, it exits 0,
+#     and it stays "active" rather than looking like a crashed service
+#   * [Install] WantedBy matching upstream -> `enable` writes the same .wants
+#     symlink upstream's first-run step expects, and exits 0
+render_sleep_lock_override() {
+  cat <<EOF
+${INSTALL_MARKER}
+#
+# INERT OVERRIDE of Omarchy's ${SLEEP_LOCK_UNIT}, installed by ${PROG}.sh.
+#
+# This Steam Deck RESUMES FROM SLEEP UNLOCKED, on purpose: it has no keyboard,
+# and Omarchy's shell exposes no unlock IPC, so a lock screen on resume is not
+# "type your password", it is a lost session. See docs/PROGRESS.md §5.24 and
+# docs/findings/T13-power-button-and-sleep.md §5.3.
+#
+# systemd resolves a user unit by name through ~/.config/systemd/user, then
+# /etc/systemd/user, then /usr/lib/systemd/user, first fragment wins. This file
+# therefore replaces upstream's, whose ExecStart runs
+# omarchy-system-sleep-monitor -- a systemd-inhibit on logind's PrepareForSleep
+# that calls omarchy-system-sleep-lock. That path is not reachable while this
+# file is here.
+#
+# It is a real unit rather than a mask (-> /dev/null) because a mask makes
+# \`systemctl --user enable --now\` fail, which killed upstream's first-run step
+# and made the first-run notifications replay on every single login.
+#
+# TO RESTORE UPSTREAM'S BEHAVIOUR: delete this file, then
+#   systemctl --user daemon-reload && systemctl --user restart ${SLEEP_LOCK_UNIT}
+# The Deck will lock on suspend again. Read §5.24 before you do.
+[Unit]
+Description=Omarchy sleep lock (neutralised: this Deck resumes unlocked)
+Documentation=file://${SLEEP_LOCK_GLOBAL_OVERRIDE}
+
+[Service]
+Type=oneshot
+ExecStart=${SLEEP_LOCK_INERT_EXEC}
+RemainAfterExit=yes
+
+[Install]
+WantedBy=${SLEEP_LOCK_WANTED_BY}
+EOF
+}
+
+# Install that override for every user of this image. Read the SLEEP_LOCK_*
+# constants above first -- the WHY is there, and it is a security decision, not
+# a tidy-up.
 #
 # THE DESTINATION IS A PARAMETER -- see "THE VERIFICATION SEAM" above
-# verify_update_stub. Production passes nothing and gets ${SLEEP_LOCK_GLOBAL_MASK};
-# the unit suite passes a path under its fake root, because the read-back below
-# resolves the symlink DIRECTLY rather than through $SUDO and would otherwise
-# be inspecting the developer's real /etc.
-install_sleep_lock_mask() {
-  local mask=${1:-$SLEEP_LOCK_GLOBAL_MASK}
+# verify_update_stub. Production passes nothing and gets
+# ${SLEEP_LOCK_GLOBAL_OVERRIDE}; the unit suite passes a path under its fake
+# root, because the read-back below reads the file DIRECTLY rather than through
+# $SUDO and would otherwise be inspecting the developer's real /etc.
+install_sleep_lock_override() {
+  local dest=${1:-$SLEEP_LOCK_GLOBAL_OVERRIDE}
 
-  # Idempotent, and it has to be: this stage is re-run by the SSH iterate loop
-  # and again by every image build. `ln -sfn` alone would be idempotent too,
-  # but it would also silently replace whatever else is there -- so look first.
-  if [[ -L $mask ]]; then
+  # 🔴 A MASK AT THIS PATH IS OUR OWN PREVIOUS OUTPUT, and it is the defect
+  # being fixed -- so this one shape is REPLACED rather than refused. Every
+  # other foreign shape still stops the run. Without this branch the fix would
+  # never reach a Deck installed by an older ISO: assert_ours_or_absent cannot
+  # read a marker out of /dev/null, and the stage would fail on every re-run.
+  if [[ -L $dest ]]; then
     local existing
-    existing=$(readlink -- "$mask") ||
-      fail "${mask} is a symlink that cannot be read; refusing to guess what it points at"
+    existing=$(readlink -- "$dest") ||
+      fail "${dest} is a symlink that cannot be read; refusing to guess what it points at"
     if [[ $existing == /dev/null ]]; then
-      log "${SLEEP_LOCK_UNIT} is already masked at ${mask}"
-      return 0
+      log "${dest} is an old-style MASK of ${SLEEP_LOCK_UNIT} (ours, from a previous release). Replacing it with the inert override: a mask makes 'systemctl --user enable --now' fail, which replays Omarchy's first-run notifications on every login."
+      $SUDO rm -f -- "$dest" ||
+        fail "could not remove the old mask at ${dest}"
+    else
+      fail "${dest} is a symlink to '${existing}', which is neither our old mask nor a unit file. Something else owns this path -- an alias or a drop-in. Refusing to replace it; remove it by hand if it is stale, then re-run."
     fi
-    fail "${mask} is a symlink to '${existing}', not to /dev/null. Something else owns this path -- an alias or a drop-in, not a mask. Refusing to replace it; remove it by hand if it is stale, then re-run."
-  elif [[ -e $mask ]]; then
-    fail "${mask} exists and is not a symlink, so it is a real unit file overriding ${SLEEP_LOCK_UNIT} rather than masking it. Refusing to replace it; move it aside by hand, then re-run."
   fi
 
-  log "masking ${SLEEP_LOCK_UNIT} for every user: ${mask} -> /dev/null"
-  $SUDO install -d -m 0755 -o root -g root "$(dirname "$mask")" ||
-    fail "could not create $(dirname "$mask")"
-  # -n matters: without it, an existing symlink-to-a-directory at $mask would
-  # make ln create the link INSIDE that directory, and the mask would land at a
-  # name systemd never looks up. The branches above already refuse that case;
-  # -n is the second line of defence, and costs nothing.
-  $SUDO ln -sfn /dev/null "$mask" ||
-    fail "could not create the mask symlink ${mask}"
+  # Idempotent, and it has to be: this stage is re-run by the SSH iterate loop
+  # and again by every image build. `install` alone would be idempotent too, but
+  # it would also silently replace whatever else is there -- so look first.
+  assert_ours_or_absent "$dest" "another package's ${SLEEP_LOCK_UNIT} override"
 
-  # Read it back rather than trusting the write, for one specific reason:
-  # systemd treats ONLY a symlink to /dev/null as a mask. A regular empty file
-  # at the same path loads as a unit with no directives -- which is not masked,
-  # starts nothing, and looks identical in a directory listing. Anything that
-  # produced that instead would be a silent no-op, and the device would lock on
-  # resume with every file the installer promised present.
-  [[ -L $mask ]] ||
-    fail "${mask} is not a symlink after installing it; systemd masks a unit only via a symlink to /dev/null, so the sleep lock would still run"
-  local got
-  got=$(readlink -- "$mask") ||
-    fail "could not read back ${mask} after installing it"
-  [[ $got == /dev/null ]] ||
-    fail "${mask} points at '${got}', not /dev/null -- that is not a mask, and the Deck would lock on resume with no way to unlock it"
-  log "verified: ${mask} is a symlink to /dev/null, so ${SLEEP_LOCK_UNIT} is masked for every user, including ones this image has not created yet"
+  log "installing the inert ${SLEEP_LOCK_UNIT} override for every user: ${dest}"
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$dest")" ||
+    fail "could not create $(dirname "$dest")"
+
+  local tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_sleep_lock_override >"$tmp" ||
+    { rm -f "$tmp"; fail "could not render the ${SLEEP_LOCK_UNIT} override"; }
+  $SUDO install -m 0644 -o root -g root "$tmp" "$dest" ||
+    { rm -f "$tmp"; fail "could not install ${dest}"; }
+  rm -f "$tmp"
+
+  # Read it back rather than trusting the write, and check the three properties
+  # that matter -- separately, because each has its own failure mode and each
+  # would otherwise fail silently:
+  #
+  #   1. It is a regular file, not a symlink. A `-> /dev/null` mask here is the
+  #      exact regression this fix exists to prevent: it stops the lock AND
+  #      breaks upstream's first-run enable, so the notifications replay.
+  #   2. Its ExecStart is ours. Anything else -- most of all upstream's
+  #      omarchy-system-sleep-monitor -- means the file that landed is not the
+  #      inert one and the Deck locks on resume.
+  #   3. It has an [Install] section. Without one `systemctl --user enable`
+  #      fails just as loudly as the mask did, which is the same defect again.
+  [[ ! -L $dest ]] ||
+    fail "${dest} is a symlink after installing it. A symlink here is either a mask (which breaks 'systemctl --user enable --now' and replays Omarchy's first-run notifications every login) or someone else's unit -- neither is the inert override this installs"
+  [[ -f $dest ]] ||
+    fail "${dest} is not a regular file after installing it, so nothing overrides ${SLEEP_LOCK_UNIT} and the Deck would lock on resume with no way to unlock it"
+  grep -qx "ExecStart=${SLEEP_LOCK_INERT_EXEC}" "$dest" ||
+    fail "${dest} does not carry 'ExecStart=${SLEEP_LOCK_INERT_EXEC}'. Whatever is there is not the inert override, so the sleep lock may still run and the Deck would resume to a password prompt it has no keyboard for."
+  # DIRECTIVES only. The file's own header explains what it replaced, and that
+  # explanation names upstream's monitor -- checking the whole file would refuse
+  # our own documentation.
+  ! grep -v '^#' "$dest" | grep -q 'omarchy-system-sleep-monitor' ||
+    fail "${dest} still names omarchy-system-sleep-monitor in a directive -- that is upstream's lock-on-suspend path, not an inert override"
+  grep -qx '\[Install\]' "$dest" ||
+    fail "${dest} has no [Install] section, so 'systemctl --user enable' would refuse it and upstream's first-run step would fail exactly as the old mask made it fail"
+  grep -qx "WantedBy=${SLEEP_LOCK_WANTED_BY}" "$dest" ||
+    fail "${dest} does not say 'WantedBy=${SLEEP_LOCK_WANTED_BY}', so 'systemctl --user enable' would write a .wants symlink somewhere upstream's first-run step does not expect"
+  log "verified: ${dest} is a real, inert, enable-able unit (ExecStart=${SLEEP_LOCK_INERT_EXEC}, WantedBy=${SLEEP_LOCK_WANTED_BY}), so ${SLEEP_LOCK_UNIT} starts and does nothing for every user, including ones this image has not created yet"
 }
 
 stage_desktop_settings() {
@@ -5399,12 +5516,12 @@ stage_desktop_settings() {
   #
   # BOTH PARAMETERS ARE SEAMS, not options a Deck ever passes: the XKB rule's
   # verification talks to a LIVE compositor, and hardcoding /run/user/<uid> would
-  # make the unit suite reload the desktop of whoever ran it; the sleep-lock mask
-  # is read back at an absolute path, which off-Deck is the developer's own /etc.
-  # Production passes nothing. See "THE VERIFICATION SEAM" above
+  # make the unit suite reload the desktop of whoever ran it; the sleep-lock
+  # override is read back at an absolute path, which off-Deck is the developer's
+  # own /etc. Production passes nothing. See "THE VERIFICATION SEAM" above
   # verify_update_stub.
   local hypr_runtime=${1:-}
-  local sleep_lock_mask=${2:-}
+  local sleep_lock_override=${2:-}
 
   command -v dconf >/dev/null 2>&1 ||
     fail "dconf not found; the on-screen keyboard's defaults cannot be installed"
@@ -5499,23 +5616,31 @@ stage_desktop_settings() {
   [[ -n $home ]] || fail "empty home directory for ${invoking_user}"
   local shell_json="${home}/${OMARCHY_SHELL_JSON_REL}"
 
-  # --- 3a. the SUSPEND producer, masked at image level ---
+  # --- 3a. the SUSPEND producer, neutered at image level ---
   #
   # First of the two, because it is the one whose failure is unrecoverable: an
   # idle lock takes five minutes to arrive and the power button takes one press.
-  install_sleep_lock_mask ${sleep_lock_mask:+"$sleep_lock_mask"}
+  install_sleep_lock_override ${sleep_lock_override:+"$sleep_lock_override"}
 
   # A user unit file SHADOWS the /etc one -- ~/.config/systemd/user comes first
   # in systemd's search path. Warn only when it actually DISAGREES, for the same
-  # reason the dconf check below does: the operator's own Deck carries a
-  # hand-made mask at exactly this path (P22 §3.1), and a warning that fires on
-  # a file which agrees with us teaches the operator to ignore the message.
+  # reason the dconf check below does: a warning that fires on a file which
+  # agrees with us teaches the operator to ignore the message.
+  #
+  # 🔴 A PER-USER MASK IS NO LONGER "REDUNDANT, NOT WRONG". This block used to
+  # say exactly that, and it was true while /etc carried a mask too. It is not
+  # true now: a `-> /dev/null` here shadows the inert override just installed
+  # and makes `systemctl --user enable --now` fail again, which is what replays
+  # Omarchy's first-run notifications on every login (§5.24). The operator's
+  # Deck carried one, hand-made, until it was reinstalled.
   local user_unit="${home}/${SLEEP_LOCK_USER_UNIT_REL}"
   if [[ -e $user_unit || -L $user_unit ]]; then
     if [[ -L $user_unit && $(readlink -- "$user_unit") == /dev/null ]]; then
-      log "${invoking_user} also has a per-user mask at ${user_unit}; it agrees with ours and is now redundant, not wrong"
+      warn "${user_unit} is a per-user MASK of ${SLEEP_LOCK_UNIT}. ~/.config/systemd/user comes BEFORE /etc/systemd/user in systemd's search path, so it shadows the inert override this stage just installed. It stops the lock, but it also makes 'systemctl --user enable --now' refuse the unit, which fails Omarchy's first-run step and REPLAYS the first-run notifications on every login. Remove it:  rm ${user_unit} && systemctl --user daemon-reload"
+    elif [[ -f $user_unit ]] && grep -qF -- "$INSTALL_MARKER_TEXT" "$user_unit" 2>/dev/null; then
+      log "${invoking_user} also has a copy of our override at ${user_unit}; it agrees with ours and is now redundant, not wrong"
     else
-      warn "${user_unit} exists and is not a mask. ~/.config/systemd/user comes BEFORE /etc/systemd/user in systemd's search path, so this file shadows the mask this stage just installed and ${SLEEP_LOCK_UNIT} may still lock the Deck on resume. Remove it, or replace it with a symlink to /dev/null."
+      warn "${user_unit} exists and is not ours. ~/.config/systemd/user comes BEFORE /etc/systemd/user in systemd's search path, so this file shadows the override this stage just installed and ${SLEEP_LOCK_UNIT} may still lock the Deck on resume. Inspect it; remove it if it is stale."
     fi
   fi
 
@@ -5588,11 +5713,14 @@ PY
   log "NOTE: the keyboard layout rule is PER DEVICE. Physical keyboards and the"
   log "      rest of the desktop keep the session layout; only"
   log "      '${OSK_HYPR_DEVICE}' is pinned to '${OSK_KB_LAYOUT}'."
-  log "NOTE: ${SLEEP_LOCK_UNIT} is masked, so this Deck RESUMES FROM SLEEP"
-  log "      UNLOCKED, deliberately -- it has no keyboard and no unlock IPC."
-  log "      A lock the user asks for (System menu, SUPER+CTRL+L) still works."
-  log "      A unit already running in this session keeps running; the mask"
-  log "      applies from the next graphical session on."
+  log "NOTE: ${SLEEP_LOCK_UNIT} is overridden by an inert unit of ours, so this"
+  log "      Deck RESUMES FROM SLEEP UNLOCKED, deliberately -- it has no keyboard"
+  log "      and no unlock IPC. A lock the user asks for (System menu,"
+  log "      SUPER+CTRL+L) still works. It is a real unit rather than a mask so"
+  log "      that Omarchy's first-run 'systemctl --user enable --now' still"
+  log "      succeeds; a mask fails it and replays the first-run notifications"
+  log "      on every login. An instance already running in this session keeps"
+  log "      running; the override applies from the next graphical session on."
 }
 
 # ---------------------------------------------------------------------------
@@ -6774,23 +6902,41 @@ verify_power_button_premise() {
 #
 # A WARNING and not a failure, and the reason is that the answer is only half
 # readable from here. omarchy-sleep-lock.service is a USER unit; it can be
-# masked globally (a /dev/null symlink under /etc/systemd/user, which this can
-# see -- install_sleep_lock_mask is what ships ours) or per user (under
+# neutered globally (a real inert unit under /etc/systemd/user, which this can
+# see -- install_sleep_lock_override is what ships ours) or per user (under
 # ~/.config/systemd/user, which it cannot see, and which is how it was masked
-# by hand on the test Deck). Failing on an unreadable half would block the fix
-# on a machine that is actually fine; saying nothing would ship a power button
-# whose every press might raise a password prompt on a device with no keyboard.
-# So: report exactly what is knowable, and print the one command that settles
-# the rest.
+# by hand on the test Deck before that Deck was reinstalled). Failing on an
+# unreadable half would block the fix on a machine that is actually fine;
+# saying nothing would ship a power button whose every press might raise a
+# password prompt on a device with no keyboard. So: report exactly what is
+# knowable, and print the one command that settles the rest.
 #
 # ⚠️ CHECKS, rather than assuming stage-desktop-settings already ran. The stages
-# are individually invocable, and "power button suspends, mask not yet
+# are individually invocable, and "power button suspends, override not yet
 # installed" is precisely the bad ordering.
+#
+# ⚠️ THE OLD MASK IS ITS OWN VERDICT, not a pass and not a plain failure. A
+# `-> /dev/null` symlink at our path is what an earlier release of this script
+# installed. It does stop the lock, so the power button is safe -- but it also
+# makes upstream's first-run `systemctl --user enable --now` fail, which
+# replays Omarchy's first-run notifications on every login (§5.24). Reporting
+# that as "verified" would hide a live defect behind a green line.
 warn_if_sleep_lock_live() {
-  local d unit=""
-  if $SUDO test -L "$SLEEP_LOCK_GLOBAL_MASK" &&
-     [[ $($SUDO readlink -- "$SLEEP_LOCK_GLOBAL_MASK" 2>/dev/null) == /dev/null ]]; then
-    log "verified: ${SLEEP_LOCK_UNIT} is masked for every user (${SLEEP_LOCK_GLOBAL_MASK} -> /dev/null), so a suspend cannot raise a lock screen"
+  local d unit="" ours=$SLEEP_LOCK_GLOBAL_OVERRIDE
+
+  if $SUDO test -L "$ours"; then
+    if [[ $($SUDO readlink -- "$ours" 2>/dev/null) == /dev/null ]]; then
+      warn "${ours} is the OLD MASK (-> /dev/null) this project used to install. A suspend cannot raise a lock screen, so the power button is safe -- but a masked unit makes 'systemctl --user enable --now' refuse, which fails Omarchy's first-run step, leaves its done marker unwritten and REPLAYS the first-run notifications on every login. Re-run:  ${PROG}.sh stage-desktop-settings"
+    else
+      warn "${ours} is a symlink to '$($SUDO readlink -- "$ours" 2>/dev/null)', which is neither our inert override nor our old mask. Something else owns that path and this cannot tell whether ${SLEEP_LOCK_UNIT} still locks the screen on suspend. Inspect it before pressing power."
+    fi
+    return 0
+  fi
+
+  if $SUDO test -f "$ours" &&
+     $SUDO grep -qF -- "$INSTALL_MARKER_TEXT" "$ours" 2>/dev/null &&
+     $SUDO grep -qx "ExecStart=${SLEEP_LOCK_INERT_EXEC}" "$ours" 2>/dev/null; then
+    log "verified: ${SLEEP_LOCK_UNIT} resolves to our inert override for every user (${ours}, ExecStart=${SLEEP_LOCK_INERT_EXEC}), so a suspend cannot raise a lock screen"
     return 0
   fi
 
@@ -6803,7 +6949,7 @@ warn_if_sleep_lock_live() {
     return 0
   fi
 
-  warn "${unit} exists and is NOT masked globally. If it is also unmasked for the desktop user, every suspend this stage enables will lock the screen -- and this Deck has no keyboard to answer the password prompt with (docs/findings/T13-power-button-and-sleep.md §5.3, blast radius R2). Check BEFORE the first press, as the desktop user:  systemctl --user is-enabled ${SLEEP_LOCK_UNIT}   -- it must say 'masked'. If it does not:  systemctl --user mask ${SLEEP_LOCK_UNIT}"
+  warn "${unit} exists and is NOT overridden globally by ours. If it is also live for the desktop user, every suspend this stage enables will lock the screen -- and this Deck has no keyboard to answer the password prompt with (docs/findings/T13-power-button-and-sleep.md §5.3, blast radius R2). Check BEFORE the first press, as the desktop user:  systemctl --user show -p FragmentPath ${SLEEP_LOCK_UNIT}   -- it must name ${ours}. If it does not:  ${PROG}.sh stage-desktop-settings"
 }
 
 # The udev rule. Written to stdout so the unit suite can check its shape with
