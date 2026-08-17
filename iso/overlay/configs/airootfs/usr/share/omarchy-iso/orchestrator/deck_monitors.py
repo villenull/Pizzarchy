@@ -520,6 +520,102 @@ def render_rule(
     )
 
 
+def render_steam_window_rules() -> list[str]:
+    """Steam's windows, re-sized to the logical desktop the lines above create.
+
+    🔴 THESE LIVE HERE BECAUSE THEY ARE A CONSEQUENCE OF ``scale = 1.25``.
+    ``scale`` and ``transform`` above are what make this panel a **1024x640**
+    logical desktop, and 1024x640 is the entire reason these rules exist. Split
+    them into a module of their own and the next person to "simplify" the scale
+    breaks Steam's window with no line of code in between to warn them.
+
+    WHAT IS BROKEN WITHOUT THEM
+    ===========================
+    Omarchy's own ``/usr/share/omarchy/default/hypr/apps/steam.lua`` ships::
+
+        o.window({class="steam", title="Steam"},        {center=true, size={1100, 700}})
+        o.window({class="steam", title="Friends List"}, {size={460, 800}})
+
+    Those are desktop-monitor numbers. Against 1024x640 -- with 26 px reserved
+    for Waybar, so 1024x614 usable -- ``1100x700`` is wider **and** taller than
+    the whole desktop, and ``center`` therefore resolves to a NEGATIVE origin.
+    Measured on the Deck 2026-08-16, Steam open in Desktop Mode::
+
+        class 'steam' title 'Steam'        at [-38, -17] size [1100, 700]
+        class 'steam' title 'Friends List' at [400,   0] size [ 460, 800]
+
+    which is exactly ``(1024-1100)/2 = -38`` and ``26+(614-700)/2 = -17``. The
+    operator sees a store page with no title bar and no Store/Library/Community
+    tabs, because both are off the top of the screen.
+
+    🔴 IT IS NOT STEAM MIS-SIZING ITSELF, AND THE CONTROL PROVES IT.
+    The obvious theory -- "Steam sizes against the 1280x800 PHYSICAL surface" --
+    is wrong, and 1100x700 looking plausible against 1280x800 is a coincidence.
+    A ``foot`` terminal launched as ``foot --app-id=steam --title=Steam``, which
+    is Wayland-native (not XWayland), has nothing to do with Steam and requests
+    no such size, was measured at the IDENTICAL ``at [-38,-17] size [1100,700]``.
+    The window rule is the whole cause. Steam is not involved.
+
+    TWO MEASURED TRAPS IN THE SYNTAX
+    ================================
+    * **Percent strings do not work.** ``size = {"96%", "86%"}`` is silently
+      ignored and the window keeps the size it asked for -- measured against a
+      no-rule control that produced the identical geometry. Numbers work, and
+      arithmetic expressions over ``monitor_w``/``monitor_h`` work. Expressions
+      are used here so the rules follow the panel instead of restating it.
+    * ``hyprctl eval`` answers ``ok`` to the broken form. It reports its own
+      status, never the rule's. The only check that means anything is reading
+      the resulting geometry back out of ``hyprctl -j clients``.
+    """
+    return [
+        "-- Steam's windows, sized against the 1024x640 the two rules above",
+        "-- create. Omarchy's default/hypr/apps/steam.lua forces 1100x700 and",
+        "-- 460x800 -- both LARGER than this whole desktop, so `center` resolves",
+        "-- to a negative origin and Steam's title bar and Store/Library tabs",
+        "-- land off the top of the panel. Measured: at [-38,-17] size",
+        "-- [1100x700], i.e. (1024-1100)/2 and 26+(614-700)/2 exactly.",
+        "--",
+        "-- NOT Steam mis-sizing itself: a `foot` terminal run as",
+        "-- `foot --app-id=steam --title=Steam` -- Wayland-native, asking for no",
+        "-- such size -- measures the IDENTICAL [-38,-17] 1100x700.",
+        "--",
+        "-- This file is required AFTER default.hypr.apps, and a later window",
+        "-- rule wins for the same property, so these override Omarchy's",
+        "-- without patching an upstream file.",
+        "--",
+        '-- 🔴 PERCENT STRINGS ("96%") DO NOT WORK -- measured: silently ignored,',
+        "-- window keeps its requested size. Numbers and monitor_w/monitor_h",
+        "-- expressions both work. `hyprctl eval` answers `ok` to the broken",
+        "-- form, so only the geometry in `hyprctl -j clients` can tell you.",
+        "",
+        "-- Catch-all for the CLIENT. Anchored ^steam$ deliberately: unanchored",
+        '-- "steam" also matches steam_app_* (a game under Proton in Desktop',
+        "-- Mode) and steamwebhelper, and clamping a game is not this rule's",
+        "-- business. This is what covers windows Omarchy has no rule for --",
+        '-- the "Special Offers" popup asks for 564x664 against 614 px of usable',
+        "-- height -- and any window a future Steam update invents. It is the",
+        "-- part of this block least likely to rot: it names no title, no pixels.",
+        'o.window("^steam$", { max_size = { "monitor_w", "monitor_h*0.95" } })',
+        "",
+        "-- The client window itself.",
+        'o.window({ class = "steam", title = "Steam" }, {',
+        "  center = true,",
+        '  size = { "monitor_w*0.97", "monitor_h*0.90" },',
+        "})",
+        "",
+        "-- The friends list opens on login and Omarchy sizes it 460x800 -- 160 px",
+        "-- taller than the desktop. Give it a right-hand column instead of",
+        "-- dropping it on top of the client.",
+        "-- ⚠️ `move` may NOT use window_w here: measured, window_w resolves to",
+        "-- the size the window ASKED for, not the size this rule then gives it,",
+        "-- which puts the window in the wrong place by that difference.",
+        'o.window({ class = "steam", title = "Friends List" }, {',
+        '  size = { "monitor_w*0.42", "monitor_h*0.85" },',
+        '  move = { "monitor_w*0.56", "monitor_h*0.06" },',
+        "})",
+    ]
+
+
 def render_block() -> list[str]:
     """The marker-delimited block, as lines.
 
@@ -554,6 +650,8 @@ def render_block() -> list[str]:
         "-- measured. If it does not, GDK_SCALE stays 2 and only GTK apps are",
         "-- wrong; the two values above are unaffected.",
         f'hl.env("GDK_SCALE", "{PANEL_GDK_SCALE}")',
+        "",
+        *render_steam_window_rules(),
         "",
         "-- Deliberately the LAST statement in this file. Hyprland answers a Lua",
         "-- syntax error ANYWHERE above by discarding the WHOLE file, without",
