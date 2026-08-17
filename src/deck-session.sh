@@ -311,6 +311,55 @@ readonly MENU_ROW_ICON='\udb80\ude97'
 readonly MENU_ROW_BEGIN="// >>> deck-session.sh: return to Gaming Mode >>>"
 readonly MENU_ROW_END="// <<< deck-session.sh: return to Gaming Mode <<<"
 
+# --- the Hibernate row, and why it is gone --------------------------------
+#
+# 🔴 OPERATOR DECISION, 2026-08-16, taken at the panel: choosing Hibernate from
+# the System menu blanks the screen, brings it back after about five seconds,
+# and leaves the Deck sitting in Desktop Mode. It never powers off. The decision
+# was to REMOVE THE ROW, not to fix hibernation.
+#
+# THE MEASUREMENT BEHIND THAT, so the removal is justified rather than
+# superstitious. Hibernation on this machine is CONFIGURED and ATTEMPTED, and
+# aborts without writing an image:
+#
+#   /proc/cmdline      resume=/dev/nvme0n1p2 resume_offset=1983968
+#   swapon             /swap/swapfile  file       14.5G  prio 0
+#                      /dev/zram0      partition  14.5G  prio 100
+#   /sys/power/state   freeze mem disk
+#   journal            "Reached target System Hibernation." then
+#                      "PM: hibernation: hibernation exit"
+#
+# "hibernation exit" is the RESUME path, not a successful power-off -- the
+# kernel came back out the way it went in. Upstream's row is guarded by
+# `when: omarchy-hibernation-available`, and that guard answers YES here, which
+# is why the row is drawn at all: everything hibernation needs is present except
+# a swap device it can actually use.
+#
+# ⚠️ THE LIKELY CAUSE IS RECORDED AND DELIBERATELY NOT FIXED HERE: zram0 outranks
+# the real swapfile (priority 100 against 0), and a zram device cannot hold a
+# hibernation image. Whether that is the whole story is unproven, and chasing it
+# is a different piece of work from removing a row that strands the user.
+#
+# ⚠️ SEPARATE MARKERS from the Gaming Mode pair above, deliberately -- the same
+# reason deck_menu_lock.py uses its own. Both blocks live in this one file, both
+# splices preserve everything outside their own markers, and a shared marker
+# would make each block eat the other.
+readonly MENU_HIBERNATE_ROW_ID=system.hibernate
+readonly MENU_HIBERNATE_BEGIN="// >>> deck-session.sh: the Hibernate row is disabled on this Deck >>>"
+readonly MENU_HIBERNATE_END="// <<< deck-session.sh: the Hibernate row is disabled on this Deck <<<"
+# The label a user sees if they ever look at the merged model. They should not:
+# the row is invisible. It says WHY anyway, because "the option vanished" with
+# no explanation anywhere is the failure this project keeps correcting.
+readonly MENU_HIBERNATE_LABEL='Hibernate (disabled: it does not work on this Deck)'
+# What upstream's row runs, recorded for the same reason deck_menu_lock.py
+# records LOCK_ROW_ACTION: so an upstream change shows up as "the row we
+# neutralised ran something else" rather than as silence.
+readonly MENU_HIBERNATE_UPSTREAM_ACTION='systemctl hibernate'
+# Menu.qml: omarchyPath + "/default/omarchy/omarchy-menu.jsonc". Read ONLY to
+# check that the row this overrides still exists and still does what this file
+# says it does -- never written.
+readonly MENU_DEFAULTS_FILE=/usr/share/omarchy/default/omarchy/omarchy-menu.jsonc
+
 # --- the boot-time re-assert (operator decision, 2026-08-12) ---------------
 #
 # Steam's own Power -> "Switch to Desktop" REWRITES the default session to the
@@ -6018,6 +6067,121 @@ ${MENU_ROW_END}
 EOF
 }
 
+# The block that kills the Hibernate row. Read the MENU_HIBERNATE_* constants
+# above first -- the measurement that justifies removing it is there.
+#
+# 🔴 WHY AN OVERRIDE WITH NO ACTION, AND NOT A DELETION OR A `when:` GUARD.
+# Copied wholesale from deck_menu_lock.py's argument, which was derived by
+# reading the pinned runtime rather than by experiment:
+#
+#   * DELETION IS NOT AVAILABLE. MenuModel.js's mergeMenuSources walks the
+#     defaults and then the user file and merges per id; there is no syntax
+#     that removes a default row. Editing upstream's own file would be reverted
+#     by the next omarchy-dev upgrade, and it is not ours to edit.
+#   * `when:` WAS REJECTED ON UPSTREAM'S OWN EVIDENCE. Menu.qml's guard block
+#     says a row whose `when:` went unanswered SHOWS, and isVisible hides a row
+#     only on an explicit false. whenResults starts empty and is filled by a
+#     bash subprocess per reload, so a `when:`-hidden row is live on the first
+#     open of every session -- and would still carry its action.
+#   * WHAT IS USED INSTEAD IS STRUCTURAL. normalizeItem derives
+#     kind = action ? "action" : (target ? "link" : "menu") and merges the
+#     NORMALISED entries, which carry every field including the empty ones -- so
+#     redeclaring the id with a label and no action CLEARS the action. The row
+#     becomes a childless submenu, and isVisible returns false for one
+#     synchronously, in the model itself, without consulting any guard.
+#
+# ⚠️ mergeMenuSources keeps an overridden id in its ORIGINAL POSITION, so
+# nothing else in the System menu moves: Suspend, Logout, Reboot and Shutdown
+# stay exactly where they are.
+render_menu_hibernate_block() {
+  cat <<EOF
+${MENU_HIBERNATE_BEGIN}
+${INSTALL_MARKER_JSONC}
+// The Hibernate row is disabled on this Deck. Everything between these two
+// markers is rewritten by ${PROG}.sh; edit outside them.
+//
+// WHY: choosing it blanks the screen, brings it back after ~5 seconds and
+// leaves you in Desktop Mode. It never powers off. Hibernation here is
+// configured and ATTEMPTED -- the kernel logs "Reached target System
+// Hibernation." and then "PM: hibernation: hibernation exit", which is the
+// resume path, not a successful suspend-to-disk. Upstream's own
+// 'omarchy-hibernation-available' guard answers yes, which is why the row
+// was drawn at all.
+//
+// TO GET Hibernate BACK: delete these lines. Nothing else has to change --
+// Omarchy's own row is untouched in
+// /usr/share/omarchy/default/omarchy/omarchy-menu.jsonc and comes back the
+// moment this override is gone.
+//
+// HOW IT WORKS: MenuModel.js merges this file on top of the defaults by id,
+// and normalizeItem gives every entry an 'action' -- so redeclaring the id
+// with no action CLEARS it. The row becomes a submenu with no children, and
+// isVisible() hides a childless submenu in the model itself. No 'when:'
+// guard: Menu.qml's own comment says a row whose when: went unanswered
+// SHOWS, so a guarded row would be live on the first open of every session.
+"${MENU_HIBERNATE_ROW_ID}": {"label": "${MENU_HIBERNATE_LABEL}"},
+${MENU_HIBERNATE_END}
+EOF
+}
+
+# warn_if_hibernate_row_drifted [defaults path]
+#
+# Does the row this overrides still exist, and does it still do what the
+# constants above say it does?
+#
+# 🔴 WARNS, NEVER FAILS, and that is deck_menu_lock.py's argument 3 applied
+# here: every input is upstream-owned and drifting -- the id, the action, the
+# path -- and a rule that turns "Omarchy renamed a menu row" into "the installer
+# refuses to produce a machine" fails an ISO at the most expensive possible
+# moment, over a row. The override itself is still correct either way: an id
+# with no default behind it simply adds nothing visible.
+#
+# The path is a parameter for the usual reason -- the unit suite must not read
+# the developer's own Omarchy install and report the answer as the target's.
+warn_if_hibernate_row_drifted() {
+  local defaults=${1:-$MENU_DEFAULTS_FILE}
+
+  [[ -f $defaults ]] || {
+    warn "${defaults} is not on this machine, so the '${MENU_HIBERNATE_ROW_ID}' override could not be checked against the menu it overrides. The override is still written; it simply has nothing behind it here."
+    return 0
+  }
+
+  local got rc=0
+  got=$(python3 - "$defaults" "$MENU_HIBERNATE_ROW_ID" <<'PY'
+import json, pathlib, re, sys
+path, row_id = pathlib.Path(sys.argv[1]), sys.argv[2]
+raw = path.read_text(errors="replace")
+stripped = re.sub(r",(\s*[}\]])", r"\1", re.sub(r"^\s*//[^\n]*(\n|$)", "", raw, flags=re.M))
+try:
+    menu = json.loads(stripped)
+except ValueError as exc:
+    sys.exit(f"PARSE {exc}")
+if not isinstance(menu, dict):
+    sys.exit("PARSE not a JSON object of menu ids")
+# 🔴 AN EXIT CODE, NOT A SENTINEL STRING. "the row is absent" and "the row runs
+# nothing" are different findings and must not collide -- and bash's command
+# substitution silently strips NUL, so an in-band marker cannot be made safe.
+if row_id not in menu:
+    sys.exit(3)
+sys.stdout.write(menu[row_id].get("action") or "")
+PY
+  ) || rc=$?
+
+  if [[ $rc -eq 3 ]]; then
+    warn "${defaults} has no '${MENU_HIBERNATE_ROW_ID}' row at all. Either upstream renamed it -- in which case a Hibernate row that does not work is live under another id and this override is defending against nothing -- or it was already removed. The override is harmless either way."
+    return 0
+  fi
+  if [[ $rc -ne 0 ]]; then
+    warn "could not read ${defaults} the way Quickshell reads it, so the '${MENU_HIBERNATE_ROW_ID}' override could not be checked against it. ⚠️ If that file does not parse, Quickshell is ALREADY discarding the entire default menu silently."
+    return 0
+  fi
+  if [[ $got != "$MENU_HIBERNATE_UPSTREAM_ACTION" ]]; then
+    warn "${defaults}'s '${MENU_HIBERNATE_ROW_ID}' row runs '${got}', not '${MENU_HIBERNATE_UPSTREAM_ACTION}'. Upstream changed it. The override still clears the action, but what it is clearing is no longer what this script documents -- re-read it before trusting the reasoning around ${MENU_HIBERNATE_ROW_ID}."
+    return 0
+  fi
+  log "verified: ${defaults} still ships '${MENU_HIBERNATE_ROW_ID}' running '${MENU_HIBERNATE_UPSTREAM_ACTION}', which is the row this override neutralises"
+}
+
 # The two halves of "return to Gaming Mode" must run the SAME command.
 #
 # Compared from what is rendered, not from the constants, because a constant
@@ -6079,11 +6243,23 @@ sys.stdout.write(list(row.values())[0].get("action", ""))
 #   - our begin marker is present with no end marker (do not guess where the
 #     old block ended);
 #   - the file is not a JSON object at all.
+# ⚠️ TWO CALLERS, and the marker pair is what keeps them apart. The Gaming Mode
+# row and the Hibernate override are both spliced into this one file, each
+# preserving every byte outside its own markers, so the second splice runs over
+# the first splice's OUTPUT. The four arguments default to the Gaming Mode row's
+# constants, so the original call site is unchanged.
+#
+# 🔴 `${6-}` AND NOT `${6:-}` ON THE ACTION. The Hibernate override's whole
+# mechanism is an EMPTY action, and `:-` would silently substitute the Gaming
+# Mode row's command for it -- which would splice a Hibernate row that switches
+# the session. The one-character difference is the fix and the trap.
 splice_menu_row() {
   local target=$1 block=$2
+  local begin=${3:-$MENU_ROW_BEGIN} end=${4:-$MENU_ROW_END}
+  local row_id=${5:-$MENU_ROW_ID} action=${6-$RETURN_ACTION}
 
-  python3 - "$target" "$block" "$MENU_ROW_BEGIN" "$MENU_ROW_END" \
-           "$MENU_ROW_ID" "$RETURN_ACTION" "$INSTALL_MARKER_JSONC" <<'PY'
+  python3 - "$target" "$block" "$begin" "$end" \
+           "$row_id" "$action" "$INSTALL_MARKER_JSONC" <<'PY'
 import json, pathlib, re, sys
 
 target, block = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
@@ -6185,12 +6361,21 @@ text = "\n".join(out).rstrip("\n") + "\n"
 merged = parse(text, "the patched " + str(target))
 if row_id not in merged:
     sys.exit(f"the patched {target} parses but has no '{row_id}' row in it")
-got = merged[row_id].get("action")
+# `or ""` so an absent key and an explicitly empty one compare equal: the
+# Hibernate override emits no "action" key at all, and that absence IS what
+# clears the action when Quickshell merges it over the default.
+got = merged[row_id].get("action") or ""
 if got != action:
+    if action:
+        sys.exit(
+            f"the patched {target} parses but '{row_id}' runs {got!r}, not {action!r}. "
+            "A row with the wrong action is the worst outcome here: it appears in the menu, "
+            "it is pressable, and it does not switch the session."
+        )
     sys.exit(
-        f"the patched {target} parses but '{row_id}' runs {got!r}, not {action!r}. "
-        "A row with the wrong action is the worst outcome here: it appears in the menu, "
-        "it is pressable, and it does not switch the session."
+        f"the patched {target} parses but '{row_id}' still runs {got!r}. This block exists to "
+        "CLEAR that action -- normalizeItem gives every merged entry an action, so a row that "
+        "still carries one is still live and still pressable."
     )
 
 sys.stdout.write(text)
@@ -6203,11 +6388,16 @@ PY
 # The path is a parameter and the caller passes the USER's copy, never skel's:
 # docs/tasks/T5-fork-plan.md \u00a73 trap (a) is explicit that a check reading only
 # /etc/skel is the check that passes on a Deck whose only user never got the file.
+# ⚠️ TWO CALLERS, same as splice_menu_row. The row id and the action to expect
+# default to the Gaming Mode row's; the Hibernate call passes an EMPTY action,
+# which is the property that makes that row inert. `${3-}` and not `${3:-}`,
+# for the reason spelled out above splice_menu_row.
 verify_menu_row() {
   local path=${1:?verify_menu_row needs the file to read}
+  local row_id=${2:-$MENU_ROW_ID} want=${3-$RETURN_ACTION}
 
   local got
-  got=$(python3 - "$path" "$MENU_ROW_ID" <<'PY'
+  got=$(python3 - "$path" "$row_id" <<'PY'
 import json, pathlib, re, sys
 path, row_id = pathlib.Path(sys.argv[1]), sys.argv[2]
 if not path.exists():
@@ -6222,14 +6412,26 @@ if row_id not in menu:
     sys.exit(f"{path} parses but carries no '{row_id}' row (ids: {sorted(menu)})")
 sys.stdout.write(menu[row_id].get("action", ""))
 PY
-  ) || fail "could not read the '${MENU_ROW_ID}' row back out of ${path}. Quickshell reports nothing when this file is wrong, so an unverified write here is an unverified feature."
+  ) || fail "could not read the '${row_id}' row back out of ${path}. Quickshell reports nothing when this file is wrong, so an unverified write here is an unverified feature."
 
-  [[ $got == "$RETURN_ACTION" ]] ||
-    fail "${path} carries a '${MENU_ROW_ID}' row whose action is '${got}', not '${RETURN_ACTION}'. The row would appear in the menu and not switch the session."
-  log "verified: ${path} parses as Quickshell parses it and '${MENU_ROW_ID}' runs '${RETURN_ACTION}'"
+  if [[ -n $want ]]; then
+    [[ $got == "$want" ]] ||
+      fail "${path} carries a '${row_id}' row whose action is '${got}', not '${want}'. The row would appear in the menu and not switch the session."
+    log "verified: ${path} parses as Quickshell parses it and '${row_id}' runs '${want}'"
+  else
+    [[ -z $got ]] ||
+      fail "${path} carries a '${row_id}' row that still runs '${got}'. This override exists to CLEAR that action; a row with one is still drawn and still pressable. ⚠️ The likeliest cause is a SECOND '${row_id}' declaration further down that file -- our block is spliced in at the top and a later duplicate key wins in JSON."
+    log "verified: ${path} parses as Quickshell parses it and '${row_id}' carries NO action, which is what makes it a childless submenu and hides it"
+  fi
 }
 
 stage_menu_row() {
+  # Omarchy's own default menu, read ONLY by the drift warning below. A
+  # parameter for the usual reason -- see "THE VERIFICATION SEAM" above
+  # verify_update_stub: with the constant baked in, the unit suite would read
+  # the DEVELOPER's Omarchy install and report its answer as the target's.
+  local menu_defaults=${1:-$MENU_DEFAULTS_FILE}
+
   # PLACEMENT: a ROOT row ("${MENU_ROW_ID}"), not "system.${MENU_ROW_ID}".
   #
   # Two presses versus one, on the one affordance CLAUDE.md's controller-only
@@ -6243,6 +6445,10 @@ stage_menu_row() {
 
   # Before anything is written: the two ways back must run the same command.
   assert_return_action_agrees
+
+  # Also before anything is written, and it only ever warns: is the Hibernate
+  # row this overrides still the row the constants describe?
+  warn_if_hibernate_row_drifted "$menu_defaults"
 
   local invoking_user; invoking_user=$(desktop_user)
   [[ -n $invoking_user && $invoking_user != root ]] ||
@@ -6259,13 +6465,16 @@ stage_menu_row() {
   # defaults, so an idle-only file strips the bar. This file MERGES:
   # mergeMenuSources(defaults, user) walks the defaults first and then the user
   # file, so a file containing nothing but our row is complete and safe.
-  local block tmp
+  local block hib_block tmp
   block=$(mktemp) || fail "mktemp failed"
   render_menu_row_block >"$block" || { rm -f "$block"; fail "could not render the menu row"; }
+  hib_block=$(mktemp) || { rm -f "$block"; fail "mktemp failed"; }
+  render_menu_hibernate_block >"$hib_block" ||
+    { rm -f "$block" "$hib_block"; fail "could not render the Hibernate override"; }
 
   local dest
   for dest in "$user_ext" "$MENU_EXT_SKEL"; do
-    tmp=$(mktemp) || { rm -f "$block"; fail "mktemp failed"; }
+    tmp=$(mktemp) || { rm -f "$block" "$hib_block"; fail "mktemp failed"; }
 
     # The skel copy is read through $SUDO (it is root-owned); the user's own
     # file is read directly, which is correct in both contexts this stage runs
@@ -6273,7 +6482,7 @@ stage_menu_row() {
     local existing=$dest
     if [[ $dest == "$MENU_EXT_SKEL" ]]; then
       if $SUDO test -e "$dest"; then
-        $SUDO cat "$dest" >"$tmp.in" 2>/dev/null || { rm -f "$block" "$tmp"; fail "could not read ${dest}"; }
+        $SUDO cat "$dest" >"$tmp.in" 2>/dev/null || { rm -f "$block" "$hib_block" "$tmp"; fail "could not read ${dest}"; }
       else
         : >"$tmp.in"
       fi
@@ -6282,26 +6491,46 @@ stage_menu_row() {
 
     log "splicing the '${MENU_ROW_ID}' row into ${dest}"
     splice_menu_row "$existing" "$block" >"$tmp" || {
-      rm -f "$block" "$tmp" "$tmp.in"
+      rm -f "$block" "$hib_block" "$tmp" "$tmp.in"
       fail "refusing to install ${dest}: the merged file would not survive Quickshell's own parser (see the message above). Nothing was written."
     }
-    chmod 0644 "$tmp" || { rm -f "$block" "$tmp" "$tmp.in"; fail "could not stage ${dest}"; }
+
+    # 🔴 CHAINED, over the FIRST splice's OUTPUT rather than over the same
+    # input. Both blocks live in this one file and each preserves every byte
+    # outside its own markers, so the second pass sees the first pass's row and
+    # keeps it. Splicing both from the same input and installing one would
+    # silently drop the other -- and dropping the Gaming Mode row is the one
+    # thing CLAUDE.md's controller-only rule cannot let fail.
+    log "splicing the '${MENU_HIBERNATE_ROW_ID}' override into ${dest}"
+    splice_menu_row "$tmp" "$hib_block" \
+      "$MENU_HIBERNATE_BEGIN" "$MENU_HIBERNATE_END" "$MENU_HIBERNATE_ROW_ID" "" >"${tmp}.hib" || {
+      rm -f "$block" "$hib_block" "$tmp" "$tmp.in" "${tmp}.hib"
+      fail "refusing to install ${dest}: with the Hibernate override added, the merged file would not survive Quickshell's own parser (see the message above). Nothing was written."
+    }
+    mv -f "${tmp}.hib" "$tmp" ||
+      { rm -f "$block" "$hib_block" "$tmp" "$tmp.in" "${tmp}.hib"; fail "could not stage ${dest}"; }
+    chmod 0644 "$tmp" || { rm -f "$block" "$hib_block" "$tmp" "$tmp.in"; fail "could not stage ${dest}"; }
 
     if [[ $dest == "$MENU_EXT_SKEL" ]]; then
       $SUDO install -D -m 0644 -o root -g root "$tmp" "$dest" ||
-        { rm -f "$block" "$tmp" "$tmp.in"; fail "could not install ${dest}"; }
+        { rm -f "$block" "$hib_block" "$tmp" "$tmp.in"; fail "could not install ${dest}"; }
     else
       run_as_desktop_user "$invoking_user" install -D -m 0644 "$tmp" "$dest" ||
-        { rm -f "$block" "$tmp"; fail "could not install ${dest} as ${invoking_user}"; }
+        { rm -f "$block" "$hib_block" "$tmp"; fail "could not install ${dest} as ${invoking_user}"; }
     fi
     rm -f "$tmp" "$tmp.in"
   done
-  rm -f "$block"
+  rm -f "$block" "$hib_block"
 
   # \ud83d\udd34 The USER's copy is what gets verified. /etc/skel is too late for the user
   # the ISO creates (T5 \u00a73 trap (a)), so a check that read skel's copy would
   # pass on precisely the Deck where the row is missing.
   verify_menu_row "$user_ext"
+
+  # Both rows, out of the same installed file. The Gaming Mode row must still
+  # RUN its command and the Hibernate row must run NOTHING, and checking only
+  # one of them is how a second splice that ate the first ships unnoticed.
+  verify_menu_row "$user_ext" "$MENU_HIBERNATE_ROW_ID" ""
 
   log "stage-menu-row: ok"
   log "NOTE: the row lands at the END of the root menu (new ids are appended),"
@@ -6309,6 +6538,14 @@ stage_menu_row() {
   log "NOTE: /etc/skel's copy is for users created LATER. The user the ISO"
   log "      creates already exists by our phase, which is why ${user_ext}"
   log "      is written and verified separately."
+  log "NOTE: '${MENU_HIBERNATE_ROW_ID}' is overridden to an inert row, so"
+  log "      Hibernate no longer appears under System. It was measured NOT to"
+  log "      work on this hardware -- it blanks the panel and returns to the"
+  log "      desktop without ever writing an image. Suspend, Logout, Reboot and"
+  log "      Shutdown are untouched and keep their positions."
+  log "      To get it back: delete the block between"
+  log "        ${MENU_HIBERNATE_BEGIN}"
+  log "      and its matching end marker in ~/${MENU_EXT_REL}"
 }
 
 # ---------------------------------------------------------------------------

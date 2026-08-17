@@ -3020,8 +3020,28 @@ sys.stdout.write("" if row is None else row.get("action", ""))
 PY
 }
 
+# 🔴 A FIXTURE, NOT THIS MACHINE'S OMARCHY. stage_menu_row reads the default
+# menu to warn when the Hibernate row it overrides has drifted, and this suite
+# runs on a developer box that has a real /usr/share/omarchy. Reading it would
+# make the result depend on whose machine ran the suite -- so the path is a
+# parameter and every call below passes a file this suite wrote.
+#
+# ⚠️ The action below is upstream's and is spelled out here ONLY as a fixture:
+# it is what the drift warning is being shown to accept. The assertions never
+# claim the real Omarchy still ships it -- that is exactly what the warning is
+# for. Same reason the row's LABEL is not pinned anywhere in this section.
+menu_defaults="$work/omarchy-menu-defaults.jsonc"
+cat >"$menu_defaults" <<JSONC
+{
+  "system": {"label": "System"},
+  "system.suspend": {"label": "Suspend", "action": "systemctl suspend"},
+  "${MENU_HIBERNATE_ROW_ID}": {"label": "Hibernate", "when": "omarchy-hibernation-available", "action": "${MENU_HIBERNATE_UPSTREAM_ACTION}"},
+  "system.shutdown": {"label": "Shutdown", "action": "omarchy-system-shutdown"},
+}
+JSONC
+
 reset_root
-run_stage_body stage_menu_row
+run_stage_body stage_menu_row "$(sandboxed "$menu_defaults")"
 ok_rc 0 "stage-menu-row completes against a fake root"
 
 # --- both destinations, and the one that is verified ----------------------
@@ -3108,7 +3128,7 @@ fi
 
 # --- idempotency (CLAUDE.md): a re-run must not duplicate or corrupt -------
 cp "$user_ext" "$work/menu-first-run"
-run_stage_body stage_menu_row
+run_stage_body stage_menu_row "$(sandboxed "$menu_defaults")"
 ok_rc 0 "a second run succeeds"
 diff -q "$work/menu-first-run" "$user_ext" >/dev/null ||
   fail_test "a re-run leaves the file byte-for-byte identical" \
@@ -3136,7 +3156,7 @@ cat >"$user_ext" <<'JSONC'
 }
 JSONC
 cp "$user_ext" "$work/menu-user-before"
-run_stage_body stage_menu_row
+run_stage_body stage_menu_row "$(sandboxed "$menu_defaults")"
 ok_rc 0 "the stage runs against a file the user already owns"
 
 while IFS= read -r line; do
@@ -3163,7 +3183,7 @@ pass "and our row is in the same file, with the right action"
 reset_root
 mkdir -p "$(dirname "$user_ext")"
 printf '{ "broken": }\n' >"$user_ext"
-run_stage_body stage_menu_row
+run_stage_body stage_menu_row "$(sandboxed "$menu_defaults")"
 ok_failed "a user extension file that does not parse stops the stage"
 ok_in_err "not valid JSONC" "the refusal names the parse failure"
 ok_in_err "silently discarded" \
@@ -3177,7 +3197,7 @@ pass "the broken file is left byte-for-byte alone rather than being repaired by 
 reset_root
 mkdir -p "$(dirname "$user_ext")"
 { printf '{\n'; printf '%s\n' "$MENU_ROW_BEGIN"; printf '"%s": {"action":"x"},\n}\n' "$MENU_ROW_ID"; } >"$user_ext"
-run_stage_body stage_menu_row
+run_stage_body stage_menu_row "$(sandboxed "$menu_defaults")"
 ok_failed "our start marker with no end marker stops the stage"
 ok_in_err "no end marker" "the refusal says it will not guess where the old block ended"
 
@@ -3209,6 +3229,143 @@ rm -f "$bad"
 run_stage_body verify_menu_row "$(sandboxed "$bad")"
 ok_failed "a file that is not there at all fails verification"
 ok_in_err "does not exist" "an absent file is reported as absent, not as a parse error"
+
+# --- 12b. the Hibernate row is disabled, and nothing else in System moves ---
+#
+# 🔴 OPERATOR DECISION, 2026-08-16: choosing Hibernate blanks the panel, brings
+# it back after ~5s and leaves the Deck in Desktop Mode. It never powers off.
+# The row is overridden to an inert one -- see the MENU_HIBERNATE_* block in
+# src/deck-session.sh for the measurement behind the removal.
+#
+# ⚠️ THE ROW'S LABEL IS DELIBERATELY NOT ASSERTED ANYWHERE HERE. Rewording it is
+# not a regression. What is asserted is the MECHANISM: no action survives the
+# merge, our two blocks stay separate, and the rows either side of it are
+# untouched.
+
+reset_root
+run_stage_body stage_menu_row "$(sandboxed "$menu_defaults")"
+ok_rc 0 "stage-menu-row completes with both blocks to splice"
+
+# 🔴 THE PROPERTY THE WHOLE OVERRIDE TURNS ON. normalizeItem gives every merged
+# entry an action, so redeclaring the id with none CLEARS it: the row becomes a
+# childless submenu and isVisible() hides it in the model, synchronously, with
+# no shell guard involved. An action here means a live, pressable Hibernate.
+got=$(menu_action_in "$user_ext" "$MENU_HIBERNATE_ROW_ID")
+[[ -z $got ]] ||
+  fail_test "the installed '${MENU_HIBERNATE_ROW_ID}' row carries NO action" \
+    "it runs '${got}'; a row with an action is still drawn and still pressable"$'\n'"$(cat "$user_ext")"
+pass "the '${MENU_HIBERNATE_ROW_ID}' override carries no action, which is what makes it a childless submenu and hides it"
+
+# 🔴 THE '${6-}' / '${6:-}' TRAP, AS AN ASSERTION. splice_menu_row's action
+# argument defaults to the Gaming Mode row's command. If that default were
+# written with ':-' it would substitute for the EXPLICIT empty string this call
+# passes -- and the Hibernate row would silently switch the session instead of
+# doing nothing. One character, and no other check in this file would see it.
+[[ $got != "$RETURN_ACTION" ]] ||
+  fail_test "the empty action passed for the Hibernate row was not replaced by the default" \
+    "it runs the Gaming Mode command, so splice_menu_row's action default is using ':-' where it must use '-'"
+pass "an explicitly empty action is honoured rather than defaulting to the Gaming Mode command"
+
+# The other half: the row this stage exists for still works. A second splice
+# that ate the first would be invisible to every assertion above.
+got=$(menu_action_in "$user_ext")
+[[ $got == "$RETURN_ACTION" ]] ||
+  fail_test "the Gaming Mode row survives the second splice" \
+    "'${MENU_ROW_ID}' runs '${got}'"$'\n'"$(cat "$user_ext")"
+pass "🔴 the Gaming Mode row still runs its command after the Hibernate block is spliced over it"
+
+# Two blocks, two marker pairs, one copy of each. A shared marker would make
+# each block eat the other on the next run.
+for marker in "$MENU_ROW_BEGIN" "$MENU_ROW_END" "$MENU_HIBERNATE_BEGIN" "$MENU_HIBERNATE_END"; do
+  [[ $(grep -cxF -- "$marker" "$user_ext") -eq 1 ]] ||
+    fail_test "exactly one copy of each marker is present" \
+      "'${marker}' appears $(grep -cxF -- "$marker" "$user_ext") times"
+done
+pass "both marked blocks are present exactly once, with distinct markers, so neither splice eats the other"
+
+# Skel gets both too. It is the surface for users created LATER, and a fix that
+# landed on one surface and not the other is the half-fix this project keeps
+# correcting.
+[[ -z $(menu_action_in "$root$skel_ext" "$MENU_HIBERNATE_ROW_ID") ]] ||
+  fail_test "/etc/skel's copy carries the Hibernate override too" \
+    "a user created later would get a working-looking Hibernate row"
+pass "/etc/skel's copy carries both blocks -- users created later get the same menu"
+
+# --- the neighbours ---------------------------------------------------------
+#
+# "Removing a row must never break the rest of the menu." mergeMenuSources keeps
+# an overridden id in its ORIGINAL position and this file declares nothing else,
+# so the way to prove the neighbours are untouched is that we never mention
+# them: any other system.* id appearing in what we wrote would move or mask a
+# row we have no business touching.
+strays=$(python3 - "$user_ext" "$MENU_HIBERNATE_ROW_ID" "$MENU_ROW_ID" <<'STRAYPY'
+import json, pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+ours = set(sys.argv[2:])
+stripped = re.sub(r"^\s*//[^\n]*(\n|$)", "", path.read_text(), flags=re.M)
+stripped = re.sub(r",(\s*[}\]])", r"\1", stripped)
+menu = json.loads(stripped)
+sys.stdout.write(" ".join(sorted(k for k in menu if k not in ours)))
+STRAYPY
+)
+[[ -z $strays ]] ||
+  fail_test "the file declares ONLY the two ids this stage owns" \
+    "it also declares: ${strays}. Every other row -- Suspend, Logout, Reboot, Shutdown -- must be left to Omarchy's own defaults"
+pass "the installed file declares only the two ids this stage owns, so Suspend/Logout/Reboot/Shutdown keep Omarchy's definitions and positions"
+
+# --- idempotency, for the second block as well as the first ---------------
+cp "$user_ext" "$work/menu-hib-first-run"
+run_stage_body stage_menu_row "$(sandboxed "$menu_defaults")"
+ok_rc 0 "a re-run with both blocks succeeds"
+diff -q "$work/menu-hib-first-run" "$user_ext" >/dev/null ||
+  fail_test "a re-run leaves the file byte-for-byte identical with both blocks in it" \
+    "$(diff "$work/menu-hib-first-run" "$user_ext" || true)"
+pass "re-running rewrites both marked blocks in place -- the file is byte-for-byte identical"
+
+# --- the drift warning: it WARNS and never fails --------------------------
+#
+# Every input here is upstream-owned: the id, the action, the path. A stage that
+# refused to run because Omarchy renamed a menu row would fail an ISO build at
+# the most expensive possible moment, over a row. So each of these must still
+# exit 0 -- and must still say what it found.
+reset_root
+drift="$work/omarchy-menu-drifted.jsonc"
+printf '{"system.suspend": {"label":"Suspend","action":"systemctl suspend"}}\n' >"$drift"
+run_stage_body stage_menu_row "$(sandboxed "$drift")"
+ok_rc 0 "a default menu with no Hibernate row at all does NOT fail the stage"
+ok_in_err "has no '${MENU_HIBERNATE_ROW_ID}' row" \
+  "an upstream rename is reported -- the override would be defending against nothing, and silence is the one outcome that helps nobody"
+
+reset_root
+printf '{"%s": {"label":"Hibernate","action":"some-other-command"}}\n' "$MENU_HIBERNATE_ROW_ID" >"$drift"
+run_stage_body stage_menu_row "$(sandboxed "$drift")"
+ok_rc 0 "a Hibernate row that runs something else does NOT fail the stage"
+ok_in_err "not '${MENU_HIBERNATE_UPSTREAM_ACTION}'" \
+  "the warning names what upstream now runs, so the reasoning written around this override can be re-checked"
+
+reset_root
+rm -f "$drift"
+run_stage_body stage_menu_row "$(sandboxed "$drift")"
+ok_rc 0 "an absent default menu does NOT fail the stage"
+ok_in_err "could not be checked" "an unreadable default menu is reported as unchecked rather than as verified"
+
+# --- verify_menu_row's empty-action arm ------------------------------------
+#
+# The fault a FUTURE change to the writer would produce: the block lands, the
+# file parses, and the row still carries an action. Nothing above would catch it
+# if the verifier did not.
+hib_bad="$work/menu-hib-bad.jsonc"
+printf '{"%s": {"label":"x","action":"systemctl hibernate"}}\n' "$MENU_HIBERNATE_ROW_ID" >"$hib_bad"
+run_stage_body verify_menu_row "$(sandboxed "$hib_bad")" "$MENU_HIBERNATE_ROW_ID" ""
+ok_failed "a Hibernate row that still carries an action fails verification"
+ok_in_err "still runs" "the failure says the action was not cleared, which is the whole mechanism"
+ok_in_err "SECOND '${MENU_HIBERNATE_ROW_ID}' declaration" \
+  "and names the likeliest cause: a later duplicate key further down the file wins in JSON"
+
+printf '{"%s": {"label":"x"}}\n' "$MENU_HIBERNATE_ROW_ID" >"$hib_bad"
+run_stage_body verify_menu_row "$(sandboxed "$hib_bad")" "$MENU_HIBERNATE_ROW_ID" ""
+ok_rc 0 "a Hibernate row with no action passes verification"
+rm -f "$hib_bad"
 
 # ===========================================================================
 # 13. stage-boot-default-gaming -- a reboot always lands in Gaming Mode

@@ -2856,6 +2856,65 @@ grep -q "no device carries ID_PATH=${POWER_KEEP_ID_PATH}" <<<"$pb_out" ||
 pass "a missing keeper fails loudly and leaves the drop-in alone, so the cause stays visible"
 
 # ===========================================================================
+# render_menu_hibernate_block -- the override that removes the Hibernate row
+# ===========================================================================
+#
+# ⚠️ THE LABEL IS DELIBERATELY NOT ASSERTED. Rewording it is not a regression.
+# The mechanism is the absence of an "action", and that is what is checked.
+
+hib_block=$(render_menu_hibernate_block)
+
+grep -qxF -- "$MENU_HIBERNATE_BEGIN" <<<"$hib_block" ||
+  fail_test "the Hibernate block opens with its own begin marker" "expected: ${MENU_HIBERNATE_BEGIN}"
+grep -qxF -- "$MENU_HIBERNATE_END" <<<"$hib_block" ||
+  fail_test "the Hibernate block closes with its own end marker" "expected: ${MENU_HIBERNATE_END}"
+# 🔴 DISTINCT FROM THE GAMING MODE PAIR. Both blocks live in the one file and
+# each splice preserves everything outside its own markers; a shared marker
+# would make each block delete the other.
+[[ $MENU_HIBERNATE_BEGIN != "$MENU_ROW_BEGIN" && $MENU_HIBERNATE_END != "$MENU_ROW_END" ]] ||
+  fail_test "the Hibernate block's markers differ from the Gaming Mode row's" \
+    "sharing a marker pair would make each splice eat the other's block"
+pass "the Hibernate block has its own marker pair, distinct from the Gaming Mode row's"
+
+printf '%s\n' "$hib_block" >"$work/hibernate-block.jsonc"
+# The block goes in as a PATH, not on stdin: `python3 -` is already reading the
+# script from stdin, so a redirect would replace the program rather than feed it.
+python3 - "$MENU_HIBERNATE_ROW_ID" "$work/hibernate-block.jsonc" <<'PY' || fail_test "the rendered Hibernate row is inert" "see the message above"
+import json, pathlib, re, sys
+row_id = sys.argv[1]
+raw = pathlib.Path(sys.argv[2]).read_text()
+raw = re.sub(r"^\s*//[^\n]*(\n|$)", "", raw, flags=re.M)
+raw = re.sub(r",(\s*$)", r"\1", raw)
+try:
+    menu = json.loads("{" + raw + "}")
+except ValueError as exc:
+    sys.exit(f"the rendered Hibernate block is not valid JSON: {exc}")
+if list(menu) != [row_id]:
+    sys.exit(f"the block declares {list(menu)}, not exactly ['{row_id}']")
+row = menu[row_id]
+# 🔴 The three keys whose ABSENCE is the mechanism. normalizeItem derives
+# kind = action ? "action" : (target ? "link" : "menu"), so an "action" or a
+# "target" here would leave the row visible and pressable; a "when" would make
+# it a guarded row, which Menu.qml's own comment says SHOWS when unanswered.
+for key in ("action", "target", "when"):
+    if row.get(key):
+        sys.exit(f"the row carries {key!r}={row[key]!r}; that keeps it live in the merged model")
+if not row.get("label"):
+    sys.exit("the row carries no label, so the merged model would fall back to showing its id")
+PY
+pass "the rendered Hibernate row is exactly one id, with a label and NO action, target or when -- a childless submenu isVisible() hides in the model"
+
+# The block must say why it is there and how to get the row back: an option
+# that vanished with no explanation anywhere is the failure this project keeps
+# correcting.
+grep -q 'hibernation exit' <<<"$hib_block" ||
+  fail_test "the block records the measurement that justifies the removal" \
+    "the journal line proving hibernation aborts rather than powering off is the evidence; without it this is a superstition"
+grep -qi 'TO GET Hibernate BACK' <<<"$hib_block" ||
+  fail_test "the block says how to get the row back" "a user who wants it must not have to read this repository"
+pass "the block carries both the measurement that justifies it and the instructions for undoing it"
+
+# ===========================================================================
 # render_onboard_audio_name_conf -- the WirePlumber drop-in that stops Steam's
 # volume OSD printing a device label over the Deck's own speakers
 # ===========================================================================
