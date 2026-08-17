@@ -51,7 +51,7 @@ image — see [Recovery](#recovery).
 
    > _**[ LINK — Internet Archive download + sha256 ]**_
 
-2. **Write it to a USB stick.** With Ventoy, copy the `.iso` onto the Ventoy partition.
+2. **Write it to a USB stick.** [Ventoy](https://www.ventoy.net) gets installed onto the stick once; after that you copy `.iso` files onto it like ordinary files, and it boots to a menu listing whatever you have dropped there. So just copy the `.iso` across — nothing to flash, and the stick stays usable for normal storage.
 
 3. **Boot it.** Hold **Volume Down + Power** until the boot menu appears, then pick the USB stick.
 
@@ -77,6 +77,7 @@ image — see [Recovery](#recovery).
 | **STEAM + Y** | close the focused window |
 | **STEAM + A** | default browser |
 | **STEAM + B** | terminal |
+| **STEAM + left stick** ↕ | screen brightness, same as a stock Deck — hold to ramp |
 | **A** / **B** | confirm / back |
 | **L2** / **R2** | left / right trackpad click |
 | **STEAM** | apps menu |
