@@ -69,7 +69,7 @@ image — see [Recovery](#recovery).
 
 ---
 
-## Controls (applicable in Desktop Mode)
+## Controls (applicable in Desktop Mode only)
 
 | | |
 |---|---|
