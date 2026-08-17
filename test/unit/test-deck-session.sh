@@ -3081,4 +3081,135 @@ grep -q 'systemctl --user restart wireplumber' <<<"$audio_conf" ||
     "deleting the file alone changes nothing until WirePlumber restarts, and nothing else on the machine says so"
 pass "the drop-in carries its own undo, including the restart that makes the undo take effect"
 
+# ===========================================================================
+# render_steam_desktop_entry / verify_steam_desktop_entry -- the Desktop-Mode
+# Steam launcher's desktop entry
+# ===========================================================================
+#
+# The entry is DERIVED from upstream's rather than hand-copied, so what these
+# assert is the derivation's behaviour: every way a launcher can start Steam
+# goes through our wrapper, everything else upstream said survives, and a file
+# that would silently route nothing is refused instead of written.
+#
+# The wrapper itself -- the namespace, the block, the fail-safe paths -- is
+# tested in test/unit/test-deck-steam-desktop.py, which can exercise the real
+# syscalls. This section is only about the file that points at it.
+
+steam_fixture="$work/steam-upstream.desktop"
+cat >"$steam_fixture" <<'FIXTURE'
+[Desktop Entry]
+Name=Steam
+Name[de]=Steam
+Exec=/usr/bin/steam %U
+Icon=steam
+MimeType=x-scheme-handler/steam;
+Actions=Store;Library;
+
+[Desktop Action Store]
+Name=Store
+Exec=steam steam://store
+
+[Desktop Action Library]
+Name=Library
+Exec=/usr/bin/steam steam://open/games
+FIXTURE
+
+derived=$(render_steam_desktop_entry "$steam_fixture")
+
+# THE PROPERTY, stated as a count rather than as a string: upstream's three
+# Exec= lines are three Exec= lines afterwards, all of them ours. A rewrite
+# that dropped the Actions would still satisfy "our line is present".
+[[ $(grep -c '^Exec=' <<<"$derived") -eq 3 ]] ||
+  fail_test "every Exec= in upstream's entry survives the rewrite" \
+    "upstream had 3 (the main one and two Desktop Actions); got $(grep -c '^Exec=' <<<"$derived")"
+[[ $(grep -c "^Exec=${STEAM_LAUNCHER_BIN}" <<<"$derived") -eq 3 ]] ||
+  fail_test "every Exec= is routed through the launcher" \
+    "an unrouted Desktop Action is a right-click menu entry that re-creates the defect: $derived"
+pass "all three of upstream's Exec= lines survive and all three route through ${STEAM_LAUNCHER_BIN}"
+
+# The negative control for the case above: the rewrite must not be a blanket
+# substitution that would also mangle the arguments or the other keys.
+grep -qx 'MimeType=x-scheme-handler/steam;' <<<"$derived" ||
+  fail_test "MimeType survives, so steam:// links still resolve to this entry" "$derived"
+grep -qx 'Name[[]de[]]=Steam' <<<"$derived" ||
+  fail_test "upstream's translations survive" "$derived"
+grep -qx "Exec=${STEAM_LAUNCHER_BIN} steam://open/games" <<<"$derived" ||
+  fail_test "an Action's arguments survive the rewrite" \
+    "only the program token may be replaced; the rest of the command is upstream's"
+pass "MimeType, translations and each Action's arguments are carried over untouched"
+
+# Idempotency, which is a hard requirement in this file and is exactly where a
+# naive rewrite double-wraps: rendering over our own output must be a fixpoint.
+again=$(render_steam_desktop_entry <(printf '%s\n' "$derived"))
+[[ $(grep -c "^Exec=${STEAM_LAUNCHER_BIN} ${STEAM_LAUNCHER_BIN}" <<<"$again") -eq 0 ]] ||
+  fail_test "re-rendering our own entry does not double-wrap the Exec line" "$again"
+pass "the rewrite is a fixpoint -- re-running the stage cannot nest the launcher inside itself"
+
+# 🔴 THE SILENT-FAILURE CASE. An upstream entry whose Exec= is not steam at all
+# means the derivation matched nothing; writing the file anyway would install a
+# working-looking override that routes nothing. PLAN.md 8.1's failure mode.
+printf '[Desktop Entry]\nName=Nope\nExec=/usr/bin/firefox %%U\n' >"$work/not-steam.desktop"
+if render_steam_desktop_entry "$work/not-steam.desktop" >/dev/null 2>"$work/stderr"; then
+  fail_test "an entry with no steam Exec= is REFUSED, not silently passed through" \
+    "it rendered successfully, which would install an override that routes nothing"
+fi
+pass "an upstream entry with no steam Exec= is refused loudly rather than rendered into a no-op"
+
+# The template-absent path. steam is fetched by a separate orchestrator step, so
+# "no upstream entry yet" is a real ordering case, and the answer must still be
+# a usable entry rather than a failure.
+fallback=$(render_steam_desktop_entry "$work/definitely-not-here.desktop")
+grep -qx "Exec=${STEAM_LAUNCHER_BIN} %U" <<<"$fallback" ||
+  fail_test "with no upstream entry to derive from, a minimal entry is still rendered" "$fallback"
+grep -qx '\[Desktop Entry\]' <<<"$fallback" ||
+  fail_test "the fallback entry has a [Desktop Entry] group" "$fallback"
+pass "with steam not installed yet the stage still writes a working entry (and says it is minimal)"
+
+# Both renders must carry the marker, or a re-run of the stage refuses its own
+# file as somebody else's -- the idempotency contract every stage here has.
+for rendered in "$derived" "$fallback"; do
+  grep -qF -- "$INSTALL_MARKER_TEXT" <<<"$rendered" ||
+    fail_test "the rendered desktop entry carries the marker text" "$rendered"
+done
+pass "both renders carry '${INSTALL_MARKER_TEXT}', so stage re-runs are allowed and foreign files are not"
+
+# --- verify_steam_desktop_entry -------------------------------------------
+
+printf '%s\n' "$derived" >"$work/installed.desktop"
+verify_steam_desktop_entry "$work/installed.desktop" >/dev/null ||
+  fail_test "verify_steam_desktop_entry accepts a correctly derived entry"
+pass "verify_steam_desktop_entry accepts the entry the renderer produces"
+
+# 🔴 ITS POSITIVE CONTROL, and the case it exists for: an entry that carries
+# our Exec= AND a leftover direct one. A check that only looked for ours would
+# pass this, and the Deck would ship a right-click menu that still kills the
+# pointer.
+printf '%s\n' "$INSTALL_MARKER" '[Desktop Entry]' "Exec=${STEAM_LAUNCHER_BIN} %U" \
+  '[Desktop Action Store]' 'Exec=/usr/bin/steam steam://store' >"$work/stray.desktop"
+if ( verify_steam_desktop_entry "$work/stray.desktop" ) >/dev/null 2>&1; then
+  fail_test "verify_steam_desktop_entry REFUSES an entry with a leftover direct steam Exec=" \
+    "one unrouted Desktop Action re-creates the defect from the right-click menu"
+fi
+pass "an entry that still launches steam directly anywhere is refused, not accepted for having ours too"
+
+# And the marker half, so an entry that would break the next re-run is caught
+# at install time rather than on the next run of the stage.
+printf '%s\n' '[Desktop Entry]' "Exec=${STEAM_LAUNCHER_BIN} %U" >"$work/nomarker.desktop"
+if ( verify_steam_desktop_entry "$work/nomarker.desktop" ) >/dev/null 2>&1; then
+  fail_test "verify_steam_desktop_entry refuses an entry with no install marker"
+fi
+pass "an entry without the install marker is refused -- the next stage run would call it somebody else's"
+
+# The stage has to be in BOTH lists, and this is asserted rather than eyeballed:
+# a stage in INSTALL_STAGES but not BAKE_STAGES is a fix that works when a human
+# runs the script by hand and is missing from every ISO install.
+[[ " ${INSTALL_STAGES[*]} " == *" stage-steam-desktop-launcher "* ]] ||
+  fail_test "stage-steam-desktop-launcher is in INSTALL_STAGES"
+[[ " ${BAKE_STAGES[*]} " == *" stage-steam-desktop-launcher "* ]] ||
+  fail_test "stage-steam-desktop-launcher is in BAKE_STAGES" \
+    "the installer reads BAKE_STAGES; a stage missing from it never runs on an ISO install"
+declare -F stage_steam_desktop_launcher >/dev/null ||
+  fail_test "the stage function exists under the name run_stage derives from the list entry"
+pass "stage-steam-desktop-launcher is in both stage lists and resolves to a real function"
+
 echo "all deck-session.sh tests passed"

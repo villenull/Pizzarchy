@@ -719,6 +719,20 @@ install -Dm0644 "$SESSION_SRC" "$session_staged_dir/deck-session.sh" ||
   build_fail "cannot stage the session layer: src/deck-session.sh names $SESSION_MAPPER_NAME as the mapper and there is no src/$SESSION_MAPPER_NAME."
 install -Dm0644 "$REPO_ROOT/src/$SESSION_MAPPER_NAME" "$session_staged_dir/$SESSION_MAPPER_NAME" ||
   build_fail "could not stage src/$SESSION_MAPPER_NAME into the airootfs at $SESSION_DEST_DIR"
+
+# The Desktop-Mode Steam launcher, by the same rule as the mapper: its filename
+# is declared in deck-session.sh and read back out of it, never repeated here.
+# stage-steam-desktop-launcher installs it on the TARGET from this payload, and
+# an image without it produces a Deck where opening Steam on the desktop still
+# takes the pointer away -- the P39 Defect 2 shape, and a stage that fails for
+# want of a file the build forgot is precisely the P32 shape.
+SESSION_STEAM_LAUNCHER_NAME=$(sed -n 's/^readonly STEAM_LAUNCHER_SRC_NAME=\(.*\)$/\1/p' "$SESSION_SRC" | tr -d "\"'" | head -1)
+[[ -n $SESSION_STEAM_LAUNCHER_NAME ]] ||
+  build_fail "cannot stage the session layer: no 'readonly STEAM_LAUNCHER_SRC_NAME=<file>' in src/deck-session.sh. That constant names the Desktop-Mode Steam launcher stage-steam-desktop-launcher installs on the TARGET; refusing to guess it."
+[[ -f "$REPO_ROOT/src/$SESSION_STEAM_LAUNCHER_NAME" ]] ||
+  build_fail "cannot stage the session layer: src/deck-session.sh names $SESSION_STEAM_LAUNCHER_NAME as the Desktop-Mode Steam launcher and there is no src/$SESSION_STEAM_LAUNCHER_NAME."
+install -Dm0644 "$REPO_ROOT/src/$SESSION_STEAM_LAUNCHER_NAME" "$session_staged_dir/$SESSION_STEAM_LAUNCHER_NAME" ||
+  build_fail "could not stage src/$SESSION_STEAM_LAUNCHER_NAME into the airootfs at $SESSION_DEST_DIR"
 for session_osk_module in "${SESSION_OSK_MODULES[@]}"; do
   [[ -f "$REPO_ROOT/src/$session_osk_module" ]] ||
     build_fail "cannot stage the session layer: src/deck-session.sh's OSK_MODULES names $session_osk_module and there is no src/$session_osk_module. Either the array is stale or the module was renamed without it."
@@ -726,7 +740,7 @@ for session_osk_module in "${SESSION_OSK_MODULES[@]}"; do
     build_fail "could not stage src/$session_osk_module into the airootfs at $SESSION_DEST_DIR"
 done
 
-build_log "staged the session layer: $SESSION_DEST_DIR/{deck-session.sh,$SESSION_MAPPER_NAME} + ${#SESSION_OSK_MODULES[@]} OSK module(s) (${SESSION_OSK_MODULES[*]}), for configure_deck's session_bake step"
+build_log "staged the session layer: $SESSION_DEST_DIR/{deck-session.sh,$SESSION_MAPPER_NAME,$SESSION_STEAM_LAUNCHER_NAME} + ${#SESSION_OSK_MODULES[@]} OSK module(s) (${SESSION_OSK_MODULES[*]}), for configure_deck's session_bake step"
 
 # --- 5c(ii). The `pizza` command, into the SAME payload directory -----------
 #

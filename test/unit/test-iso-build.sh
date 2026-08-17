@@ -259,6 +259,12 @@ make_fixture() {
   # compositor. The fixture symlinks the real deck-session.sh (below), so its
   # array is the real one and the wayland module has to exist here too.
   printf '"""Stand-in for src/deck_osk_wayland.py."""\n' >"$root/src/deck_osk_wayland.py"
+  # Step 5c also stages the Desktop-Mode Steam launcher, whose filename it reads
+  # out of deck-session.sh's STEAM_LAUNCHER_SRC_NAME the same way it reads the
+  # mapper's. Stand-in, for the same reason as the mapper's: what is under test
+  # is that the build derives the name and stages the file, not what the
+  # launcher does (test/unit/test-deck-steam-desktop.py owns that).
+  printf '"""Stand-in for src/deck-steam-desktop.py."""\n' >"$root/src/deck-steam-desktop.py"
 
   # Step 5c(ii)'s inputs: the `pizza` command and its art, which bin/build
   # stages FLAT into the same session payload directory (stage_payload copies
