@@ -40,6 +40,8 @@ image — see [Recovery](#recovery).
 
 ![The on-screen keyboard on the desktop, aimed with the trackpads](docs/images/desktop-osk.png)
 
+![fastfetch on the installed Deck: Valve's Neptune kernel, Hyprland, Omarchy 4.0](docs/images/desktop-fastfetch.png)
+
 ---
 
 ## Install
