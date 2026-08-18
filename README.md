@@ -88,6 +88,7 @@ image — see [Recovery](#recovery).
 | **STEAM + A** | default browser |
 | **STEAM + B** | terminal |
 | **STEAM + left stick** ↕ | screen brightness, same as a stock Deck — hold to ramp |
+| **STEAM + right stick** ↔ | previous / next workspace, one per flick — wraps around |
 | **A** / **B** | confirm / back |
 | **L2** / **R2** | left / right trackpad click |
 | **STEAM** | apps menu |

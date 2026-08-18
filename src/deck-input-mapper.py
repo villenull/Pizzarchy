@@ -44,6 +44,7 @@ DESKTOP MODE ADDS THESE BUTTONS (docs/PROGRESS.md §5.23, §5.37)
     STEAM + B              the DEFAULT terminal        the controller's SUPER+RETURN
     STEAM + A              the DEFAULT web browser     the controller's SUPER+SHIFT+B
     STEAM + LEFT STICK ↕   screen brightness           stock Steam Deck parity
+    STEAM + RIGHT STICK ↔  previous / next workspace   one flick, one workspace
     QAM (the ... button)   `omarchy-menu toggle`       the Omarchy menu
 
     ⚠️ A AND B ARE CHORD PARTNERS NOW, so STEAM+A no longer emits Enter and
@@ -51,9 +52,16 @@ DESKTOP MODE ADDS THESE BUTTONS (docs/PROGRESS.md §5.23, §5.37)
     make with Backspace and Space. Pressed WITHOUT Steam they are unchanged
     (BUTTON_MAP), which is what the installer profile above depends on. The
     same goes for the left stick: STEAM + up/down is brightness and types
-    nothing, and the stick on its own is still the arrow keys. Left/right is
-    untouched in both states -- a stock Deck puts VOLUME there, and that has
+    nothing, and the stick on its own is still the arrow keys. Its left/right
+    is untouched in both states -- a stock Deck puts VOLUME there, and that has
     deliberately NOT been implemented (nobody asked for it yet).
+
+    ⚠️ AND THE RIGHT STICK IS NO LONGER UNMAPPED. Until 2026-08-17 this mapper
+    ignored ABS_RX/ABS_RY entirely; STEAM + right stick LEFT/RIGHT is now the
+    workspace, wrapping at both ends (WORKSPACE_STICK_AXIS). Its VERTICAL axis
+    is still unmapped, and without STEAM the right stick still does nothing at
+    all -- so no key can be left stuck by this binding, which is the hazard
+    `_release_stick_axis` exists to answer for the LEFT one.
 
     All of them need lizard_mode=N, or the firmware swallows the presses and no
     evdev node ever sees them. Startup says which of those is in force.
@@ -219,8 +227,13 @@ BUTTON_MAP: dict[int, int] = {
 # ⚠️ THESE ARE INTERNAL AXIS IDENTIFIERS, NOT DEVICE AXES.
 #
 # ABS_HAT0X/Y are reused here purely as names for "horizontal direction" and
-# "vertical direction", because the d-pad and both sticks all resolve onto them
-# and must share one held-direction state.
+# "vertical direction", because the d-pad and the LEFT stick both resolve onto
+# them and must share one held-direction state.
+#
+# ⚠️ THE RIGHT STICK DOES NOT. It drives no arrow key at all (STICK_AXES), and
+# under STEAM its horizontal axis is the workspace chord (WORKSPACE_STICK_AXIS).
+# This comment said "both sticks" while that was vacuously true of a stick
+# nothing read; it would be wrong now.
 #
 # On the Deck's own pad those codes mean something completely different --
 # ABS_HAT0X/Y is the LEFT TRACKPAD (measured 2026-08-10: sliding it moved
@@ -600,6 +613,73 @@ BRIGHTNESS_ACTIONS: dict[str, list[str]] = {
     "brightness-down": BRIGHTNESS_DOWN_ARGV,
 }
 
+# --- 🆕 what STEAM + the right stick runs: OMARCHY'S OWN WORKSPACE FOCUS ------
+#
+# ✅ READ OUT OF THE PINNED RUNTIME, not inferred from another Hyprland. The
+# test Deck runs `basecamp/omarchy@f0020448ca87` (CLAUDE.md), and that tree's
+# `default/hypr/bindings/tiling.lua` binds every workspace key like this:
+#
+#     o.bind("SUPER + " .. key, "Switch to workspace " .. workspace,
+#            hl.dsp.focus({ workspace = tostring(workspace) }))
+#     o.bind("SUPER + TAB", "Next workspace", hl.dsp.focus({ workspace = "e+1" }))
+#
+# so the controller lands on the SAME dispatcher SUPER+1..0 and SUPER+TAB
+# already use, spelled the same way -- the argument CLOSE_WINDOW_ARGV makes for
+# `hl.dsp.window.close()`, applied again. The form was additionally run live
+# against the Deck in session 21 (`hyprctl dispatch 'hl.dsp.focus({ workspace =
+# 2 })'`, docs/findings/T10-steam-extest-results.md §3).
+#
+# ⚠️ THE CLASSIC SPELLING -- a bare dispatcher name and a workspace number, no
+# `hl.`, no parentheses -- is a LUA PARSE ERROR here, not an unknown command,
+# and its error goes to stderr where a discarded pipe hides it.
+# `test/unit/test-hyprctl-syntax.sh` refuses to let that form back into this
+# repo AT ALL, including from a comment: writing it out here to illustrate it
+# turned that suite red while this feature was being built, which is the check
+# working exactly as intended. Hence the description instead of the example.
+#
+# 🔴 AN ABSOLUTE ID, NOT `e+1`/`e-1`, AND THE WRAP IS THE ENTIRE REASON.
+# Hyprland's relative forms walk to the next EXISTING workspace and STOP at the
+# ends: on the last workspace `e+1` does nothing whatsoever. The operator asked
+# for the opposite -- *"if steam button is pressed in workspace 1 and yo move
+# right joystick left move to the last workspace"* -- so the target is computed
+# from the workspace list (`next_workspace_id`) and named outright.
+#
+# ⚠️ THE ID IS PASSED AS A STRING, exactly as upstream's `tostring(workspace)`
+# writes it. `{ workspace = 2 }` was also accepted live, but the shipped
+# runtime's own spelling is the one with two independent pieces of evidence
+# behind it.
+def workspace_focus_argv(workspace_id: "int | str") -> list[str]:
+    """The dispatch that focuses one workspace by id. See the block above.
+
+    ⚠️ ACCEPTS A STRING SO THE STARTUP REPORT CAN SHOW THE SHAPE. Every caller
+    that actually dispatches passes an int from `next_workspace_id`;
+    `menu_binding_report` passes a placeholder, because printing a real id there
+    would claim the chord always goes to that workspace.
+    """
+    return ["hyprctl", "dispatch",
+            f'hl.dsp.focus({{ workspace = "{workspace_id}" }})']
+
+
+# What the wrap has to know before it can act: which workspaces exist, and
+# which one we are on. Two QUERIES -- unaffected by the Lua change above, which
+# only `dispatch` grew -- read the same way `LOCK_STATE_ARGV` is read.
+WORKSPACE_LIST_ARGV: tuple[str, ...] = ("hyprctl", "-j", "workspaces")
+WORKSPACE_ACTIVE_ARGV: tuple[str, ...] = ("hyprctl", "-j", "activeworkspace")
+
+# 🔴 WHAT A HUNG COMPOSITOR MAY COST THE INPUT LOOP, AND IT IS PAID TWICE.
+# `read_workspace_state` runs both queries above back to back, so the worst case
+# this binding can add is 2x this number. Measured on the Deck 2026-08-12, a
+# `hyprctl -j` query answers in 9-10 ms (see `read_screensaver_state`), so 0.2 s
+# is ~20x the measurement and the pair's worst case (0.4 s) is bounded by
+# REPEAT_DELAY -- i.e. the longest stall a user could ever feel here is one
+# key-repeat delay, on a compositor that has already stopped answering.
+#
+# ⚠️ AFFORDABLE ONLY BECAUSE THIS CHORD DOES NOT REPEAT. One flick is one
+# workspace (`_stick_workspace`), so these reads happen at most once per
+# deliberate deflection -- never on a clock, unlike the brightness ramp, which
+# is precisely why that binding was given no state to read.
+WORKSPACE_STATE_TIMEOUT = 0.2
+
 # ✅ MEASURED ON HARDWARE 2026-08-11: QAM is BTN_BASE (294), on the "Steam Deck"
 # node (/dev/input/event7), with lizard_mode=N.
 #
@@ -658,8 +738,14 @@ REPEAT_INTERVAL = 0.15
 # reading the node's own absinfo:
 #
 #     ABS_X / ABS_Y    left stick,  min=-32767 max=32767 fuzz=0 FLAT=0
-#     ABS_RX / ABS_RY  right stick, same ranges -- and unmapped in STICK_AXES,
-#                      i.e. it does nothing in this mapper today
+#     ABS_RX / ABS_RY  right stick, same ranges -- and absent from STICK_AXES,
+#                      so neither axis emits an arrow key
+#
+# ⚠️ THAT SECOND LINE USED TO END "i.e. it does nothing in this mapper today",
+# and it stopped being true on 2026-08-17: ABS_RX is now the workspace chord
+# (WORKSPACE_STICK_AXIS, below). ABS_RY still does nothing, and both are still
+# absent from STICK_AXES, which is what keeps the workspace binding free of the
+# stuck-arrow hazard `_release_stick_axis` answers for this one.
 #
 # ⚠️ THE RANGE IS -32767, NOT -32768, and `flat=0` means THE KERNEL APPLIES NO
 # DEADZONE OF ITS OWN. Ours is the only one there is. The same read caught the
@@ -728,6 +814,66 @@ BRIGHTNESS_RAMP_DELAY = 0.30
 # are all real in that measurement; the sysfs write is not. If the ramp feels
 # slower than it says here, suspect lock collisions FIRST and raise this number.
 BRIGHTNESS_RAMP_INTERVAL = 0.125
+
+# --- 🆕 STEAM + THE RIGHT STICK, LEFT AND RIGHT, IS THE WORKSPACE ------------
+#
+# 🔴 THE OPERATOR'S REQUEST, VERBATIM, BECAUSE THE SHAPE OF IT IS THE DESIGN:
+# *"Press steam + right joystick right to move from workspace 1 to 2. Then again
+# right joystick to move to workspace three (steam button still pressed) etc. if
+# steam button is pressed in workspace 1 and yo move right joystick left move to
+# the last workspace."*
+#
+# 🔴 SO IT STEPS, IT DOES NOT RAMP -- AND THIS IS THE OPPOSITE OF THE BRIGHTNESS
+# CHORD ABOVE. "Then AGAIN right joystick" is one deflection per workspace: the
+# stick must come back under WORKSPACE_STICK_RELEASE before another step can
+# fire, and a stick held at full deflection for a minute moves exactly one
+# workspace. Copying `due_brightness`'s clock here would fly through every
+# workspace on one push and make the binding unusable; there is deliberately no
+# clock, no deadline and no `due_*` for this chord (see `_stick_workspace`).
+#
+# ⚠️ THE RIGHT STICK, MEASURED AS ABS_RX/ABS_RY on /dev/input/event7 2026-08-16
+# with the same -32767..32767 range and the same FLAT=0 as the left one -- so
+# the kernel applies no deadzone here either and the constants below are, again,
+# the only deadzone that exists.
+WORKSPACE_STICK_AXIS = e.ABS_RX
+
+# ⚠️ POSITIVE IS RIGHT. Not an assumption and not a second opinion: this is the
+# sign `DPAD_BUTTON_MAP` already binds BTN_DPAD_RIGHT to, which `HAT_MAP` turns
+# into KEY_RIGHT, and which the left stick's horizontal axis has driven on
+# hardware since 2026-08-10. Read from that table rather than written out, so a
+# re-measurement lands in one place.
+WORKSPACE_STICK_RIGHT = DPAD_BUTTON_MAP[e.BTN_DPAD_RIGHT][1]
+
+# ⛔ KEYED BY THAT SIGN, NOT SPELLED OUT TWICE -- same reason as BRIGHTNESS_STEPS:
+# right-is-next and left-is-previous cannot drift apart, and one correction fixes
+# both. `WORKSPACE_STEP_DIRECTIONS` below is the inverse, derived rather than
+# retyped, so a name can never mean one direction here and the other there.
+WORKSPACE_STEPS: dict[int, str] = {
+    WORKSPACE_STICK_RIGHT: "workspace-next",
+    -WORKSPACE_STICK_RIGHT: "workspace-prev",
+}
+
+WORKSPACE_STEP_DIRECTIONS: dict[str, int] = {
+    name: direction for direction, name in WORKSPACE_STEPS.items()
+}
+
+# Deflection needed to fire a step, and the lower one the stick must fall back
+# under before the NEXT step can fire.
+#
+# 🔴 THE DEADZONE AGAIN, AND HERE IT ALSO DOES THE RE-ARMING. ENGAGE is sized
+# exactly as BRIGHTNESS_STICK_ENGAGE is -- ~24x the ~2% resting deflection
+# measured on this hardware, so a stick nobody is touching can never reach it.
+# RELEASE is the threshold the stick has to come back under to re-arm the chord:
+# too high and a lazily-centred stick fires a second workspace change, too low
+# and a user who flicks twice quickly gets one step. The gap between the two is
+# ordinary hysteresis.
+#
+# ⚠️ SEPARATE CONSTANTS FROM THE BRIGHTNESS PAIR ON PURPOSE, though they start at
+# the same values: this chord's feel is tuned by flicking it, that one's by
+# holding it, and the operator must be able to move one without disturbing the
+# other. Same reason BRIGHTNESS_STICK_ENGAGE is not STICK_ENGAGE.
+WORKSPACE_STICK_ENGAGE = 0.5
+WORKSPACE_STICK_RELEASE = 0.35
 
 # --- the OSK's button profile: Valve's, reproduced (T8 §9g) ------------------
 #
@@ -1185,6 +1331,23 @@ class Mapper:
     brightness_dir: int = 0
     brightness_next: float = 0.0
 
+    # --- 🆕 the workspace flick (STEAM + right stick, left/right) ------------
+    #
+    # Which way the stick is currently deflected past the threshold (0 = not
+    # deflected). ONE field, and the missing second one is the feature: there is
+    # no `workspace_next` deadline because this chord has no clock. It is a
+    # LATCH, not a ramp -- it says "a step for this direction has already been
+    # queued", and only the stick falling back under WORKSPACE_STICK_RELEASE
+    # clears it. That is what makes one flick exactly one workspace.
+    #
+    # 🔴 CLEARED BY THE STEAM RELEASE TOO, and unlike the brightness ramp's
+    # field this is not about runaway -- nothing here queues work on its own. It
+    # is about the NEXT flick: samples on this axis are only routed here while
+    # STEAM is held, so a stick released after STEAM would leave the latch set
+    # for ever and silently swallow the next push in the same direction. See
+    # `stop_workspace`.
+    workspace_dir: int = 0
+
     # Whether a BTN_LEFT we emitted from the RIGHT PAD'S CLICK is still down.
     #
     # 🔴 THE INVARIANT, AND IT IS THE WHOLE REASON THIS FIELD EXISTS: true if and
@@ -1608,6 +1771,70 @@ class Mapper:
         """
         self.brightness_dir = 0
 
+    def _workspace_direction(self, value: int) -> int:
+        """+1 (next), -1 (previous) or 0, from one raw sample of ABS_RX.
+
+        The deadzone and the hysteresis both live here, exactly as they do in
+        `_brightness_direction` -- but the hysteresis is doing a second job. A
+        latched direction is only cleared when the stick falls back under
+        WORKSPACE_STICK_RELEASE, so this threshold pair IS the re-arm rule that
+        makes one flick one workspace.
+        """
+        lo, hi = self.axis_ranges.get(WORKSPACE_STICK_AXIS, (-32767, 32767))
+        mid = (lo + hi) / 2
+        half = (hi - lo) / 2 or 1
+        frac = (value - mid) / half
+        threshold = (WORKSPACE_STICK_RELEASE if self.workspace_dir
+                     else WORKSPACE_STICK_ENGAGE)
+        if abs(frac) < threshold:
+            return 0
+        return 1 if frac > 0 else -1
+
+    def _stick_workspace(self, value: int) -> list[tuple[int, int]]:
+        """STEAM + the right stick's horizontal axis. Queues one step; no keys.
+
+        Returns [] ALWAYS, like `_stick_brightness`: this binding types nothing,
+        and the right stick emits no arrow key with or without STEAM.
+
+        🔴 ONE EDGE, ONE STEP, AND NOTHING AFTERWARDS. There is no `now`
+        parameter and no deadline field on purpose -- a signature with no clock
+        in it cannot grow a repeat by accident. Holding the stick at full
+        deflection for a minute queues exactly one action; the stick has to fall
+        back under WORKSPACE_STICK_RELEASE before another can be queued. The
+        operator asked for "then AGAIN right joystick to move to workspace
+        three", which is one deflection per workspace, and a ramp here would fly
+        through every workspace on a single push.
+        """
+        direction = self._workspace_direction(value)
+        if direction == self.workspace_dir:
+            return []
+        self.workspace_dir = direction
+        if direction:
+            # 🔴 THE TAP-POISONING GUARD, exactly as `_stick_brightness` needs
+            # it and for exactly the same reason: `mode_chorded` is otherwise
+            # armed only by a BUTTON press, and an axis deflection is not one.
+            # Without this line "hold STEAM, flick the stick, let go of STEAM"
+            # would change workspace AND THEN open the apps menu, because the
+            # hold still looked like a clean tap. Covered by its own test, in
+            # both release orders.
+            self.mode_chorded = True
+            self.pending_actions.append(WORKSPACE_STEPS[direction])
+        return []
+
+    def stop_workspace(self) -> None:
+        """Forget a latched deflection, so the next flick counts. Idempotent.
+
+        🔴 THE STALE LATCH THIS EXISTS TO PREVENT, and it is a dead chord rather
+        than a runaway: ABS_RX reaches `_stick_workspace` ONLY while STEAM is
+        held, so a user who lets go of STEAM before centring the stick leaves
+        `workspace_dir` set with nothing left that could ever clear it. The next
+        STEAM + push in that same direction would compare equal, queue nothing,
+        and look broken. Called on the STEAM release, and again when the pad's
+        node vanishes (the same place `stop_brightness` is called, for a
+        neighbouring reason).
+        """
+        self.workspace_dir = 0
+
     def due_brightness(self, now: float) -> int:
         """Queue the next step of a held ramp. Returns how many it queued.
 
@@ -1965,6 +2192,12 @@ class Mapper:
                     # stick may be perfectly still, in which case no further
                     # sample is coming. See `stop_brightness`.
                     self.stop_brightness()
+                    # 🆕 AND THE WORKSPACE LATCH GOES WITH IT. Nothing else can
+                    # clear it either: ABS_RX is only routed to the chord while
+                    # STEAM is held, so a stick still pushed right at this
+                    # instant would stay latched right for ever and swallow the
+                    # next flick that way. See `stop_workspace`.
+                    self.stop_workspace()
                     # `mode_held` as well as `mode_chorded`: a release we never
                     # saw the press for (re-binding to a pad mid-hold) is not a
                     # tap the user made.
@@ -2024,6 +2257,19 @@ class Mapper:
         # menu behind it at the same time.
         if etype == e.EV_ABS and code == BRIGHTNESS_STICK_AXIS and self.mode_held:
             return self._stick_brightness(value, now)
+        # 🆕 AND STEAM + THE RIGHT STICK'S HORIZONTAL AXIS IS THE WORKSPACE.
+        #
+        # ⚠️ BESIDE THE BRIGHTNESS BRANCH, ABOVE `osk_active`, for the same
+        # reason: a chord the user reaches for must not stop working because a
+        # keyboard happens to be on screen -- and the OSK's own routing
+        # (`_osk_event`) is interested in the PADS, never in this axis.
+        #
+        # ⚠️ NO EARLY-RETURN HAZARD OF THE KIND THE LINE ABOVE HAS. The
+        # brightness branch has to pre-empt STICK_AXES or the same push would
+        # also drive an arrow key; ABS_RX is in no such table, so this returns []
+        # from a path that would have returned [] anyway.
+        if etype == e.EV_ABS and code == WORKSPACE_STICK_AXIS and self.mode_held:
+            return self._stick_workspace(value)
         # ⚠️ AFTER the chord, BEFORE everything else. The chord has to keep
         # working while the keyboard is up -- it is how a user dismisses one
         # they opened by accident -- and nothing else may reach the navigation
@@ -3006,6 +3252,205 @@ def run_brightness(action: str, dry_run: bool = False) -> bool:
     return True
 
 
+# --- 🆕 STEAM + the right stick: finding the workspace to move to ------------
+#
+# 🔴 THIS IS THE ONE BINDING THAT HAS TO READ BEFORE IT ACTS, and the wrap is
+# why. "Move left from workspace 1 to the last workspace" cannot be expressed as
+# a dispatch at all -- Hyprland's own relative forms stop at the ends (see
+# `workspace_focus_argv`) -- so the target has to be computed from the workspace
+# list, which means asking the compositor two questions first.
+#
+# ⚠️ WHAT "THE LAST WORKSPACE" MEANS HERE: the highest-numbered workspace that
+# EXISTS. Not workspace 10, and not a workspace conjured for the occasion. That
+# is the same set Omarchy's own SUPER+TAB walks (`hl.dsp.focus({ workspace =
+# "e+1" })` is Hyprland's "next EXISTING workspace"), so the controller and the
+# keyboard agree about what a workspace is -- the same principle CLOSE_WINDOW_ARGV
+# applies to the close binding. The visible consequence, and it is worth knowing
+# before someone reports it as a bug: on a desktop with ONE workspace this chord
+# has nowhere to go and does nothing, exactly as SUPER+TAB does nothing there.
+# `run_workspace` says so in the journal rather than failing silently.
+
+
+def workspace_ids_from_json(workspaces_json: str) -> list[int] | None:
+    """Every ORDINARY workspace's id, ascending, or None if it cannot be read.
+
+    None means the question was not answered (bad JSON, a shape we do not
+    recognise); [] means it was answered and there are no ordinary workspaces.
+    The caller must be able to tell those apart -- one is a broken read to
+    report, the other is a desktop to leave alone.
+
+    ⚠️ IDS BELOW 1 ARE NOT WORKSPACES A FLICK MAY LAND ON. Hyprland gives
+    SPECIAL workspaces negative ids -- Omarchy binds `special:scratchpad` to
+    SUPER+S -- and there is no workspace 0. A scratchpad that appeared in this
+    list would be one flick away from swallowing the user's screen, with no
+    obvious way back on a controller.
+
+    ⚠️ `isinstance(True, int)` IS TRUE IN PYTHON, hence the bool guard: a JSON
+    `true` in that field would otherwise read as workspace 1.
+    """
+    try:
+        workspaces = json.loads(workspaces_json)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(workspaces, list):
+        return None
+    ids = set()
+    for workspace in workspaces:
+        if not isinstance(workspace, dict):
+            continue
+        workspace_id = workspace.get("id")
+        if isinstance(workspace_id, bool) or not isinstance(workspace_id, int):
+            continue
+        if workspace_id >= 1:
+            ids.add(workspace_id)
+    return sorted(ids)
+
+
+def active_workspace_from_json(active_json: str) -> int | None:
+    """The focused workspace's id, or None if it cannot be read.
+
+    ⚠️ A NEGATIVE ID IS RETURNED AS IT IS, not filtered out like the list above:
+    "we are on the scratchpad" is a true and useful answer, and
+    `next_workspace_id` knows what to do with a current workspace that is not in
+    the list.
+    """
+    try:
+        active = json.loads(active_json)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(active, dict):
+        return None
+    workspace_id = active.get("id")
+    if isinstance(workspace_id, bool) or not isinstance(workspace_id, int):
+        return None
+    return workspace_id
+
+
+def next_workspace_id(current: int, ids: list[int], direction: int) -> int | None:
+    """The workspace one step from `current`, WRAPPING at both ends.
+
+    None when there is nowhere to go: no ordinary workspaces at all, or only the
+    one we are already on.
+
+    🔴 THE WRAP THE OPERATOR ASKED FOR is left-from-the-first -> the last.
+    Right-from-the-last -> the first is the symmetric case; they did NOT ask for
+    it and it is implemented anyway, because the alternative is a control that
+    wraps one way and dead-ends the other. Flagged as an inference in the
+    handover, not smuggled in as a requirement.
+
+    ⚠️ A `current` THAT IS NOT IN THE LIST is a real state, not a bug: the
+    scratchpad is a workspace with a negative id that `workspace_ids_from_json`
+    deliberately drops. Stepping from outside the ring enters it at the end the
+    direction points at -- right -> the first workspace, left -> the last --
+    which is the same answer wrapping gives.
+    """
+    if not ids:
+        return None
+    if current not in ids:
+        return ids[0] if direction > 0 else ids[-1]
+    target = ids[(ids.index(current) + direction) % len(ids)]
+    return None if target == current else target
+
+
+def read_workspace_state(list_argv: tuple[str, ...] = WORKSPACE_LIST_ARGV,
+                         active_argv: tuple[str, ...] = WORKSPACE_ACTIVE_ARGV,
+                         timeout: float = WORKSPACE_STATE_TIMEOUT,
+                         env=None) -> "tuple[int, list[int]] | None":
+    """`(current_id, existing_ids)`, or None if either question went unanswered.
+
+    Two bounded, synchronous reads -- the same deliberate, scoped exception to
+    `spawn_detached`'s "never block" rule that `read_lock_state` is, and bounded
+    by WORKSPACE_STATE_TIMEOUT for the same reason. It costs the input loop
+    ~20 ms on a healthy compositor and at most 2x the timeout on a sick one, and
+    it is only ever reached from a deliberate stick flick, never from a clock.
+
+    ⚠️ `hyprctl` NEEDS HYPRLAND_INSTANCE_SIGNATURE, which this service does not
+    inherit (§5.28). `session_environ()` resolves it at call time; without it
+    every read here is None and the chord is dead. Same requirement, same fix,
+    as `read_lock_state` and every `spawn_detached` in this file.
+
+    ⚠️ IT DOES NOT REFACTOR THE OTHER TWO READERS INTO ITSELF. `read_lock_state`
+    and `read_screensaver_state` answer three-valued questions where None means
+    "unknown, change nothing"; this one answers "act or do not act". Merging
+    them would put one error-handling policy in charge of both.
+    """
+    environ = session_environ() if env is None else env
+
+    def ask(argv: tuple[str, ...]) -> str | None:
+        try:
+            result = subprocess.run(list(argv), capture_output=True, text=True,
+                                    timeout=timeout, env=environ)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return result.stdout if result.returncode == 0 else None
+
+    listed = ask(list_argv)
+    if listed is None:
+        return None
+    ids = workspace_ids_from_json(listed)
+    if ids is None:
+        return None
+    active = ask(active_argv)
+    if active is None:
+        return None
+    current = active_workspace_from_json(active)
+    if current is None:
+        return None
+    return current, ids
+
+
+def run_workspace(action: str, dry_run: bool = False,
+                  read=read_workspace_state) -> bool:
+    """STEAM + the right stick: move one workspace. True if it was started.
+
+    ⚠️ ITS OWN RUNNER, LIKE EVERY OTHER BINDING HERE, AND FOR THE USUAL REASON:
+    the failure sentence has to name what THIS chord needed. It has three
+    distinct ways to do nothing -- the compositor did not answer, there is
+    nowhere to go, the binary is missing -- and a shared runner would collapse
+    them into one misleading line.
+
+    ⚠️ NOT ONCE-ONLY LIKE `run_brightness`. That binding is throttled because it
+    fires on a clock and could scroll the journal eight times a second; this one
+    fires once per deliberate flick, so every line in the log corresponds to
+    something a human just did.
+    """
+    direction = WORKSPACE_STEP_DIRECTIONS.get(action)
+    if direction is None:
+        # Unreachable from translate(), which queues only WORKSPACE_STEPS'
+        # names -- which is exactly why it is loud rather than ignored.
+        print(f"deck-input-mapper: unknown workspace action {action!r}; "
+              "nothing moved", file=sys.stderr, flush=True)
+        return False
+    state = read()
+    if state is None:
+        print("deck-input-mapper: STEAM + the right stick could not ask "
+              f"`{WORKSPACE_LIST_ARGV[0]}` which workspaces exist, so nothing "
+              "moved; the rest of the mapper is unaffected",
+              file=sys.stderr, flush=True)
+        return False
+    current, ids = state
+    target = next_workspace_id(current, ids, direction)
+    if target is None:
+        # Not a failure, and said plainly so it is not read as one. This is the
+        # fresh-desktop case: one workspace, nowhere to flick to.
+        print(f"deck-input-mapper: STEAM + the right stick has nowhere to go "
+              f"from workspace {current} -- it moves between the workspaces that "
+              "EXIST, exactly as Omarchy's own next-workspace binding does",
+              file=sys.stderr, flush=True)
+        return False
+    argv = workspace_focus_argv(target)
+    printable = " ".join(argv)
+    if dry_run:
+        print(f"{action} -> {printable}", file=sys.stderr, flush=True)
+        return True
+    if not spawn_detached(argv, f"run `{printable}`"):
+        print(f"deck-input-mapper: STEAM + the right stick does nothing until "
+              f"`{argv[0]}` is installed and on PATH; the rest of the mapper is "
+              "unaffected", file=sys.stderr, flush=True)
+        return False
+    return True
+
+
 # --- the system pointer, for as long as our own keyboard is up ---------------
 #
 # 🔴 THE POINTER WAS STILL DRAWN OVER THE KEYBOARD. `--grab` on the unit
@@ -3410,6 +3855,15 @@ def menu_binding_report(lizard: str | None) -> list[str]:
         f"`{' '.join(BRIGHTNESS_ACTIONS['brightness-up'])}` / "
         f"`{' '.join(BRIGHTNESS_ACTIONS['brightness-down'])}`, one step then "
         f"every {BRIGHTNESS_RAMP_INTERVAL:g}s while held",
+        # 🆕 THE ONE BINDING THAT READS BEFORE IT ACTS, so it has a failure the
+        # others do not: `hyprctl` present but unable to answer (no instance
+        # signature, not Hyprland) leaves the flick doing nothing with nothing
+        # visibly wrong. Naming both commands here means the journal shows which
+        # half to test by hand.
+        f"STEAM + right stick left/right (previous/next workspace, wrapping at "
+        f"both ends, ONE workspace per flick) -> "
+        f"`{' '.join(workspace_focus_argv('<id>'))}`, after asking "
+        f"`{' '.join(WORKSPACE_LIST_ARGV)}` which workspaces exist",
     ]
     if QAM_BUTTON is None:
         lines.append(
@@ -4119,10 +4573,15 @@ def main() -> None:
         return set_lizard_mode(want, dry_run=args.dry_run)
 
     pad = pick_device(args.device, lizard=lizard)
+    # ⚠️ WORKSPACE_STICK_AXIS IS IN THIS FILTER DELIBERATELY. It is NOT in
+    # STICK_AXES (it drives no arrow key), so without naming it the mapper would
+    # never learn ABS_RX's real range and `_workspace_direction` would fall back
+    # to its default -- which happens to be right on this Deck and would be
+    # wrong, silently, on any pad that reports a different range.
     mapper = Mapper(axis_ranges={
         code: (ai.min, ai.max)
         for code, ai in dict(pad.capabilities().get(e.EV_ABS, [])).items()
-        if code in STICK_AXES
+        if code in STICK_AXES or code == WORKSPACE_STICK_AXIS
     })
 
     # --- the pad click's haptic confirmation (PAD_HAPTIC_MAGNITUDES) --------
@@ -4780,6 +5239,18 @@ def main() -> None:
                           file=sys.stderr, flush=True)
                 run_brightness(action, dry_run=ui is None)
                 continue
+            # 🆕 And the workspace flick, spelled out for the same reason.
+            #
+            # ⚠️ THE VERBOSE LINE NAMES A DIRECTION, NOT A COMMAND, because the
+            # command is not known until `run_workspace` has asked Hyprland
+            # which workspaces exist -- it prints the resolved dispatch itself
+            # under --dry-run.
+            if action in ("workspace-next", "workspace-prev"):
+                if args.verbose and ui is not None:
+                    print(f"{action} -> {WORKSPACE_STEP_DIRECTIONS[action]:+d} "
+                          "workspace", file=sys.stderr, flush=True)
+                run_workspace(action, dry_run=ui is None)
+                continue
             # An action queued by translate() and handled by nobody is a bug
             # that would otherwise present as a dead button.
             print(f"deck-input-mapper: queued action {action!r} has no handler; "
@@ -4956,6 +5427,12 @@ def main() -> None:
                     # no stick left in the world that could stop it. The screen
                     # would walk to full brightness on its own.
                     mapper.stop_brightness()
+                    # 🆕 AND THE WORKSPACE LATCH, which fails the other way: it
+                    # queues nothing on its own, but a direction latched by the
+                    # pad that just died would still be latched against the
+                    # replacement, swallowing the user's first flick after the
+                    # recovery. See `stop_workspace`.
+                    mapper.stop_workspace()
                     # 🔴 AND HAND THE FIRMWARE BACK, BEFORE ANYTHING SLOW.
                     # (docs/findings/P39 Defect 2, fix point 3.) The node
                     # vanishing IS the "user opened Steam" path, and from this

@@ -1385,6 +1385,446 @@ check("🔴 STEAM + stick DOWN dims end to end -- it does not brighten",
       [argv for argv, _kw in _fake.calls], [m.BRIGHTNESS_DOWN_ARGV])
 
 
+# --- 🆕 STEAM + THE RIGHT STICK, LEFT AND RIGHT, IS THE WORKSPACE ------------
+#
+# 🔴 THE OPERATOR'S REQUEST IS THE SPEC, AND ITS SHAPE IS "AGAIN": *"Press steam
+# + right joystick right to move from workspace 1 to 2. Then again right
+# joystick to move to workspace three (steam button still pressed) etc."* One
+# deflection is one workspace. That is the OPPOSITE of the brightness ramp
+# above, which repeats while held, and the assertions below are written to fail
+# loudly if this one is ever given a clock.
+#
+# ✅ The resting sample used here is the measured one (REST_ABS_X = 681, read
+# off an untouched stick on 2026-08-16) -- input, never a pinned expectation.
+
+WS_FULL_RIGHT = 30000       # a deliberate push; well past any threshold
+WS_FULL_LEFT = -30000
+# Between RELEASE and ENGAGE: a stick on its way back that has NOT re-armed yet.
+WS_PARTIAL = int(32767 * (m.WORKSPACE_STICK_RELEASE
+                          + (m.WORKSPACE_STICK_ENGAGE - m.WORKSPACE_STICK_RELEASE) / 2))
+
+
+def fresh_sticks() -> "m.Mapper":
+    """A mapper built the way main() builds it -- knowing the RIGHT stick's
+    range as well as the left one's. `fresh()` deliberately does not, so the
+    fallback path is exercised too (asserted below)."""
+    return m.Mapper(axis_ranges={e.ABS_X: (-32768, 32767), e.ABS_Y: (-32768, 32767),
+                                 m.WORKSPACE_STICK_AXIS: (-32767, 32767)})
+
+
+# The axis, and the two ways it must NOT be the left stick's.
+check("the workspace chord rides the RIGHT stick's horizontal axis",
+      (m.WORKSPACE_STICK_AXIS, m.WORKSPACE_STICK_AXIS == m.BRIGHTNESS_STICK_AXIS),
+      (e.ABS_RX, False))
+# 🔴 THE STUCK-KEY HAZARD, AND WHY IT CANNOT APPLY HERE. The left stick's
+# brightness chord needed `_release_stick_axis` because grabbing ABS_Y mid-push
+# stranded an arrow key held down for the rest of the session. That is only
+# possible for an axis some OTHER table already claims -- so the claim being
+# tested is that NOTHING else claims this one.
+_axis_tables = {"STICK_AXES": set(m.STICK_AXES), "POINTER_AXES": set(m.POINTER_AXES),
+                "DECK_TRIGGERS": set(m.DECK_TRIGGERS),
+                "PAD_TOUCH_AXES": set(m.PAD_TOUCH_AXES)}
+check("🔴 neither right-stick axis is claimed by any other axis table, so no "
+      "key can be stranded held down by this chord",
+      sorted(name for name, table in _axis_tables.items()
+             if {e.ABS_RX, e.ABS_RY} & table), [])
+check("...and the positive control: that sweep DOES find the left stick's axes",
+      sorted(name for name, table in _axis_tables.items()
+             if {e.ABS_X, e.ABS_Y} & table), ["STICK_AXES"])
+check("...so the right stick emits no arrow key even without STEAM",
+      (fresh_sticks().translate(e.EV_ABS, e.ABS_RX, WS_FULL_RIGHT, 0.0),
+       fresh_sticks().translate(e.EV_ABS, e.ABS_RY, WS_FULL_RIGHT, 0.0)),
+      ([], []))
+
+# The two steps, derived from one measured sign so they cannot invert apart.
+check("the two steps are opposite directions of one axis",
+      sorted(m.WORKSPACE_STEPS),
+      sorted({m.WORKSPACE_STICK_RIGHT, -m.WORKSPACE_STICK_RIGHT}))
+check("...and right is the NEXT one, matching the sign HAT_MAP proves is right",
+      (m.WORKSPACE_STEPS[m.WORKSPACE_STICK_RIGHT],
+       m.HAT_MAP[(e.ABS_HAT0X, m.WORKSPACE_STICK_RIGHT)]),
+      ("workspace-next", e.KEY_RIGHT))
+check("the direction lookup is the exact inverse of the step table",
+      m.WORKSPACE_STEP_DIRECTIONS,
+      {name: direction for direction, name in m.WORKSPACE_STEPS.items()})
+
+# Hysteresis, and here it is also the re-arm rule.
+check("the stick must fall further back than it pushed to re-arm",
+      m.WORKSPACE_STICK_RELEASE < m.WORKSPACE_STICK_ENGAGE, True)
+check("...and the deadzone is far above the measured resting deflection",
+      m.WORKSPACE_STICK_ENGAGE > 4 * (abs(REST_ABS_X) / 32767), True)
+
+# 🔴 THE DEADZONE: the stick's own resting sample, under a held STEAM, must not
+# move the user off their workspace.
+mm = fresh_sticks()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("🔴 a RESTING right stick under a held STEAM queues nothing at all",
+      (mm.translate(e.EV_ABS, e.ABS_RX, REST_ABS_X, 0.1), mm.pending_actions,
+       mm.workspace_dir),
+      ([], [], 0))
+check("🔴 ...while a real push on that very same mapper DOES queue one step",
+      (mm.translate(e.EV_ABS, e.ABS_RX, WS_FULL_RIGHT, 0.2), mm.pending_actions),
+      ([], ["workspace-next"]))
+
+# Direction, both ways, from a fresh hold each time.
+mm = fresh_sticks()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("STEAM + right stick RIGHT queues the next workspace and emits no key",
+      (mm.translate(e.EV_ABS, e.ABS_RX, WS_FULL_RIGHT, 0.1), mm.pending_actions),
+      ([], ["workspace-next"]))
+mm = fresh_sticks()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("STEAM + right stick LEFT queues the previous workspace",
+      (mm.translate(e.EV_ABS, e.ABS_RX, WS_FULL_LEFT, 0.1), mm.pending_actions),
+      ([], ["workspace-prev"]))
+
+# 🔴🔴 THE ONE THAT DECIDES WHETHER THIS FEATURE IS USABLE AT ALL. Hold the
+# stick fully deflected and let time pass -- through every clock this process
+# has -- and EXACTLY ONE workspace change may be queued. A ramp here would fly
+# through every workspace on a single push.
+mm = fresh_sticks()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_ABS, e.ABS_RX, WS_FULL_RIGHT, 0.0)
+for _tick in range(1, 61):                 # six seconds of a held stick
+    _now = _tick * 0.1
+    # A real pad keeps sending samples while a thumb rests on a deflected
+    # stick; they jitter a little and never fall back to centre.
+    mm.translate(e.EV_ABS, e.ABS_RX, WS_FULL_RIGHT + (_tick % 5) * 37, _now)
+    mm.due_repeats(_now)
+    mm.due_brightness(_now)
+check("🔴🔴 SIX SECONDS of a fully deflected stick queue EXACTLY ONE workspace "
+      "change -- one flick, one workspace, never a ramp",
+      mm.pending_actions, ["workspace-next"])
+check("🔴 ...and the chord asks main()'s select() for NO deadline: it has no "
+      "clock to be woken for, unlike the brightness ramp",
+      mm.next_deadline(), None)
+# The structural half of the same claim: there is no timer method to call. A
+# ramp cannot be added by accident without this failing.
+check("🔴 ...and the Mapper has no workspace timer at all",
+      [name for name in dir(mm) if "workspace" in name and name.startswith("due")],
+      [])
+# The positive control for that absence: the brightness ramp DOES have one, so
+# the two checks above are looking at something real.
+check("...and the positive control: the brightness ramp does have a timer, and "
+      "a held stick keeps it fed",
+      (hasattr(mm, "due_brightness"), m.BRIGHTNESS_STEPS != {}), (True, True))
+
+# Re-arming: the stick has to come back before it can step again. This is the
+# operator's "then AGAIN right joystick".
+mm = fresh_sticks()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_ABS, e.ABS_RX, WS_FULL_RIGHT, 0.0)
+mm.translate(e.EV_ABS, e.ABS_RX, WS_PARTIAL, 0.1)
+check("a stick only half-way back has NOT re-armed -- that gap is hysteresis",
+      (mm.workspace_dir, mm.pending_actions),
+      (m.WORKSPACE_STICK_RIGHT, ["workspace-next"]))
+mm.translate(e.EV_ABS, e.ABS_RX, REST_ABS_X, 0.2)
+check("...centring it re-arms without queueing anything",
+      (mm.workspace_dir, mm.pending_actions), (0, ["workspace-next"]))
+mm.translate(e.EV_ABS, e.ABS_RX, WS_FULL_RIGHT, 0.3)
+check("🔴 ...and pushing AGAIN, with STEAM never released, is the second "
+      "workspace -- the operator's 1 -> 2 -> 3",
+      mm.pending_actions, ["workspace-next", "workspace-next"])
+# Reversing without centring is a new direction, so it steps immediately.
+mm.translate(e.EV_ABS, e.ABS_RX, WS_FULL_LEFT, 0.4)
+check("pushing the other way steps back rather than needing a centre first",
+      (mm.workspace_dir, mm.pending_actions),
+      (-m.WORKSPACE_STICK_RIGHT,
+       ["workspace-next", "workspace-next", "workspace-prev"]))
+
+# 🔴 THE STEAM-TAP POISONING BUG, in both release orders. `mode_chorded` is
+# otherwise armed only by a BUTTON press, and an axis deflection is not one.
+mm = fresh_sticks()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_ABS, e.ABS_RX, WS_FULL_RIGHT, 0.1)
+mm.translate(e.EV_ABS, e.ABS_RX, REST_ABS_X, 0.2)          # stick released first
+check("🔴 STEAM + right stick is a CHORD, not a tap: no apps menu on the release",
+      (mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.3), mm.pending_actions),
+      ([], ["workspace-next"]))
+mm = fresh_sticks()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_ABS, e.ABS_RX, WS_FULL_RIGHT, 0.1)       # still pushed when
+check("🔴 ...and still no menu when the stick is let go AFTER steam",
+      (mm.translate(e.EV_KEY, e.BTN_MODE, 0, 0.2), mm.pending_actions),
+      ([], ["workspace-next"]))
+
+# 🔴 THE STALE LATCH, which is the way this chord dies quietly. ABS_RX only
+# reaches the chord while STEAM is held, so a stick still deflected when STEAM
+# comes up has nothing left that could ever clear its latch.
+check("🔴 the STEAM release clears a latch the stick can no longer clear",
+      mm.workspace_dir, 0)
+mm.pending_actions.clear()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 1.0)
+check("🔴 ...so the very next STEAM + push in the SAME direction still moves",
+      (mm.translate(e.EV_ABS, e.ABS_RX, WS_FULL_RIGHT, 1.1), mm.pending_actions),
+      ([], ["workspace-next"]))
+check("...and stop_workspace is idempotent",
+      (mm.stop_workspace(), mm.stop_workspace(), mm.workspace_dir), (None, None, 0))
+
+# 🔴 DO NOT STEAL THE VERTICAL AXIS. The operator asked for left/right only, and
+# STEAM + right stick up/down must go on doing exactly what it did before:
+# nothing at all.
+mm = fresh_sticks()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("🔴 STEAM + right stick UP does nothing and queues nothing",
+      (mm.translate(e.EV_ABS, e.ABS_RY, WS_FULL_LEFT, 0.1), mm.pending_actions,
+       mm.workspace_dir),
+      ([], [], 0))
+check("🔴 ...and STEAM + right stick DOWN likewise",
+      (mm.translate(e.EV_ABS, e.ABS_RY, WS_FULL_RIGHT, 0.2), mm.pending_actions,
+       mm.workspace_dir),
+      ([], [], 0))
+check("...and the positive control: the HORIZONTAL axis on that same mapper does "
+      "move a workspace",
+      (mm.translate(e.EV_ABS, e.ABS_RX, WS_FULL_RIGHT, 0.3), mm.pending_actions),
+      ([], ["workspace-next"]))
+# ...nor the LEFT stick's, which is still brightness and still arrow keys.
+mm = fresh_sticks()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("STEAM + the LEFT stick is still brightness, not a workspace",
+      (mm.translate(e.EV_ABS, e.ABS_Y, FULL_UP, 0.1), mm.pending_actions),
+      ([], ["brightness-up"]))
+
+# A mapper that never learned ABS_RX's range must still behave -- main() names
+# the axis in its `axis_ranges` filter (asserted against the source below), and
+# the fallback covers a pad that declares no range at all.
+mm = fresh()                      # no ABS_RX range at all
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("the chord works from the fallback range too, and still ignores a "
+      "resting stick",
+      (mm.translate(e.EV_ABS, e.ABS_RX, REST_ABS_X, 0.1),
+       mm.translate(e.EV_ABS, e.ABS_RX, WS_FULL_RIGHT, 0.2), mm.pending_actions),
+      ([], [], ["workspace-next"]))
+
+# The keyboard being up is not a reason to be stuck on one workspace.
+mm = fresh_sticks()
+mm.osk_active = True
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+check("STEAM + right stick still changes workspace with the keyboard up",
+      (mm.translate(e.EV_ABS, e.ABS_RX, WS_FULL_RIGHT, 0.1), mm.pending_actions),
+      ([], ["workspace-next"]))
+
+# --- which workspace: the arithmetic, and the wrap the operator asked for ----
+
+check("the ordinary workspaces come back sorted and de-duplicated",
+      m.workspace_ids_from_json('[{"id": 3}, {"id": 1}, {"id": 3}]'), [1, 3])
+# 🔴 The scratchpad must never be one flick away: it is a workspace with a
+# negative id, and a controller has no obvious way back out of it.
+check("🔴 a SPECIAL workspace is not somewhere a flick can land",
+      m.workspace_ids_from_json(
+          '[{"id": 1}, {"id": -99, "name": "special:scratchpad"}]'), [1])
+check("...and the positive control: the same read keeps an ordinary neighbour",
+      m.workspace_ids_from_json(
+          '[{"id": 1}, {"id": 2, "name": "2"}, {"id": -99}]'), [1, 2])
+check("a JSON true is not workspace 1 (isinstance(True, int) is True)",
+      m.workspace_ids_from_json('[{"id": true}, {"id": 2}]'), [2])
+check("a non-dict entry is skipped, not fatal",
+      m.workspace_ids_from_json('["nope", {"id": 2}]'), [2])
+check("an empty list is an ANSWER (no workspaces), not a failed read",
+      m.workspace_ids_from_json("[]"), [])
+check("malformed JSON is a failed read, not an empty desktop",
+      m.workspace_ids_from_json("{not json"), None)
+check("a JSON object instead of a list is a failed read -- the shape changed",
+      m.workspace_ids_from_json('{"id": 1}'), None)
+check("empty input is a failed read", m.workspace_ids_from_json(""), None)
+
+check("the active workspace is read by id", m.active_workspace_from_json('{"id": 4}'), 4)
+check("a special workspace is reported as itself, not dropped",
+      m.active_workspace_from_json('{"id": -99, "name": "special:scratchpad"}'), -99)
+check("a missing id is a failed read", m.active_workspace_from_json('{"name": "1"}'), None)
+check("malformed JSON is a failed read here too",
+      m.active_workspace_from_json("nope"), None)
+check("a list where an object belongs is a failed read",
+      m.active_workspace_from_json('[{"id": 1}]'), None)
+
+_RING = [1, 2, 3]
+check("right steps to the next workspace",
+      m.next_workspace_id(1, _RING, m.WORKSPACE_STICK_RIGHT), 2)
+check("left steps to the previous one",
+      m.next_workspace_id(2, _RING, -m.WORKSPACE_STICK_RIGHT), 1)
+# 🔴 THE WRAP THE OPERATOR ASKED FOR, in their own words: "if steam button is
+# pressed in workspace 1 and yo move right joystick left move to the last
+# workspace".
+check("🔴 left from the FIRST workspace wraps to the LAST one",
+      m.next_workspace_id(1, _RING, -m.WORKSPACE_STICK_RIGHT), 3)
+# ...and the symmetric case, which is an INFERENCE from that one and is flagged
+# as such in the source and the handover.
+check("right from the LAST workspace wraps to the first",
+      m.next_workspace_id(3, _RING, m.WORKSPACE_STICK_RIGHT), 1)
+# The ends are found by POSITION in the list, not by arithmetic on the number --
+# workspaces 1, 2 and 3 do not have to be the ones that exist.
+check("a gappy set of workspaces steps by position, not by number",
+      [m.next_workspace_id(1, [1, 4, 7], m.WORKSPACE_STICK_RIGHT),
+       m.next_workspace_id(7, [1, 4, 7], m.WORKSPACE_STICK_RIGHT),
+       m.next_workspace_id(1, [1, 4, 7], -m.WORKSPACE_STICK_RIGHT)],
+      [4, 1, 7])
+check("one workspace means nowhere to go, in either direction",
+      [m.next_workspace_id(1, [1], d) for d in (1, -1)], [None, None])
+check("no workspaces at all means nowhere to go",
+      m.next_workspace_id(1, [], 1), None)
+# Being on the scratchpad is a real state: its id is not in the list at all.
+check("stepping from a workspace that is not in the ring enters it at the end "
+      "the direction points at",
+      [m.next_workspace_id(-99, _RING, m.WORKSPACE_STICK_RIGHT),
+       m.next_workspace_id(-99, _RING, -m.WORKSPACE_STICK_RIGHT)],
+      [1, 3])
+
+# --- reading that state: bounded, and never fatal ----------------------------
+
+import time as _time  # noqa: E402 -- the suite is a script; block-local by design
+
+_WS_LIST = '[{"id": 1}, {"id": 2}]'
+_WS_ACTIVE = '{"id": 2}'
+
+
+def ws_stub(payload: str) -> tuple:
+    """A hyprctl-shaped process that prints one JSON document."""
+    return (sys.executable, "-c", f"print({payload!r})")
+
+
+check("both hyprctl-shaped reads are parsed into (current, existing)",
+      m.read_workspace_state(list_argv=ws_stub(_WS_LIST),
+                             active_argv=ws_stub(_WS_ACTIVE)),
+      (2, [1, 2]))
+check("a nonzero exit from the LIST query is a failed read",
+      m.read_workspace_state(
+          list_argv=(sys.executable, "-c",
+                     f"import sys; print({_WS_LIST!r}); sys.exit(1)"),
+          active_argv=ws_stub(_WS_ACTIVE)),
+      None)
+check("a nonzero exit from the ACTIVE query is a failed read too",
+      m.read_workspace_state(
+          list_argv=ws_stub(_WS_LIST),
+          active_argv=(sys.executable, "-c",
+                       f"import sys; print({_WS_ACTIVE!r}); sys.exit(1)")),
+      None)
+check("a binary that does not exist is a failed read, never a raise",
+      m.read_workspace_state(list_argv=("/nonexistent/hyprctl", "-j", "workspaces"),
+                             active_argv=ws_stub(_WS_ACTIVE)),
+      None)
+check("garbage on stdout is a failed read, not an empty desktop",
+      m.read_workspace_state(list_argv=ws_stub("not json at all"),
+                             active_argv=ws_stub(_WS_ACTIVE)),
+      None)
+# ⚠️ THE CLOCK IS THE ASSERTION HERE, not the answer -- exactly as it is for
+# read_lock_state. A reader that ignored `timeout` would also return None from
+# this, five seconds later, having blocked the only input path on the device.
+_started = _time.monotonic()
+check("a compositor that never answers is a failed read, never a hang",
+      m.read_workspace_state(list_argv=(sys.executable, "-c", "import time; time.sleep(5)"),
+                             active_argv=ws_stub(_WS_ACTIVE), timeout=0.2),
+      None)
+check("...and it was CUT OFF at the bound, not merely answered late",
+      _time.monotonic() - _started < 2.0, True)
+# 🔴 §5.28: hyprctl needs HYPRLAND_INSTANCE_SIGNATURE, which this service does
+# not inherit. A reader that passed the bare environment would be dead on a cold
+# boot and silent about it.
+_env_seen = {}
+_real_run = m.subprocess.run
+try:
+    m.subprocess.run = lambda argv, **kw: (_env_seen.update(kw), _real_run(argv, **kw))[1]
+    m.read_workspace_state(list_argv=ws_stub(_WS_LIST), active_argv=ws_stub(_WS_ACTIVE))
+finally:
+    m.subprocess.run = _real_run
+check("🔴 the reads run with the RESOLVED session environment (§5.28)",
+      _env_seen.get("env") is not None, True)
+check("...and are bounded by a timeout rather than trusting hyprctl to return",
+      _env_seen.get("timeout"), m.WORKSPACE_STATE_TIMEOUT)
+check("the pair's worst case is bounded by one key-repeat delay",
+      2 * m.WORKSPACE_STATE_TIMEOUT <= m.REPEAT_DELAY, True)
+
+# --- and the dispatch, through the same stub every other binding uses --------
+
+check("the dispatch is the LUA form Omarchy's own bindings use, never a bareword",
+      (m.workspace_focus_argv(2)[:2], m.workspace_focus_argv(2)[2].startswith("hl.")),
+      (["hyprctl", "dispatch"], True))
+check("...and it names the workspace it resolved, not a relative step",
+      ("2" in m.workspace_focus_argv(2)[2],
+       "e+1" in m.workspace_focus_argv(2)[2]),
+      (True, False))
+
+
+def ws_reader(current, ids):
+    """A `read_workspace_state` that answers without a compositor."""
+    return lambda: (current, ids)
+
+
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_workspace("workspace-next", read=ws_reader(1, [1, 2, 3])))
+check("a workspace step spawns the dispatch for the RESOLVED target",
+      [argv for argv, _kw in _fake.calls], [m.workspace_focus_argv(2)])
+check("and reports that it started", _result, True)
+check("nothing waits on it -- the input loop must never freeze on a workspace",
+      [p.waited for p in _fake.procs], [False])
+check("and it is an argv, never a shell string", _fake.calls[0][1].get("shell"), None)
+check("it runs with the RESOLVED session environment, like every other spawn",
+      _fake.calls[0][1].get("env") is not None, True)
+check("a successful step says nothing on stderr", _err, "")
+
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_workspace("workspace-prev", read=ws_reader(1, [1, 2, 3])))
+check("🔴 the WRAP end to end: left from workspace 1 dispatches the LAST one",
+      [argv for argv, _kw in _fake.calls], [m.workspace_focus_argv(3)])
+
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_workspace("workspace-next", dry_run=True, read=ws_reader(1, [1, 2])))
+check("--dry-run reports the resolved dispatch instead of running it",
+      (_fake.calls, m.workspace_focus_argv(2)[2] in _err, _result), ([], True, True))
+
+_result, _fake, _err = with_fake_subprocess(lambda: m.run_workspace("workspace-nope"))
+check("an unknown workspace action moves nothing and says so",
+      (_fake.calls, _result, "workspace-nope" in _err), ([], False, True))
+
+# 🔴 THE THREE WAYS IT CAN DO NOTHING MUST READ DIFFERENTLY IN THE JOURNAL.
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_workspace("workspace-next", read=lambda: None))
+check("a compositor that could not be asked spawns nothing and is LOUD",
+      (_fake.calls, _result), ([], False))
+check("...and names the binary it needed", m.WORKSPACE_LIST_ARGV[0] in _err, True)
+check("...and says the rest of the mapper is unaffected",
+      "the rest of the mapper is unaffected" in _err, True)
+
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_workspace("workspace-next", read=ws_reader(1, [1])))
+check("a desktop with ONE workspace spawns nothing and explains itself",
+      (_fake.calls, _result, "nowhere to go" in _err), ([], False, True))
+check("...naming the workspace it was on, so the log is diagnosable",
+      "1" in _err, True)
+
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_workspace("workspace-next", read=ws_reader(1, [1, 2])),
+    error=FileNotFoundError(2, "No such file or directory", "hyprctl"))
+check("a missing hyprctl does not raise", _result, False)
+check("it is LOUD about it", "could not run" in _err, True)
+check("...and names the binary the chord needed",
+      m.workspace_focus_argv(2)[0] in _err, True)
+mm = fresh_sticks()
+check("...and the mapper still translates afterwards",
+      mm.translate(e.EV_KEY, e.BTN_SOUTH, 1, 0.0), [(e.KEY_ENTER, 1)])
+
+# End to end, the way main() drives it: the stick queues a NAME, the runner
+# resolves it to a target and an argv. Either half alone still passes if the
+# two directions are swapped.
+mm = fresh_sticks()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_ABS, e.ABS_RX, WS_FULL_RIGHT, 0.0)
+check("STEAM + right stick RIGHT queues exactly one action",
+      mm.pending_actions, ["workspace-next"])
+_result, _fake, _err = with_fake_subprocess(
+    lambda: [m.run_workspace(a, read=ws_reader(2, [1, 2, 3]))
+             for a in mm.pending_actions])
+check("🔴 STEAM + right stick RIGHT moves FORWARD end to end -- 2 -> 3, not 2 -> 1",
+      [argv for argv, _kw in _fake.calls], [m.workspace_focus_argv(3)])
+mm = fresh_sticks()
+mm.translate(e.EV_KEY, e.BTN_MODE, 1, 0.0)
+mm.translate(e.EV_ABS, e.ABS_RX, WS_FULL_LEFT, 0.0)
+_result, _fake, _err = with_fake_subprocess(
+    lambda: [m.run_workspace(a, read=ws_reader(2, [1, 2, 3]))
+             for a in mm.pending_actions])
+check("🔴 ...and LEFT moves BACK end to end -- 2 -> 1",
+      [argv for argv, _kw in _fake.calls], [m.workspace_focus_argv(1)])
+
+
 # --- what startup says, so a dead button is never a mystery ------------------
 #
 # ⚠️ Both buttons exist only with lizard_mode=N (§5.9, §5.21), and QAM's binding
@@ -1421,6 +1861,21 @@ check("...and says it is the left stick",
       "left stick" in _report_n, True)
 check("...and states the repeat rate, so a stalled ramp is diagnosable",
       str(m.BRIGHTNESS_RAMP_INTERVAL) in _report_n, True)
+# 🆕 And the workspace flick, which has a failure the others do not: `hyprctl`
+# present but unable to ANSWER leaves the chord doing nothing with nothing
+# visibly wrong, so the journal has to name both halves.
+check("startup says which stick moves the workspace",
+      "right stick" in _report_n, True)
+check("...and names the dispatcher it will run",
+      m.workspace_focus_argv(2)[2].split("(")[0] in _report_n, True)
+check("...and the query it asks first, so a dead chord can be tested by hand",
+      " ".join(m.WORKSPACE_LIST_ARGV) in _report_n, True)
+# 🔴 The two behaviours a user would otherwise report as bugs: it wraps, and it
+# is one workspace per flick rather than a ramp.
+check("🔴 ...and says it wraps rather than stopping at the ends",
+      "wrapping" in _report_n, True)
+check("🔴 ...and that one flick is one workspace",
+      "per flick" in _report_n, True)
 
 # The inert announcement is still the guard against a silent dead button, so it
 # keeps its coverage -- forced, since the shipped constant is no longer None.
@@ -5312,6 +5767,48 @@ check("...honouring --dry-run, or `--dry-run` really changes the brightness",
        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
        and node.func.id == "run_brightness" for kw in node.keywords],
       ["dry_run=ui is None"])
+# 🆕 And the same, for the workspace flick -- starting from WORKSPACE_STEPS, so
+# a direction renamed there and not here is caught by this rather than by an
+# operator flicking the stick and watching nothing happen.
+check("every workspace action reaches a branch in run_pending",
+      sorted(name for name in m.WORKSPACE_STEPS.values()
+             if f"'{name}'" not in pending_src), [])
+check("...and reaches the runner that resolves and dispatches it",
+      sorted({node.func.id for node in ast.walk(pending_def)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+              and node.func.id == "run_workspace"}),
+      ["run_workspace"])
+check("...honouring --dry-run, or `--dry-run` really changes workspace",
+      [ast.unparse(kw) for node in ast.walk(pending_def)
+       if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+       and node.func.id == "run_workspace" for kw in node.keywords],
+      ["dry_run=ui is None"])
+# 🔴 THE AXIS THE MAPPER WOULD OTHERWISE NEVER LEARN THE RANGE OF.
+# WORKSPACE_STICK_AXIS is deliberately absent from STICK_AXES (it drives no
+# arrow key), so main()'s `axis_ranges` filter has to name it as well -- without
+# that, `_workspace_direction` silently falls back to a default range that
+# happens to be right on this Deck and would be wrong on anything else.
+_ranges_call = next(node for node in ast.walk(main_def)
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "Mapper")
+check("🔴 main() gives the mapper the RIGHT stick's declared range too",
+      "WORKSPACE_STICK_AXIS" in ast.unparse(_ranges_call), True)
+check("...and the positive control: that same filter still names STICK_AXES",
+      "STICK_AXES" in ast.unparse(_ranges_call), True)
+# 🔴 AND THE CLOCK THAT MUST NOT EXIST. The whole feature is "one flick, one
+# workspace"; a `due_workspace` ticked from the loop would make a single push
+# fly through every workspace. Asserted against main()'s source so it cannot be
+# introduced there either.
+check("🔴 nothing in main() ticks a workspace clock -- there is none to tick",
+      [node.func.attr for node in ast.walk(main_def)
+       if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+       and "workspace" in node.func.attr and node.func.attr.startswith("due")],
+      [])
+check("...and the positive control: that sweep DOES see the brightness ramp's tick",
+      [node.func.attr for node in ast.walk(main_def)
+       if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+       and "brightness" in node.func.attr and node.func.attr.startswith("due")],
+      ["due_brightness"])
 
 # 🔴 THE RAMP'S WIRING, AND IT IS THE P32 DEFECT'S FAVOURITE SHAPE. Every
 # behavioural assertion about `due_brightness` above passes with main() never
@@ -5398,6 +5895,15 @@ check("🔴 main() abandons a running ramp when the pad disappears",
        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
        and node.func.attr == "stop_brightness"],
       ["stop_brightness"])
+# 🆕 ...and the workspace latch with it, which fails the other way: it queues
+# nothing on its own, but a direction latched by the pad that just died would
+# still be latched against its replacement and swallow the first flick after
+# the recovery.
+check("🆕 main() clears the workspace latch when the pad disappears too",
+      [node.func.attr for node in ast.walk(main_def)
+       if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+       and node.func.attr == "stop_workspace"],
+      ["stop_workspace"])
 
 # --- 🆕 THE POINTER DISAPPEARS WHILE OUR KEYBOARD IS UP ----------------------
 #
