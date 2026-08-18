@@ -445,13 +445,117 @@ readonly MENU_DEFAULTS_FILE=/usr/share/omarchy/default/omarchy/omarchy-menu.json
 readonly BOOT_DEFAULT_UNIT_NAME=deck-boot-default-gaming.service
 readonly BOOT_DEFAULT_UNIT="/etc/systemd/system/${BOOT_DEFAULT_UNIT_NAME}"
 
-# 🔴 THE ESCAPE HATCH. With this unit enabled a broken Gaming Mode is
-# re-asserted on EVERY boot, and the operator has one device. Touch this file
-# and the unit's ConditionPathExists=! skips it -- no edit, no unit file, no
-# systemctl, and `systemctl status` says out loud that a condition skipped it.
-# stage_boot_default_gaming creates the directory so the escape is one `touch`,
-# and prints both this path and the `systemctl disable` form.
+# 🔴 THE ESCAPE HATCH, AND WHY IT IS NOT THE SAFETY MECHANISM.
+#
+# Touch this file and the unit's ConditionPathExists=! skips it -- no edit, no
+# unit file, no systemctl, and `systemctl status` says out loud that a condition
+# skipped it. stage_boot_default_gaming creates the directory so the escape is
+# one `touch`, and prints both this path and the `systemctl disable` form.
+#
+# ⚠️ IT NEEDS A KEYBOARD, AND THIS DEVICE HAS NONE. Established 2026-08-17,
+# from the shipped artefacts rather than from memory (docs/findings/
+# P39-boot-default-gaming-safety.md):
+#
+#   * src/deck-input-mapper.py's uinput device declares no KEY_LEFTCTRL, no
+#     KEY_LEFTALT and no KEY_F1..F12, so the mapper CANNOT type Ctrl+Alt+F2;
+#   * the mapper is WantedBy=${MAPPER_WANTED_BY}, i.e. it runs in the Hyprland
+#     desktop session and never in Gaming Mode, never on a TTY;
+#   * src/deck_osk_tty.py IS installed to ${OSK_LIB_DIR} but is unreachable
+#     there -- it has no __main__ and only `--osk-backend=tty` drives it, which
+#     only the live ISO's deck-form.sh ever passes;
+#   * the installer DELETES getty@tty1's autologin drop-in, so a TTY is a login
+#     prompt needing a typed username and password.
+#
+# docs/RECOVERY.md has said so in plain words since it was written: reaching a
+# terminal "needs a USB or Bluetooth keyboard, as the on-screen keyboard is not
+# available on a TTY". So this file is a hatch for someone with a keyboard --
+# a developer, an operator -- and NOT a safety property of the product. The
+# safety property is BOOT_DEFAULT_MAX_FAILS below, which needs no human at all.
 readonly BOOT_DEFAULT_OVERRIDE=/etc/deck-session/no-boot-default-gaming
+
+# --- the self-limiting half (2026-08-17) -----------------------------------
+#
+# 🔴 THE HAZARD THIS EXISTS FOR. "Every reboot returns to Gaming Mode" and "a
+# broken Gaming Mode is escapable by rebooting" are the same lever pulled in
+# opposite directions; no implementation of the first can keep the second. And
+# the loop is worse than it looks, because two shipped decisions already remove
+# every other graphical way out:
+#
+#   * ${SDDM_DROPIN} carries Relogin=true, so a session that dies is retried by
+#     autologin instead of dropping to the greeter (deliberate -- see the
+#     render_session_select comment: a greeter is a password prompt no
+#     controller can answer);
+#   * stage-sddm-resilience sets StartLimitIntervalSec=0, so sddm retries for
+#     ever rather than latching to `failed`.
+#
+# Both are right on their own terms and neither is being reversed here. Their
+# combined consequence is that "Gaming Mode does not come up" is ALREADY a loop
+# with no keyboard-free exit, for anyone whose default session is Gaming Mode.
+# Re-asserting at boot does not create that loop -- it widens the door into it,
+# by taking away the one case that used to escape: a user sitting in a working
+# Desktop Mode whose Gaming Mode broke underneath them (a Mesa or gamescope
+# update is the ordinary way this happens).
+#
+# So the re-assert is bounded. If the previous boot produced no evidence that a
+# graphical session came up AND was not ended deliberately, that boot is scored
+# a failure; after ${BOOT_DEFAULT_MAX_FAILS} consecutive failures the helper
+# stops re-asserting, writes `desktop` instead, and disarms itself. Two bad
+# boots and the Deck lands in a working Desktop Mode by itself. Nobody has to
+# find a keyboard, and nobody has to know this file exists.
+#
+# 🔴 EVERY FAILURE MODE OF THIS MACHINERY DEGRADES TO TODAY'S SHIPPED
+# BEHAVIOUR, and that is the property that makes it safe to ship before any
+# Deck has booted with it. If the helper is missing, the unit fails loudly and
+# sddm still starts. If the liveness probe never records anything, the fallback
+# fires and the Deck boots to the desktop -- which is exactly what it does
+# today. Nothing here can produce a state worse than the one it replaces.
+readonly BOOT_DEFAULT_BIN=/usr/local/lib/deck-session/boot-default-gaming
+# Root-owned, /var so it survives reboots and /etc so it does not. Two keys:
+# `attempted=<boot id>` (the boot on which the helper last left the default set
+# to Gaming Mode) and `fails=<n>`.
+readonly BOOT_DEFAULT_STATE=/var/lib/deck-session/boot-default-gaming.state
+# Written by ${BOOT_DEFAULT_UNIT_NAME}'s sibling below when a graphical session
+# is observed alive, and by its ExecStop when the machine shuts down cleanly.
+# Holds the boot id the observation belongs to, so a stale stamp from an
+# earlier boot cannot vouch for this one.
+readonly BOOT_DEFAULT_ALIVE_STAMP=/var/lib/deck-session/session-alive
+# 2, not 1. One missed observation is not a broken Deck: a boot the user ended
+# in under ${BOOT_DEFAULT_SETTLE_SECONDS}s, a first boot spent in Steam's
+# self-update, a probe that sampled at an unlucky moment. Two consecutive
+# boots that produced neither a live session nor a clean shutdown is a machine
+# somebody is power-cycling to get out of something.
+readonly BOOT_DEFAULT_MAX_FAILS=2
+# The sibling unit that supplies the evidence. It runs AFTER the display
+# manager, so it cannot delay a boot, and nothing depends on it.
+readonly BOOT_ALIVE_UNIT_NAME=deck-session-alive.service
+readonly BOOT_ALIVE_UNIT="/etc/systemd/system/${BOOT_ALIVE_UNIT_NAME}"
+# Seconds from unit start to the first sample. A session that is crash-looping
+# under Relogin=true dies in about a millisecond (measured, soak cycle 4 -- see
+# render_session_select), so anything past a few seconds separates it from a
+# session that started. This is deliberately far longer than that: it also has
+# to outlast a slow first gamescope start without scoring it a failure.
+readonly BOOT_DEFAULT_SETTLE_SECONDS=45
+# 🔴 AND THEN A SECOND SAMPLE, ${BOOT_DEFAULT_RESAMPLE_SECONDS}s later, WHICH
+# MUST BE THE SAME PID. One sample cannot tell "a compositor is running" from
+# "a compositor is being started for the ninth time" -- and the second is the
+# exact failure this bound exists for. Requiring the pid to be unchanged across
+# the gap makes a restart loop fail the check, which a single `pgrep` cannot.
+readonly BOOT_DEFAULT_RESAMPLE_SECONDS=15
+# The compositor comm names, and the list is MEASURED, not guessed. It is the
+# same list render_restart_helper uses, for the same reason: an earlier version
+# of that one listed `gamescope` and was a total no-op for the Gaming Mode
+# direction, because the kernel truncates comm at 15 characters and the real
+# name is `gamescope-wl`. Do not shorten this list without re-measuring.
+readonly BOOT_DEFAULT_COMPOSITORS='Hyprland|start-hyprland|gamescope-wl|start-gamescope|uwsm'
+# One syslog tag for all three modes of the helper, so the whole story reads
+# back with `journalctl -t ${BOOT_DEFAULT_TAG} -b` regardless of which unit
+# produced which line -- the same affordance FIRST_BOOT_VERIFY_TAG gives.
+readonly BOOT_DEFAULT_TAG=deck-boot-default-gaming
+# What `systemctl enable` writes. Named because chroot mode has no manager to
+# ask and writes the symlinks directly -- the same split install_first_boot_
+# verify makes, for the same reason.
+readonly BOOT_DEFAULT_WANTS="/etc/systemd/system/graphical.target.wants/${BOOT_DEFAULT_UNIT_NAME}"
+readonly BOOT_ALIVE_WANTS="/etc/systemd/system/graphical.target.wants/${BOOT_ALIVE_UNIT_NAME}"
 
 # The display manager, by BOTH names. sddm.service carries
 # `[Install] Alias=display-manager.service` and `systemctl enable sddm` makes
@@ -1662,13 +1766,31 @@ readonly -a INSTALL_STAGES=(
 #     ${FIRST_BOOT_VERIFY_NAME}, which DISARMS the handler on the target if it
 #     did not.
 #
-# The two remaining opt-in stages stay opt-in here too, on their own arguments,
+#   - stage-boot-default-gaming is IN, as of 2026-08-17, and it was NOT before.
+#     🔴 The reason for the change is that leaving it out shipped a product
+#     that does not do the thing it says it does: a reboot returned to the
+#     LAST-USED mode, so Steam's own Power -> "Switch to Desktop" was permanent
+#     and Desktop Mode was not the one-shot session stock SteamOS has. Found by
+#     the operator on a full install from the released ISO
+#     (docs/KNOWN-ISSUES.md 2026.08.17 #2). The unit, its ordering proof, its
+#     escape hatch and its assertions were all already written -- the P32
+#     defect family for the seventh time.
+#     The argument that kept it out ("arms a re-assert at EVERY boot on a
+#     machine whose Gaming Mode nobody has yet watched start") was an argument
+#     about a BARE RUN, which is why it stays out of INSTALL_STAGES.
+#     ⚠️ AND IT WAS NOT ENOUGH ON ITS OWN. The escape hatch that argument
+#     pointed at needs a keyboard, which the product does not have -- so what
+#     actually answers the safety half is that the re-assert now BOUNDS ITSELF:
+#     after ${BOOT_DEFAULT_MAX_FAILS} boots that reached no usable session it
+#     sets the desktop as the default and disarms. See the block beside
+#     BOOT_DEFAULT_OVERRIDE. The one thing a chroot cannot answer -- does
+#     systemd really order it before the display manager? -- is deferred, not
+#     skipped.
+#
+# The one remaining opt-in stage stays opt-in here too, on its own argument,
 # which chroot mode does not change: stage-default-session (deck_autologin.py
 # already writes and verifies the autologin drop-in -- a second writer of one
-# file is the drift this project pays for) and stage-boot-default-gaming (arms
-# a re-assert at EVERY boot on a machine whose Gaming Mode nobody has yet
-# watched start; it is an operator decision, and its ordering check needs a
-# live systemd).
+# file is the drift this project pays for).
 readonly -a BAKE_STAGES=(
   stage-preconditions
   stage-session-select
@@ -1701,6 +1823,12 @@ readonly -a BAKE_STAGES=(
   # in this list -- it sits here so the last thing the installer does is still
   # the hardware-button stage below.
   stage-pizza
+  # AFTER stage-session-select, and that is a hard requirement rather than a
+  # preference: this stage refuses to run until ${SELECT_BIN} is executable,
+  # because both units it installs schedule that writer. Everything else about
+  # its position is free -- it writes three root-owned files and arms a unit
+  # that only runs at the NEXT boot, so it cannot affect any stage after it.
+  stage-boot-default-gaming
   # Last, and the ordering is not arbitrary: it writes the two files that
   # change what a hardware button does, and every other stage should already
   # have had its chance to fail before anything rewires the power key. It also
@@ -7499,6 +7627,252 @@ stage_default_session() {
 # started would be a race against a display manager that does not exist yet.
 # All the boot-time re-assert has to do is write the config sddm is about to
 # read.
+#
+# 🔴 WHAT CHANGED 2026-08-17. The unit used to call ${SELECT_BIN} directly. It
+# now calls ${BOOT_DEFAULT_BIN}, which calls ${SELECT_BIN} -- the writer is
+# still the one writer, and the helper adds only the decision of WHETHER to run
+# it. That decision is the price of putting this stage in BAKE_STAGES: see the
+# self-limiting block beside BOOT_DEFAULT_OVERRIDE for why an unbounded
+# re-assert could not be shipped to a device with no keyboard.
+
+# render_boot_default_helper [user]
+#
+# The body of ${BOOT_DEFAULT_BIN}, written to stdout. Same seam as
+# render_first_boot_verify: the desktop user is a PARAMETER so the unit suite
+# can render it for a user it invented, rather than for whoever ran the tests.
+render_boot_default_helper() {
+  local user=${1:-$(desktop_user)}
+  cat <<EOF
+#!/usr/bin/env bash
+#
+# deck-session: keep Gaming Mode the default session across reboots -- and stop
+# doing that if Gaming Mode is not coming up.
+${INSTALL_MARKER}
+#
+# Three modes, one file, because they share the state format and splitting them
+# is how the two halves drift apart:
+#
+#   (no arguments)   ${BOOT_DEFAULT_UNIT_NAME}, before the display manager.
+#                    Decides, then re-asserts Gaming Mode or gives up.
+#   --record-alive   ${BOOT_ALIVE_UNIT_NAME}, after the display manager.
+#                    Watches for a graphical session that stays up.
+#   --record-clean   the same unit's ExecStop, i.e. an orderly shutdown.
+#
+# 🔴 THE ONE THING TO UNDERSTAND BEFORE CHANGING ANY OF IT. There is no probe
+# on this machine that can answer "is Gaming Mode USABLE". A gamescope that is
+# up with a wedged Steam behind it looks exactly like a healthy one from out
+# here, and that failure is scored a success by this file. What IS answerable,
+# and what this file actually asks, is narrower and honest:
+#
+#     did this boot reach a graphical session whose compositor was still the
+#     same process ${BOOT_DEFAULT_RESAMPLE_SECONDS}s later, or end in an
+#     orderly shutdown?
+#
+# A "no" to both, on ${BOOT_DEFAULT_MAX_FAILS} boots running, is a machine
+# being power-cycled by somebody trying to get out of something. That is the
+# case this gives up for. It is not every case.
+#
+# NOT 'set -e'. Every branch has to reach its own write of the state file: an
+# early exit half way through the accounting leaves a counter that never
+# advances, which is the same as having no bound at all.
+set -uo pipefail
+
+select_bin=${SELECT_BIN}
+state=${BOOT_DEFAULT_STATE}
+alive=${BOOT_DEFAULT_ALIVE_STAMP}
+override=${BOOT_DEFAULT_OVERRIDE}
+max_fails=${BOOT_DEFAULT_MAX_FAILS}
+
+# Tagged so it can be read back without knowing which unit produced it:
+#   journalctl -t ${BOOT_DEFAULT_TAG} -b
+say() {
+  printf '%s\n' "\$1"
+  logger -t ${BOOT_DEFAULT_TAG} -- "\$1" 2>/dev/null || true
+}
+
+# ...and the verdict that matters is ALSO appended to the desktop user's own
+# log file, for the reason render_first_boot_verify appends to it: a verdict
+# that exists only in the journal is a verdict only someone with SSH can read,
+# and this whole file exists because this device has no keyboard. That file
+# opens in a text editor in Desktop Mode -- which, after a give-up, is exactly
+# where the user is sitting.
+tell_user() {
+  local home line
+  home=\$(getent passwd ${user} 2>/dev/null | cut -d: -f6) || return 0
+  [[ -n \$home ]] || return 0
+  printf -v line '%s ${BOOT_DEFAULT_TAG}: %s' "\$(date -Iseconds)" "\$1"
+  runuser -u ${user} -- bash -c 'mkdir -p -- "\$(dirname -- "\$1")" 2>/dev/null; printf "%s\n" "\$2" >>"\$1"' _ "\${home}/${FIRST_BOOT_LOG_REL}" "\$line" 2>/dev/null || true
+}
+
+# The kernel's own per-boot identifier. Nothing else on the machine is both
+# guaranteed to exist and guaranteed to differ between two boots -- a timestamp
+# is neither on a Deck whose clock is set from the network after the fact.
+this_boot=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || this_boot=""
+
+read_state() {
+  attempted=""
+  fails=0
+  local line
+  # Guarded rather than 2>/dev/null'd: bash evaluates redirections before it
+  # can silence them, so a missing state file on the FIRST boot would print a
+  # shell error into the journal that reads like a fault.
+  if [[ -r \$state ]]; then
+    while IFS= read -r line; do
+      case \$line in
+        attempted=*) attempted=\${line#attempted=} ;;
+        fails=*)     fails=\${line#fails=} ;;
+      esac
+    done <"\$state"
+  fi
+  # A corrupt or hand-edited counter must not disable the bound silently.
+  [[ \$fails =~ ^[0-9]+\$ ]] || fails=0
+}
+
+write_state() {
+  install -d -m 0755 -o root -g root "\$(dirname "\$state")" 2>/dev/null
+  printf 'attempted=%s\nfails=%s\n' "\$1" "\$2" >"\$state" ||
+    say "WARNING: could not write \${state}. The re-assert still ran, but it is now unbounded -- every boot will look like the first one to the give-up rule."
+}
+
+# --- --record-alive: did a graphical session come up AND stay up? ----------
+#
+# 🔴 TWO SAMPLES, AND THE PID HAS TO SURVIVE THE GAP. One \`pgrep\` cannot tell a
+# running compositor from one being started for the ninth time by autologin,
+# and that restart loop is the exact state this whole mechanism is bounding.
+# The sleeps are in ExecStart of a unit ordered AFTER the display manager and
+# ordered before nothing, so no part of a boot waits on them.
+if [[ \${1:-} == --record-alive ]]; then
+  sleep ${BOOT_DEFAULT_SETTLE_SECONDS}
+  first=\$(pgrep -u ${user} -x '${BOOT_DEFAULT_COMPOSITORS}' 2>/dev/null | tr '\n' ' ')
+  sleep ${BOOT_DEFAULT_RESAMPLE_SECONDS}
+  second=\$(pgrep -u ${user} -x '${BOOT_DEFAULT_COMPOSITORS}' 2>/dev/null | tr '\n' ' ')
+
+  stable=""
+  for p in \$first; do
+    case " \$second " in *" \$p "*) stable=\$p; break ;; esac
+  done
+
+  if [[ -z \$stable ]]; then
+    say "no compositor of ${BOOT_DEFAULT_COMPOSITORS} survived from +${BOOT_DEFAULT_SETTLE_SECONDS}s to +\$((${BOOT_DEFAULT_SETTLE_SECONDS} + ${BOOT_DEFAULT_RESAMPLE_SECONDS}))s (saw '\${first}' then '\${second}'). This boot is not recorded as having reached a session."
+    exit 0
+  fi
+  install -d -m 0755 -o root -g root "\$(dirname "\$alive")" 2>/dev/null
+  printf '%s\n' "\$this_boot" >"\$alive" ||
+    say "WARNING: a session IS alive (pid \${stable}) but \${alive} could not be written. The next boot will score this one a failure."
+  say "a graphical session is alive and stable (pid \${stable}); this boot is recorded"
+  exit 0
+fi
+
+# --- --record-clean: an orderly shutdown is consent -------------------------
+#
+# A user who reaches a menu and asks the machine to reboot was in control of
+# it, whatever the compositor probe managed to see. A Deck that has to be held
+# down for ten seconds never gets here, and that asymmetry IS the signal.
+if [[ \${1:-} == --record-clean ]]; then
+  install -d -m 0755 -o root -g root "\$(dirname "\$alive")" 2>/dev/null
+  printf '%s\n' "\$this_boot" >"\$alive" 2>/dev/null || true
+  exit 0
+fi
+
+# --- the boot-time decision -------------------------------------------------
+
+[[ -n \$this_boot ]] ||
+  { say "ERROR: /proc/sys/kernel/random/boot_id is unreadable, so this boot cannot be told apart from the last one and the give-up rule would be guessing. Refusing to re-assert; the machine boots into whatever the default already was."; exit 1; }
+
+read_state
+
+# Accounting for the PREVIOUS boot, and only if there was one. On the first
+# boot after install there is nothing to score, so nothing is scored.
+if [[ -n \$attempted && \$attempted != "\$this_boot" ]]; then
+  last_alive=\$(cat "\$alive" 2>/dev/null) || last_alive=""
+  if [[ \$last_alive == "\$attempted" ]]; then
+    fails=0
+  else
+    fails=\$((fails + 1))
+    say "the previous boot left Gaming Mode as the default and produced neither a live session nor an orderly shutdown (\${fails}/\${max_fails})"
+  fi
+fi
+
+if [[ \$fails -ge \$max_fails ]]; then
+  # 🔴 GIVING UP MEANS WRITING 'desktop', NOT MERELY DECLINING TO WRITE
+  # 'gamescope'. The default session on disk is already Gaming Mode -- this
+  # unit put it there on an earlier boot -- so a helper that simply returns
+  # leaves the machine in the loop it just diagnosed. The whole point is to
+  # land the user somewhere they can use.
+  say "GIVING UP: \${fails} consecutive boots reached no usable session. Setting the default session to the DESKTOP so this Deck boots somewhere usable, and disarming the boot-time re-assert."
+  "\$select_bin" desktop --no-restart ||
+    say "ERROR: could not set the default session to the desktop. ${SELECT_BIN} failed. The next boot will still be Gaming Mode."
+
+  # ...and disarm, so the user's own "Return to Gaming Mode" is not undone at
+  # the next boot by the very mechanism that just gave up on it. Re-arming is
+  # 'rm' of one file, which is what docs/RECOVERY.md documents.
+  install -d -m 0755 -o root -g root "\$(dirname "\$override")" 2>/dev/null
+  : >"\$override" ||
+    say "ERROR: could not create \${override}, so the re-assert is NOT disarmed and the next boot will fight this one."
+
+  tell_user "Gaming Mode did not start on \${fails} boots in a row, so this Deck has been set to start in Desktop Mode instead. Nothing is broken by this and nothing was uninstalled. To go back to starting in Gaming Mode once it works again: sudo rm ${BOOT_DEFAULT_OVERRIDE}"
+  write_state "" 0
+  # Loud on purpose. Nothing depends on this unit, so a non-zero exit costs the
+  # boot nothing and puts the event in 'systemctl --failed' for whoever looks.
+  exit 1
+fi
+
+"\$select_bin" gamescope --no-restart || exit 1
+write_state "\$this_boot" "\$fails"
+EOF
+}
+
+# The sibling that supplies the evidence. Ordered AFTER the display manager --
+# the opposite of ${BOOT_DEFAULT_UNIT_NAME}, and for the mirror-image reason:
+# one has to write before sddm reads, the other has to look after sddm has
+# started something worth looking at.
+render_boot_alive_unit() {
+  cat <<EOF
+${INSTALL_MARKER}
+#
+# Record whether this boot reached a graphical session that stayed up. Read at
+# the NEXT boot by ${BOOT_DEFAULT_UNIT_NAME}, which stops re-asserting Gaming
+# Mode after ${BOOT_DEFAULT_MAX_FAILS} boots that produced no such record.
+#
+# 🔴 NOTHING MAY DEPEND ON THIS. It sleeps for most of a minute by design, so
+# it declares no Requires=, no Before= on any target, and is ordered AFTER the
+# display manager -- which is the property that actually matters and is the one
+# worth checking: sddm has already been started before this unit's first sleep
+# begins, so nothing the user can see is waiting on it. Whether graphical.target
+# itself is reported "reached" before or after this unit finishes is a systemd
+# accounting question, deliberately not relied on either way, and listed as
+# unverified in docs/findings/P39-boot-default-gaming-safety.md.
+#
+# ExecStop is the second half of the signal and it is not decoration: an
+# orderly shutdown is the user telling us they were in control of the machine,
+# and it is precisely what a Deck being held down for ten seconds cannot do.
+
+[Unit]
+Description=Record whether this boot reached a usable graphical session
+Documentation=file://${BOOT_ALIVE_UNIT}
+After=${BOOT_DEFAULT_BEFORE_ALIAS}
+After=${BOOT_DEFAULT_BEFORE_REAL}
+After=local-fs.target
+ConditionPathExists=${BOOT_DEFAULT_BIN}
+
+[Service]
+Type=oneshot
+# So the unit is still 'active' at shutdown and ExecStop actually runs. Without
+# it the unit returns to inactive the moment ExecStart finishes and the clean
+# shutdown half of the signal is silently never recorded.
+RemainAfterExit=yes
+ExecStart=${BOOT_DEFAULT_BIN} --record-alive
+ExecStop=${BOOT_DEFAULT_BIN} --record-clean
+# The two sleeps plus room. A probe that wedges must not sit in the shutdown
+# path of the machine it was watching.
+TimeoutStartSec=$((BOOT_DEFAULT_SETTLE_SECONDS + BOOT_DEFAULT_RESAMPLE_SECONDS + 60))
+TimeoutStopSec=30
+
+[Install]
+WantedBy=graphical.target
+EOF
+}
+
 render_boot_default_unit() {
   cat <<EOF
 ${INSTALL_MARKER}
@@ -7556,7 +7930,7 @@ ConditionPathExists=!${BOOT_DEFAULT_OVERRIDE}
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=${SELECT_BIN} gamescope --no-restart
+ExecStart=${BOOT_DEFAULT_BIN}
 StandardOutput=journal
 StandardError=journal
 
@@ -7600,20 +7974,32 @@ verify_boot_default_ordering() {
   log "verified: systemd orders ${unit} before the display manager (Before='${before}')"
 }
 
-# NOT in INSTALL_STAGES, and deliberately -- same reasoning as
-# stage_default_session, which it is meant to be run beside.
+# IN BAKE_STAGES since 2026-08-17, and NOT in INSTALL_STAGES. The asymmetry is
+# the one stage-power-button established (PROGRESS.md 5.38 D9) and it is not a
+# hedge:
 #
-# stage_default_session is excluded because flipping the default is the one
-# irreversible-feeling step: autologin means no session picker, so a Gaming Mode
-# that fails to start leaves no graphical way back. This stage carries that same
-# risk on EVERY boot rather than on one, so if anything the argument for keeping
-# it opt-in is stronger, not weaker. A bare `./deck-session.sh` on a machine
-# whose Gaming Mode has never been proven would otherwise arm a boot-time
-# re-assert nobody asked for.
+#   * The INSTALLER is not a bare run. It is building the product, on hardware
+#     it has just identified, from a plan a human approved, and it has just
+#     installed the Gaming Mode session it is about to make the default. A
+#     product that does not do this does not behave like the thing it says it
+#     is -- and, worse, was the P32 defect family again: this unit, its
+#     ordering proof, its escape hatch and 40-odd assertions were written,
+#     documented, and reached by no code path on any shipped Deck.
+#   * A BARE `./deck-session.sh` is a developer's machine mid-iteration, where
+#     "arm a re-assert at every boot" is a thing to ask for rather than a thing
+#     to inherit. stage_default_session stays opt-in for the same reason and
+#     this stage is still meant to be run beside it:
 #
-# The pair is the intended usage:
-#   sudo ./deck-session.sh stage-default-session        (now)
-#   sudo ./deck-session.sh stage-boot-default-gaming    (and at every boot)
+#         sudo ./deck-session.sh stage-default-session        (now)
+#         sudo ./deck-session.sh stage-boot-default-gaming    (and at every boot)
+#
+# 🔴 WHAT MADE THE CHANGE SAFE, because "Gaming Mode works now" would NOT have
+# been enough on its own. The escape hatch this stage prints needs a keyboard --
+# established from the artefacts, not assumed; see the BOOT_DEFAULT_OVERRIDE
+# block. So the stage no longer ships an unbounded re-assert. It ships a
+# re-assert that gives up after ${BOOT_DEFAULT_MAX_FAILS} boots that reached no
+# usable session and sets the DESKTOP as the default instead, which needs
+# nobody to find a keyboard, know this file exists, or read a journal.
 stage_boot_default_gaming() {
   # The unit runs the writer stage-session-select installs. Without it the unit
   # would fail at every boot with a 203/EXEC nobody would connect to this.
@@ -7621,6 +8007,8 @@ stage_boot_default_gaming() {
     fail "${SELECT_BIN} is not installed or not executable. Run '${PROG}.sh stage-session-select' first -- this stage only schedules that writer, it does not contain a second copy of it."
 
   assert_ours_or_absent "$BOOT_DEFAULT_UNIT" "another package's unit"
+  assert_ours_or_absent "$BOOT_ALIVE_UNIT" "another package's unit"
+  assert_ours_or_absent "$BOOT_DEFAULT_BIN" "another package's helper"
 
   # The escape hatch has to be one `touch` at a TTY, so its directory exists
   # before anyone needs it. Creating it does NOT arm the override: the unit
@@ -7628,28 +8016,93 @@ stage_boot_default_gaming() {
   $SUDO install -d -m 0755 -o root -g root "$(dirname "$BOOT_DEFAULT_OVERRIDE")" ||
     fail "could not create $(dirname "$BOOT_DEFAULT_OVERRIDE") -- the escape hatch has to be reachable with a single 'touch' from a TTY"
 
-  log "installing ${BOOT_DEFAULT_UNIT}"
+  # 🔴 THE HELPER FIRST, AND THE ORDER IS THE SAFETY PROPERTY. Both units name
+  # it in ExecStart, and both carry ConditionPathExists on it or fail loudly
+  # without it. Installing a unit that schedules a helper which is not there
+  # yet is the 203/EXEC this stage's own gate above exists to prevent, one
+  # level down.
   local tmp
+  log "installing ${BOOT_DEFAULT_BIN}"
+  $SUDO install -d -m 0755 -o root -g root "$(dirname "$BOOT_DEFAULT_BIN")" ||
+    fail "could not create $(dirname "$BOOT_DEFAULT_BIN")"
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_boot_default_helper >"$tmp" || fail "could not render ${BOOT_DEFAULT_BIN}"
+  # Refuse to install a helper bash cannot parse. A syntax error here is a unit
+  # that fails at every boot with a message about line numbers in a file nobody
+  # has open, and the machine boots to whatever the default was -- which is the
+  # bug this stage exists to fix, wearing a different hat.
+  local helper_err
+  helper_err=$(bash -n "$tmp" 2>&1) ||
+    { rm -f "$tmp"; fail "the helper this stage generates is not valid bash: ${helper_err}. Refusing to install it."; }
+  $SUDO install -m 0755 -o root -g root "$tmp" "$BOOT_DEFAULT_BIN" ||
+    fail "could not install ${BOOT_DEFAULT_BIN}"
+  rm -f "$tmp"
+
+  log "installing ${BOOT_ALIVE_UNIT}"
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_boot_alive_unit >"$tmp" || fail "could not render ${BOOT_ALIVE_UNIT_NAME}"
+  $SUDO install -D -m 0644 -o root -g root "$tmp" "$BOOT_ALIVE_UNIT" ||
+    fail "could not install ${BOOT_ALIVE_UNIT}"
+  rm -f "$tmp"
+
+  log "installing ${BOOT_DEFAULT_UNIT}"
   tmp=$(mktemp) || fail "mktemp failed"
   render_boot_default_unit >"$tmp" || fail "could not render ${BOOT_DEFAULT_UNIT_NAME}"
   $SUDO install -D -m 0644 -o root -g root "$tmp" "$BOOT_DEFAULT_UNIT" ||
     fail "could not install ${BOOT_DEFAULT_UNIT}"
   rm -f "$tmp"
 
-  $SUDO systemctl daemon-reload ||
-    fail "systemctl daemon-reload failed; ${BOOT_DEFAULT_UNIT_NAME} is on disk but systemd has not read it"
-  $SUDO systemctl enable "$BOOT_DEFAULT_UNIT_NAME" ||
-    fail "could not enable ${BOOT_DEFAULT_UNIT_NAME}. An installed-but-not-enabled unit is silent: it would never run and nothing would report that."
+  # 🔴 THE SYMLINK, NOT 'systemctl enable', WHEN THERE IS NO MANAGER -- the
+  # same split install_first_boot_verify makes, and for the same reason: in
+  # chroot mode `systemctl enable` would need a manager the target does not
+  # have, and the symlink IS what enable writes.
+  if in_chroot; then
+    $SUDO install -d -m 0755 -o root -g root "$(dirname "$BOOT_DEFAULT_WANTS")" ||
+      fail "could not create $(dirname "$BOOT_DEFAULT_WANTS")"
+    local unit_path wants_path
+    for unit_path in "$BOOT_DEFAULT_UNIT:$BOOT_DEFAULT_WANTS" "$BOOT_ALIVE_UNIT:$BOOT_ALIVE_WANTS"; do
+      wants_path=${unit_path#*:}
+      unit_path=${unit_path%%:*}
+      $SUDO ln -sf "$unit_path" "$wants_path" ||
+        fail "could not enable ${unit_path##*/}"
+      [[ -L $wants_path ]] ||
+        fail "wrote ${wants_path} but it is not a symlink on re-read, so ${unit_path##*/} would never run and nothing would say so"
+    done
+  else
+    $SUDO systemctl daemon-reload ||
+      fail "systemctl daemon-reload failed; ${BOOT_DEFAULT_UNIT_NAME} is on disk but systemd has not read it"
+    $SUDO systemctl enable "$BOOT_DEFAULT_UNIT_NAME" ||
+      fail "could not enable ${BOOT_DEFAULT_UNIT_NAME}. An installed-but-not-enabled unit is silent: it would never run and nothing would report that."
+    # 🔴 AND THE SIBLING, WHICH IS NOT OPTIONAL. Without it nothing ever
+    # records a good boot, every boot scores a failure, and the bound fires
+    # after ${BOOT_DEFAULT_MAX_FAILS} boots on a perfectly healthy Deck. The
+    # direction of that mistake is safe -- it lands the user in Desktop Mode,
+    # which is where they are today -- but it silently un-ships the feature,
+    # so it fails here instead.
+    $SUDO systemctl enable "$BOOT_ALIVE_UNIT_NAME" ||
+      fail "could not enable ${BOOT_ALIVE_UNIT_NAME}. It is what records a boot that WORKED; with it disabled, ${BOOT_DEFAULT_UNIT_NAME} would give up after ${BOOT_DEFAULT_MAX_FAILS} healthy boots and set the desktop as the default."
+  fi
 
-  verify_boot_default_ordering
+  if in_chroot; then
+    defer "whether systemd orders ${BOOT_DEFAULT_UNIT_NAME} before the display manager cannot be checked at install time -- 'systemctl show' needs the manager of a machine that has never booted, and arch-chroot's is the installer's. Both units and ${BOOT_DEFAULT_BIN} ARE installed and both wants-symlinks were written and read back. Confirm on the installed machine with: systemctl show ${BOOT_DEFAULT_UNIT_NAME} -p Before, and read the whole story with: journalctl -t ${BOOT_DEFAULT_TAG} -b"
+  else
+    verify_boot_default_ordering
+  fi
 
   log "stage-boot-default-gaming: ok"
   log "Every boot now re-asserts Gaming Mode as the default session. Steam's"
   log "Power -> 'Switch to Desktop' still works and still lasts until reboot,"
   log "which is how stock SteamOS behaves."
   log ""
-  log "🔴 ESCAPE HATCH -- read this before rebooting:"
-  log "   If Gaming Mode is broken, this unit re-asserts it at EVERY boot."
+  log "IT BOUNDS ITSELF. ${BOOT_ALIVE_UNIT_NAME} records every boot that reached"
+  log "a graphical session which stayed up, or ended in an orderly shutdown."
+  log "After ${BOOT_DEFAULT_MAX_FAILS} consecutive boots with neither, the re-assert sets the"
+  log "DESKTOP as the default instead and disarms itself, so a Gaming Mode that"
+  log "stops working cannot strand a device that has no keyboard. Read it back:"
+  log "  journalctl -t ${BOOT_DEFAULT_TAG} -b"
+  log ""
+  log "🔴 ESCAPE HATCH -- for someone who HAS a keyboard. On the product nobody"
+  log "   does, which is why the bound above exists and this does not have to."
   log "   Reach a TTY with Ctrl+Alt+F2 and run ONE of:"
   log "     sudo touch ${BOOT_DEFAULT_OVERRIDE}     (skip it, keep the unit)"
   log "     sudo systemctl disable ${BOOT_DEFAULT_UNIT_NAME}   (permanent)"
@@ -8371,10 +8824,23 @@ ENVIRONMENT
                                     EVERY boot, so Desktop Mode is a one-shot
                                     session the way stock SteamOS's is. Steam's
                                     own 'Switch to Desktop' rewrites the default
-                                    and this is what undoes that. Opt-in for the
-                                    same reason stage-default-session is, and
-                                    meant to be run beside it.
-                                    Escape hatch, no editor needed:
+                                    and this is what undoes that. The ISO's
+                                    installer runs it; a bare '${PROG}.sh' does
+                                    NOT, for the same reason it skips
+                                    stage-default-session, so run it beside that
+                                    one on a machine you are iterating on.
+                                    IT BOUNDS ITSELF: ${BOOT_ALIVE_UNIT_NAME}
+                                    records each boot that reached a graphical
+                                    session which stayed up, or ended in an
+                                    orderly shutdown; after ${BOOT_DEFAULT_MAX_FAILS} boots with
+                                    neither, the re-assert sets the DESKTOP as
+                                    the default and disarms itself, so a broken
+                                    Gaming Mode cannot strand a device that has
+                                    no keyboard. Read it back with:
+                                      journalctl -t ${BOOT_DEFAULT_TAG} -b
+                                    Escape hatch for someone who HAS a keyboard
+                                    (a TTY needs one; the on-screen keyboard
+                                    does not reach a console):
                                       sudo touch ${BOOT_DEFAULT_OVERRIDE}
                                       sudo systemctl disable ${BOOT_DEFAULT_UNIT_NAME}
   ${PROG}.sh stage-power-button     make ONE SHORT PRESS of the power button

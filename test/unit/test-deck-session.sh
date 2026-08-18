@@ -1834,10 +1834,29 @@ pass "the boot unit is ordered before the display manager under both of its name
     "that is the silent no-op: sddm reads /etc/sddm.conf.d at start, so a write that lands afterwards changes nothing until the boot after next. File:"$'\n'"$(cat "$boot_unit")"
 pass "no After= in the boot unit names the display manager"
 
-grep -qx "ExecStart=${SELECT_BIN} gamescope --no-restart" "$boot_unit" ||
-  fail_test "the boot unit re-runs the EXISTING writer" \
-    "expected exactly 'ExecStart=${SELECT_BIN} gamescope --no-restart'. A second implementation of that write is the drift this project keeps paying for; --no-restart is required because sddm has not started yet. File:"$'\n'"$(cat "$boot_unit")"
-pass "the boot unit runs '${SELECT_BIN} gamescope --no-restart' -- the writer stage-session-select already installed"
+grep -qx "ExecStart=${BOOT_DEFAULT_BIN}" "$boot_unit" ||
+  fail_test "the boot unit runs the helper" \
+    "expected exactly 'ExecStart=${BOOT_DEFAULT_BIN}'. The unit used to call ${SELECT_BIN} directly; it now goes through the helper, which is where the give-up rule lives. A unit that calls the writer directly is an UNBOUNDED re-assert, which is what could not be shipped to a device with no keyboard. File:"$'\n'"$(cat "$boot_unit")"
+pass "the boot unit runs ${BOOT_DEFAULT_BIN}, so the boot-time decision goes through the bounded path"
+
+# ...and the helper still delegates to the ONE writer rather than carrying a
+# second copy of the drop-in write. That property moved down a level when the
+# helper was introduced; it did not stop mattering.
+boot_helper="$work/boot-default-gaming"
+render_boot_default_helper decktester >"$boot_helper"
+
+grep -qF -- "\"\$select_bin\" gamescope --no-restart" "$boot_helper" ||
+  fail_test "the helper re-runs the EXISTING writer for the re-assert" \
+    "it must call the writer stage-session-select installed, with --no-restart because sddm has not started yet. A second implementation of that write is the drift this project keeps paying for. File:"$'\n'"$(cat "$boot_helper")"
+grep -qF -- "select_bin=${SELECT_BIN}" "$boot_helper" ||
+  fail_test "the helper resolves that writer to ${SELECT_BIN}" \
+    "the constant and the rendered script have to agree, or the unit fails at every boot with a 203/EXEC nobody connects to this"
+pass "the helper delegates the re-assert to ${SELECT_BIN}, exactly as the unit used to"
+
+bash -n "$boot_helper" ||
+  fail_test "the rendered helper is valid bash" \
+    "a syntax error here is a unit that fails at every boot with a message about line numbers in a file nobody has open"
+pass "the rendered helper parses"
 
 ! grep -qE '^ExecStart=-' "$boot_unit" ||
   fail_test "the boot unit's ExecStart= is not prefixed with '-'" \
@@ -1866,6 +1885,114 @@ grep -qx 'RemainAfterExit=yes' "$boot_unit" ||
   fail_test "the boot unit is RemainAfterExit=yes" \
     "without it the unit returns to inactive and could be re-triggered mid-boot; with it, the re-assert happens once per boot, which is what makes Desktop Mode a one-shot session"
 pass "the boot unit is a Type=oneshot with RemainAfterExit=yes -- one re-assert per boot"
+
+# ---------------------------------------------------------------------------
+# 9c-bis. The bound, and the unit that feeds it
+#
+# 🔴 WHY THIS SECTION IS NOT OPTIONAL. The re-assert is in BAKE_STAGES, so every
+# installed Deck now arms it -- and the escape hatch the old design leaned on
+# needs a keyboard the product does not have (measured from the artefacts:
+# src/deck-input-mapper.py's uinput device declares no Ctrl, no Alt and no
+# F-keys, so it cannot type Ctrl+Alt+F2; the mapper runs only in the Hyprland
+# session; the installer deletes getty@tty1's autologin). What replaces that
+# hatch as the SAFETY property is the give-up rule, and every assertion below
+# is about a way the give-up rule could be shipped inert.
+#
+# All of these are invisible at runtime on a healthy Deck. A boot unit with no
+# bound behaves identically to a bounded one for as long as Gaming Mode works,
+# which is the whole time anybody is looking.
+
+alive_unit="$work/deck-session-alive.service"
+render_boot_alive_unit >"$alive_unit"
+
+grep -qF -- "$INSTALL_MARKER" "$alive_unit" ||
+  fail_test "the alive unit carries the '#'-commented marker" "expected: ${INSTALL_MARKER}"
+pass "the alive unit carries '${INSTALL_MARKER}'"
+
+grep -qx "ExecStart=${BOOT_DEFAULT_BIN} --record-alive" "$alive_unit" ||
+  fail_test "the alive unit records a live session" \
+    "without this nothing ever writes ${BOOT_DEFAULT_ALIVE_STAMP}, every boot scores a failure, and the give-up rule fires after ${BOOT_DEFAULT_MAX_FAILS} HEALTHY boots. File:"$'\n'"$(cat "$alive_unit")"
+grep -qx "ExecStop=${BOOT_DEFAULT_BIN} --record-clean" "$alive_unit" ||
+  fail_test "the alive unit records an orderly shutdown" \
+    "an orderly shutdown is the second half of the signal: it is what a Deck being held down for ten seconds cannot produce. Without it, a boot the user ended before the probe sampled is scored a failure. File:"$'\n'"$(cat "$alive_unit")"
+pass "the alive unit records both halves of the signal: a live session, and an orderly shutdown"
+
+grep -qx 'RemainAfterExit=yes' "$alive_unit" ||
+  fail_test "the alive unit is RemainAfterExit=yes" \
+    "🔴 without it a Type=oneshot returns to inactive the moment ExecStart finishes, and systemd never runs ExecStop -- the clean-shutdown half of the signal would be silently never recorded, and the unit would look completely correct"
+pass "the alive unit stays active, so its ExecStop actually runs at shutdown"
+
+# 🔴 THE MIRROR IMAGE of the boot unit, and getting it backwards is the same
+# class of silent no-op: this one has to look AFTER sddm has started something
+# worth looking at, so an ordering that puts it first would sample a machine
+# with no session on it and score every boot a failure.
+for dm in "$BOOT_DEFAULT_BEFORE_ALIAS" "$BOOT_DEFAULT_BEFORE_REAL"; do
+  grep -qx "After=${dm}" "$alive_unit" ||
+    fail_test "the alive unit is ordered After=${dm}" \
+      "it samples for a compositor; running it before the display manager would sample a machine that has not started one yet, on every boot, and the bound would fire on a healthy Deck. File:"$'\n'"$(cat "$alive_unit")"
+done
+! grep -qE '^Before=.*(display-manager|sddm)' "$alive_unit" ||
+  fail_test "the alive unit is never ordered BEFORE the display manager" \
+    "that is the boot unit's job and the exact inversion this pair is shaped to avoid. File:"$'\n'"$(cat "$alive_unit")"
+pass "the alive unit is ordered after the display manager under both names, and before neither"
+
+# It sleeps for most of a minute. Nothing may wait on it.
+! grep -qE '^(Requires|RequiredBy|BindsTo|Requisite)=' "$alive_unit" ||
+  fail_test "nothing in the alive unit creates a hard dependency" \
+    "a probe that can fail a boot is worse than no probe. File:"$'\n'"$(cat "$alive_unit")"
+! grep -qE '^Before=graphical\.target' "$alive_unit" ||
+  fail_test "the alive unit is not ordered before graphical.target" \
+    "its ExecStart sleeps for $((BOOT_DEFAULT_SETTLE_SECONDS + BOOT_DEFAULT_RESAMPLE_SECONDS))s; ordering the target after it would make every boot wait that long to be 'reached'. A unit that delays the boot in order to watch the boot is not worth having."
+grep -qx 'WantedBy=graphical.target' "$alive_unit" ||
+  fail_test "the alive unit is WantedBy=graphical.target" \
+    "the same target that pulls in the display manager it watches, so the pair is armed and disarmed together"
+pass "the alive unit is wanted by graphical.target, required by nothing, and delays nothing"
+
+grep -qx "ConditionPathExists=${BOOT_DEFAULT_BIN}" "$alive_unit" ||
+  fail_test "the alive unit is conditioned on its helper existing" \
+    "a unit whose ExecStart is missing fails with 203/EXEC at every boot, which is noise that would train someone to ignore ${BOOT_ALIVE_UNIT_NAME}"
+pass "the alive unit skips itself rather than 203/EXEC-ing when the helper is absent"
+
+# The timeout has to outlast what the helper actually does, or systemd kills the
+# probe mid-sample and the boot is scored a failure -- on a healthy machine.
+alive_timeout=$(grep -m1 '^TimeoutStartSec=' "$alive_unit" | cut -d= -f2)
+[[ -n $alive_timeout && $alive_timeout -gt $((BOOT_DEFAULT_SETTLE_SECONDS + BOOT_DEFAULT_RESAMPLE_SECONDS)) ]] ||
+  fail_test "the alive unit's TimeoutStartSec outlasts its own two samples" \
+    "got '${alive_timeout}' against ${BOOT_DEFAULT_SETTLE_SECONDS}s + ${BOOT_DEFAULT_RESAMPLE_SECONDS}s of sampling. A timeout shorter than the probe kills the probe, and a killed probe is recorded as a boot that reached no session."
+pass "the alive unit's TimeoutStartSec (${alive_timeout}s) outlasts its ${BOOT_DEFAULT_SETTLE_SECONDS}+${BOOT_DEFAULT_RESAMPLE_SECONDS}s of sampling"
+
+# --- the bound itself ------------------------------------------------------
+
+[[ $BOOT_DEFAULT_MAX_FAILS -ge 1 ]] ||
+  fail_test "the give-up rule has a bound at all" \
+    "BOOT_DEFAULT_MAX_FAILS is ${BOOT_DEFAULT_MAX_FAILS}; at 0 the helper gives up on the first boot, and above that it must be a real number of boots"
+grep -qx "max_fails=${BOOT_DEFAULT_MAX_FAILS}" "$boot_helper" ||
+  fail_test "the helper is rendered with the bound the constant declares" \
+    "the constant and the script have to agree or the documented behaviour is not the shipped behaviour"
+pass "the helper is bounded at ${BOOT_DEFAULT_MAX_FAILS} consecutive boots, from the one constant"
+
+# 🔴 GIVING UP MEANS WRITING 'desktop'. A helper that merely stops re-asserting
+# leaves Session=gamescope on disk from an earlier boot -- the machine stays in
+# exactly the loop the rule just diagnosed, and every assertion about counters
+# and stamps still passes.
+grep -qF -- '"$select_bin" desktop --no-restart' "$boot_helper" ||
+  fail_test "the give-up branch actively selects the desktop" \
+    "declining to write 'gamescope' is not enough: the default on disk is ALREADY gamescope, so a helper that just returns leaves the Deck looping into the session it gave up on. File:"$'\n'"$(cat "$boot_helper")"
+grep -qF -- "$BOOT_DEFAULT_OVERRIDE" "$boot_helper" ||
+  fail_test "the give-up branch disarms the re-assert" \
+    "without touching ${BOOT_DEFAULT_OVERRIDE} the unit runs again at the next boot and undoes the user's own 'Return to Gaming Mode' for ever"
+pass "giving up writes 'desktop' AND disarms, so the Deck lands somewhere usable and stays there"
+
+# The compositor list is measured, and shortening it is a silent no-op: an
+# earlier version of the same list in render_restart_helper said `gamescope`,
+# which never matches, because the kernel truncates comm at 15 characters.
+grep -qF -- 'gamescope-wl' "$boot_helper" ||
+  fail_test "the probe looks for 'gamescope-wl'" \
+    "'gamescope' is NOT the comm name -- the kernel truncates at 15 characters, and a probe keyed on the wrong name matches nothing, records nothing, and gives up on a healthy Deck after ${BOOT_DEFAULT_MAX_FAILS} boots. This exact mistake is recorded in render_restart_helper."
+grep -qF -- 'Hyprland' "$boot_helper" ||
+  fail_test "the probe also accepts the DESKTOP compositor" \
+    "a user who boots and immediately switches to Desktop Mode has a working machine; scoring that boot a failure is how a healthy Deck reaches the bound"
+pass "the probe accepts both compositors, so a deliberate switch to the desktop is not scored a failure"
 
 # ---------------------------------------------------------------------------
 # 9d. stage-power-button -- the two files, and the two traps they are shaped by

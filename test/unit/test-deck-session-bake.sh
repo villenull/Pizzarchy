@@ -265,6 +265,20 @@ declare -A CHROOT_FUNCS=(
   # The runner itself: no manager to `systemctl enable` with, so the symlink is
   # written directly and then read back.
   [install_first_boot_verify]=adapted
+  # "A reboot always lands in Gaming Mode", baked as of 2026-08-17. TWO chroot
+  # branches, and they are different jobs:
+  #   * enabling -- no manager to `systemctl enable` with, so both wants
+  #     symlinks are written directly and read back (the install_first_boot_
+  #     verify move, for two units instead of one);
+  #   * verify_boot_default_ordering -- `systemctl show` would be answered by
+  #     the INSTALLER's manager about a unit the installer does not have, so
+  #     the ordering proof is deferred to the target. It is the one thing about
+  #     this stage a chroot genuinely cannot answer, and it is the thing the
+  #     whole unit depends on.
+  # 'defer' is the stricter of the two labels this suite can apply -- it also
+  # requires the fail-on-readback that 'adapted' asks for, since both branches
+  # are in the one body.
+  [stage_boot_default_gaming]=defer
 )
 
 mapfile -t all_funcs < <(bash -c 'source "$1"; declare -F | sed "s/^declare -f //"' _ "$SESSION_SH")
@@ -605,12 +619,41 @@ pass "the baked list is the install stages minus desktop-settings, plus the XKB 
 # HandlePowerKey=ignore and nothing of ours ever contested it. The assertions
 # below now check the opposite, plus the two properties that made the change
 # safe. Do not "restore" this line without reading that section.
-for opt in stage-default-session stage-boot-default-gaming stage-audit-privileges; do
+#
+# ⚠️ stage-boot-default-gaming LEFT THIS LIST on 2026-08-17, for the same shape
+# of reason and with the same shape of evidence. Read the assertions below it
+# before "restoring" this line.
+for opt in stage-default-session stage-audit-privileges; do
   printf '%s\n' "${baked[@]}" | grep -qx "$opt" &&
     fail_test "${opt} is not baked by the installer" \
       "it is opt-in on its own argument (see BAKE_STAGES); baking it would arm it on a machine nobody has watched"
 done
-pass "the three remaining opt-in stages are still opt-in -- the installer arms none of them"
+pass "the two remaining opt-in stages are still opt-in -- the installer arms none of them"
+
+# 🔴 THE SHIPPED BUG, ASSERTED. Without this stage the installer produces a Deck
+# on which Steam's own Power -> "Switch to Desktop" is PERMANENT: a reboot
+# returns to the last-used mode, not to Gaming Mode, so Desktop Mode is not the
+# one-shot session stock SteamOS has and this product says it has. The unit, its
+# ordering proof and its escape hatch were all already written and reached by no
+# code path on any shipped Deck -- the P32 defect family again.
+# docs/KNOWN-ISSUES.md 2026.08.17 #2.
+printf '%s\n' "${baked[@]}" | grep -qx stage-boot-default-gaming ||
+  fail_test "stage-boot-default-gaming IS baked" \
+    "it was not, and the released ISO shipped a Deck that returns to whatever mode it was last in. Baking it is what makes 'a reboot always lands in Gaming Mode' true of the product rather than of a stage nobody runs."
+pass "stage-boot-default-gaming is baked, so a reboot on an installed Deck lands in Gaming Mode"
+
+# It refuses to run until ${SELECT_BIN} is executable -- both units it installs
+# schedule that writer -- so its position relative to stage-session-select is a
+# hard requirement, not a preference. Ordered wrong, the whole stage fails.
+bdg_at=-1; sel_at=-1
+for i in "${!baked[@]}"; do
+  [[ ${baked[$i]} == stage-boot-default-gaming ]] && bdg_at=$i
+  [[ ${baked[$i]} == stage-session-select ]]      && sel_at=$i
+done
+[[ $sel_at -ge 0 && $bdg_at -gt $sel_at ]] ||
+  fail_test "stage-boot-default-gaming runs after stage-session-select" \
+    "session-select at ${sel_at}, boot-default-gaming at ${bdg_at}. The stage gates on ${SELECT_BIN} being executable, so running it first is a guaranteed stage failure in every install."
+pass "stage-boot-default-gaming runs after the stage that installs the writer it schedules"
 
 # 🔴 THE P32 DEFECT FAMILY, ASSERTED. Written, unit-tested, documented and
 # reached by no code path is this project's most expensive recurring bug (six

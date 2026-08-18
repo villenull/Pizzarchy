@@ -43,12 +43,18 @@ installed.** `src/deck-session.sh` has all of it:
 * `/etc/deck-session/no-boot-default-gaming`, a one-`touch` escape hatch whose
   directory the stage creates in advance.
 
-But **`stage-boot-default-gaming` is not in `INSTALL_STAGES`.** It sits in the
-opt-in group with `stage-power-button`, `stage-default-session`,
-`stage-osk-kb-layout` and `stage-audit-privileges`, reachable only by naming it
-explicitly. So a normal install never runs it, and Steam's own
-Power → "Switch to Desktop" rewrites the default session with nothing to undo
-it at the next boot.
+But **the stage was in no stage list at all.** It sat in the opt-in group with
+`stage-power-button`, `stage-default-session`, `stage-osk-kb-layout` and
+`stage-audit-privileges`, reachable only by naming it explicitly. So a normal
+install never ran it, and Steam's own Power → "Switch to Desktop" rewrote the
+default session with nothing to undo it at the next boot.
+
+⚠️ **Correction, 2026-08-17.** This section first said the fix was to add it to
+`INSTALL_STAGES`. That was wrong and it matters: `INSTALL_STAGES` is the
+**bare-dev-run** list, while the released ISO installs via **`BAKE_STAGES`**
+under `arch-chroot`. Adding it to `INSTALL_STAGES` would have fixed the bug on
+a developer's manual run and shipped nothing. `stage-power-button` sets the
+precedent — "the installer is not a bare run".
 
 **Why it was opt-in** — and this is the decision to revisit, not an oversight
 to sweep away. The stage's own comment states it: with that unit enabled, a

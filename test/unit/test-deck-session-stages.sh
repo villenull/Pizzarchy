@@ -3458,8 +3458,8 @@ ok_line /etc/systemd/system/deck-boot-default-gaming.service \
   "Before=${BOOT_DEFAULT_BEFORE_REAL}" \
   "and before sddm.service under its real name -- the alias only exists once sddm has been enabled"
 ok_line /etc/systemd/system/deck-boot-default-gaming.service \
-  "ExecStart=${SELECT_BIN} gamescope --no-restart" \
-  "it re-runs the EXISTING writer rather than reimplementing the drop-in write"
+  "ExecStart=${BOOT_DEFAULT_BIN}" \
+  "it runs the helper, which is where the give-up rule lives -- a unit that called the writer directly would be an UNBOUNDED re-assert"
 ok_line /etc/systemd/system/deck-boot-default-gaming.service \
   "ConditionPathExists=!${BOOT_DEFAULT_OVERRIDE}" \
   "the escape hatch is one 'touch' away, with no editor and no unit file"
@@ -3481,10 +3481,30 @@ ok_in_out "systemctl disable ${BOOT_DEFAULT_UNIT_NAME}" \
   "and the permanent form of it"
 ok_in_out "Ctrl+Alt+F2" "and how to reach a terminal to type either"
 
-# --- the unit is loaded and enabled, in that order ------------------------
+# --- the bound is installed too, and it is not optional -------------------
+#
+# 🔴 The stage now ships three artefacts, not one, and the two new ones ARE the
+# safety property: with the boot unit installed alone, the re-assert is
+# unbounded, and the escape hatch it prints needs a keyboard this device does
+# not have. Every assertion here is about a way to ship the give-up rule inert.
+ok_file "$BOOT_DEFAULT_BIN" "it installs the helper the boot unit's ExecStart names"
+ok_mode "$BOOT_DEFAULT_BIN" 755 "the helper is executable -- an 0644 helper is a 203/EXEC at every boot"
+ok_file "$BOOT_ALIVE_UNIT" "and ${BOOT_ALIVE_UNIT_NAME}, which records the boots that WORKED"
+ok_line "$BOOT_ALIVE_UNIT" "ExecStart=${BOOT_DEFAULT_BIN} --record-alive" \
+  "without it nothing writes ${BOOT_DEFAULT_ALIVE_STAMP}, every boot scores a failure, and the bound fires on a HEALTHY Deck"
+
+# The helper is the only 0755 file install in this stage and the units are the
+# only 0644 ones, so these two needles name the writes rather than the paths --
+# which the `test -e` ownership probes above would otherwise match first.
+ok_before "install -m 0755" "install -D -m 0644" \
+  "the helper is on disk before EITHER unit that schedules it -- a unit installed ahead of its ExecStart is the 203/EXEC this stage's own gate exists to prevent, one level down"
+
+# --- the units are loaded and enabled, in that order ----------------------
 ok_called "systemctl daemon-reload" "systemd is told to re-read the unit"
 ok_called "systemctl enable ${BOOT_DEFAULT_UNIT_NAME}" \
   "and the unit is ENABLED -- an installed-but-not-enabled unit never runs and nothing reports that"
+ok_called "systemctl enable ${BOOT_ALIVE_UNIT_NAME}" \
+  "and so is the alive unit. Enabling one without the other ships the re-assert with its bound disabled: nothing records a good boot, so every boot is a failure and a healthy Deck is sent to the desktop after ${BOOT_DEFAULT_MAX_FAILS} of them."
 ok_before "daemon-reload" "enable ${BOOT_DEFAULT_UNIT_NAME}" \
   "the reload happens before the enable, so systemd enables the unit it just read"
 ok_before "install -D -m 0644" "daemon-reload" \
@@ -3551,6 +3571,274 @@ ok_in_out "orders ${BOOT_DEFAULT_UNIT_NAME} before the display manager" \
   "and says which ordering it verified, rather than only that it passed"
 
 unset FAKE_SYSTEMCTL_SHOW_Before FAKE_SYSTEMCTL_SHOW_After
+
+# ===========================================================================
+# 13b. THE GIVE-UP RULE -- run, not read
+# ===========================================================================
+#
+# 🔴 WHY THIS SECTION IS THE MOST IMPORTANT ONE IN §13. "A reboot always lands
+# in Gaming Mode" and "a broken Gaming Mode is escapable by rebooting" are the
+# same lever pulled in opposite directions, and shipping the first removes the
+# second. On this device that matters more than it would anywhere else:
+#
+#   * ${SDDM_DROPIN} carries Relogin=true, so a session that dies is retried by
+#     autologin rather than dropping to a greeter;
+#   * stage-sddm-resilience sets StartLimitIntervalSec=0, so sddm retries for
+#     ever instead of latching to `failed`;
+#   * and the escape hatch the unit prints needs a KEYBOARD -- the mapper's
+#     uinput device declares no Ctrl, no Alt and no F-keys, the mapper runs
+#     only in the Hyprland session, and the installer deletes getty@tty1's
+#     autologin. docs/RECOVERY.md says so in as many words.
+#
+# So the helper's give-up rule is the whole safety argument for baking this
+# stage, and every property of it below is invisible on a healthy Deck. A
+# helper with the rule deleted behaves identically for as long as Gaming Mode
+# works, which is the entire time anyone is looking at it.
+#
+# The helper is RUN here rather than grepped. Its absolute paths are rewritten
+# into $work -- derived from the constants, so a renamed constant moves the
+# test with it -- and its two external effects (the session writer, the
+# process probe) are stubs whose argv is recorded.
+
+echo "# 13b. the give-up rule, exercised"
+
+bdg_dir="$work/bdg"
+bdg_bin="$bdg_dir/bin"
+mkdir -p "$bdg_dir" "$bdg_bin" \
+  "$bdg_dir$(dirname "$BOOT_DEFAULT_STATE")" \
+  "$bdg_dir$(dirname "$BOOT_DEFAULT_OVERRIDE")" \
+  "$bdg_dir/home"
+
+bdg_state="$bdg_dir$BOOT_DEFAULT_STATE"
+bdg_alive="$bdg_dir$BOOT_DEFAULT_ALIVE_STAMP"
+bdg_override="$bdg_dir$BOOT_DEFAULT_OVERRIDE"
+bdg_select_log="$bdg_dir/select.log"
+bdg_bootid="$bdg_dir/boot_id"
+bdg_pgrep="$bdg_dir/pgrep-answers"   # one line per call, consumed in order
+bdg_userlog="$bdg_dir/home/first-boot.log"
+
+# The writer the helper delegates to. It records the session it was asked for,
+# which is the ONLY thing that distinguishes "re-asserted Gaming Mode" from
+# "gave up and chose the desktop" -- the two outcomes this section is about.
+write_program "$bdg_bin/deck-session-select" <<SH >/dev/null
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$bdg_select_log"
+SH
+# Answers queued by each case. Two calls per --record-alive run, so a case can
+# say "the same pid twice" or "a different pid each time" without a real
+# compositor.
+write_program "$bdg_bin/pgrep" <<SH >/dev/null
+#!/usr/bin/env bash
+line=\$(head -1 "$bdg_pgrep")
+sed -i 1d "$bdg_pgrep"
+[[ -n \$line ]] || exit 1
+printf '%s\n' \$line
+SH
+write_program "$bdg_bin/sleep" <<'SH' >/dev/null
+#!/usr/bin/env bash
+exit 0
+SH
+write_program "$bdg_bin/logger" <<'SH' >/dev/null
+#!/usr/bin/env bash
+exit 0
+SH
+write_program "$bdg_bin/getent" <<SH >/dev/null
+#!/usr/bin/env bash
+printf 'decktester:x:1000:1000::%s:/bin/bash\n' "$bdg_dir/home"
+SH
+# Drops the privilege-dropping and runs the command, so the user-facing message
+# the helper writes is observable without root.
+write_program "$bdg_bin/runuser" <<'SH' >/dev/null
+#!/usr/bin/env bash
+while [[ ${1:-} == -u || ${1:-} == -- ]]; do
+  [[ $1 == -u ]] && shift 2 || shift
+done
+exec "$@"
+SH
+
+# The helper, with every absolute path it owns pointed inside $work. The
+# substitutions are built from the constants: rename one in src/ and this
+# rewrite follows it rather than silently missing.
+bdg_render() {
+  render_boot_default_helper decktester |
+    sed -e "s|=${BOOT_DEFAULT_STATE}\$|=${bdg_state}|" \
+        -e "s|=${BOOT_DEFAULT_ALIVE_STAMP}\$|=${bdg_alive}|" \
+        -e "s|=${BOOT_DEFAULT_OVERRIDE}\$|=${bdg_override}|" \
+        -e "s|=${SELECT_BIN}\$|=${bdg_bin}/deck-session-select|" \
+        -e "s|/proc/sys/kernel/random/boot_id|${bdg_bootid}|g" \
+        -e "s|\${home}/${FIRST_BOOT_LOG_REL}|${bdg_userlog}|"
+}
+bdg_helper="$bdg_dir/boot-default-gaming"
+bdg_render >"$bdg_helper"
+chmod +x "$bdg_helper"
+
+# 🔴 THE REWRITE HAS TO HAVE WORKED, or every case below runs against the real
+# system paths, finds nothing, and passes for the wrong reason.
+for real in "$BOOT_DEFAULT_STATE" "$BOOT_DEFAULT_ALIVE_STAMP" "$BOOT_DEFAULT_OVERRIDE" "$SELECT_BIN"; do
+  ! grep -qE "^[a-z_]+=${real}\$" "$bdg_helper" ||
+    fail_test "the sandboxed helper names no real system path in an assignment" \
+      "'${real}' survived the rewrite, so this section would drive the real filesystem"
+done
+grep -qF -- "$bdg_state" "$bdg_helper" ||
+  fail_test "the sandboxed helper points at the sandbox state file" \
+    "the rewrite matched nothing; every case below would test a helper reading a state file it never writes"
+pass "the helper under test has its state, stamp, override, writer and boot-id all inside the suite's work directory"
+
+bdg_rc=0
+bdg_boot() {        # bdg_boot <boot-id> [argv...]
+  printf '%s\n' "$1" >"$bdg_bootid"; shift
+  bdg_rc=0
+  PATH="$bdg_bin:$PATH" "$bdg_helper" "$@" \
+    >"$work/bdg.out" 2>"$work/bdg.err" || bdg_rc=$?
+}
+bdg_last_select() { tail -1 "$bdg_select_log" 2>/dev/null || true; }
+bdg_reset() {
+  rm -f "$bdg_state" "$bdg_alive" "$bdg_override" "$bdg_select_log" "$bdg_userlog"
+  : >"$bdg_pgrep"
+}
+bdg_fails() { grep -m1 '^fails=' "$bdg_state" 2>/dev/null | cut -d= -f2; }
+
+# --- a first boot has nothing to score ------------------------------------
+bdg_reset
+bdg_boot boot-1
+[[ $bdg_rc -eq 0 ]] || fail_test "the first boot after install succeeds" "exit ${bdg_rc}: $(cat "$work/bdg.err")"
+[[ $(bdg_last_select) == "gamescope --no-restart" ]] ||
+  fail_test "the first boot re-asserts Gaming Mode" \
+    "the writer was asked for '$(bdg_last_select)'. With no previous boot recorded there is nothing to score, so the bound must not fire."
+pass "a first boot with no state re-asserts Gaming Mode and scores nothing"
+[[ $(bdg_fails) == 0 ]] ||
+  fail_test "and records no failures" "fails=$(bdg_fails)"
+pass "and leaves the failure count at 0"
+
+# --- a boot that reached a session clears the count ------------------------
+printf '%s\n' boot-1 >"$bdg_alive"
+bdg_boot boot-2
+[[ $(bdg_last_select) == "gamescope --no-restart" ]] ||
+  fail_test "a boot following a GOOD boot still re-asserts" "asked for '$(bdg_last_select)'"
+[[ $(bdg_fails) == 0 ]] ||
+  fail_test "a boot following a GOOD boot scores no failure" \
+    "fails=$(bdg_fails). The stamp named the boot the helper recorded as attempted, so that boot reached a session."
+pass "a boot whose predecessor reached a session keeps the count at 0 and re-asserts"
+
+# 🔴 POSITIVE CONTROL for the assertion above: the stamp has to actually be
+# CONSULTED. A helper that ignored it would pass the previous case too.
+bdg_reset
+printf 'attempted=boot-1\nfails=0\n' >"$bdg_state"
+printf '%s\n' boot-0 >"$bdg_alive"     # a stamp from an EARLIER boot
+bdg_boot boot-2
+[[ $(bdg_fails) == 1 ]] ||
+  fail_test "a stamp from a DIFFERENT boot does not vouch for the attempted one" \
+    "fails=$(bdg_fails), expected 1. Without the boot-id comparison one good boot would excuse every later failure for ever."
+pass "a stale stamp from an earlier boot is not accepted as evidence for the attempted one"
+
+# --- one bad boot is not enough -------------------------------------------
+bdg_reset
+printf 'attempted=boot-1\nfails=0\n' >"$bdg_state"
+bdg_boot boot-2
+[[ $(bdg_last_select) == "gamescope --no-restart" ]] ||
+  fail_test "ONE unrecorded boot does not give up" \
+    "asked for '$(bdg_last_select)'. A user who ended a boot early, or a first boot spent in Steam's self-update, must not be bounced to the desktop."
+[[ $(bdg_fails) == 1 ]] || fail_test "but it is counted" "fails=$(bdg_fails)"
+pass "one boot with no evidence is counted but does not give up -- the bound is ${BOOT_DEFAULT_MAX_FAILS}, not 1"
+[[ ! -e $bdg_override ]] ||
+  fail_test "and nothing is disarmed after one failure" "the override was created early"
+pass "and the re-assert is still armed"
+
+# --- ...but ${BOOT_DEFAULT_MAX_FAILS} in a row is ---------------------------
+#
+# THE CASE THE WHOLE MECHANISM EXISTS FOR: a Deck whose Gaming Mode stopped
+# working, being power-cycled by somebody who has no keyboard and no other way
+# to say so.
+bdg_boot boot-3
+[[ $bdg_rc -ne 0 ]] ||
+  fail_test "giving up is LOUD" \
+    "the helper exited 0. Nothing depends on this unit, so a non-zero exit costs the boot nothing and puts the event in 'systemctl --failed' for whoever looks."
+[[ $(bdg_last_select) == "desktop --no-restart" ]] ||
+  fail_test "🔴 giving up WRITES 'desktop'" \
+    "the writer was last asked for '$(bdg_last_select)'. Merely declining to re-assert leaves Session=gamescope on disk from an earlier boot -- the Deck stays in exactly the loop the rule just diagnosed."
+pass "after ${BOOT_DEFAULT_MAX_FAILS} consecutive boots with no evidence, the helper selects the DESKTOP"
+[[ -e $bdg_override ]] ||
+  fail_test "and disarms itself" \
+    "${BOOT_DEFAULT_OVERRIDE} was not created, so the next boot re-asserts Gaming Mode again and undoes the user's own 'Return to Gaming Mode' for ever"
+pass "and creates ${BOOT_DEFAULT_OVERRIDE}, so the unit's own condition skips it from the next boot"
+grep -q 'Desktop Mode' "$bdg_userlog" 2>/dev/null ||
+  fail_test "and tells the user, somewhere they can read without a terminal" \
+    "nothing was appended to the desktop user's log. After a give-up the user is sitting in Desktop Mode wondering why; a verdict that exists only in the journal is one only someone with SSH can read."
+grep -qF -- "rm ${BOOT_DEFAULT_OVERRIDE}" "$bdg_userlog" ||
+  fail_test "and the message says how to undo it" \
+    "the user has to be able to get Gaming Mode's boot behaviour back once it works again. Log:"$'\n'"$(cat "$bdg_userlog")"
+pass "and writes the user a plain-language explanation, with the one command that re-arms it"
+[[ $(bdg_fails) == 0 ]] ||
+  fail_test "and resets the count" \
+    "fails=$(bdg_fails); removing the override to re-arm has to start from a clean count, not from an already-tripped one"
+pass "and resets the count, so removing the override re-arms it cleanly"
+
+# --- an orderly shutdown is evidence too -----------------------------------
+#
+# Without this, a user who boots and shuts down again before the probe samples
+# is scored a failure -- twice in a row and a HEALTHY Deck is sent to the
+# desktop. A Deck held down for ten seconds cannot produce this record, and
+# that asymmetry is the signal.
+bdg_reset
+bdg_boot boot-1
+bdg_boot boot-1 --record-clean
+[[ $(cat "$bdg_alive" 2>/dev/null) == boot-1 ]] ||
+  fail_test "--record-clean records the boot it ran on" "stamp: '$(cat "$bdg_alive" 2>/dev/null)'"
+bdg_boot boot-2
+[[ $(bdg_fails) == 0 ]] ||
+  fail_test "a boot ended by an orderly shutdown is not a failure" \
+    "fails=$(bdg_fails). The user reached a menu and asked the machine to reboot -- they were in control of it, whatever the compositor probe saw."
+pass "an orderly shutdown clears the count even when the compositor probe recorded nothing"
+
+# --- the probe: a live session vs. a restart loop --------------------------
+#
+# 🔴 ONE SAMPLE CANNOT TELL THEM APART, and the restart loop is the exact state
+# the bound exists for: under Relogin=true a dying Gaming Mode is retried for
+# ever, so a single `pgrep` finds a compositor every time.
+bdg_reset
+printf '4242\n4242\n' >"$bdg_pgrep"
+bdg_boot boot-7 --record-alive
+[[ $(cat "$bdg_alive" 2>/dev/null) == boot-7 ]] ||
+  fail_test "the same compositor pid across the gap is recorded as a live session" \
+    "stamp: '$(cat "$bdg_alive" 2>/dev/null)'; stderr: $(cat "$work/bdg.err")"
+pass "a compositor that is still the same process ${BOOT_DEFAULT_RESAMPLE_SECONDS}s later is recorded as a live session"
+
+bdg_reset
+printf '4242\n5353\n' >"$bdg_pgrep"
+bdg_boot boot-8 --record-alive
+[[ ! -e $bdg_alive ]] ||
+  fail_test "a DIFFERENT pid across the gap is not a live session" \
+    "the stamp was written anyway. That is autologin restarting a session that keeps dying, and scoring it a success is how the bound never fires on the machine it was written for."
+pass "a compositor that was replaced across the gap is NOT recorded -- a restart loop fails the probe"
+
+bdg_reset
+printf '\n\n' >"$bdg_pgrep"
+bdg_boot boot-9 --record-alive
+[[ ! -e $bdg_alive ]] ||
+  fail_test "no compositor at all is not a live session" "the stamp was written with nothing running"
+pass "no compositor at either sample records nothing"
+
+# --- the accounting cannot be disabled by a bad state file ------------------
+bdg_reset
+printf 'attempted=boot-1\nfails=not-a-number\n' >"$bdg_state"
+bdg_boot boot-2
+[[ $(bdg_fails) == 1 ]] ||
+  fail_test "a corrupt count is treated as 0 and starts counting again" \
+    "fails=$(bdg_fails). A non-numeric value must not make '\$fails -ge \$max_fails' an error that skips the bound."
+pass "a corrupt failure count restarts the accounting rather than disabling it"
+
+# --- and it refuses rather than guesses when it cannot tell boots apart -----
+bdg_reset
+printf 'attempted=boot-1\nfails=1\n' >"$bdg_state"
+: >"$bdg_bootid"
+bdg_rc=0
+PATH="$bdg_bin:$PATH" "$bdg_helper" >"$work/bdg.out" 2>"$work/bdg.err" || bdg_rc=$?
+[[ $bdg_rc -ne 0 ]] ||
+  fail_test "an unreadable boot id is a loud refusal" "the helper exited 0"
+[[ -z $(bdg_last_select) ]] ||
+  fail_test "and it writes NOTHING" \
+    "the writer was asked for '$(bdg_last_select)'. Without a boot id the helper cannot tell this boot from the last, so both the re-assert and the give-up would be guesses -- and it must fall back to leaving the machine exactly as it was."
+pass "an unreadable boot id refuses loudly and changes no default in either direction"
 
 # ===========================================================================
 # 14. stage-power-button -- one press suspends, and the ways that go wrong
