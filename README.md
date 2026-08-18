@@ -49,16 +49,16 @@ image — see [Recovery](#recovery).
 
 1. **Get the image.**
 
-   **[omarchy-deck-2026.08.17-P39-x86_64.iso](https://archive.org/details/pizzarchy-2026.08.17-P39)** — 6.1 GB, from the Internet Archive.
+   **[omarchy-deck-2026.08.18-P40-x86_64.iso](https://archive.org/details/pizzarchy-2026.08.18-P40)** — 6.1 GB, from the Internet Archive.
 
    ```
-   sha256  2c771e8199bcc90a42c45db028006ba66d66b8f803ffb504029a85ab7104cddb
+   sha256  b555017eaa02fb17d341b0f6fc8f268cea3e0258bf70c5ca963b25eccaf74195
    ```
 
    Check it before you install — a truncated download looks like a bad ISO:
 
    ```bash
-   sha256sum omarchy-deck-2026.08.17-P39-x86_64.iso
+   sha256sum omarchy-deck-2026.08.18-P40-x86_64.iso
    ```
 
 2. **Write it to a USB stick.** [Ventoy](https://www.ventoy.net) gets installed onto the stick once; after that you copy `.iso` files onto it like ordinary files, and it boots to a menu listing whatever you have dropped there.
