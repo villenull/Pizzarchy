@@ -419,10 +419,19 @@ target was 8. This is 6 the user answers, which is the direction §6.1a asked fo
    `open_partition_tool` — the last one launches `cfdisk`, which is
    unnavigable with a controller)**. None of it has meaning on a Deck. Forcing
    `full_disk_only=true` uses upstream's own existing skip path.
-   ⚠️ **The microSD must be excluded from the picker by `lsblk -dno RM`, not by
-   name.** Excluding `mmcblk*` would also exclude the 64 GB LCD Deck's internal
-   eMMC — and per `CLAUDE.md` LCD is unverified anyway, so the model gate belongs
-   here too.
+   ⚠️ **The internal disk is told apart from the microSD by `lsblk -dno RM`,
+   not by name.** A name-only rule (exclude `mmcblk*`) would also exclude the
+   64 GB LCD Deck's internal eMMC, which is `mmcblk*`-named too — and per
+   `CLAUDE.md` LCD is unverified anyway, so the model gate belongs here too.
+   RM tells the two apart instead: `RM==0` keeps any internal disk (NVMe or
+   eMMC). ~~The microSD (`RM==1`) was originally excluded outright.~~ **This
+   was later deliberately reversed**: a microSD card is now offered as a
+   selectable install target too — `deck_form_disk_list` keeps `RM==1`
+   devices ONLY when they are also `mmcblk*`-named, so the SD-card reader is
+   let in while other removable media (a USB flash drive, the boot stick
+   itself) stay excluded exactly as before. With no SD card inserted, or with
+   only the internal disk eligible, behaviour is unchanged: the picker is
+   still skipped and the internal disk is still the sole choice.
 
 6. **No screen has a timeout, and §6.1a's "fallback if the user does nothing" is
    answered differently.** A screen that self-advances on a clock makes an

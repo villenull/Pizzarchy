@@ -2864,28 +2864,37 @@ omarchy_prompt_timezone() {
 # deck_form_disk_list <lsblk-fixture-file> [<exclude-device>]
 # lsblk-fixture-file: lines of "NAME TYPE RM" (matches
 # `lsblk -dpno NAME,TYPE,RM`'s own column order). Keeps TYPE=="disk" and
-# RM=="0" -- §3 deviation 5's own warning, quoted: "the microSD must be
-# excluded ... by lsblk -dno RM, not by name. Excluding mmcblk* would also
-# exclude the 64GB LCD Deck's internal eMMC." RM, not a name pattern, is
-# the only test applied here, so an internal eMMC (RM=0) is kept exactly
-# like an internal NVMe. EXCLUDE-DEVICE (the resolved boot/install medium,
-# upstream's own `get_root_disk` walk -- reused live in disk_form below,
-# not reimplemented here) is dropped by exact NAME match. An empty result
-# is a REPORTED failure (return 1), never a silently empty list -- §4 S4's
-# own verified-by row.
+# either RM=="0" (an internal disk -- NVMe or, on the 64GB LCD Deck, eMMC,
+# which is ALSO mmcblk*-named, per §3 deviation 5's own warning: "excluding
+# mmcblk* would also exclude the ... internal eMMC") OR the device is the
+# microSD reader (mmcblk*, even with RM=="1") -- deliberately reversing
+# deviation 5's blanket microSD exclusion so the SD card is offered as an
+# install target instead of only ever the internal disk. A NAME pattern is
+# used ONLY for this SD-card carve-out; every other removable device (a USB
+# flash drive, an SD card read through an external USB reader instead of the
+# Deck's built-in slot, etc.) is still excluded by RM, so plugging in
+# unrelated USB storage never adds a wipe target. EXCLUDE-DEVICE (the
+# resolved boot/install medium, upstream's own `get_root_disk` walk --
+# reused live in disk_form below, not reimplemented here) is dropped by
+# exact NAME match regardless of RM, so the boot USB itself is never listed
+# even though it is removable. An empty result is a REPORTED failure
+# (return 1), never a silently empty list -- §4 S4's own verified-by row.
 deck_form_disk_list() {
   local file=$1 exclude=${2:-}
   local name type rm found=0
   while read -r name type rm; do
     [[ -n $name ]] || continue
     [[ $type == disk ]] || continue
-    [[ $rm == 0 ]] || continue
     [[ -n $exclude && $name == "$exclude" ]] && continue
+    if [[ $rm != 0 ]]; then
+      # Removable: only the microSD reader (mmcblk*) is still eligible.
+      [[ $name == *mmcblk* ]] || continue
+    fi
     printf '%s\n' "$name"
     found=1
   done <"$file"
   if [[ $found -eq 0 ]]; then
-    deck_form_warn "no eligible install disk found in $file (every candidate is removable or is the boot medium)"
+    deck_form_warn "no eligible install disk found in $file (every candidate is removable non-SD-card storage or is the boot medium)"
     return 1
   fi
   return 0
