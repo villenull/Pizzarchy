@@ -1,0 +1,162 @@
+diff --git a/docs/tasks/T4-screen-spec.md b/docs/tasks/T4-screen-spec.md
+index 5c10f50..4510e0e 100644
+--- a/docs/tasks/T4-screen-spec.md
++++ b/docs/tasks/T4-screen-spec.md
+@@ -419,10 +419,19 @@ target was 8. This is 6 the user answers, which is the direction §6.1a asked fo
+    `open_partition_tool` — the last one launches `cfdisk`, which is
+    unnavigable with a controller)**. None of it has meaning on a Deck. Forcing
+    `full_disk_only=true` uses upstream's own existing skip path.
+-   ⚠️ **The microSD must be excluded from the picker by `lsblk -dno RM`, not by
+-   name.** Excluding `mmcblk*` would also exclude the 64 GB LCD Deck's internal
+-   eMMC — and per `CLAUDE.md` LCD is unverified anyway, so the model gate belongs
+-   here too.
++   ⚠️ **The internal disk is told apart from the microSD by `lsblk -dno RM`,
++   not by name.** A name-only rule (exclude `mmcblk*`) would also exclude the
++   64 GB LCD Deck's internal eMMC, which is `mmcblk*`-named too — and per
++   `CLAUDE.md` LCD is unverified anyway, so the model gate belongs here too.
++   RM tells the two apart instead: `RM==0` keeps any internal disk (NVMe or
++   eMMC). ~~The microSD (`RM==1`) was originally excluded outright.~~ **This
++   was later deliberately reversed**: a microSD card is now offered as a
++   selectable install target too — `deck_form_disk_list` keeps `RM==1`
++   devices ONLY when they are also `mmcblk*`-named, so the SD-card reader is
++   let in while other removable media (a USB flash drive, the boot stick
++   itself) stay excluded exactly as before. With no SD card inserted, or with
++   only the internal disk eligible, behaviour is unchanged: the picker is
++   still skipped and the internal disk is still the sole choice.
+ 
+ 6. **No screen has a timeout, and §6.1a's "fallback if the user does nothing" is
+    answered differently.** A screen that self-advances on a clock makes an
+diff --git a/iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh b/iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh
+index d23651d..423c5dd 100755
+--- a/iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh
++++ b/iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh
+@@ -2864,28 +2864,37 @@ omarchy_prompt_timezone() {
+ # deck_form_disk_list <lsblk-fixture-file> [<exclude-device>]
+ # lsblk-fixture-file: lines of "NAME TYPE RM" (matches
+ # `lsblk -dpno NAME,TYPE,RM`'s own column order). Keeps TYPE=="disk" and
+-# RM=="0" -- §3 deviation 5's own warning, quoted: "the microSD must be
+-# excluded ... by lsblk -dno RM, not by name. Excluding mmcblk* would also
+-# exclude the 64GB LCD Deck's internal eMMC." RM, not a name pattern, is
+-# the only test applied here, so an internal eMMC (RM=0) is kept exactly
+-# like an internal NVMe. EXCLUDE-DEVICE (the resolved boot/install medium,
+-# upstream's own `get_root_disk` walk -- reused live in disk_form below,
+-# not reimplemented here) is dropped by exact NAME match. An empty result
+-# is a REPORTED failure (return 1), never a silently empty list -- §4 S4's
+-# own verified-by row.
++# either RM=="0" (an internal disk -- NVMe or, on the 64GB LCD Deck, eMMC,
++# which is ALSO mmcblk*-named, per §3 deviation 5's own warning: "excluding
++# mmcblk* would also exclude the ... internal eMMC") OR the device is the
++# microSD reader (mmcblk*, even with RM=="1") -- deliberately reversing
++# deviation 5's blanket microSD exclusion so the SD card is offered as an
++# install target instead of only ever the internal disk. A NAME pattern is
++# used ONLY for this SD-card carve-out; every other removable device (a USB
++# flash drive, an SD card read through an external USB reader instead of the
++# Deck's built-in slot, etc.) is still excluded by RM, so plugging in
++# unrelated USB storage never adds a wipe target. EXCLUDE-DEVICE (the
++# resolved boot/install medium, upstream's own `get_root_disk` walk --
++# reused live in disk_form below, not reimplemented here) is dropped by
++# exact NAME match regardless of RM, so the boot USB itself is never listed
++# even though it is removable. An empty result is a REPORTED failure
++# (return 1), never a silently empty list -- §4 S4's own verified-by row.
+ deck_form_disk_list() {
+   local file=$1 exclude=${2:-}
+   local name type rm found=0
+   while read -r name type rm; do
+     [[ -n $name ]] || continue
+     [[ $type == disk ]] || continue
+-    [[ $rm == 0 ]] || continue
+     [[ -n $exclude && $name == "$exclude" ]] && continue
++    if [[ $rm != 0 ]]; then
++      # Removable: only the microSD reader (mmcblk*) is still eligible.
++      [[ $name == *mmcblk* ]] || continue
++    fi
+     printf '%s\n' "$name"
+     found=1
+   done <"$file"
+   if [[ $found -eq 0 ]]; then
+-    deck_form_warn "no eligible install disk found in $file (every candidate is removable or is the boot medium)"
++    deck_form_warn "no eligible install disk found in $file (every candidate is removable non-SD-card storage or is the boot medium)"
+     return 1
+   fi
+   return 0
+diff --git a/test/unit/test-deck-form.sh b/test/unit/test-deck-form.sh
+index ea11248..d78cc09 100755
+--- a/test/unit/test-deck-form.sh
++++ b/test/unit/test-deck-form.sh
+@@ -2958,27 +2958,30 @@ cat >"$work/lsblk.disks" <<'EOF'
+ /dev/nvme0n1 disk 0
+ /dev/sda disk 1
+ /dev/mmcblk0 disk 0
++/dev/mmcblk1 disk 1
+ /dev/loop0 loop 0
+ EOF
+ 
+ got=$(deck_form_disk_list "$work/lsblk.disks") || fail "disk_list must succeed when eligible disks exist"
+ LC_ALL=C grep -qxF "/dev/nvme0n1" <<<"$got" || fail "an internal NVMe disk must be kept" "$got"
+-LC_ALL=C grep -qxF "/dev/mmcblk0" <<<"$got" || fail "an internal eMMC disk must be kept (excluded by RM, never by the mmcblk* NAME pattern -- §3 deviation 5)" "$got"
++LC_ALL=C grep -qxF "/dev/mmcblk0" <<<"$got" || fail "an internal eMMC disk must be kept (RM=0, kept exactly like NVMe)" "$got"
++LC_ALL=C grep -qxF "/dev/mmcblk1" <<<"$got" || fail "the removable microSD card (mmcblk*, RM=1) must now be offered as an install target" "$got"
+ if LC_ALL=C grep -qxF "/dev/sda" <<<"$got"; then
+-  fail "a removable disk (RM=1) must be excluded"
++  fail "a removable, non-microSD disk (RM=1, not mmcblk*) must still be excluded"
+ fi
+ if LC_ALL=C grep -qxF "/dev/loop0" <<<"$got"; then
+   fail "a non-disk TYPE (loop) must be excluded"
+ fi
+-pass "disk_list keeps internal NVMe and eMMC, excludes removable (by RM, not name) and non-disk types"
++pass "disk_list keeps internal NVMe/eMMC and the removable microSD card, excludes other removable disks and non-disk types"
+ 
+-got=$(deck_form_disk_list "$work/lsblk.disks" "/dev/nvme0n1") || fail "disk_list must still succeed with one disk excluded and one remaining"
+-[[ $got == /dev/mmcblk0 ]] || fail "the boot/install medium must be excluded by exact NAME match" "got: $got"
+-pass "disk_list excludes the boot/install medium by exact device-name match"
++got=$(deck_form_disk_list "$work/lsblk.disks" "/dev/nvme0n1") || fail "disk_list must still succeed with one disk excluded and others remaining"
++LC_ALL=C grep -qxF "/dev/nvme0n1" <<<"$got" && fail "the excluded boot/install medium must not appear" "got: $got"
++LC_ALL=C grep -qxF "/dev/mmcblk0" <<<"$got" || fail "the internal eMMC must still be present after excluding a different device" "got: $got"
++LC_ALL=C grep -qxF "/dev/mmcblk1" <<<"$got" || fail "the SD card must still be present after excluding a different device" "got: $got"
++pass "disk_list excludes only the named boot/install medium by exact device-name match, leaving the SD card eligible"
+ 
+ cat >"$work/lsblk.none.disks" <<'EOF'
+ /dev/sda disk 1
+-/dev/mmcblk1 disk 1
+ EOF
+ out=$(deck_form_disk_list "$work/lsblk.none.disks" 2>&1) && fail "disk_list must return nonzero when nothing is eligible"
+ LC_ALL=C grep -qF "no eligible install disk" <<<"$out" || fail "disk_list must SAY why it found nothing, not go silent" "got: $out"
+@@ -3195,6 +3198,38 @@ PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
+ LC_ALL=C grep -qF "choose" "$work/gum.log" || fail "disk_form must have actually invoked a picker when two disks were eligible" "$(cat "$work/gum.log")"
+ pass "disk_form shows a picker (and honours its answer) when more than one disk is eligible"
+ 
++echo "--- S4 disk_form: an inserted microSD card is offered alongside the internal disk ---"
++
++# The internal disk (RM=0) plus a REMOVABLE microSD card (RM=1, mmcblk*) --
++# this is the actual card-reader case, distinct from the eMMC test above
++# (which uses RM=0 and would have been eligible even under the old,
++# SD-excluding filter). A non-SD removable device (/dev/sda, e.g. the USB
++# boot stick) is included too, to prove it is still left out even while the
++# SD card is let in.
++cat >"$work/bin-fakelsblk/lsblk" <<'EOF'
++#!/usr/bin/env bash
++if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM" ]]; then
++  printf '/dev/nvme0n1 disk 0\n/dev/sda disk 1\n/dev/mmcblk1 disk 1\n'
++  exit 0
++fi
++field=$3
++case "$field" in
++  SIZE) echo "64G" ;;
++  *) : ;;
++esac
++EOF
++unset disk 2>/dev/null || true
++: >"$work/gum.log"
++DECK_TEST_ROOT_DISK="" \
++DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" \
++FAKE_GUM_LOG="$work/gum.log" \
++FAKE_GUM_CHOOSE_OUTPUT="/dev/mmcblk1" \
++PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
++  disk_form
++[[ $disk == /dev/mmcblk1 ]] || fail "disk_form must allow selecting the removable microSD card when the user picks it" "got: ${disk:-unset}"
++LC_ALL=C grep -qF "choose" "$work/gum.log" || fail "disk_form must show a picker once the SD card makes a second eligible disk" "$(cat "$work/gum.log")"
++pass "disk_form offers the removable microSD card as a selectable install target alongside the internal disk, and honours picking it"
++
+ echo "--- S4 disk_form: zero eligible disks -> dead-end, NEVER falls through to a picker ---"
+ 
+ # ⚠️ MUTATION-FOUND GAP, closed: neither test above ever drives disk_form
