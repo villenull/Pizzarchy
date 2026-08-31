@@ -3339,4 +3339,60 @@ declare -F stage_steam_desktop_launcher >/dev/null ||
   fail_test "the stage function exists under the name run_stage derives from the list entry"
 pass "stage-steam-desktop-launcher is in both stage lists and resolves to a real function"
 
+# --- stage-portal-env-fix: a leaked XDG_DESKTOP_PORTAL_DIR keeps GTK4 apps
+# in light mode in Desktop Mode (operator report). --------------------------
+
+pf_unit="$work/deck-portal-env-fix.service"
+render_portal_fix_unit >"$pf_unit"
+
+grep -qF -- "$INSTALL_MARKER" "$pf_unit" ||
+  fail_test "the rendered portal-fix unit carries the install marker" \
+    "expected: $INSTALL_MARKER"
+pass "the rendered portal-fix unit carries '${INSTALL_MARKER}'"
+
+for section in '[Unit]' '[Service]' '[Install]'; do
+  grep -qxF -- "$section" "$pf_unit" ||
+    fail_test "the portal-fix unit declares ${section}" \
+      "a setting outside its section is 'Unknown key ... ignoring' and the unit still loads. File:"$'\n'"$(cat "$pf_unit")"
+done
+pass "the portal-fix unit declares [Unit], [Service] and [Install]"
+
+grep -qx 'Type=oneshot' "$pf_unit" ||
+  fail_test "the portal-fix unit is Type=oneshot" \
+    "it must run again on every entry into the desktop session, not once ever -- RemainAfterExit=yes would leave it 'active' after the first run and systemd would not re-run an already-active unit on the next session"
+pass "the portal-fix unit is Type=oneshot"
+
+! grep -qx 'RemainAfterExit=yes' "$pf_unit" ||
+  fail_test "the portal-fix unit must NOT set RemainAfterExit=yes" \
+    "an oneshot that stays 'active' does not re-run on the next desktop session, which is exactly the session a second leak would need it to catch"
+pass "the portal-fix unit does not pin itself active, so it re-runs on every desktop session"
+
+grep -qxF "ExecStart=/usr/bin/systemctl --user unset-environment ${PORTAL_ENV_VAR}" "$pf_unit" ||
+  fail_test "the portal-fix unit unsets ${PORTAL_ENV_VAR}" \
+    "File:"$'\n'"$(cat "$pf_unit")"
+pass "the portal-fix unit unsets ${PORTAL_ENV_VAR} from the user manager's own environment"
+
+grep -qxF "ExecStart=/usr/bin/systemctl --user restart ${PORTAL_UNITS[0]} ${PORTAL_UNITS[1]}" "$pf_unit" ||
+  fail_test "the portal-fix unit restarts both portal services" \
+    "restarting only xdg-desktop-portal.service would leave xdg-desktop-portal-hyprland.service answering from its own already-cached (wrong) config. File:"$'\n'"$(cat "$pf_unit")"
+pass "the portal-fix unit restarts both ${PORTAL_UNITS[0]} and ${PORTAL_UNITS[1]}, not just one"
+
+grep -qx "WantedBy=${PORTAL_FIX_WANTED_BY}" "$pf_unit" ||
+  fail_test "the portal-fix unit is WantedBy the desktop-only target" \
+    "it must be ${MAPPER_WANTED_BY} -- the same target the mapper uses and the one target this project has already verified exists and starts ONLY inside the Hyprland desktop session. WantedBy=graphical-session.target would also fire inside gamescope."
+pass "the portal-fix unit is WantedBy=${PORTAL_FIX_WANTED_BY}, the desktop-only target, not graphical-session.target"
+
+# The stage has to be in BOTH lists, same reasoning as
+# stage-steam-desktop-launcher's own check above: a stage in INSTALL_STAGES
+# but not BAKE_STAGES is a fix that works when a human re-runs this script by
+# hand and ships broken on every fresh ISO install.
+[[ " ${INSTALL_STAGES[*]} " == *" stage-portal-env-fix "* ]] ||
+  fail_test "stage-portal-env-fix is in INSTALL_STAGES"
+[[ " ${BAKE_STAGES[*]} " == *" stage-portal-env-fix "* ]] ||
+  fail_test "stage-portal-env-fix is in BAKE_STAGES" \
+    "the installer reads BAKE_STAGES; a stage missing from it never runs on an ISO install"
+declare -F stage_portal_env_fix >/dev/null ||
+  fail_test "the stage function exists under the name run_stage derives from the list entry"
+pass "stage-portal-env-fix is in both stage lists and resolves to a real function"
+
 echo "all deck-session.sh tests passed"
