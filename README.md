@@ -3,7 +3,7 @@
 One bootable USB installs [Omarchy](https://omarchy.org) on your Steam Deck with no keyboard/mouse required. Feels exactly like SteamOS except the desktop is Omarchy with a Steam-like on-screen keyboard (bring it up using STEAM+X). Installation is driven entirely by the Deck's buttons and trackpads. Credit goes to the Omarchy team! This is essentially a Quattro ISO slightly modified to be more deck friendly and comes with a few off-the-shelf modifications (e.g., on-screen keyboard).
 
 
-**Hot and ready in about twenty minutes! Easy as Pizza(rchy) pie.**
+**Hot and ready in about five minutes! Easy as Pizza(rchy) pie.**
 
 Deck behaves like it always did as turning your Deck on lands you in Gaming Mode and power button puts the Deck to sleep/wake. The difference is **Desktop Mode**, which now drops you into an Omarchy/Hyprland desktop. Use the QAM button and menu to go back to Gaming Mode.
 
