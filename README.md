@@ -1,13 +1,38 @@
-# Pizzarchy: Omarchy on your Steam Deck
+<p align="center">
+  <img src="docs/images/logo.png" width="128" height="128" alt="Pizzarchy logo">
+</p>
 
-One bootable USB installs [Omarchy](https://omarchy.org) on your Steam Deck with no keyboard/mouse required. Feels exactly like SteamOS except the desktop is Omarchy with a Steam-like on-screen keyboard (bring it up using STEAM+X). Installation is driven entirely by the Deck's buttons and trackpads. Credit goes to the Omarchy team! This is essentially a Quattro ISO slightly modified to be more deck friendly and comes with a few off-the-shelf modifications (e.g., on-screen keyboard).
+<h1 align="center">Pizzarchy</h1>
 
+<p align="center">
+  <strong>One bootable USB puts Omarchy on your Steam Deck.</strong><br>
+  No keyboard, no mouse — the whole install runs on the Deck's buttons and trackpads.
+</p>
 
-**Hot and ready in about five minutes! Easy as Pizza(rchy) pie.**
+<p align="center">
+  <a href="https://github.com/villenull/Pizzarchy/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/villenull/Pizzarchy?label=release&color=B45309"></a>
+  <img alt="Steam Deck OLED" src="https://img.shields.io/badge/Steam%20Deck-OLED-1A9FFF?logo=steamdeck&logoColor=white">
+  <img alt="Controller-only install" src="https://img.shields.io/badge/install-controller%20only-17A673">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-2EA44F"></a>
+</p>
+
+<p align="center">
+  <a href="#what-you-need">Requirements</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#what-you-get">What you get</a> ·
+  <a href="#controls-applicable-in-desktop-mode-only">Controls</a> ·
+  <a href="#recovery">Recovery</a>
+</p>
+
+<p align="center">
+  <img src="docs/images/hero-desktop.png" width="900" alt="Omarchy's desktop running on a Steam Deck">
+</p>
+
+The name is *pizza + Omarchy*. **Hot and ready in about five minutes! Easy as Pizza(rchy) pie.**
+
+Feels exactly like SteamOS except the desktop is [Omarchy](https://omarchy.org) with a Steam-like on-screen keyboard (bring it up using STEAM+X). Installation is driven entirely by the Deck's buttons and trackpads. Credit goes to the Omarchy team! This is essentially a Quattro ISO slightly modified to be more deck friendly and comes with a few off-the-shelf modifications (e.g., on-screen keyboard).
 
 Deck behaves like it always did as turning your Deck on lands you in Gaming Mode and power button puts the Deck to sleep/wake. The difference is **Desktop Mode**, which now drops you into an Omarchy/Hyprland desktop. Use the QAM button and menu to go back to Gaming Mode.
-
-![Omarchy's desktop running on a Steam Deck](docs/images/hero-desktop.png)
 
 ---
 

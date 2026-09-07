@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Pizzarchy logo">
+  <rect width="128" height="128" rx="28" ry="28" fill="#12333F"/>
+  <path d="M 64 98 L 25.98 41.63 A 68 68 0 0 1 102.02 41.63 Z"
+        fill="#F2A44E" stroke="#F2A44E" stroke-width="8" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M 40.33 49.47 A 54 54 0 0 1 87.67 49.47" fill="none" stroke="#12333F" stroke-width="7" stroke-linecap="round"/>
+  <g fill="#12333F">
+    <circle cx="51" cy="63" r="8"/>
+    <circle cx="77" cy="63" r="8"/>
+    <circle cx="64" cy="83" r="7.5"/>
+  </g>
+</svg>
