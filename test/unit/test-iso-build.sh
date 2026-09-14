@@ -1137,9 +1137,9 @@ pass "iso/UPSTREAM is exactly 'omacom-io/omarchy-iso@174dd82b157b'"
 
 [[ -f "$ISO_ROOT/RUNTIME" ]] || fail "iso/RUNTIME exists"
 runtime_content=$(cat "$ISO_ROOT/RUNTIME")
-[[ $runtime_content == "basecamp/omarchy@f0020448ca87" ]] ||
-  fail "iso/RUNTIME has the exact pin (Omarchy 4.0.0 stable, tag v4.0.0)" "got: $runtime_content"
-pass "iso/RUNTIME is exactly 'basecamp/omarchy@f0020448ca87'"
+[[ $runtime_content == "basecamp/omarchy@053498700906" ]] ||
+  fail "iso/RUNTIME has the exact pin (Omarchy 4.0.3 stable, tag v4.0.3)" "got: $runtime_content"
+pass "iso/RUNTIME is exactly 'basecamp/omarchy@053498700906'"
 
 [[ -d "$ISO_ROOT/overlay/configs/airootfs" ]] || fail "iso/overlay/configs/airootfs/ exists"
 [[ -d "$ISO_ROOT/overlay/patches" ]] || fail "iso/overlay/patches/ exists"

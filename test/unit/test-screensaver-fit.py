@@ -89,7 +89,7 @@ def note(what: str) -> None:
 
 # Omarchy's logo.txt, which omarchy-upgrade-to-quattro:1972 copies to
 # ~/.config/omarchy/branding/screensaver.txt and which omarchy-screensaver feeds
-# to ttfx. Widest line, in characters, at basecamp/omarchy@f0020448ca87.
+# to ttfx. Widest line, in characters, at basecamp/omarchy@053498700906.
 # The "O" occupies columns 0-9 and the "Y" columns 70-80.
 ART_COLUMNS = 81
 

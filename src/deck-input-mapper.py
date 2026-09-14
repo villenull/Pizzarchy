@@ -616,7 +616,7 @@ BRIGHTNESS_ACTIONS: dict[str, list[str]] = {
 # --- 🆕 what STEAM + the right stick runs: OMARCHY'S OWN WORKSPACE FOCUS ------
 #
 # ✅ READ OUT OF THE PINNED RUNTIME, not inferred from another Hyprland. The
-# test Deck runs `basecamp/omarchy@f0020448ca87` (CLAUDE.md), and that tree's
+# test Deck runs `basecamp/omarchy@053498700906` (CLAUDE.md), and that tree's
 # `default/hypr/bindings/tiling.lua` binds every workspace key like this:
 #
 #     o.bind("SUPER + " .. key, "Switch to workspace " .. workspace,

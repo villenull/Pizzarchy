@@ -10,7 +10,7 @@
 # inside a fullscreen terminal. The art is UPSTREAM'S OWN logo.txt, copied to
 # that path by omarchy-upgrade-to-quattro:1972, and it is **81 columns wide**
 # (measured: `max(len(line))` over the pinned checkout's logo.txt at
-# basecamp/omarchy@f0020448ca87; the "O" occupies columns 0-9 and the "Y"
+# basecamp/omarchy@053498700906; the "O" occupies columns 0-9 and the "Y"
 # columns 70-80 -- exactly the two letters the operator lost).
 #
 # THE TERMINAL IS foot, AND THAT IS MEASURED, NOT ASSUMED. Two independent
