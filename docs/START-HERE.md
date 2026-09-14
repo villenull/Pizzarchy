@@ -3,7 +3,7 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
-> ## Where things stand (updated 2026-08-15, session 28 — READ THIS FIRST)
+> ## Where things stand (updated 2026-09-14 — pin bumped to v4.0.3; was 2026-08-15 session 28)
 >
 > *(Supersedes every block below wherever they disagree. Same rule: verify every
 > "done"/✅ against the tree before trusting it.)*
@@ -31,7 +31,9 @@ work without waiting for further instruction.**
 > `P32-tty-path-anomaly.md` (UNREPRODUCED, no action).
 >
 > **The Deck was REINSTALLED from our own stable ISO** and is now on
-> `omarchy-dev 4.0.0.r1744.gf002044-1` = `iso/RUNTIME`'s pin. It has `sshd`
+> `omarchy-dev 4.0.0.r1744.gf002044-1` (old pin, `iso/RUNTIME` was bumped to
+> `053498700906` = v4.0.3 on 2026-09-14 — Deck needs a rebuild from the new
+> ISO). It has `sshd`
 > enabled (key-only, no root, `ufw limit 22/tcp`) — `ssh steamdeck` works, and
 > **ufw rate-limits to 6 connections/30 s**, so batch remote commands into one
 > invocation. Steam was installed by hand to un-break it; `deck-session.sh` was

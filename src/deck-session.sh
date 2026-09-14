@@ -913,6 +913,47 @@ readonly MAPPER_WANTED_BY=wayland-session@hyprland.desktop.target
 # starts gets shipped.
 readonly MAPPER_GLOBAL_WANTS="${MAPPER_UNIT%/*}/${MAPPER_WANTED_BY}.wants/${MAPPER_UNIT##*/}"
 
+# --- Portal env leak: GTK4/libadwaita apps stuck in light mode ------------
+# (found by the operator in Desktop Mode; not yet in any PROGRESS.md session)
+#
+# Reproduced: XDG_DESKTOP_PORTAL_DIR=/usr/share/xdg-desktop-portal/gamescope-portals
+# ends up in the systemd --user MANAGER's own environment (not any one
+# process's) while Desktop Mode is running, even though nothing in Desktop
+# Mode's own session sets it. The gamescope-portals config carries no Settings
+# backend, so xdg-desktop-portal answers every app asking for the color scheme
+# with nothing, and GTK4/libadwaita apps (Nautilus, etc.) fall back to light
+# mode regardless of `gsettings ... color-scheme prefer-dark`.
+#
+# THE LIKELY MECHANISM, matching how this project's own switch works
+# (stage_session_select above): a session switch here is an SDDM restart, not
+# a fresh boot, and an SDDM restart does not by itself tear down the
+# `user@<uid>.service` systemd --user manager -- so an environment variable
+# set into it while Gaming Mode's gamescope session was active can still be
+# sitting there after SDDM hands the same user a fresh Hyprland session. This
+# is a HYPOTHESIS, not yet confirmed on hardware by capturing
+# `systemctl --user show-environment` across an actual gamescope-to-desktop
+# switch -- do that before trusting this comment over a live Deck.
+#
+# THE FIX is deliberately unconditional and idempotent rather than
+# gamescope-specific: unset the variable if present (a no-op if it is not),
+# then restart the portal services so any ALREADY-CACHED wrong config is
+# dropped too. Running it every time Desktop Mode starts costs one
+# unset-environment call and two service restarts nobody will notice, against
+# the alternative of a defect that reproduces exactly once per session and
+# nowhere else. Read WANTED_BY below before changing WHEN it runs.
+readonly PORTAL_ENV_VAR=XDG_DESKTOP_PORTAL_DIR
+readonly PORTAL_UNITS=(xdg-desktop-portal.service xdg-desktop-portal-hyprland.service)
+# /etc/systemd/user, and the SAME target as the mapper (MAPPER_WANTED_BY), for
+# the same reason: this must run once per entry into the Hyprland desktop
+# session, never inside gamescope, and `wayland-session@hyprland.desktop.target`
+# is the one target this project has already verified exists and starts only
+# there. Do not point this at graphical-session.target -- gamescope reaches
+# that target too, and firing a portal restart mid-game over stray env cleanup
+# is not a trade this stage should make silently.
+readonly PORTAL_FIX_UNIT=/etc/systemd/user/deck-portal-env-fix.service
+readonly PORTAL_FIX_WANTED_BY=${MAPPER_WANTED_BY}
+readonly PORTAL_FIX_GLOBAL_WANTS="${PORTAL_FIX_UNIT%/*}/${PORTAL_FIX_WANTED_BY}.wants/${PORTAL_FIX_UNIT##*/}"
+
 # --- Lizard mode: the controller firmware's own input emulation -----------
 #
 # PROGRESS.md 5.21 is the defect, 5.9 / R-29 the measurements, and operator
@@ -1714,6 +1755,11 @@ readonly -a INSTALL_STAGES=(
   # failure here cannot cost the mapper.
   stage-steam-desktop-launcher
   stage-desktop-settings
+  # One /etc/systemd/user unit, no system state beyond it, nothing else
+  # depends on it. Sits right after stage-desktop-settings because both are
+  # "the desktop doesn't look right" fixes, not because either needs the
+  # other.
+  stage-portal-env-fix
   # One file in the desktop user's own ~/.config, no system state, nothing
   # armed. Position is not load-bearing -- it depends on no other stage and no
   # other stage depends on it -- so it sits with the other cosmetic-defect work
@@ -1818,6 +1864,14 @@ readonly -a BAKE_STAGES=(
   # cannot make in a chroot -- did WirePlumber actually take the new name? --
   # needs a running PipeWire and is deferred, not skipped.
   stage-onboard-audio-name
+  # IN, for the same reason stage-onboard-audio-name is right above it: it
+  # writes state (one /etc/systemd/user unit) that nothing else in the install
+  # path writes, so leaving it out of a full-ISO bake would ship the defect on
+  # every fresh install, not just on a Deck this script was later re-run on.
+  # The one check it cannot make in a chroot -- does the target really exist in
+  # THIS user manager -- is deferred, not skipped, same as everywhere else in
+  # this list.
+  stage-portal-env-fix
   # Before the power button, because everything is. It writes three root-owned
   # files under /usr/local and touches no system state, so it is safe anywhere
   # in this list -- it sits here so the last thing the installer does is still
@@ -6442,6 +6496,96 @@ PY
   log "      succeeds; a mask fails it and replays the first-run notifications"
   log "      on every login. An instance already running in this session keeps"
   log "      running; the override applies from the next graphical session on."
+}
+
+# ---------------------------------------------------------------------------
+
+# The unit stage-portal-env-fix installs. Written to stdout, split out for the
+# same reason render_update_stub is: the unit suite reads it back with no
+# Deck, no root and no live systemd --user manager to import a stray variable
+# into.
+#
+# Type=oneshot with RemainAfterExit=no: it should run again on every entry
+# into the desktop session (WantedBy=${PORTAL_FIX_WANTED_BY}), not once ever --
+# an already-clean environment costs nothing extra to unset again, and an
+# environment that got re-poisoned by a second gamescope-then-desktop cycle
+# in the same boot needs the same fix a second time.
+#
+# `unset-environment` on a variable that was never set is NOT an error --
+# tested by hand, exits 0 -- so this never fails on the common case where
+# nothing leaked. The portal restarts run UNCONDITIONALLY rather than only
+# when the variable was present, on purpose: a portal that already cached the
+# wrong config from an earlier leak this stage did not exist to catch needs
+# the restart regardless of what the environment says right now.
+render_portal_fix_unit() {
+  cat <<EOF
+${INSTALL_MARKER}
+[Unit]
+Description=Clear a leaked ${PORTAL_ENV_VAR} before the desktop portals start answering apps
+Documentation=file://${PORTAL_FIX_UNIT}
+# Before, not just wanted alongside: the whole point is that the portal
+# services must not still be running on the poisoned environment by the time
+# a GTK4 app asks them for the color scheme.
+Before=${PORTAL_UNITS[0]} ${PORTAL_UNITS[1]}
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/bin/systemctl --user unset-environment ${PORTAL_ENV_VAR}
+ExecStart=/usr/bin/systemctl --user restart ${PORTAL_UNITS[0]} ${PORTAL_UNITS[1]}
+
+[Install]
+WantedBy=${PORTAL_FIX_WANTED_BY}
+EOF
+}
+
+# stage-portal-env-fix -- Nautilus (and other GTK4/libadwaita apps) stuck in
+# light mode in Desktop Mode despite `prefer-dark` (operator report; see
+# PORTAL_ENV_VAR above for the mechanism this assumes but has not yet
+# confirmed on hardware). One file, no dependents, no other stage depends on
+# it -- it sits here beside the other cosmetic-defect work for the same reason
+# stage-onboard-audio-name does (see INSTALL_STAGES).
+stage_portal_env_fix() {
+  assert_ours_or_absent "$PORTAL_FIX_UNIT" "another package's unit"
+
+  log "installing ${PORTAL_FIX_UNIT}"
+  local tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_portal_fix_unit >"$tmp" || fail "could not render the portal-env-fix unit"
+  $SUDO install -m 0644 -o root -g root "$tmp" "$PORTAL_FIX_UNIT" ||
+    fail "could not install ${PORTAL_FIX_UNIT}"
+  rm -f "$tmp"
+
+  # Same target the mapper uses, and the same reason to check it exists before
+  # trusting `--global enable`: WantedBy a target this user manager has never
+  # heard of enables with no error and never starts.
+  if in_chroot; then
+    defer "whether ${PORTAL_FIX_WANTED_BY} exists cannot be answered in a chroot -- confirm in the first desktop session with: systemctl --user list-units --all | grep wayland-session"
+  elif systemctl --user list-units --all --no-legend "$PORTAL_FIX_WANTED_BY" 2>/dev/null | grep -q .; then
+    log "verified: ${PORTAL_FIX_WANTED_BY} exists in this user manager"
+  else
+    warn "${PORTAL_FIX_WANTED_BY} is not known to this user manager. Over SSH with no graphical session that is normal; inside the desktop it means this fix will enable and never run."
+  fi
+
+  $SUDO systemctl --global enable "${PORTAL_FIX_UNIT##*/}" >/dev/null 2>&1 ||
+    fail "'systemctl --global enable ${PORTAL_FIX_UNIT##*/}' failed"
+
+  if in_chroot; then
+    defer "cannot read back ${PORTAL_FIX_GLOBAL_WANTS} for a user that has never logged in -- confirm after first boot"
+  else
+    [[ -L $PORTAL_FIX_GLOBAL_WANTS ]] ||
+      fail "'systemctl --global enable' exited 0 but ${PORTAL_FIX_GLOBAL_WANTS} is not a symlink, so the fix is installed and NOT enabled -- it would never run, and nothing would say so."
+    log "verified: ${PORTAL_FIX_GLOBAL_WANTS} exists -- enabled for every user of this image"
+  fi
+
+  log "stage-portal-env-fix: ok"
+  log "NOTE: this assumes ${PORTAL_ENV_VAR} leaks from a Gaming-Mode session"
+  log "      into the systemd --user manager Desktop Mode then reuses (see the"
+  log "      comment above PORTAL_ENV_VAR). That mechanism has not yet been"
+  log "      confirmed by capturing 'systemctl --user show-environment' across"
+  log "      a real gamescope-to-desktop switch on hardware. If Nautilus is"
+  log "      STILL in light mode after this stage and a session switch, that"
+  log "      hypothesis is the first thing to re-check, not this unit."
 }
 
 # ---------------------------------------------------------------------------

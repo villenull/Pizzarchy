@@ -2958,27 +2958,30 @@ cat >"$work/lsblk.disks" <<'EOF'
 /dev/nvme0n1 disk 0
 /dev/sda disk 1
 /dev/mmcblk0 disk 0
+/dev/mmcblk1 disk 1
 /dev/loop0 loop 0
 EOF
 
 got=$(deck_form_disk_list "$work/lsblk.disks") || fail "disk_list must succeed when eligible disks exist"
 LC_ALL=C grep -qxF "/dev/nvme0n1" <<<"$got" || fail "an internal NVMe disk must be kept" "$got"
-LC_ALL=C grep -qxF "/dev/mmcblk0" <<<"$got" || fail "an internal eMMC disk must be kept (excluded by RM, never by the mmcblk* NAME pattern -- §3 deviation 5)" "$got"
+LC_ALL=C grep -qxF "/dev/mmcblk0" <<<"$got" || fail "an internal eMMC disk must be kept (RM=0, kept exactly like NVMe)" "$got"
+LC_ALL=C grep -qxF "/dev/mmcblk1" <<<"$got" || fail "the removable microSD card (mmcblk*, RM=1) must now be offered as an install target" "$got"
 if LC_ALL=C grep -qxF "/dev/sda" <<<"$got"; then
-  fail "a removable disk (RM=1) must be excluded"
+  fail "a removable, non-microSD disk (RM=1, not mmcblk*) must still be excluded"
 fi
 if LC_ALL=C grep -qxF "/dev/loop0" <<<"$got"; then
   fail "a non-disk TYPE (loop) must be excluded"
 fi
-pass "disk_list keeps internal NVMe and eMMC, excludes removable (by RM, not name) and non-disk types"
+pass "disk_list keeps internal NVMe/eMMC and the removable microSD card, excludes other removable disks and non-disk types"
 
-got=$(deck_form_disk_list "$work/lsblk.disks" "/dev/nvme0n1") || fail "disk_list must still succeed with one disk excluded and one remaining"
-[[ $got == /dev/mmcblk0 ]] || fail "the boot/install medium must be excluded by exact NAME match" "got: $got"
-pass "disk_list excludes the boot/install medium by exact device-name match"
+got=$(deck_form_disk_list "$work/lsblk.disks" "/dev/nvme0n1") || fail "disk_list must still succeed with one disk excluded and others remaining"
+LC_ALL=C grep -qxF "/dev/nvme0n1" <<<"$got" && fail "the excluded boot/install medium must not appear" "got: $got"
+LC_ALL=C grep -qxF "/dev/mmcblk0" <<<"$got" || fail "the internal eMMC must still be present after excluding a different device" "got: $got"
+LC_ALL=C grep -qxF "/dev/mmcblk1" <<<"$got" || fail "the SD card must still be present after excluding a different device" "got: $got"
+pass "disk_list excludes only the named boot/install medium by exact device-name match, leaving the SD card eligible"
 
 cat >"$work/lsblk.none.disks" <<'EOF'
 /dev/sda disk 1
-/dev/mmcblk1 disk 1
 EOF
 out=$(deck_form_disk_list "$work/lsblk.none.disks" 2>&1) && fail "disk_list must return nonzero when nothing is eligible"
 LC_ALL=C grep -qF "no eligible install disk" <<<"$out" || fail "disk_list must SAY why it found nothing, not go silent" "got: $out"
@@ -3194,6 +3197,38 @@ PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
 [[ $disk == /dev/mmcblk0 ]] || fail "disk_form must set 'disk' to whatever the (faked) picker returned" "got: ${disk:-unset}"
 LC_ALL=C grep -qF "choose" "$work/gum.log" || fail "disk_form must have actually invoked a picker when two disks were eligible" "$(cat "$work/gum.log")"
 pass "disk_form shows a picker (and honours its answer) when more than one disk is eligible"
+
+echo "--- S4 disk_form: an inserted microSD card is offered alongside the internal disk ---"
+
+# The internal disk (RM=0) plus a REMOVABLE microSD card (RM=1, mmcblk*) --
+# this is the actual card-reader case, distinct from the eMMC test above
+# (which uses RM=0 and would have been eligible even under the old,
+# SD-excluding filter). A non-SD removable device (/dev/sda, e.g. the USB
+# boot stick) is included too, to prove it is still left out even while the
+# SD card is let in.
+cat >"$work/bin-fakelsblk/lsblk" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM" ]]; then
+  printf '/dev/nvme0n1 disk 0\n/dev/sda disk 1\n/dev/mmcblk1 disk 1\n'
+  exit 0
+fi
+field=$3
+case "$field" in
+  SIZE) echo "64G" ;;
+  *) : ;;
+esac
+EOF
+unset disk 2>/dev/null || true
+: >"$work/gum.log"
+DECK_TEST_ROOT_DISK="" \
+DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" \
+FAKE_GUM_LOG="$work/gum.log" \
+FAKE_GUM_CHOOSE_OUTPUT="/dev/mmcblk1" \
+PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
+  disk_form
+[[ $disk == /dev/mmcblk1 ]] || fail "disk_form must allow selecting the removable microSD card when the user picks it" "got: ${disk:-unset}"
+LC_ALL=C grep -qF "choose" "$work/gum.log" || fail "disk_form must show a picker once the SD card makes a second eligible disk" "$(cat "$work/gum.log")"
+pass "disk_form offers the removable microSD card as a selectable install target alongside the internal disk, and honours picking it"
 
 echo "--- S4 disk_form: zero eligible disks -> dead-end, NEVER falls through to a picker ---"
 
