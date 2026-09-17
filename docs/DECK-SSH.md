@@ -65,8 +65,10 @@ whole recovery — there is no key string to type on the Deck, ever.
   over the LAN for air-gapped setups. Prefer `ssh-copy-id` — one command,
   no server to run, no URL to type.
 - **Password `deck` is the bootstrap, not the posture.** After `ssh-copy-id`,
-  consider `pizza ssh status` — it tells you whether password auth is still
-  on and how to close it. The project deliberately never does that for you
+  consider `sudo pizza ssh status` on the Deck — it tells you whether
+  password auth is still on and how to close it (unprivileged `pizza ssh
+  status` reports `PasswordAuthentication=unknown`: reading sshd's resolved
+  config needs root). The project deliberately never does that for you
   (wrong and you're locked out of a keyboard-less device).
 - **If SSH is unreachable at all**, hold Power ~10 seconds to force a
   shutdown, then power on and re-run `pizza ssh`. This loses nothing but
