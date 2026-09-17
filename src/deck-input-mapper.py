@@ -58,10 +58,10 @@ DESKTOP MODE ADDS THESE BUTTONS (docs/PROGRESS.md §5.23, §5.37)
 
     ⚠️ AND THE RIGHT STICK IS NO LONGER UNMAPPED. Until 2026-08-17 this mapper
     ignored ABS_RX/ABS_RY entirely; STEAM + right stick LEFT/RIGHT is now the
-    workspace, wrapping at both ends (WORKSPACE_STICK_AXIS). Its VERTICAL axis
-    is still unmapped, and without STEAM the right stick still does nothing at
-    all -- so no key can be left stuck by this binding, which is the hazard
-    `_release_stick_axis` exists to answer for the LEFT one.
+    workspace, stopping dead at 1 and 5 (WORKSPACE_STICK_AXIS). Its VERTICAL
+    axis is still unmapped, and without STEAM the right stick still does
+    nothing at all -- so no key can be left stuck by this binding, which is
+    the hazard `_release_stick_axis` exists to answer for the LEFT one.
 
     All of them need lizard_mode=N, or the firmware swallows the presses and no
     evdev node ever sees them. Startup says which of those is in force.
@@ -637,13 +637,12 @@ BRIGHTNESS_ACTIONS: dict[str, list[str]] = {
 # turned that suite red while this feature was being built, which is the check
 # working exactly as intended. Hence the description instead of the example.
 #
-# 🔴 AN ABSOLUTE ID, NOT `e+1`/`e-1`, AND THE WRAP IS THE ENTIRE REASON.
+# 🔴 AN ABSOLUTE ID, NOT `e+1`/`e-1`, AND THE FIXED ENDS ARE THE ENTIRE REASON.
 # Hyprland's relative forms walk to the next EXISTING workspace and STOP at the
-# ends: on the last workspace `e+1` does nothing whatsoever. The operator asked
-# for the opposite -- *"if steam button is pressed in workspace 1 and yo move
-# right joystick left move to the last workspace"* -- so the target is computed
-# positionally (`next_workspace_id`: N±1 inside 1..10, focusing CREATES) and
-# named outright.
+# ends. The operator wants the same stop-dead at the FIXED ends 1 and 5 -- so
+# the target is computed positionally (`next_workspace_id`: N±1 inside 1..5)
+# and named outright. No wrap, no creating: left from 1 and right from 5 do
+# nothing, like SUPER+TAB at the ends.
 #
 # ⚠️ THE ID IS PASSED AS A STRING, exactly as upstream's `tostring(workspace)`
 # writes it. `{ workspace = 2 }` was also accepted live, but the shipped
@@ -857,17 +856,10 @@ WORKSPACE_STEPS: dict[int, str] = {
 WORKSPACE_STEP_DIRECTIONS: dict[str, int] = {
     name: direction for direction, name in WORKSPACE_STEPS.items()
 }
-
-# POSITIONAL over Omarchy's fixed ring, not a walk over existing ids.
-# tiling.lua binds SUPER+1..10 (`for workspace = 1, 10`), and focusing a
-# number CREATES it -- proven live: focus 9 from [1, 3] gave [3, 9]. So the
-# chord steps N±1 inside 1..10 by construction and can never dispatch a ghost
-# outside that range.
-WORKSPACE_COUNT = 10
-
-# Deflection needed to fire a step, and the lower one the stick must fall back
-# under before the NEXT step can fire.
-#
+# FIVE numbered workspaces 1..5 -- the set the top bar shows and SUPER+1..5
+# reaches. (tiling.lua binds 1..10, but the bar and the operator's model are
+# five; anything past 5 is a ghost by definition.)
+WORKSPACE_COUNT = 5
 # 🔴 THE DEADZONE AGAIN, AND HERE IT ALSO DOES THE RE-ARMING. ENGAGE is sized
 # exactly as BRIGHTNESS_STICK_ENGAGE is -- ~24x the ~2% resting deflection
 # measured on this hardware, so a stick nobody is touching can never reach it.
@@ -3262,19 +3254,18 @@ def run_brightness(action: str, dry_run: bool = False) -> bool:
 
 # --- 🆕 STEAM + the right stick: finding the workspace to move to ------------
 #
-# 🔴 THIS IS THE ONE BINDING THAT HAS TO READ BEFORE IT ACTS, and the wrap is
-# why. "Move left from workspace 1 to the last workspace" cannot be expressed as
-# a dispatch at all -- Hyprland's own relative forms stop at the ends (see
+# 🔴 THIS IS THE ONE BINDING THAT HAS TO READ BEFORE IT ACTS, and the ends are
+# why. "Move left from workspace 1" and "move right from workspace 5" stop
+# dead -- Hyprland's own relative forms stop at the ends (see
 # `workspace_focus_argv`) -- so the target has to be computed positionally
-# (`next_workspace_id`: N±1 inside 1..10, focusing CREATES), which means asking
+# (`next_workspace_id`: N±1 inside the fixed 1..5 ring), which means asking
 # the compositor which workspace we are on first.
 #
-# ⚠️ WHAT "THE LAST WORKSPACE" MEANS HERE: workspace 10, not the
-# highest-numbered workspace that EXISTS. Omarchy binds SUPER+1..10 (`for
-# workspace = 1, 10` in tiling.lua) and focusing a number CREATES it -- proven
-# live: focus 9 from [1, 3] gave [3, 9] -- so the number alone is the target
-# and the ghost outside 1..10 can never be dispatched. The existing-ids list
-# is kept only for the empty-desktop guard.
+# ⚠️ WHAT "THE LAST WORKSPACE" MEANS HERE: workspace 5, not 10 and not the
+# highest-numbered workspace that EXISTS. The top bar shows 1..5, SUPER+1..5
+# reaches them, and the operator's model is five. Windows change nothing, the
+# existing set changes nothing: the number alone is the target, and no flick
+# can leave 1..5 or manufacture a workspace.
 
 
 def workspace_ids_from_json(workspaces_json: str) -> list[int] | None:
@@ -3311,37 +3302,6 @@ def workspace_ids_from_json(workspaces_json: str) -> list[int] | None:
             ids.add(workspace_id)
     return sorted(ids)
 
-def populated_workspace_ids_from_json(workspaces_json: str) -> list[int] | None:
-    """Every ORDINARY workspace's id that HAS WINDOWS, ascending, or None.
-
-    Same shape contract as `workspace_ids_from_json` (None = unanswered, []
-    = answered with none populated), plus the `windows` field: absent or
-    non-int counts as unpopulated rather than failing the read, because a
-    compositor that renames a field must not strand the chord -- it just
-    stops offering that workspace as a landing pad until the read is fixed.
-    Bool-guarded like the id (`isinstance(True, int)` is True in Python).
-    """
-    try:
-        workspaces = json.loads(workspaces_json)
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(workspaces, list):
-        return None
-    ids = set()
-    for workspace in workspaces:
-        if not isinstance(workspace, dict):
-            continue
-        workspace_id = workspace.get("id")
-        if isinstance(workspace_id, bool) or not isinstance(workspace_id, int):
-            continue
-        if workspace_id < 1:
-            continue
-        windows = workspace.get("windows", 0)
-        if isinstance(windows, bool) or not isinstance(windows, int):
-            continue
-        if windows >= 1:
-            ids.add(workspace_id)
-    return sorted(ids)
 
 
 def active_workspace_from_json(active_json: str) -> int | None:
@@ -3364,32 +3324,30 @@ def active_workspace_from_json(active_json: str) -> int | None:
 
 
 def next_workspace_id(current: int, ids: list[int], direction: int) -> int | None:
-    """The populated workspace one step from `current`, or None at the ends.
+    """The workspace one step from `current`, or None at the fixed ends.
 
-    `ids` is the POPULATED set (workspaces with windows -- see
-    `populated_workspace_ids_from_json`). The step is positional N±1 inside
-    1..10, but the landing pad must EXIST with windows: right from 2 with
-    programs in 1+2 lands nowhere (None -- stop dead, like SUPER+TAB), never
-    conjuring empty 3. Left from 1 and right from 10 are the same dead end
-    (no workspace 0, no workspace 11). Empty and populated alike behave the
-    same: with no windows anywhere every flick is nowhere-to-go.
+    The ring is the FIVE numbered workspaces 1..5 -- the set the top bar
+    shows and SUPER+1..5 reaches. The step is positional N±1 inside that
+    fixed ring, from the number alone: windows change nothing, the existing
+    set changes nothing, an empty desktop behaves exactly like a full one.
+    Left from 1 and right from 5 stop dead (None -- no workspace 0, no
+    workspace 6), like SUPER+TAB at the ends.
 
-    NO WRAP, by operator decision 2026-09-17: the earlier ring walked 2->1
-    past the user's programs, and the positional 1..10 that replaced it
-    manufactured ghost empties (Deck-verified: focus 6 from five populated
-    left a highlighted-but-empty 6). Stop dead at both ends instead.
+    NO CREATING, by operator decision 2026-09-17: focusing an empty number
+    makes the compositor conjure a highlighted-but-empty workspace
+    (Deck-verified ghost 6), so the target never leaves 1..5 and no flick
+    can manufacture a workspace. A `current` outside 1..5 (a leftover ghost,
+    a scratchpad id) folds positionally first, so recovery lands back inside
+    instead of dispatching outside the bar.
 
-    A `current` outside 1..10 (a ghost the old build left behind, a
-    scratchpad id) folds positionally first, so recovery never dispatches
-    outside the bound keys either.
+    An EMPTY list is a transient read, not a desktop: vacated workspaces
+    vanish from the list, so [] can arrive while the user sits on a good
+    workspace. Step from `current` anyway -- never swallow a flick on a
+    read artefact.
     """
-    if not ids:
-        return None
     folded = ((current - 1) % WORKSPACE_COUNT) + 1
     target = folded + direction
     if target < 1 or target > WORKSPACE_COUNT:
-        return None
-    if target not in ids:
         return None
     return None if target == current else target
 
@@ -3429,7 +3387,7 @@ def read_workspace_state(list_argv: tuple[str, ...] = WORKSPACE_LIST_ARGV,
     listed = ask(list_argv)
     if listed is None:
         return None
-    ids = populated_workspace_ids_from_json(listed)
+    ids = workspace_ids_from_json(listed)
     if ids is None:
         return None
     active = ask(active_argv)
@@ -3474,12 +3432,11 @@ def run_workspace(action: str, dry_run: bool = False,
     current, ids = state
     target = next_workspace_id(current, ids, direction)
     if target is None:
-        # Ordinary, not a failure: the step ran past the last POPULATED
-        # workspace (right from the highest one with windows, left from the
-        # lowest), or nothing anywhere has windows. Stop dead, like SUPER+TAB
-        # -- never conjure an empty workspace (Deck-verified ghost 6).
+        # Ordinary, not a failure: left from 1, right from 5 -- the fixed
+        # ends of the ring, like SUPER+TAB. Windows change nothing, an empty
+        # desktop behaves exactly like a full one.
         print(f"deck-input-mapper: STEAM + the right stick has nowhere to go "
-              f"from workspace {current} -- the next workspace has no windows, "
+              f"from workspace {current} -- at the end of the 1..5 ring, "
               "so nothing moved",
               file=sys.stderr, flush=True)
         return False

@@ -1638,73 +1638,67 @@ check("a list where an object belongs is a failed read",
       m.active_workspace_from_json('[{"id": 1}]'), None)
 
 _IDS = [1, 2, 3]
-check("right steps to the next NUMBER when it has windows",
+check("right steps to the next NUMBER, windows or not",
       m.next_workspace_id(1, _IDS, m.WORKSPACE_STICK_RIGHT), 2)
-check("left steps to the previous number when it has windows",
+check("left steps to the previous number, windows or not",
       m.next_workspace_id(2, _IDS, -m.WORKSPACE_STICK_RIGHT), 1)
-# 🔴 STOP DEAD, BY OPERATOR DECISION 2026-09-17: programs in 1+2, flick right
-# from 2, lands NOWHERE -- never conjuring empty 3 (the positional build did
-# exactly that, Deck-verified ghost 6). Same as SUPER+TAB at the ends.
-check("🔴 right from 2 with only 1+2 populated STOPS DEAD, it does not "
-      "create 3",
-      m.next_workspace_id(2, [1, 2], m.WORKSPACE_STICK_RIGHT), None)
-check("...and left from 1 stops dead too (no workspace 0)",
+# 🔴 FIXED RING 1..5, BY OPERATOR DECISION 2026-09-17: windows change nothing,
+# an empty desktop behaves exactly like a full one. Left from 1 and right
+# from 5 stop dead (no workspace 0, no workspace 6) -- like SUPER+TAB.
+check("🔴 right from 2 lands on 3 whether or not it has windows",
+      m.next_workspace_id(2, [1, 2], m.WORKSPACE_STICK_RIGHT), 3)
+check("...and left from 1 stops dead (no workspace 0)",
       m.next_workspace_id(1, _IDS, -m.WORKSPACE_STICK_RIGHT), None)
-check("right from the highest populated stops dead (no wrap to 1)",
-      m.next_workspace_id(3, _IDS, m.WORKSPACE_STICK_RIGHT), None)
-check("left from the lowest populated stops dead",
-      m.next_workspace_id(1, _IDS, -m.WORKSPACE_STICK_RIGHT), None)
-# Gaps are dead ends in the stepped-over direction, not skips: 1+3 populated,
-# right from 1 is None (2 has no windows), right from 3 is None (top).
-check("gaps do not skip -- the neighbour must HAVE windows",
-      [m.next_workspace_id(1, [1, 3], m.WORKSPACE_STICK_RIGHT),
-       m.next_workspace_id(3, [1, 3], m.WORKSPACE_STICK_RIGHT),
-       m.next_workspace_id(3, [1, 3], -m.WORKSPACE_STICK_RIGHT)],
-      [None, None, None])
-check("...but stepping back toward windows works",
-      m.next_workspace_id(3, [1, 3], -m.WORKSPACE_STICK_RIGHT), None)
-# A SINGLE populated workspace is a dead end both ways: right creates nothing,
-# left from 1 creates nothing.
-check("a single populated workspace stops dead right",
-      m.next_workspace_id(1, [1], m.WORKSPACE_STICK_RIGHT), None)
-check("...and left from a single 1",
+check("right from 5 stops dead (no workspace 6)",
+      m.next_workspace_id(5, [1, 5], m.WORKSPACE_STICK_RIGHT), None)
+check("left from 5 steps down regardless of windows",
+      m.next_workspace_id(5, [1, 5], -m.WORKSPACE_STICK_RIGHT), 4)
+# The existing set is IGNORED entirely: gaps change nothing, empties are
+# ordinary landing pads inside 1..5.
+check("the existing set is ignored -- gaps change nothing",
+      [m.next_workspace_id(1, [1, 4, 7], m.WORKSPACE_STICK_RIGHT),
+       m.next_workspace_id(3, [1, 4, 7], m.WORKSPACE_STICK_RIGHT),
+       m.next_workspace_id(3, [1, 4, 7], -m.WORKSPACE_STICK_RIGHT)],
+      [2, 4, 2])
+# A SINGLE existing workspace is not special either: either direction steps
+# to the neighbour inside 1..5.
+check("right from a SINGLE workspace steps to the neighbour",
+      m.next_workspace_id(1, [1], m.WORKSPACE_STICK_RIGHT), 2)
+check("...from a higher single too",
+      m.next_workspace_id(4, [4], m.WORKSPACE_STICK_RIGHT), 5)
+check("left from a single above 1 steps down",
+      m.next_workspace_id(3, [3], -m.WORKSPACE_STICK_RIGHT), 2)
+check("left from a single 1 stops dead",
       m.next_workspace_id(1, [1], -m.WORKSPACE_STICK_RIGHT), None)
-check("...and from a higher single too",
-      [m.next_workspace_id(5, [5], m.WORKSPACE_STICK_RIGHT),
-       m.next_workspace_id(5, [5], -m.WORKSPACE_STICK_RIGHT)],
+check("right from a single 5 stops dead",
+      m.next_workspace_id(5, [5], m.WORKSPACE_STICK_RIGHT), None)
+# An EMPTY list is a transient read (vacated workspaces vanish), not a dead
+# end: the step still lands on the adjacent number inside 1..5.
+check("an empty list still steps from current -- it is a transient, not a "
+      "dead end",
+      [m.next_workspace_id(1, [], 1), m.next_workspace_id(5, [], -1)],
+      [2, 4])
+# 🔴 NO GHOST, STRUCTURALLY: the target is N+-1 clamped to the fixed 1..5,
+# so nothing outside the bar can ever dispatch.
+check("🔴 stepping never dispatches outside 1..5",
+      [1 <= m.next_workspace_id(n, [1, 2, 3], d) <= 5
+       for n in (1, 3, 4, 5) for d in (1, -1) if m.next_workspace_id(n, [1, 2, 3], d) is not None],
+      [True] * 6)
+check("...left from 1 and right from 5 are the dead ends",
+      [m.next_workspace_id(1, [1, 2, 3], -m.WORKSPACE_STICK_RIGHT),
+       m.next_workspace_id(5, [1, 2, 3], m.WORKSPACE_STICK_RIGHT)],
       [None, None])
-# NO WINDOWS ANYWHERE behaves exactly the same: every flick is nowhere-to-go.
-check("an empty desktop stops dead in both directions",
-      [m.next_workspace_id(1, [], 1), m.next_workspace_id(5, [], -1)], [None, None])
-# 🔴 NO GHOST, STRUCTURALLY: the target is N+-1 clamped to 1..10 AND in the
-# populated set, so nothing outside the bound keys can ever dispatch.
-check("🔴 stepping never dispatches outside 1..10",
-      [m.next_workspace_id(n, [1, 2, 3], d) for n in (1, 3, 6, 9, 10) for d in (1, -1)],
-      [2, None, None, 2, None, None, None, None, None, None])
-# 🔴 GHOST RECOVERY: a ghost 11 left by the old mapper folds positionally
-# (11->1) and then clamps to populated -- right lands on 2, left runs past
-# 1 to 0 and stops dead. Never on to 12.
-check("🔴 a ghost 11 left by the old mapper can only land on populated 1..10",
-      [m.next_workspace_id(11, [1, 2, 11], m.WORKSPACE_STICK_RIGHT),
-       m.next_workspace_id(11, [1, 2, 11], -m.WORKSPACE_STICK_RIGHT)],
+# 🔴 GHOST RECOVERY: a ghost 6+ left by an older build folds positionally
+# 6 folds to 1: right lands 2, left runs to 0 and stops dead.
+check("🔴 a ghost 6 left by an older build folds back inside, never to 7",
+      [m.next_workspace_id(6, [1, 2, 6], m.WORKSPACE_STICK_RIGHT),
+       m.next_workspace_id(6, [1, 2, 6], -m.WORKSPACE_STICK_RIGHT)],
       [2, None])
-# Being on the scratchpad folds positionally, then clamps the same way.
-check("stepping from the scratchpad folds and clamps to populated",
+# Being on the scratchpad folds positionally into 1..5 the same way.
+check("stepping from the scratchpad folds into 1..5",
       [m.next_workspace_id(-99, [1, 2], m.WORKSPACE_STICK_RIGHT),
        m.next_workspace_id(-99, [1, 2], -m.WORKSPACE_STICK_RIGHT)],
       [2, None])
-# The populated-set reader: windows field decides, absent/non-int is
-# unpopulated, specials excluded, bools guarded.
-check("populated ids keep only workspaces WITH windows",
-      m.populated_workspace_ids_from_json('[{"id": 1, "windows": 2}, {"id": 2, "windows": 0}, {"id": 3}]'),
-      [1])
-check("...specials excluded even with windows",
-      m.populated_workspace_ids_from_json('[{"id": -99, "windows": 5}, {"id": 1, "windows": 1}]'),
-      [1])
-check("...bool windows is not 1",
-      m.populated_workspace_ids_from_json('[{"id": 1, "windows": true}]'), [])
-check("...malformed JSON is a failed read",
-      m.populated_workspace_ids_from_json("{not json"), None)
 
 # --- reading that state: bounded, and never fatal ----------------------------
 
@@ -1785,6 +1779,21 @@ def ws_reader(current, ids):
     """A `read_workspace_state` that answers without a compositor."""
     return lambda: (current, ids)
 
+# Right from 5 stops dead end to end (the fixed end); an empty list is a
+# transient read and still steps.
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_workspace("workspace-next", read=ws_reader(5, [1, 5])))
+check("right from 5 spawns nothing and explains itself",
+      ([argv for argv, _kw in _fake.calls], _result, "nowhere to go" in _err),
+      ([], False, True))
+check("...naming the fixed 1..5 ring, so the log is diagnosable",
+      "1..5" in _err, True)
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_workspace("workspace-next", read=ws_reader(1, [])))
+check("an empty list still dispatches -- a transient, not a dead end",
+      ([argv for argv, _kw in _fake.calls], _result, "workspace-next 1 -> 2" in _err),
+      ([m.workspace_focus_argv(2)], True, True))
+
 
 _result, _fake, _err = with_fake_subprocess(
     lambda: m.run_workspace("workspace-next", read=ws_reader(1, [1, 2, 3])))
@@ -1823,20 +1832,20 @@ check("...and names the binary it needed", m.WORKSPACE_LIST_ARGV[0] in _err, Tru
 check("...and says the rest of the mapper is unaffected",
       "the rest of the mapper is unaffected" in _err, True)
 
-# Right from the highest POPULATED stops dead end to end; empty everywhere
-# stops dead the same way (operator: no-windows behaves like windows).
+# Right from 5 stops dead end to end (the fixed end); an empty list is a
+# transient read and still steps.
 _result, _fake, _err = with_fake_subprocess(
-    lambda: m.run_workspace("workspace-next", read=ws_reader(2, [1, 2])))
-check("right from the highest POPULATED spawns nothing and explains itself",
+    lambda: m.run_workspace("workspace-next", read=ws_reader(5, [1, 5])))
+check("right from 5 spawns nothing and explains itself",
       ([argv for argv, _kw in _fake.calls], _result, "nowhere to go" in _err),
       ([], False, True))
-check("...naming the no-windows reason, so the log is diagnosable",
-      "no windows" in _err, True)
+check("...naming the fixed 1..5 ring, so the log is diagnosable",
+      "1..5" in _err, True)
 _result, _fake, _err = with_fake_subprocess(
     lambda: m.run_workspace("workspace-next", read=ws_reader(1, [])))
-check("an empty desktop stops dead -- same as populated",
-      ([argv for argv, _kw in _fake.calls], _result, "nowhere to go" in _err),
-      ([], False, True))
+check("an empty list still dispatches -- a transient, not a dead end",
+      ([argv for argv, _kw in _fake.calls], _result, "workspace-next 1 -> 2" in _err),
+      ([m.workspace_focus_argv(2)], True, True))
 
 _result, _fake, _err = with_fake_subprocess(
     lambda: m.run_workspace("workspace-next", read=ws_reader(1, [1, 2])),
