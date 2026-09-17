@@ -351,6 +351,53 @@ comparing; anything shown above is a real difference in directives.)"
 fi
 pass "fact 2c: the substrate's fragment is exactly what stage_repos would write"
 
+# --- 2f: the THIRD copy, on the target itself ---------------------------------
+#
+# 2026-09-17 Deck-verified: src/deck-session.sh's stage-valve-repos puts the
+# SAME repos on the installed target (the kernel script's stage_repos never runs
+# there -- no copy of that script is installed on the Deck). If these drift, the
+# target's pacman.conf and the VM guests diverge: a package resolving from
+# Valve's mirror in test resolves from Arch's on the Deck, which is exactly the
+# gamescope swap that deleted Gaming Mode (Arch 3.16.28-1 over Valve 3.16.25-3).
+# Asserted EQUAL to the product side above: same names in order, same mirror,
+# same SigLevel. The deck-session copy renders its sections with printf rather
+# than a heredoc, so the comparison is on the rendered directives, not the
+# template text -- which is the same strength as 2c above.
+SESSION_SH="$REPO_ROOT/src/deck-session.sh"
+[[ -f $SESSION_SH ]] ||
+  fail "EXTRACTION FAILED (missing): the session layer's Valve repo copy" \
+    "expected ${SESSION_SH} to exist; it holds the target-side copy of the Valve repos"
+mapfile -t session_repos < <(extract_bash_array "$SESSION_SH" VALVE_REPOS)
+require_extract "Valve repo list (session side)" \
+  "${SESSION_SH}: readonly -a VALVE_REPOS=( ... )" 2 \
+  "$(printf '%s\n' "${session_repos[@]:-}")"
+[[ ${product_repos[*]} == "${session_repos[*]}" ]] ||
+  fail "FACT 2 DIVERGED (third copy): the session layer's Valve repos" \
+    "src/omarchy-deck-kernel.sh  VALVE_REPOS: ${product_repos[*]}
+src/deck-session.sh         VALVE_REPOS: ${session_repos[*]}
+The target would carry a different repo set than the VM guests the suites test."
+pass "fact 2f: deck-session.sh's VALVE_REPOS matches the kernel script's (${product_repos[*]})"
+session_mirror=$(sed -nE "s/^readonly VALVE_MIRROR='(.*)'\$/\1/p" "$SESSION_SH")
+require_extract "Valve mirror URL (session side)" \
+  "${SESSION_SH}: readonly VALVE_MIRROR='...'" 1 "$session_mirror"
+[[ $product_mirror == "$session_mirror" ]] ||
+  fail "FACT 2 DIVERGED (third copy): the session layer's Valve mirror" \
+    "src/omarchy-deck-kernel.sh  VALVE_MIRROR: ${product_mirror}
+src/deck-session.sh         VALVE_MIRROR: ${session_mirror}"
+pass "fact 2f: deck-session.sh's VALVE_MIRROR matches the kernel script's"
+session_sig=$(grep -c 'SigLevel = Never' "$SESSION_SH" || true)
+[[ $session_sig -ge 2 ]] ||
+  fail "FACT 2 DIVERGED (third copy): the session layer's SigLevel" \
+    "src/deck-session.sh names 'SigLevel = Never' ${session_sig} time(s); the repos are unsigned, and a session copy that drops it changes the trust shape."
+pass "fact 2f: deck-session.sh's Valve sections carry SigLevel = Never"
+# The repair must stay repo-qualified: a bare `pacman -S gamescope` in
+# stage_valve_repos resolves by repo order to Arch's build -- reinstalling the
+# very defect the repair exists to fix.
+! grep -qE 'pacman -S[^/]* gamescope' <(bash -c 'source "$1"; declare -f stage_valve_repos' _ "$SESSION_SH") ||
+  fail "FACT 2 DIVERGED (third copy): the session layer's gamescope repair" \
+    "stage_valve_repos installs a bare gamescope name, which resolves by repo order to Arch's bare compositor."
+pass "fact 2f: stage_valve_repos installs only the repo-qualified gamescope build"
+
 # --- 2d/2e: two further copies the inventory did not record -----------------
 #
 # The mirror's HOSTNAME is repeated in each kernel VM suite's reachability

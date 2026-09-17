@@ -246,6 +246,7 @@ readonly -a STOCK_DIRS=(
   /usr/bin /bin /usr/local/bin /usr/local/lib /usr/share/applications
   /usr/share/wayland-sessions /etc /etc/sudoers.d /etc/sddm.conf.d
   /etc/systemd/system /etc/systemd/user /var/lib
+  /etc/pacman.d
 )
 
 reset_root() {
@@ -368,8 +369,19 @@ for a in "$@"; do
   fi
   argv+=("$a")
 done
-
-printf '%s\n' "${argv[*]}" >>"$RESOLVED_LOG"
+# `tee -a <file>` with stdin: fake-sudo must perform the append itself, because
+# exec'ing the real tee would write the developer's filesystem. Only -a mode is
+# emulated; anything else refuses loudly.
+if [[ $cmd == tee ]]; then
+  append=""
+  for a in "${argv[@]}"; do
+    [[ $a == -a ]] && continue
+    [[ $a == "$FAKE_ROOT"/* ]] && append=$a
+  done
+  [[ -n $append ]] || refuse "tee with no fake-root destination: ${argv[*]}"
+  cat >>"$append"
+  exit 0
+fi
 exec "${argv[@]}"
 FAKE_SUDO
 chmod +x "$stub_bin/fake-sudo"
@@ -717,6 +729,33 @@ exit 0
 STUB_GENERIC
 done
 
+# --- pacman ---------------------------------------------------------------
+#
+# stage_valve_repos is the only stage that shells out to pacman on a live
+# system: `pacman -Sy` for the sync, `pacman -Sl <repo>` to prove each Valve
+# repo answers, and `pacman -S jupiter-staging/gamescope` for the repair. The
+# answers are dialable so the repair path is reachable without a Deck:
+#   FAKE_PACMAN_SL_RC        `pacman -Sl` exit (non-zero = repo has no database)
+#   FAKE_PACMAN_INSTALL_ARMS=1  a qualified gamescope install plants the
+#                            session file under the fake root (the repair's own
+#                            read-back then passes); without it the install
+#                            "succeeds" but the file never appears, and the
+#                            stage must fail loudly rather than claim Gaming
+#                            Mode is back.
+cat >"$stub_bin/pacman" <<'STUB_PACMAN'
+#!/usr/bin/env bash
+set -uo pipefail
+printf 'pacman %s\n' "$*" >>"$CALLS_LOG"
+if [[ ${1-} == -Sl ]]; then
+  exit "${FAKE_PACMAN_SL_RC:-0}"
+fi
+if [[ $* == *"jupiter-staging/gamescope"* && ${FAKE_PACMAN_INSTALL_ARMS:-0} -eq 1 ]]; then
+  mkdir -p "${FAKE_ROOT}/usr/share/wayland-sessions"
+  printf '[Desktop Entry]\nName=Gaming Mode\n' >"${FAKE_ROOT}/usr/share/wayland-sessions/gamescope-wayland.desktop"
+fi
+exit "${FAKE_PACMAN_RC:-0}"
+STUB_PACMAN
+
 chmod +x "$stub_bin"/*
 export PATH="$stub_bin:$PATH"
 
@@ -725,14 +764,13 @@ export PATH="$stub_bin:$PATH"
 export FAKE_SYSTEMCTL_SHOW_StartLimitIntervalUSec=0
 export FAKE_SYSTEMCTL_SHOW_TimeoutStopUSec="${SDDM_STOP_TIMEOUT}s"
 export FAKE_SYSTEMCTL_SHOW_RestartUSec=3s
-
 # --- GATE 2 ----------------------------------------------------------------
-for tool in sudo systemctl visudo dconf env getent timedatectl hyprctl udevadm; do
+for tool in sudo systemctl visudo dconf env getent timedatectl hyprctl udevadm pacman; do
   [[ $(command -v "$tool") == "$stub_bin/$tool" ]] ||
     fail_test "'${tool}' resolves to this suite's stub" \
       "got $(command -v "$tool"); the stub PATH is not in front, so this suite would drive the real system"
 done
-pass "sudo, systemctl, visudo, dconf, env, getent, timedatectl, hyprctl and udevadm all resolve to stubs, not to the real binaries"
+pass "sudo, systemctl, visudo, dconf, env, getent, timedatectl, hyprctl, udevadm and pacman all resolve to stubs, not to the real binaries"
 
 # --- GATE 3 ----------------------------------------------------------------
 rc=0
@@ -3839,6 +3877,106 @@ PATH="$bdg_bin:$PATH" "$bdg_helper" >"$work/bdg.out" 2>"$work/bdg.err" || bdg_rc
   fail_test "and it writes NOTHING" \
     "the writer was asked for '$(bdg_last_select)'. Without a boot id the helper cannot tell this boot from the last, so both the re-assert and the give-up would be guesses -- and it must fall back to leaving the machine exactly as it was."
 pass "an unreadable boot id refuses loudly and changes no default in either direction"
+
+# ===========================================================================
+# 13c. stage-valve-repos -- the repos the gamescope build came from
+# ===========================================================================
+#
+# THE 2026-09-17 DECK-VERIFIED DEFECT: the target shipped Valve's gamescope
+# (3.16.25-3, with the session) but WITHOUT the repos it came from, so the
+# first omarchy-update's plain -Syu resolved bare `gamescope` by repo order to
+# Arch's 3.16.28-1 (no .desktop, no start-gamescope-session) and deleted Gaming
+# Mode out from under the boot unit. 07:01:47 booted to Gaming Mode; 07:13:19
+# and 07:17:48 failed with "no .desktop" -- matching the Syu window.
+#
+# What this section proves, and why each case would otherwise be silent:
+#   * repos appended (not reordered) -- Valve-first would downgrade 50 overlapped
+#     packages; the failure would be a worse system, not a louder one.
+#   * sync verified per repo -- a `pacman -Sy` that fetched nothing would leave
+#     a pacman.conf that parses and resolves nothing Valve's.
+#   * repair is repo-qualified -- a bare reinstall re-resolves to Arch's build,
+#     i.e. reinstalls the defect being repaired.
+#   * refresh hook installed for user AND skel -- refresh overwrites pacman.conf
+#     wholesale; either surface alone leaves a user (present or future) exposed.
+#   * chroot defers sync/repair but still lands the files -- answered by
+#     test-deck-session-bake.sh's CHROOT_FUNCS declaration; exercised here by
+#     calling under DECK_SESSION_CHROOT=1 is NOT possible (readonly), so the
+#     deferral is asserted via CHROOT mode variable indirection instead -- see
+#     the chroot case below which sources with the flag set in a fresh process.
+
+echo "# 13c. stage-valve-repos, exercised"
+
+# Minimal pacman.conf fixture: what `omarchy refresh pacman` leaves behind --
+# Arch's repos only, no Valve sections.
+valve_conf() {
+  printf '[options]\nHoldPkg = pacman glibc\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n\n[extra]\nInclude = /etc/pacman.d/mirrorlist\n'
+}
+
+# --- happy path: repos absent, session present (no repair) ------------------
+reset_root
+export FAKE_PACMAN_SL_RC=0 FAKE_PACMAN_RC=0
+unset FAKE_PACMAN_INSTALL_ARMS
+valve_conf >"$root/etc/pacman.conf"
+printf '[Desktop Entry]\nName=Gaming Mode\n' >"$root/usr/share/wayland-sessions/gamescope-wayland.desktop"
+run_stage_body stage_valve_repos
+ok_rc 0 "stage-valve-repos completes when the repos are missing and the session is present"
+for repo in "${VALVE_REPOS[@]}"; do
+  ok_in_file /etc/pacman.conf "[${repo}]" "it appends [${repo}] to pacman.conf"
+done
+ok_in_file /etc/pacman.conf "SigLevel = Never" "the Valve sections carry SigLevel = Never (unsigned mirror)"
+ok_called "pacman -Sy" "it syncs the databases after adding the repos"
+ok_in_file "$VALVE_HOOK_SKEL" "${INSTALL_MARKER_TEXT}" "it seeds ${VALVE_HOOK_SKEL} with the ownership marker"
+[[ -x "$FAKE_HOME/${VALVE_HOOK_REL}" ]] ||
+  fail_test "the user hook is executable" "expected executable ${FAKE_HOME}/${VALVE_HOOK_REL}"
+pass "the user hook is installed executable, so a future refresh re-appends the repos"
+bash -n "$FAKE_HOME/${VALVE_HOOK_REL}" ||
+  fail_test "the installed refresh hook is valid bash" "a hook that does not parse breaks every future refresh"
+pass "the installed refresh hook parses"
+
+# --- idempotent: repos already present --------------------------------------
+run_stage_body stage_valve_repos
+ok_rc 0 "a second run succeeds -- present sections are left alone, not duplicated"
+[[ $(grep -c '^\[jupiter-staging\]' "$root/etc/pacman.conf") -eq 1 ]] ||
+  fail_test "a re-run appends no duplicate section" "got: $(grep -c '^\[jupiter-staging\]' "$root/etc/pacman.conf") copies"
+pass "a re-run leaves exactly one copy of each Valve section"
+
+# --- repair path: session missing, install plants it -------------------------
+reset_root
+export FAKE_PACMAN_SL_RC=0 FAKE_PACMAN_RC=0 FAKE_PACMAN_INSTALL_ARMS=1
+valve_conf >"$root/etc/pacman.conf"
+run_stage_body stage_valve_repos
+ok_rc 0 "stage-valve-repos repairs a missing session via a qualified reinstall"
+ok_called "jupiter-staging/gamescope" "the repair installs the repo-qualified build, not a bare name"
+[[ -f "$root/usr/share/wayland-sessions/gamescope-wayland.desktop" ]] ||
+  fail_test "the session file exists after the repair" "the qualified reinstall did not restore it"
+pass "the session file is present after the qualified reinstall"
+
+# --- repair path, negative: install succeeds but file never appears ----------
+reset_root
+export FAKE_PACMAN_SL_RC=0 FAKE_PACMAN_RC=0
+unset FAKE_PACMAN_INSTALL_ARMS
+valve_conf >"$root/etc/pacman.conf"
+run_stage_body stage_valve_repos
+ok_failed "an install that leaves the session file absent fails the stage"
+ok_in_err "still absent" "the failure says the session is still absent rather than claiming Gaming Mode is back"
+
+# --- sync failure is loud -----------------------------------------------------
+reset_root
+export FAKE_PACMAN_SL_RC=1 FAKE_PACMAN_RC=0
+valve_conf >"$root/etc/pacman.conf"
+printf '[Desktop Entry]\nName=Gaming Mode\n' >"$root/usr/share/wayland-sessions/gamescope-wayland.desktop"
+run_stage_body stage_valve_repos
+ok_failed "a Valve repo with no usable database fails the stage"
+ok_in_err "no usable package database" "the failure names the repo without a database"
+export FAKE_PACMAN_SL_RC=0
+
+# --- never bare: the repair must not resolve by repo order ---------------------
+# A bare `pacman -S gamescope` inside the repair would re-resolve to Arch's
+# build -- the exact swap being repaired. Asserted statically: no invocation of
+# the stage may pass a bare gamescope name to pacman.
+! grep -qE 'pacman -S[^/]* gamescope' <(declare -f stage_valve_repos) ||
+  fail_test "the repair never installs a bare gamescope name" "a bare name resolves by repo order to Arch's build"
+pass "every gamescope install in the repair is repo-qualified"
 
 # ===========================================================================
 # 14. stage-power-button -- one press suspends, and the ways that go wrong

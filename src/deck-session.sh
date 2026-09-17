@@ -205,6 +205,63 @@ DESKTOP_SESSION=""   # resolved at runtime; Omarchy's own entry
 
 readonly SELECT_BIN=/usr/local/bin/deck-session-select
 
+# --- Valve's repos, and the one package that must come from them --------------
+#
+# ROOT CAUSE, measured on the Deck 2026-09-17 (Deck-verified, both halves):
+#
+#   pacman.log 07:08:33  upgraded gamescope (3.16.25-3 -> 3.16.28-1)
+#   from `pacman -Syu --noconfirm --overwrite '/usr/share/omarchy/*'`
+#   (upstream's omarchy-update-system-pkgs, run interactively -- the journal
+#   shows uwsm_app-daemon launching `omarchy-update` at 07:08, 07:10 and
+#   07:11), against a /etc/pacman.conf holding ONLY core/extra/multilib/omarchy.
+#   Arch's 3.16.28-1 ships no wayland-sessions entry and no
+#   start-gamescope-session (verified: `pacman -Ql gamescope` lists 47 files,
+#   none under wayland-sessions/). The 07:01:47 boot re-asserted Gaming Mode
+#   fine; the 07:13:19 and 07:17:48 boots failed with "target session
+#   'gamescope-wayland' has no .desktop", matching the 07:11:04 Syu window.
+#
+# This script is what puts the Valve repos on the TARGET (stage-valve-repos):
+# src/omarchy-deck-kernel.sh's stage_repos never runs there -- no copy of that
+# script is installed on the Deck -- and `omarchy refresh pacman` overwrites
+# /etc/pacman.conf wholesale before the pre-refresh hook runs, so anything less
+# than a hook is unwritten by the next refresh. The repo NAMES and MIRROR below
+# are the third copy of test/unit/test-duplicated-upstream-facts.sh's fact 2:
+# they must stay identical to that script's VALVE_REPOS/VALVE_MIRROR, and the
+# suite fails if they drift.
+#
+# APPENDED LAST, deliberately, for the reason argued in full in
+# src/omarchy-deck-kernel.sh: pacman resolves `-S <name>` by REPO ORDER, not
+# version, and 101 names overlap with Valve's build OLDER in 50 (the whole
+# mesa/vulkan stack the Deck runs Arch's build of). Valve-first, matching
+# SteamOS, would downgrade half the system. The one package where order picks
+# the wrong build is gamescope, and it is qualified at every call site
+# (${GAMESCOPE_VALVE_SPEC}) instead.
+#
+# NOT IgnorePkg, deliberately: IgnorePkg=gamescope would freeze the name in BOTH
+# repos, so Valve's own bugfix/security updates to the session would stop too --
+# and it is a pacman.conf line, so `omarchy refresh pacman` wipes it through
+# the same destruction event as the repos. It needs the hook anyway and then
+# adds a version freeze on top. Rejected.
+readonly -a VALVE_REPOS=(jupiter-staging holo-staging)
+# $repo/$arch are pacman's own variables and must reach pacman.conf unexpanded.
+readonly VALVE_MIRROR='https://steamdeck-packages.steamos.cloud/archlinux-mirror/$repo/os/$arch'
+# The one repo-qualified package name in this file. A bare `pacman -S gamescope`
+# resolves by repo order to Arch's bare compositor, which ships no SteamOS
+# session -- every install of it below spells the repo out.
+readonly GAMESCOPE_VALVE_SPEC=jupiter-staging/gamescope
+# The pre-refresh hook that re-appends the repos after `omarchy refresh pacman`
+# replaces /etc/pacman.conf: upstream's refresh copies the channel template over
+# the file and THEN runs `omarchy-hook pre-refresh-pacman`, whose documented
+# purpose is exactly this ("layer customizations onto the freshly-written
+# pacman.conf"). An ALPM hook cannot cover that path: the overwrite is a `cp`,
+# not a transaction, and the refresh's own trailing `pacman -Syyuu` would
+# already have resolved without the repos by the time any PostTransaction hook
+# ran. Installed for the invoking user AND in /etc/skel (T5 section 3 trap (a):
+# the ISO's user already exists, so skel alone never reaches them).
+readonly VALVE_HOOK_NAME=10-valve-repos.hook
+readonly VALVE_HOOK_REL=.config/omarchy/hooks/pre-refresh-pacman.d/${VALVE_HOOK_NAME}
+readonly VALVE_HOOK_SKEL="/etc/skel/${VALVE_HOOK_REL}"
+
 # /usr/bin, NOT /usr/local/bin. Steam's runtime narrows PATH to exactly
 # "/usr/bin:/bin" -- read from the running Steam process's own environ, with
 # SYSTEM_PATH unset so the ${PATH} fallback in its command template applies.
@@ -1683,6 +1740,7 @@ readonly AUDIO_CARD_MATCH_KEY='device.nick'
 readonly -a INSTALL_STAGES=(
   stage-preconditions
   stage-session-select
+  stage-valve-repos
   stage-steam-hook
   stage-update-stub
   stage-timezone-helper
@@ -1794,6 +1852,7 @@ readonly -a INSTALL_STAGES=(
 readonly -a BAKE_STAGES=(
   stage-preconditions
   stage-session-select
+  stage-valve-repos
   stage-steam-hook
   stage-update-stub
   stage-timezone-helper
@@ -1980,9 +2039,11 @@ stage_preconditions() {
   # installs ARCH's build, which is the bare compositor and ships none of this
   # -- pacman resolves by repo order, not version, and Arch's repos come first
   # by design (PROGRESS.md 5.13, docs/findings/P16-repo-overlap-audit.md).
-  # Arch's is 3.16.25-1, Valve's is 3.16.25-3: same upstream version, so a
-  # version check would not tell them apart. Checking for the session FILE is
-  # what distinguishes them, which is why this test is written this way.
+  # Arch's was 3.16.25-1 against Valve's 3.16.25-3 at install time, and 3.16.28-1
+  # on the Deck 2026-09-17 when an update swapped it in: same-or-newer upstream
+  # version EITHER way, so a version check would not tell them apart. Checking
+  # for the session FILE is what distinguishes them, which is why this test is
+  # written this way.
   [[ -n $found ]] ||
     fail "no ${GAMING_SESSION}.desktop in any wayland-sessions directory. Install Valve's build explicitly -- 'sudo pacman -S jupiter-staging/gamescope' -- because a bare 'pacman -S gamescope' installs Arch's bare compositor, which ships no SteamOS session. Then re-run."
   log "gaming session: ${found}"
@@ -2128,7 +2189,7 @@ found=""
 for d in /usr/local/share/wayland-sessions /usr/share/wayland-sessions; do
   [[ -f "\$d/\${target}.desktop" ]] && { found="\$d/\${target}.desktop"; break; }
 done
-[[ -n \$found ]] || die "target session '\${target}' has no .desktop in any wayland-sessions directory -- refusing to write a config that cannot log in"
+[[ -n \$found ]] || die "target session '\${target}' has no .desktop in any wayland-sessions directory -- refusing to write a config that cannot log in. The Gaming Mode session ships ONLY in Valve's gamescope build: run 'sudo pacman -S ${GAMESCOPE_VALVE_SPEC}' (a bare 'pacman -S gamescope' installs Arch's bare compositor, which ships no SteamOS session), then re-run this command."
 
 install -d -m 0755 "\$(dirname "\$STATE_FILE")"
 printf '%s\n' "\$target" >"\$STATE_FILE"
@@ -2258,6 +2319,154 @@ EOF
   verify_nopasswd "$SELECT_BIN" "$invoking_user"
 
   log "stage-session-select: ok"
+}
+
+# ---------------------------------------------------------------------------
+# stage-valve-repos -- Valve's repos on the target, surviving refresh
+# ---------------------------------------------------------------------------
+#
+# WHY THIS STAGE EXISTS is the 2026-09-17 Deck-verified defect in the VALVE_REPOS
+# comment above: the target shipped with Valve's gamescope but WITHOUT the repos
+# it came from, so the first `omarchy-update`'s plain -Syu resolved the bare
+# `gamescope` name by repo order to Arch's build and deleted the Gaming Mode
+# session out from under the boot unit. The INSTALL bins cannot fix this -- the
+# dual-entry lists decide which build the OFFLINE mirror carries, which is spent
+# the moment pacstrap finishes -- and src/omarchy-deck-kernel.sh cannot either:
+# no copy of it is installed on the Deck, and its stage_repos runs pre-install
+# only. This stage is the target-side half.
+#
+# WHAT IT DOES, in order: (1) appends the VALVE_REPOS block to /etc/pacman.conf
+# when a section is missing (never reorders, never edits Arch's sections --
+# Valve-first would downgrade the 50 overlapped packages the kernel script's
+# comment names); (2) syncs the databases and verifies each Valve repo answers
+# `pacman -Sl`; (3) repairs gamescope when the installed build ships no session
+# file, via the repo-qualified `${GAMESCOPE_VALVE_SPEC}` (a bare reinstall would
+# resolve to Arch's build again -- the exact swap being repaired); (4) installs
+# the pre-refresh hook (${VALVE_HOOK_REL} for the invoking user plus
+# ${VALVE_HOOK_SKEL}) that re-appends the block after `omarchy refresh pacman`
+# replaces /etc/pacman.conf wholesale before running `pacman -Syyuu`.
+#
+# Position: AFTER stage-session-select (its repair re-runs that stage's probe
+# shape -- session FILE present -- and both live behind the same precondition),
+# and NOTHING depends on it, so it sits directly after it in both lists.
+# In chroot mode the pacman sync/install arms are deferred: the target's
+# keyring and network are the live ISO's, and a `pacman -Sy` there would write
+# the installer's databases, not the target's. The file-level work (repos block
+# when absent, hook files) still lands.
+render_valve_hook() {
+  cat <<EOF
+#!/usr/bin/env bash
+# Re-append Valve's repos after 'omarchy refresh pacman' replaces
+# /etc/pacman.conf wholesale. Installed by ${PROG}.sh stage-valve-repos.
+# ${INSTALL_MARKER}
+#
+# Runs as the invoking user with a warm sudo cache (that is the contract of
+# ~/.config/omarchy/hooks/pre-refresh-pacman.d/), AFTER the channel template
+# is copied and BEFORE 'pacman -Syyuu' runs -- so the upgrade resolves
+# ${GAMESCOPE_VALVE_SPEC} instead of Arch's bare gamescope.
+set -euo pipefail
+CONF=/etc/pacman.conf
+for repo in ${VALVE_REPOS[*]}; do
+  grep -qE "^\[\${repo}\]" "\$CONF" && continue
+  sudo tee -a "\$CONF" >/dev/null <<BLOCK
+
+[\${repo}]
+Server = ${VALVE_MIRROR}
+SigLevel = Never
+BLOCK
+done
+EOF
+}
+
+valve_repo_present() {   # valve_repo_present <repo> [conf]
+  grep -qE "^\[$1\]" "${2:-${VALVE_CONF:-/etc/pacman.conf}}"
+}
+
+valve_session_installed() {
+  local d
+  for d in /usr/share/wayland-sessions /usr/local/share/wayland-sessions; do
+    $SUDO test -f "$d/${GAMING_SESSION}.desktop" && return 0
+  done
+  return 1
+}
+
+stage_valve_repos() {
+  local repo
+  log "ensuring Valve repos in /etc/pacman.conf (${VALVE_REPOS[*]})"
+  for repo in "${VALVE_REPOS[@]}"; do
+    if $SUDO grep -qE "^\[${repo}\]" /etc/pacman.conf; then
+      log "repo ${repo}: already in /etc/pacman.conf"
+      continue
+    fi
+    # SigLevel = Never, scoped to these two sections only: Valve's mirror is
+    # unsigned for these repos. Same trust shape as upstream's own [arch-mact2]
+    # block.
+    # Through $SUDO tee, like every other privileged write in this file: the
+    # stages suite redirects those under a fake root, and a bare `>>` would
+    # write the developer's real /etc/pacman.conf from a unit test.
+    printf '\n[%s]\nServer = %s\nSigLevel = Never\n' "$repo" "$VALVE_MIRROR" |
+      $SUDO tee -a /etc/pacman.conf >/dev/null ||
+      fail "could not append [${repo}] to /etc/pacman.conf"
+    $SUDO grep -qE "^\[${repo}\]" /etc/pacman.conf ||
+      fail "wrote [${repo}] to /etc/pacman.conf but it is not there on re-read -- is / read-only or full?"
+  done
+
+  # The hook that survives `omarchy refresh pacman`. Both surfaces: the
+  # invoking user's copy (the one the hook runner reads) and /etc/skel's (for
+  # users created later). T5 section 3 trap (a): skel alone never reaches the
+  # user the ISO already created, and the user's copy alone never reaches the
+  # next one.
+  local invoking_user; invoking_user=$(desktop_user)
+  [[ -n $invoking_user && $invoking_user != root ]] ||
+    fail "cannot determine the unprivileged user to own the refresh hook (got '${invoking_user}'). Re-run as that user with sudo, not as root directly."
+  local home
+  home=$(getent passwd "$invoking_user" | cut -d: -f6) ||
+    fail "could not resolve ${invoking_user}'s home directory"
+  [[ -n $home ]] || fail "empty home directory for ${invoking_user}"
+  local user_hook="${home}/${VALVE_HOOK_REL}" tmp
+  tmp=$(mktemp) || fail "mktemp failed"
+  render_valve_hook >"$tmp" || { rm -f "$tmp"; fail "could not render ${VALVE_HOOK_NAME}"; }
+  bash -n "$tmp" ||
+    { rm -f "$tmp"; fail "the rendered refresh hook is not valid bash: refusing to install a hook that would break every future refresh."; }
+  run_as_desktop_user "$invoking_user" install -D -m 0755 "$tmp" "$user_hook" ||
+    { rm -f "$tmp"; fail "could not install ${user_hook} as ${invoking_user}"; }
+  $SUDO install -D -m 0755 -o root -g root "$tmp" "$VALVE_HOOK_SKEL" ||
+    fail "could not seed ${VALVE_HOOK_SKEL}"
+  rm -f "$tmp"
+  $SUDO grep -qF -- "$INSTALL_MARKER_TEXT" "$VALVE_HOOK_SKEL" ||
+    fail "installed ${VALVE_HOOK_SKEL} but the ownership marker is not there on re-read"
+
+  if in_chroot; then
+    defer "pacman database sync and gamescope repair need the target's own network and keyring -- the chroot sees the installer's. Repos block and refresh hook ARE installed. Confirm on the installed machine with: pacman -Sl ${VALVE_REPOS[0]} && ls /usr/share/wayland-sessions/${GAMING_SESSION}.desktop"
+    log "stage-valve-repos: ok (file-level work done; sync and repair deferred)"
+    return 0
+  fi
+
+  log "syncing package databases"
+  $SUDO pacman -Sy --noconfirm >/dev/null ||
+    fail "pacman -Sy failed -- check network and the Valve mirror"
+  for repo in "${VALVE_REPOS[@]}"; do
+    pacman -Sl "$repo" >/dev/null 2>&1 ||
+      fail "repo '${repo}' has no usable package database after pacman -Sy"
+  done
+
+  # The repair: when the installed gamescope ships no session file, it is
+  # Arch's bare compositor (same upstream version, so no version check can tell
+  # them apart -- the FILE is the probe), and only the repo-qualified reinstall
+  # fixes it: a bare 'pacman -S gamescope' resolves by repo order to Arch's
+  # build again.
+  if valve_session_installed; then
+    log "gaming session: present -- no gamescope repair needed"
+  else
+    log "gaming session missing -- reinstalling Valve's build (${GAMESCOPE_VALVE_SPEC})"
+    $SUDO env OMARCHY_UPDATE_PACMAN=1 pacman -S --noconfirm "${GAMESCOPE_VALVE_SPEC}" ||
+      fail "could not install ${GAMESCOPE_VALVE_SPEC}. Gaming Mode's session is still absent; Deck boots to Desktop Mode until this resolves."
+    valve_session_installed ||
+      fail "installed ${GAMESCOPE_VALVE_SPEC} but ${GAMING_SESSION}.desktop is still absent -- refusing to claim Gaming Mode is back"
+    log "gaming session restored from ${GAMESCOPE_VALVE_SPEC}"
+  fi
+
+  log "stage-valve-repos: ok"
 }
 
 # ---------------------------------------------------------------------------
@@ -7817,7 +8026,20 @@ if [[ \$fails -ge \$max_fails ]]; then
   exit 1
 fi
 
-"\$select_bin" gamescope --no-restart || exit 1
+if ! "\$select_bin" gamescope --no-restart; then
+  # LOUD, NOT SILENT, AND LOUD ABOUT THE RIGHT PACKAGE. The Deck-verified shape
+  # of this failure is an omarchy-update run that swapped Valve's gamescope for
+  # Arch's (no .desktop, no start-gamescope-session), so the message names the
+  # repair that actually restores the session -- NOT a bare reinstall, which
+  # resolves by repo order to Arch's build again. No auto-reinstall here, by
+  # operator decision: this runs before the display manager, possibly offline,
+  # and a wedged pacman (db lock, no network) must never decide whether the
+  # machine boots. Failing keeps sddm starting into whatever the default was
+  # journal line below. Read the whole story with: journalctl -t ${BOOT_DEFAULT_TAG} -b
+  say "ERROR: Gaming Mode's session file is absent (Valve's gamescope was replaced by Arch's bare build, e.g. by an update without the Valve repos). The Deck is booting to the desktop. Repair with: sudo pacman -S ${GAMESCOPE_VALVE_SPEC} -- then: sudo ${SELECT_BIN} gamescope --no-restart"
+  tell_user "Gaming Mode's session is missing (Arch's gamescope replaced Valve's). The Deck booted to the desktop. Repair: sudo pacman -S ${GAMESCOPE_VALVE_SPEC}"
+  exit 1
+fi
 write_state "\$this_boot" "\$fails"
 EOF
 }

@@ -277,8 +277,11 @@ declare -A CHROOT_FUNCS=(
   #     whole unit depends on.
   # 'defer' is the stricter of the two labels this suite can apply -- it also
   # requires the fail-on-readback that 'adapted' asks for, since both branches
-  # are in the one body.
   [stage_boot_default_gaming]=defer
+  # 2026-09-17 -- Valve's repos on the target. The file-level work (repos block,
+  # refresh hook) lands in the chroot; the pacman sync and the gamescope repair
+  # need the target's own network and keyring, which the chroot does not have.
+  [stage_valve_repos]=defer
 )
 
 mapfile -t all_funcs < <(bash -c 'source "$1"; declare -F | sed "s/^declare -f //"' _ "$SESSION_SH")
@@ -654,6 +657,24 @@ done
   fail_test "stage-boot-default-gaming runs after stage-session-select" \
     "session-select at ${sel_at}, boot-default-gaming at ${bdg_at}. The stage gates on ${SELECT_BIN} being executable, so running it first is a guaranteed stage failure in every install."
 pass "stage-boot-default-gaming runs after the stage that installs the writer it schedules"
+
+# 2026-09-17 -- the Deck-verified gamescope swap. Without this stage the target
+# carries Valve's gamescope but not the repos it came from, so the first
+# omarchy-update resolves bare `gamescope` to Arch's build and deletes the
+# Gaming Mode session. It must run right after the writer it repairs beside.
+printf '%s\n' "${baked[@]}" | grep -qx stage-valve-repos ||
+  fail_test "stage-valve-repos IS baked" \
+    "without it the installed Deck has Valve's gamescope but no Valve repos, and the first update swaps in Arch's build -- which ships no gamescope-wayland.desktop. That is the 2026-09-17 Deck-verified defect."
+pass "stage-valve-repos is baked, so the target keeps the repos its gamescope came from"
+valve_at=-1; sel2_at=-1
+for i in "${!baked[@]}"; do
+  [[ ${baked[$i]} == stage-valve-repos ]] && valve_at=$i
+  [[ ${baked[$i]} == stage-session-select ]] && sel2_at=$i
+done
+[[ $sel2_at -ge 0 && $valve_at -gt $sel2_at ]] ||
+  fail_test "stage-valve-repos runs after stage-session-select" \
+    "session-select at ${sel2_at}, valve-repos at ${valve_at}. The repair reads the session file the writer's probe shape checks, so running it first is a guaranteed wrong order in every install."
+pass "stage-valve-repos runs after the writer whose session file its repair reads"
 
 # 🔴 THE P32 DEFECT FAMILY, ASSERTED. Written, unit-tested, documented and
 # reached by no code path is this project's most expensive recurring bug (six

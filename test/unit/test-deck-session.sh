@@ -1858,6 +1858,18 @@ bash -n "$boot_helper" ||
     "a syntax error here is a unit that fails at every boot with a message about line numbers in a file nobody has open"
 pass "the rendered helper parses"
 
+# 2026-09-17 Deck-verified: the helper's re-assert CAN fail at boot -- an update
+# without the Valve repos swaps in Arch's gamescope (no .desktop), and the
+# writer refuses. The failure must name the repair that actually restores the
+# session (the repo-qualified reinstall -- a bare one re-resolves to Arch's
+# build), not merely repeat the refusal. No auto-reinstall at boot, by operator
+# decision: pre-sddm, possibly offline, and a wedged pacman must never decide
+# whether the machine boots.
+grep -qF -- "sudo pacman -S ${GAMESCOPE_VALVE_SPEC}" "$boot_helper" ||
+  fail_test "the helper's re-assert failure names the qualified repair" \
+    "a bare 'pacman -S gamescope' resolves by repo order to Arch's bare compositor -- naming it reinstalls the defect. File:"$'\n'"$(cat "$boot_helper")"
+pass "the helper's re-assert failure names 'sudo pacman -S ${GAMESCOPE_VALVE_SPEC}'"
+
 ! grep -qE '^ExecStart=-' "$boot_unit" ||
   fail_test "the boot unit's ExecStart= is not prefixed with '-'" \
     "a '-' tells systemd to ignore a non-zero exit; the unit would go active on a re-assert that failed, and a failed unit is this project's only no-terminal signal"

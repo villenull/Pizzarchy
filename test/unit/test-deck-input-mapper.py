@@ -1637,46 +1637,61 @@ check("malformed JSON is a failed read here too",
 check("a list where an object belongs is a failed read",
       m.active_workspace_from_json('[{"id": 1}]'), None)
 
-_RING = [1, 2, 3]
-check("right steps to the next workspace",
-      m.next_workspace_id(1, _RING, m.WORKSPACE_STICK_RIGHT), 2)
-check("left steps to the previous one",
-      m.next_workspace_id(2, _RING, -m.WORKSPACE_STICK_RIGHT), 1)
+_IDS = [1, 2, 3]
+check("right steps to the next NUMBER",
+      m.next_workspace_id(1, _IDS, m.WORKSPACE_STICK_RIGHT), 2)
+check("left steps to the previous number",
+      m.next_workspace_id(2, _IDS, -m.WORKSPACE_STICK_RIGHT), 1)
+# 🔴 THE BUG THIS REWRITE FIXES: programs in 1+2, flick right from 2, land on
+# 3 EMPTY (focusing CREATES it) -- the old ring walked 2->1.
+check("🔴 right from 2 with only 1+2 around CREATES 3, it does not jump back "
+      "to 1",
+      m.next_workspace_id(2, [1, 2], m.WORKSPACE_STICK_RIGHT), 3)
 # 🔴 THE WRAP THE OPERATOR ASKED FOR, in their own words: "if steam button is
 # pressed in workspace 1 and yo move right joystick left move to the last
-# workspace".
-check("🔴 left from the FIRST workspace wraps to the LAST one",
-      m.next_workspace_id(1, _RING, -m.WORKSPACE_STICK_RIGHT), 3)
-# ...and the symmetric case, which is an INFERENCE from that one and is flagged
-# as such in the source and the handover.
-check("right from the LAST workspace wraps to the first",
-      m.next_workspace_id(3, _RING, m.WORKSPACE_STICK_RIGHT), 1)
-# The ends are found by POSITION in the list, not by arithmetic on the number --
-# workspaces 1, 2 and 3 do not have to be the ones that exist.
-check("a gappy set of workspaces steps by position, not by number",
+# workspace" -- and the last workspace is 10, not the highest existing one.
+check("🔴 left from workspace 1 wraps to workspace 10",
+      m.next_workspace_id(1, _IDS, -m.WORKSPACE_STICK_RIGHT), 10)
+check("right from workspace 10 wraps to workspace 1",
+      m.next_workspace_id(10, _IDS, m.WORKSPACE_STICK_RIGHT), 1)
+# The existing set is IGNORED entirely: gaps change nothing.
+check("the existing set is ignored -- gaps change nothing, create still lands "
+      "on the adjacent number",
       [m.next_workspace_id(1, [1, 4, 7], m.WORKSPACE_STICK_RIGHT),
        m.next_workspace_id(7, [1, 4, 7], m.WORKSPACE_STICK_RIGHT),
        m.next_workspace_id(1, [1, 4, 7], -m.WORKSPACE_STICK_RIGHT)],
-      [4, 1, 7])
-# 🆕 A SINGLE workspace is not a dead end to the right: right CREATES the
-# adjacent one, the same way SUPER+2 opens workspace 2 on a fresh desktop.
-# Left steps down, except from 1 -- there is no workspace 0 to create.
-check("🆕 right from a SINGLE workspace creates the adjacent one",
+      [2, 8, 10])
+# A SINGLE workspace is not special either: either direction CREATES the
+# neighbour, the same way SUPER+2 opens workspace 2 on a fresh desktop.
+check("right from a SINGLE workspace creates the adjacent one",
       m.next_workspace_id(1, [1], m.WORKSPACE_STICK_RIGHT), 2)
-check("🆕 ...from a higher single workspace too",
+check("...from a higher single workspace too",
       m.next_workspace_id(5, [5], m.WORKSPACE_STICK_RIGHT), 6)
-check("🆕 left from a single workspace above 1 steps down",
+check("left from a single workspace above 1 steps down",
       m.next_workspace_id(3, [3], -m.WORKSPACE_STICK_RIGHT), 2)
-check("🆕 only left from a single workspace 1 has nowhere to go",
-      m.next_workspace_id(1, [1], -m.WORKSPACE_STICK_RIGHT), None)
-check("no workspaces at all means nowhere to go",
-      m.next_workspace_id(1, [], 1), None)
-# Being on the scratchpad is a real state: its id is not in the list at all.
-check("stepping from a workspace that is not in the ring enters it at the end "
-      "the direction points at",
-      [m.next_workspace_id(-99, _RING, m.WORKSPACE_STICK_RIGHT),
-       m.next_workspace_id(-99, _RING, -m.WORKSPACE_STICK_RIGHT)],
-      [1, 3])
+check("left from a single workspace 1 wraps to 10",
+      m.next_workspace_id(1, [1], -m.WORKSPACE_STICK_RIGHT), 10)
+# An EMPTY list is a transient read (vacated workspaces vanish), not a desktop
+# to leave alone: the step still lands on the adjacent number.
+check("an empty list still steps from current -- it is a transient, not a "
+      "dead end",
+      [m.next_workspace_id(1, [], 1), m.next_workspace_id(5, [], -1)], [2, 4])
+# 🔴 NO GHOST: the target always stays inside 1..10 whatever the list holds.
+check("🔴 stepping never dispatches outside 1..10",
+      [1 <= m.next_workspace_id(n, [1, 2, 3], d) <= 10
+       for n in (1, 3, 6, 9, 10) for d in (1, -1)], [True] * 10)
+# 🔴 LIVE GHOST RECOVERY: the old mapper dispatched `workspace-next 10 -> 11`
+# and Hyprland created+focused 11. From that ghost the positional step folds
+# back inside -- never on to 12.
+check("🔴 a ghost 11 left by the old mapper steps back inside, never to 12",
+      [m.next_workspace_id(11, [1, 2, 11], m.WORKSPACE_STICK_RIGHT),
+       m.next_workspace_id(11, [1, 2, 11], -m.WORKSPACE_STICK_RIGHT)],
+      [2, 10])
+# Being on the scratchpad is a real state: its id folds positionally too.
+check("stepping from the scratchpad folds positionally into 1..10",
+      [m.next_workspace_id(-99, _IDS, m.WORKSPACE_STICK_RIGHT),
+       m.next_workspace_id(-99, _IDS, -m.WORKSPACE_STICK_RIGHT)],
+      [2, 10])
 
 # --- reading that state: bounded, and never fatal ----------------------------
 
@@ -1773,8 +1788,10 @@ check("a successful step reports the resolved dispatch in the journal",
 
 _result, _fake, _err = with_fake_subprocess(
     lambda: m.run_workspace("workspace-prev", read=ws_reader(1, [1, 2, 3])))
-check("🔴 the WRAP end to end: left from workspace 1 dispatches the LAST one",
-      [argv for argv, _kw in _fake.calls], [m.workspace_focus_argv(3)])
+check("🔴 the WRAP end to end: left from workspace 1 dispatches workspace 10",
+      [argv for argv, _kw in _fake.calls], [m.workspace_focus_argv(10)])
+check("...and the success line carries the resolved step",
+      ("workspace-prev 1 -> 10" in _err), True)
 
 _result, _fake, _err = with_fake_subprocess(
     lambda: m.run_workspace("workspace-next", dry_run=True, read=ws_reader(1, [1, 2])))
@@ -1794,21 +1811,26 @@ check("...and names the binary it needed", m.WORKSPACE_LIST_ARGV[0] in _err, Tru
 check("...and says the rest of the mapper is unaffected",
       "the rest of the mapper is unaffected" in _err, True)
 
-# 🆕 Right from a single workspace CREATES the adjacent one end to end; only
-# left from 1 is the nowhere-to-go case (no workspace 0 to create).
+# Right from a single workspace CREATES the adjacent one end to end, and left
+# from 1 wraps to 10 the same way; an empty list is a transient read and still
+# steps from current.
 _result, _fake, _err = with_fake_subprocess(
     lambda: m.run_workspace("workspace-next", read=ws_reader(1, [1])))
-check("🆕 right from a SINGLE workspace dispatches the created adjacent one",
+check("right from a SINGLE workspace dispatches the created adjacent one",
       ([argv for argv, _kw in _fake.calls], _result),
       ([m.workspace_focus_argv(2)], True))
-check("🆕 ...and the journal carries the resolved dispatch as evidence",
+check("...and the journal carries the resolved dispatch as evidence",
       "workspace-next 1 -> 2" in _err, True)
 _result, _fake, _err = with_fake_subprocess(
     lambda: m.run_workspace("workspace-prev", read=ws_reader(1, [1])))
-check("left from a single workspace 1 spawns nothing and explains itself",
-      (_fake.calls, _result, "nowhere to go" in _err), ([], False, True))
-check("...naming the workspace it was on, so the log is diagnosable",
-      "1" in _err, True)
+check("left from a single workspace 1 dispatches workspace 10 end to end",
+      ([argv for argv, _kw in _fake.calls], _result, "workspace-prev 1 -> 10" in _err),
+      ([m.workspace_focus_argv(10)], True, True))
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_workspace("workspace-next", read=ws_reader(1, [])))
+check("an empty list still dispatches -- a transient, not a dead end",
+      ([argv for argv, _kw in _fake.calls], _result, "workspace-next 1 -> 2" in _err),
+      ([m.workspace_focus_argv(2)], True, True))
 
 _result, _fake, _err = with_fake_subprocess(
     lambda: m.run_workspace("workspace-next", read=ws_reader(1, [1, 2])),

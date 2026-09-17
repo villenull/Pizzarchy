@@ -642,7 +642,8 @@ BRIGHTNESS_ACTIONS: dict[str, list[str]] = {
 # ends: on the last workspace `e+1` does nothing whatsoever. The operator asked
 # for the opposite -- *"if steam button is pressed in workspace 1 and yo move
 # right joystick left move to the last workspace"* -- so the target is computed
-# from the workspace list (`next_workspace_id`) and named outright.
+# positionally (`next_workspace_id`: N±1 inside 1..10, focusing CREATES) and
+# named outright.
 #
 # ⚠️ THE ID IS PASSED AS A STRING, exactly as upstream's `tostring(workspace)`
 # writes it. `{ workspace = 2 }` was also accepted live, but the shipped
@@ -856,6 +857,13 @@ WORKSPACE_STEPS: dict[int, str] = {
 WORKSPACE_STEP_DIRECTIONS: dict[str, int] = {
     name: direction for direction, name in WORKSPACE_STEPS.items()
 }
+
+# POSITIONAL over Omarchy's fixed ring, not a walk over existing ids.
+# tiling.lua binds SUPER+1..10 (`for workspace = 1, 10`), and focusing a
+# number CREATES it -- proven live: focus 9 from [1, 3] gave [3, 9]. So the
+# chord steps N±1 inside 1..10 by construction and can never dispatch a ghost
+# outside that range.
+WORKSPACE_COUNT = 10
 
 # Deflection needed to fire a step, and the lower one the stick must fall back
 # under before the NEXT step can fire.
@@ -3257,23 +3265,16 @@ def run_brightness(action: str, dry_run: bool = False) -> bool:
 # 🔴 THIS IS THE ONE BINDING THAT HAS TO READ BEFORE IT ACTS, and the wrap is
 # why. "Move left from workspace 1 to the last workspace" cannot be expressed as
 # a dispatch at all -- Hyprland's own relative forms stop at the ends (see
-# `workspace_focus_argv`) -- so the target has to be computed from the workspace
-# list, which means asking the compositor two questions first.
+# `workspace_focus_argv`) -- so the target has to be computed positionally
+# (`next_workspace_id`: N±1 inside 1..10, focusing CREATES), which means asking
+# the compositor which workspace we are on first.
 #
-# ⚠️ WHAT "THE LAST WORKSPACE" MEANS HERE: the highest-numbered workspace that
-# EXISTS. Not workspace 10. (Right from a single-workspace desktop is the one
-# deliberate exception below: it focuses an adjacent workspace the compositor
-# then creates.) That
-# is the same set Omarchy's own SUPER+TAB walks (`hl.dsp.focus({ workspace =
-# "e+1" })` is Hyprland's "next EXISTING workspace"), so the controller and the
-# keyboard agree about what a workspace is -- the same principle CLOSE_WINDOW_ARGV
-# applies to the close binding. Right from a desktop with exactly ONE
-# workspace [C] is the one DELIBERATE exception to "existing workspaces only":
-# it focuses C+1, which the compositor CREATES -- the same way SUPER+2 opens
-# workspace 2 on a fresh desktop, so the dispatch stays a plain "go there".
-# Left from [C] with C > 1 steps down to C-1 the same way; only left from [1]
-# has nowhere to go (there is no workspace 0), and `run_workspace` says so in
-# the journal rather than failing silently.
+# ⚠️ WHAT "THE LAST WORKSPACE" MEANS HERE: workspace 10, not the
+# highest-numbered workspace that EXISTS. Omarchy binds SUPER+1..10 (`for
+# workspace = 1, 10` in tiling.lua) and focusing a number CREATES it -- proven
+# live: focus 9 from [1, 3] gave [3, 9] -- so the number alone is the target
+# and the ghost outside 1..10 can never be dispatched. The existing-ids list
+# is kept only for the empty-desktop guard.
 
 
 def workspace_ids_from_json(workspaces_json: str) -> list[int] | None:
@@ -3316,8 +3317,7 @@ def active_workspace_from_json(active_json: str) -> int | None:
 
     ⚠️ A NEGATIVE ID IS RETURNED AS IT IS, not filtered out like the list above:
     "we are on the scratchpad" is a true and useful answer, and
-    `next_workspace_id` knows what to do with a current workspace that is not in
-    the list.
+    `next_workspace_id` folds any current positionally into 1..10.
     """
     try:
         active = json.loads(active_json)
@@ -3332,41 +3332,28 @@ def active_workspace_from_json(active_json: str) -> int | None:
 
 
 def next_workspace_id(current: int, ids: list[int], direction: int) -> int | None:
-    """The workspace one step from `current`, WRAPPING at both ends.
+    """The workspace one step from `current`, POSITIONAL inside 1..10.
 
-    None when there is nowhere to go: no ordinary workspaces at all, or left
-    from workspace 1 on a single-workspace desktop (there is no workspace 0).
+    Omarchy binds SUPER+1..10 (`for workspace = 1, 10` in tiling.lua), and
+    focusing a number CREATES it -- proven live: focus 9 from [1, 3] gave
+    [3, 9]. So the target is N±1 with wrap 10->1 and 1->10, computed from the
+    number alone; `ids` is not consulted at all. The fixes this carries:
+    (a) programs in 1+2, flick right from 2 -> 3 empty (the old ring walked
+    2->1); (b) the target is always 1..10, so no ghost outside the bound keys
+    can ever be dispatched -- even from a ghost the OLD mapper left behind
+    (live: `workspace-next 10 -> 11`): 11 folds back to 1/2, never to 12.
 
-    🔴 THE WRAP THE OPERATOR ASKED FOR is left-from-the-first -> the last.
-    Right-from-the-last -> the first is the symmetric case; they did NOT ask for
-    it and it is implemented anyway, because the alternative is a control that
-    wraps one way and dead-ends the other. Flagged as an inference in the
-    handover, not smuggled in as a requirement.
+    ⚠️ AN EMPTY LIST IS A TRANSIENT READ, NOT A DESKTOP TO LEAVE ALONE.
+    Vacated workspaces vanish from the list, so [] can arrive while the user
+    sits on a perfectly good workspace. Stepping from `current` anyway is
+    correct; returning None would swallow a deliberate flick.
 
-    🆕 A SINGLE workspace [C] is not a dead end to the right: right steps to
-    C+1, which focusing CREATES -- the same way SUPER+2 opens workspace 2 on a
-    fresh desktop. Left steps to C-1, or nowhere when C is 1. Verified live on
-    the Deck: the mapper held --grab, the dispatch form works, and the
-    left-stick chord proves the queueing path; the flick did nothing only
-    because one workspace is a ring of one, which the user reads as broken.
-
-    ⚠️ A `current` THAT IS NOT IN THE LIST is a real state, not a bug: the
-    scratchpad is a workspace with a negative id that `workspace_ids_from_json`
-    deliberately drops. Stepping from outside the ring enters it at the end the
-    direction points at -- right -> the first workspace, left -> the last --
-    which is the same answer wrapping gives.
+    None is kept in the signature only so the dispatcher's nowhere-to-go
+    branch stays total; the arithmetic below can never produce it -- in 1..10
+    N±1 wrapped never equals N, and Python's `%` on a positive divisor keeps
+    ANY integer input inside 1..10.
     """
-    if not ids:
-        return None
-    if current not in ids:
-        return ids[0] if direction > 0 else ids[-1]
-    if len(ids) == 1:
-        sole = ids[0]
-        if direction > 0:
-            return sole + 1
-        return sole - 1 if sole > 1 else None
-    target = ids[(ids.index(current) + direction) % len(ids)]
-    return None if target == current else target
+    return ((current - 1 + direction) % WORKSPACE_COUNT) + 1
 
 
 def read_workspace_state(list_argv: tuple[str, ...] = WORKSPACE_LIST_ARGV,
@@ -3421,10 +3408,11 @@ def run_workspace(action: str, dry_run: bool = False,
     """STEAM + the right stick: move one workspace. True if it was started.
 
     ⚠️ ITS OWN RUNNER, LIKE EVERY OTHER BINDING HERE, AND FOR THE USUAL REASON:
-    the failure sentence has to name what THIS chord needed. It has three
-    distinct ways to do nothing -- the compositor did not answer, there is
-    nowhere to go, the binary is missing -- and a shared runner would collapse
-    them into one misleading line.
+    the failure sentence has to name what THIS chord needed. It has two
+    distinct ways to do nothing -- the compositor did not answer, the binary
+    is missing -- plus a defensive nowhere-to-go branch that positional
+    arithmetic keeps unreachable, and a shared runner would collapse them
+    into one misleading line.
 
     ⚠️ NOT ONCE-ONLY LIKE `run_brightness`. That binding is throttled because it
     fires on a clock and could scroll the journal eight times a second; this one
@@ -3448,12 +3436,12 @@ def run_workspace(action: str, dry_run: bool = False,
     current, ids = state
     target = next_workspace_id(current, ids, direction)
     if target is None:
-        # Not a failure, and said plainly so it is not read as one. The only
-        # ring this small is left-from-1 on a single-workspace desktop: there
-        # is no workspace 0 to create, so there is nowhere to flick to.
+        # Defensive only: positional N±1 inside 1..10 always lands somewhere,
+        # from ANY current (Python's % on a positive divisor folds ghosts and
+        # scratchpad ids inside too), so this is unreachable. Kept total
+        # rather than failing silently if the arithmetic ever changes.
         print(f"deck-input-mapper: STEAM + the right stick has nowhere to go "
-              f"from workspace {current} -- left from workspace 1 steps toward "
-              "workspace 0, which does not exist and is never created",
+              f"from workspace {current} -- no target resolved",
               file=sys.stderr, flush=True)
         return False
     argv = workspace_focus_argv(target)
