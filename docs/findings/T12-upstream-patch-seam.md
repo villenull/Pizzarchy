@@ -364,9 +364,27 @@ per **M1**, it may well have.
 (**VERIFIED**, M5) — we are knowingly making pacman's database describe the
 package rather than the disk, and anyone auditing the machine sees a
 "corrupted" file. `docs/tasks/T5-fork-plan.md` §1 caps the ISO overlay at ≤ 4
-patch files; this seam deserves its own budget and the same pressure: **≤ 2
-runtime patches, and a third has to argue for itself.** Every patch here is a
+patch files; this seam deserves its own budget and the same pressure: **≤ 4
+runtime patches, and a fifth has to argue for itself.** Every patch here is a
 standing rebase liability against a repo that moves several times a day.
+
+Budget history (each raise argued from the previous cap, never automatic):
+
+- **Raised to 3 on 2026-08-16** for `0030-screensaver-font-fits-panel`: sizes
+  the screensaver terminal's font so Omarchy's own 81-column logo fits the
+  Deck's panel (operator, from hardware). No non-patch seam exists —
+  `omarchy-launch-screensaver` runs `foot --config=…`, which *replaces* the
+  user config, so nothing under `$HOME` can reach the setting — and its rebase
+  liability was the smallest of the three (a 7-line INI, one integer).
+- **Raised to 4 on 2026-09-17** for `0040-limine-boot-timeout`: sets
+  `timeout: 2` in the packaged Limine config template (operator, from the
+  panel: the boot menu sits ~5 s before booting the default entry). No
+  non-patch seam exists — `omarchy-refresh-limine` moves `/boot/limine.conf`
+  aside and copies `$OMARCHY_PATH/default/limine/limine.conf` over it, so the
+  *template* is what must carry the value, and the template is `omarchy-dev`-
+  owned and silently reverted on upgrade (M2). Its rebase liability is the
+  smallest of the four: a 1-line diff (`-#timeout: 3` / `+timeout: 2`) against
+  a ~20-line config.
 
 ---
 

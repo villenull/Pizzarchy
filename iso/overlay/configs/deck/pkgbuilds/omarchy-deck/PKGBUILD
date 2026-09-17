@@ -152,8 +152,10 @@ source=('README'
   '0020-limine-interface-rotation.patch'
   '0020-limine-interface-rotation.meta'
   '0030-screensaver-font-fits-panel.patch'
-  '0030-screensaver-font-fits-panel.meta')
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+  '0030-screensaver-font-fits-panel.meta'
+  '0040-limine-boot-timeout.patch'
+  '0040-limine-boot-timeout.meta')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 # The one place the patch payload's destination is written down. The applier's
 # own DEFAULT_PATCH_DIR is /usr/share/omarchy-deck/patches and deck_patches.py's
@@ -244,4 +246,8 @@ package() {
     "$pkgdir/$_patchdir/0030-screensaver-font-fits-panel.patch"
   install -Dm644 "$srcdir/0030-screensaver-font-fits-panel.meta" \
     "$pkgdir/$_patchdir/0030-screensaver-font-fits-panel.meta"
+  install -Dm644 "$srcdir/0040-limine-boot-timeout.patch" \
+    "$pkgdir/$_patchdir/0040-limine-boot-timeout.patch"
+  install -Dm644 "$srcdir/0040-limine-boot-timeout.meta" \
+    "$pkgdir/$_patchdir/0040-limine-boot-timeout.meta"
 }

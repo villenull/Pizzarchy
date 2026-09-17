@@ -1,0 +1,34 @@
+# 0040-limine-boot-timeout -- metadata and post-conditions.
+#
+# WHY THIS PATCH EXISTS
+#
+# Operator, from the panel, 2026-09-17: the Limine boot menu waits 5 seconds
+# before booting the default entry; 1 is enough. The template ships
+# `#timeout: 3` COMMENTED OUT (upstream default), so the effective value comes
+# from Limine's own default (5s on this build) -- not from anyone's decision.
+#
+# ⚠️ THIS IS THE TEMPLATE, NOT /boot/limine.conf. `omarchy-refresh-limine`
+# moves /boot/limine.conf aside and copies $OMARCHY_PATH/default/limine/limine.conf
+# over it (see 0020's meta). So the *template* is what has to carry the value,
+# or it is lost the first time anyone runs `omarchy refresh limine`.
+# /boot/limine.conf itself is NOT package-owned and is NOT this applier's
+# business.
+#
+# `timeout: 2` (not `timeout: 0`): 0 skips the menu entirely, which strands a
+# user who needs the fallback entry or snapshots with no way to reach them on
+# a device with no keyboard to hold. 1 keeps the menu reachable (two beats to catch it) and boots
+# unattended fast. Decimal values are accepted per CONFIG.md; integers keep
+# the post-condition exact.
+
+requirement: operator request 2026-09-17 (boot menu 5s -> 2s)
+description: set timeout: 2 in the packaged Limine config template
+target: default/limine/limine.conf
+
+# Exactly once. Twice would mean a previous run appended rather than patched,
+# and Limine's behaviour on a duplicated key is not something this project has
+# measured -- so it is asserted against, not reasoned about.
+assert_count: default/limine/limine.conf|^timeout: 2$|1
+# The commented upstream default must be gone where we set the value: a file
+# carrying both `#timeout: 3` and `timeout: 3` is a reader guessing which one
+# wins.
+assert_count: default/limine/limine.conf|^#timeout: 3$|0
