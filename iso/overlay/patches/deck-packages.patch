@@ -371,10 +371,28 @@ index db8daa2..c0e085f 100755
      grep -hv '^#\|^$' /builder/archinstall.packages
      # Always include the selected Omarchy packages so the target install can
      # find the runtime and companion packages in the offline mirror.
-@@ -213,6 +544,69 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+@@ -213,6 +544,87 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
    )
  fi
  
++# Upstream 4.0.4 lists hardware-availability packages (T2 Mac firmware and
++# kernels among them) that its own third-party repo no longer carries, and the
++# offline mirror's explicit-target download fails on the first missing name.
++# Same class as the broadcom-wl rename above: an availability list newer than
++# its repo. T2 hardware is out of scope for this ISO (no Deck has a T2 chip;
++# deck-form.sh routes every Deck to linux-omarchy before the T2 probe), so
++# drop the uninstallable names from the DOWNLOAD list only. They stay in the
++# shipped omarchy-other.packages the installer reads, so a T2 Mac pointed at
++# this ISO still sees its firmware lines -- pacstrap resolves them only if
++# that hardware path runs, which Deck installs never take.
++mapfile -t all_packages < <(
++  printf '%s\n' "${all_packages[@]}" | grep -Fxv -e apple-bcm-firmware -e apple-t2-audio-config -e t2fanrd -e linux-t2 -e linux-t2-headers || true
++)
++if ((${#all_packages[@]} == 0)); then
++  echo "ERROR: stripping the uninstallable T2 availability names emptied the offline" >&2
++  echo "       mirror target list." >&2
++  exit 1
++fi
 +# CONSUMER 3 of deck_local_packages (T5-fork-plan.md §3 seam S4): the same
 +# treatment, but UNCONDITIONAL -- unlike upstream's three, ours are always
 +# locally built and exist in no online repository at all. They reach
