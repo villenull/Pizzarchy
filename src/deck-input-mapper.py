@@ -3311,6 +3311,38 @@ def workspace_ids_from_json(workspaces_json: str) -> list[int] | None:
             ids.add(workspace_id)
     return sorted(ids)
 
+def populated_workspace_ids_from_json(workspaces_json: str) -> list[int] | None:
+    """Every ORDINARY workspace's id that HAS WINDOWS, ascending, or None.
+
+    Same shape contract as `workspace_ids_from_json` (None = unanswered, []
+    = answered with none populated), plus the `windows` field: absent or
+    non-int counts as unpopulated rather than failing the read, because a
+    compositor that renames a field must not strand the chord -- it just
+    stops offering that workspace as a landing pad until the read is fixed.
+    Bool-guarded like the id (`isinstance(True, int)` is True in Python).
+    """
+    try:
+        workspaces = json.loads(workspaces_json)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(workspaces, list):
+        return None
+    ids = set()
+    for workspace in workspaces:
+        if not isinstance(workspace, dict):
+            continue
+        workspace_id = workspace.get("id")
+        if isinstance(workspace_id, bool) or not isinstance(workspace_id, int):
+            continue
+        if workspace_id < 1:
+            continue
+        windows = workspace.get("windows", 0)
+        if isinstance(windows, bool) or not isinstance(windows, int):
+            continue
+        if windows >= 1:
+            ids.add(workspace_id)
+    return sorted(ids)
+
 
 def active_workspace_from_json(active_json: str) -> int | None:
     """The focused workspace's id, or None if it cannot be read.
@@ -3332,28 +3364,34 @@ def active_workspace_from_json(active_json: str) -> int | None:
 
 
 def next_workspace_id(current: int, ids: list[int], direction: int) -> int | None:
-    """The workspace one step from `current`, POSITIONAL inside 1..10.
+    """The populated workspace one step from `current`, or None at the ends.
 
-    Omarchy binds SUPER+1..10 (`for workspace = 1, 10` in tiling.lua), and
-    focusing a number CREATES it -- proven live: focus 9 from [1, 3] gave
-    [3, 9]. So the target is N±1 with wrap 10->1 and 1->10, computed from the
-    number alone; `ids` is not consulted at all. The fixes this carries:
-    (a) programs in 1+2, flick right from 2 -> 3 empty (the old ring walked
-    2->1); (b) the target is always 1..10, so no ghost outside the bound keys
-    can ever be dispatched -- even from a ghost the OLD mapper left behind
-    (live: `workspace-next 10 -> 11`): 11 folds back to 1/2, never to 12.
+    `ids` is the POPULATED set (workspaces with windows -- see
+    `populated_workspace_ids_from_json`). The step is positional N±1 inside
+    1..10, but the landing pad must EXIST with windows: right from 2 with
+    programs in 1+2 lands nowhere (None -- stop dead, like SUPER+TAB), never
+    conjuring empty 3. Left from 1 and right from 10 are the same dead end
+    (no workspace 0, no workspace 11). Empty and populated alike behave the
+    same: with no windows anywhere every flick is nowhere-to-go.
 
-    ⚠️ AN EMPTY LIST IS A TRANSIENT READ, NOT A DESKTOP TO LEAVE ALONE.
-    Vacated workspaces vanish from the list, so [] can arrive while the user
-    sits on a perfectly good workspace. Stepping from `current` anyway is
-    correct; returning None would swallow a deliberate flick.
+    NO WRAP, by operator decision 2026-09-17: the earlier ring walked 2->1
+    past the user's programs, and the positional 1..10 that replaced it
+    manufactured ghost empties (Deck-verified: focus 6 from five populated
+    left a highlighted-but-empty 6). Stop dead at both ends instead.
 
-    None is kept in the signature only so the dispatcher's nowhere-to-go
-    branch stays total; the arithmetic below can never produce it -- in 1..10
-    N±1 wrapped never equals N, and Python's `%` on a positive divisor keeps
-    ANY integer input inside 1..10.
+    A `current` outside 1..10 (a ghost the old build left behind, a
+    scratchpad id) folds positionally first, so recovery never dispatches
+    outside the bound keys either.
     """
-    return ((current - 1 + direction) % WORKSPACE_COUNT) + 1
+    if not ids:
+        return None
+    folded = ((current - 1) % WORKSPACE_COUNT) + 1
+    target = folded + direction
+    if target < 1 or target > WORKSPACE_COUNT:
+        return None
+    if target not in ids:
+        return None
+    return None if target == current else target
 
 
 def read_workspace_state(list_argv: tuple[str, ...] = WORKSPACE_LIST_ARGV,
@@ -3391,7 +3429,7 @@ def read_workspace_state(list_argv: tuple[str, ...] = WORKSPACE_LIST_ARGV,
     listed = ask(list_argv)
     if listed is None:
         return None
-    ids = workspace_ids_from_json(listed)
+    ids = populated_workspace_ids_from_json(listed)
     if ids is None:
         return None
     active = ask(active_argv)
@@ -3436,12 +3474,13 @@ def run_workspace(action: str, dry_run: bool = False,
     current, ids = state
     target = next_workspace_id(current, ids, direction)
     if target is None:
-        # Defensive only: positional N±1 inside 1..10 always lands somewhere,
-        # from ANY current (Python's % on a positive divisor folds ghosts and
-        # scratchpad ids inside too), so this is unreachable. Kept total
-        # rather than failing silently if the arithmetic ever changes.
+        # Ordinary, not a failure: the step ran past the last POPULATED
+        # workspace (right from the highest one with windows, left from the
+        # lowest), or nothing anywhere has windows. Stop dead, like SUPER+TAB
+        # -- never conjure an empty workspace (Deck-verified ghost 6).
         print(f"deck-input-mapper: STEAM + the right stick has nowhere to go "
-              f"from workspace {current} -- no target resolved",
+              f"from workspace {current} -- the next workspace has no windows, "
+              "so nothing moved",
               file=sys.stderr, flush=True)
         return False
     argv = workspace_focus_argv(target)
