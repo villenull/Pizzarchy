@@ -371,7 +371,7 @@ index db8daa2..c0e085f 100755
      grep -hv '^#\|^$' /builder/archinstall.packages
      # Always include the selected Omarchy packages so the target install can
      # find the runtime and companion packages in the offline mirror.
-@@ -213,6 +544,87 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+@@ -213,6 +544,99 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
    )
  fi
  
@@ -392,6 +392,18 @@ index db8daa2..c0e085f 100755
 +  echo "ERROR: stripping the uninstallable T2 availability names emptied the offline" >&2
 +  echo "       mirror target list." >&2
 +  exit 1
++fi
++
++# The live ISO boots whichever kernel arch_packages names above, and that
++# kernel's package must reach the offline mirror the live pacstrap resolves
++# against -- mkarchiso installs packages.x86_64 out of the mirror, not the
++# network. Upstream's arch-mact2 repo currently serves linux-t2 (7.2.6) but no
++# longer carries the T2 availability names stripped above, so only the live
++# kernel itself is carried (one package, hardware-gated to T2 Macs at install
++# time everywhere else).
++_t2kern=linux-t2
++if ! printf '%s\n' "${all_packages[@]}" | grep -Fxq "$_t2kern"; then
++  all_packages+=("$_t2kern")
 +fi
 +# CONSUMER 3 of deck_local_packages (T5-fork-plan.md §3 seam S4): the same
 +# treatment, but UNCONDITIONAL -- unlike upstream's three, ours are always
