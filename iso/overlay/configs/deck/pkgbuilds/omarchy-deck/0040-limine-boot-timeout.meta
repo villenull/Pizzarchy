@@ -3,7 +3,7 @@
 # WHY THIS PATCH EXISTS
 #
 # Operator, from the panel, 2026-09-17: the Limine boot menu waits 5 seconds
-# before booting the default entry; 1 is enough. The template ships
+# before booting the default entry; 2 is enough. The template ships
 # `#timeout: 3` COMMENTED OUT (upstream default), so the effective value comes
 # from Limine's own default (5s on this build) -- not from anyone's decision.
 #
@@ -16,7 +16,7 @@
 #
 # `timeout: 2` (not `timeout: 0`): 0 skips the menu entirely, which strands a
 # user who needs the fallback entry or snapshots with no way to reach them on
-# a device with no keyboard to hold. 1 keeps the menu reachable (two beats to catch it) and boots
+# a device with no keyboard to hold. 2 keeps the menu reachable (two beats to catch it) and boots
 # unattended fast. Decimal values are accepted per CONFIG.md; integers keep
 # the post-condition exact.
 
