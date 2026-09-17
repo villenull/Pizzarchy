@@ -67,7 +67,7 @@ base_bin="$work/base-bin"
 mkdir -p "$base_bin"
 # bash and env are here because the stubs are themselves `#!/usr/bin/env bash`
 # scripts: with a sanitised PATH they have to be able to find their own shell.
-for util in bash env awk sed grep sort cut cat getent head tr mv rm; do
+for util in bash env awk sed grep sort cut cat getent head tr mv rm mkdir chmod mktemp curl chown touch; do
   real=$(command -v "$util") || fail "the host provides $util (needed to run the script under test)"
   ln -sf "$real" "$base_bin/$util"
 done
@@ -657,6 +657,82 @@ pass "'on' prints the stale-host-key remedy (ssh-keygen -R)"
 grep -qF 'omarchy-deck-install.json' <<<"$out" ||
   fail "'on' shows how to copy the install record off the device" "$out"
 pass "'on' shows how to copy /var/log/omarchy-deck-install.json off the device"
+
+# ---------------------------------------------------------------------------
+# 9b. 'allow' installs a key without typing it
+#
+# The trackpad keyboard makes a 100-character key string unfollowable, so the
+# key travels over the LAN instead of through a human. `pizza ssh allow <url>`
+# fetches one public key, validates its shape, appends it idempotently, and
+# fixes modes -- the same ownership rule as the rest of this file (the
+# invoking user owns their .ssh, never root via sudo).
+# ---------------------------------------------------------------------------
+
+# A curl stub: serves one file per URL basename out of $dir/state/allow-keys/.
+stub_curl() {
+  local dir=$1
+  cat >"$dir/bin/curl" <<STUBEOF
+#!/usr/bin/env bash
+# usage in the script: curl -fsSL --max-time N --proto http,https <url> -o <file>
+curl_args=( "\$@" )
+curl_out=""
+curl_url=""
+curl_i=0
+while (( curl_i < \${#curl_args[@]} )); do
+  if [[ \${curl_args[\$curl_i]} == -o ]]; then
+    curl_out=\${curl_args[\$((curl_i + 1))]}
+  elif [[ \${curl_args[\$curl_i]} != -* && \${curl_args[\$curl_i]} == *://* ]]; then
+    curl_url=\${curl_args[\$curl_i]}
+  fi
+  curl_i=\$((curl_i + 1))
+done
+curl_path=\${curl_url##*/}
+if [[ -n \$curl_path && -e "__DIR__/state/allow-keys/\$curl_path" ]]; then
+  cat "__DIR__/state/allow-keys/\$curl_path" >"\$curl_out"
+  exit 0
+fi
+printf 'curl: (6) could not resolve host\n' >&2
+exit 6
+STUBEOF
+  sed -i "s|__DIR__|$dir|" "$dir/bin/curl"
+  mkdir -p "$dir/state/allow-keys"
+  chmod +x "$dir/bin/curl"
+}
+
+d=$(full_scenario allow-ok)
+stub_curl "$d"
+printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakekeyfortestsonly0123456789@test\n' >"$d/state/allow-keys/deck-key.pub"
+# curl must be reachable: full_scenario does not stub it, so link the stub in.
+# (run_in sanitises PATH to $dir/bin + base.)
+rc=0; out=$(run_in "$d" allow http://192.168.100.14:8000/deck-key.pub 2>&1) || rc=$?
+(( rc == 0 )) || fail "'allow' succeeds fetching a real key" "rc=$rc: $out"
+grep -qF 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakekeyfortestsonly0123456789' "$d/home/tester/.ssh/authorized_keys" ||
+  fail "'allow' appends the fetched key to authorized_keys" "$(cat "$d/home/tester/.ssh/authorized_keys" 2>&1)"
+pass "'allow' fetches a key over the LAN and installs it"
+
+rc=0; out=$(run_in "$d" allow http://192.168.100.14:8000/deck-key.pub 2>&1) || rc=$?
+(( rc == 0 )) || fail "'allow' twice succeeds (idempotent)" "rc=$rc: $out"
+n=$(grep -c 'IFakekeyfortestsonly0123456789' "$d/home/tester/.ssh/authorized_keys")
+(( n == 1 )) || fail "'allow' twice installs the key exactly once" "found $n copies"
+pass "'allow' is idempotent: the same key twice installs once"
+
+d=$(full_scenario allow-html)
+stub_curl "$d"
+printf '<html><body>directory listing</body></html>\n' >"$d/state/allow-keys/index.html"
+rc=0; out=$(run_in "$d" allow http://192.168.100.14:8000/index.html 2>&1) || rc=$?
+(( rc != 0 )) || fail "'allow' refuses a non-key response" "rc=$rc"
+pass "'allow' refuses a fetched page with no public key in it (proxy page, typo)"
+
+d=$(full_scenario allow-unreachable)
+stub_curl "$d"
+rc=0; out=$(run_in "$d" allow http://192.168.100.14:8000/missing.pub 2>&1) || rc=$?
+(( rc != 0 )) || fail "'allow' fails loudly when the URL cannot be fetched" "rc=$rc"
+pass "'allow' fails loudly on an unreachable URL (no silent no-key)"
+
+d=$(full_scenario allow-no-url)
+rc=0; out=$(run_in "$d" allow 2>&1) || rc=$?
+(( rc == 2 )) || fail "'allow' with no URL is a usage error" "rc=$rc: $out"
+pass "'allow' with no URL exits 2 (usage)"
 
 # ---------------------------------------------------------------------------
 # 10. the port is derived, not assumed

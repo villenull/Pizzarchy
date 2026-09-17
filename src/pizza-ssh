@@ -890,41 +890,103 @@ cmd_status() {
   return 0
 }
 
-usage() {
-  cat <<'EOF'
-pizza ssh — turn SSH on for support, restricted to this network only.
-
-  pizza ssh          turn it on: enable sshd, open the port to this subnet
-                     only, and print exactly how to connect
-  pizza ssh off      turn it off: stop sshd, disable it, remove the rule
-  pizza ssh status   is it on, what address, is a key installed, is the port
-                     open — four distinct answers, never conflated
-
-SSH is OFF by default and is never enabled by the installer. Turn it on
-deliberately when you need to get a file off this device, and turn it off
-again afterwards.
-EOF
+cmd_allow() {
+  # Fetch one public key over the LAN and install it, so nobody types a
+  # 100-character key string on a trackpad keyboard. The URL is short by
+  # construction (the other machine serves its .pub); the key itself never
+  # passes through a human.
+  local url=${1:-}
+  [[ -n $url ]] || die "usage: pizza ssh allow <url>" \
+    "Serve your public key on your other machine, then fetch it here." \
+    "On that machine:  python3 -m http.server 8000" \
+    "Then here:  pizza ssh allow http://<that-machine>:8000/<key>.pub"
+  local user home
+  user=$(target_user)
+  home=$(target_home "$user")
+  [[ -n $home ]] || die "could not resolve a home directory for '$user' from the passwd database"
+  local sshdir=$home/.ssh akfile=$home/.ssh/authorized_keys
+  # Who owns the home decides who owns the key file: running under sudo must
+  # not leave root-owned files in the user's .ssh (today's twenty-minute bug,
+  # same class as the ~ expansion one in the header).
+  local owner=$user
+  mkdir -p -- "$sshdir" || die "could not create $sshdir"
+  chmod 700 -- "$sshdir" || die "could not chmod $sshdir"
+  local tmp
+  tmp=$(mktemp "$sshdir/.allow.XXXXXX") || die "could not stage a download in $sshdir"
+  if ! curl -fsSL --max-time 30 --proto http,https "$url" -o "$tmp"; then
+    rm -f -- "$tmp"
+    die "could not fetch a key from $url" \
+      "Is the server running on the other machine, and is this Deck on the same network?"
+  fi
+  # A public key is one line starting with a known type. Anything else is a
+  # proxy error page, an HTML directory listing, or a typo -- and appending
+  # it would silently break nothing while installing nothing.
+  local fetched
+  fetched=$(grep -E '^(ssh-(ed25519|rsa|ecdsa|dss)|ecdsa-sha2-nistp[0-9]+|sk-ssh-ed25519)[[:space:]]+[A-Za-z0-9+/=]+' -o "$tmp" | head -1)
+  if [[ -z $fetched ]]; then
+    rm -f -- "$tmp"
+    die "fetched $url but found no public key in it" \
+      "Point pizza ssh allow at the .pub FILE, not at a directory listing."
+  fi
+  touch -- "$akfile" || { rm -f -- "$tmp"; die "could not write $akfile"; }
+  chmod 600 -- "$akfile" || { rm -f -- "$tmp"; die "could not chmod $akfile"; }
+  if grep -Fxq -- "$fetched" "$akfile"; then
+    rm -f -- "$tmp"
+  else
+    printf '%s\n' "$fetched" >>"$akfile" || { rm -f -- "$tmp"; die "could not append to $akfile"; }
+    rm -f -- "$tmp"
+  fi
+  chown -R "$owner": "$sshdir" 2>/dev/null || true
+  local count
+  count=$(authorized_key_count "$akfile")
+  say "key installed: ${count} key(s) in ${akfile}."
+  say "Connect from the other machine with:  ssh ${user}@$(detect_link >/dev/null 2>&1 && printf '%s' "$LINK_ADDR" || printf '<this device>')"
 }
 
-main() {
-  local cmd=${1:-on}
+ usage() {
+   cat <<'EOF'
+ pizza ssh — turn SSH on for support, restricted to this network only.
+ 
+   pizza ssh          turn it on: enable sshd, open the port to this subnet
+                      only, and print exactly how to connect
+  pizza ssh allow <url>
+                     fetch a public key over the LAN and install it, so
+                     nobody types a key string on this keyboard
+   pizza ssh off      turn it off: stop sshd, disable it, remove the rule
+   pizza ssh status   is it on, what address, is a key installed, is the port
+                      open — four distinct answers, never conflated
+ 
+ SSH is OFF by default and is never enabled by the installer. Turn it on
+ deliberately when you need to get a file off this device, and turn it off
+ again afterwards.
+EOF
+ }
+ 
+ main() {
+   local cmd=${1:-on}
+  if [[ $cmd == allow ]]; then
+    [[ $# == 2 ]] || { printf 'pizza ssh: usage: pizza ssh allow <url>\n\n' >&2; usage >&2; exit "$EX_USAGE"; }
+    cmd_allow "$2"
+    return 0
+  fi
   if (( $# > 1 )); then
-    printf 'pizza ssh: too many arguments\n\n' >&2
-    usage >&2
-    exit "$EX_USAGE"
+     printf 'pizza ssh: too many arguments\n\n' >&2
+     usage >&2
+     exit "$EX_USAGE"
   fi
   case $cmd in
     on)              cmd_on ;;
     off)             cmd_off ;;
     status)          cmd_status ;;
     -h|--help|help)  usage ;;
-    *)
-      printf 'pizza ssh: unknown subcommand %q\n\n' "$cmd" >&2
-      usage >&2
-      exit "$EX_USAGE"
-      ;;
-  esac
-}
+     *)
+       printf 'pizza ssh: unknown subcommand %q\n\n' "$cmd" >&2
+       usage >&2
+       exit "$EX_USAGE"
+       ;;
+   esac
+ }
+
 
 # `extglob` is needed for the +([0-9]) prefix check in detect_link().
 shopt -s extglob
