@@ -1178,10 +1178,11 @@ readonly FIRST_BOOT_VERIFY_TAG=deck-session-verify
 # one. deck_wifi.py's first-boot unit says why in its own comment (it takes
 # Wants=network.target deliberately): on a Deck with no network at all that
 # target is reached only by TIMEOUT, so the cost lands on exactly the machines
-# least able to afford it. On this machine it would not even do that --
-# NetworkManager-wait-online.service is MASKED here (read off the Deck
-# 2026-08-15), so network-online.target is never reached at all and an ordering
-# on it would either hang or be silently meaningless.
+# least able to afford it. The image enables NetworkManager-wait-online.service
+# via /etc/systemd/system/network-online.target.wants/ (fresh-4.json manifest),
+# and stage-mask-wait-online (below) masks it back out on every install --
+# re-verified masked on the Deck 2026-09-17. An ordering on the target would
+# either hang or be silently meaningless.
 #
 # What is used instead is `nm-online`, which takes its own bound as an
 # argument, run from a wrapper that ALWAYS exits 0. Both halves matter: the
@@ -1190,22 +1191,24 @@ readonly FIRST_BOOT_VERIFY_TAG=deck-session-verify
 readonly STEAM_LAUNCHER_UNIT=steam-launcher.service
 readonly STEAM_WAIT_ONLINE_BIN=/usr/local/lib/deck-session/steam-wait-online
 readonly STEAM_WAIT_DROPIN="/etc/systemd/user/${STEAM_LAUNCHER_UNIT}.d/50-deck-wait-online.conf"
-# Seconds. Chosen against the measurement above rather than picked: the retry
-# that worked was ONE second after the failure, so almost any bound closes the
-# race, and the number's real job is to be a ceiling on a Deck that will never
-# come online. 20 s is well under the ~120 s Steam then spends updating, so on a
-# connected Deck it costs nothing. ⚠️ It is NOT what a networkless Deck pays --
-# that is `-x`'s job, not this number's, and the difference matters because this
-# wait runs at EVERY Gaming Mode start and not only the first. Read the note
-# above render_steam_wait_online.
+# Seconds. Chosen against the 2026-08-15 measurement (the retry that worked was
+# ONE second after the failure) and re-measured 2026-09-17: on a healthy boot
+# (81bc61eb) the wait confirmed connectivity after 3 s inside this 20 s ceiling,
+# with nm-online's own `-x` escape hatch (verified present on the target's
+# NetworkManager: `nm-online -x -t 1` -> rc 0) returning at once on a Deck with
+# no network at all -- so this is NOT what a networkless Deck pays. It runs at
+# EVERY Gaming Mode start, in-session, AFTER gamescope paints, never on the
+# boot/login path -- that placement is what keeps it from gating the session.
 readonly STEAM_WAIT_SECONDS=20
-# Phase 1's ceiling. Separate from the one above because it bounds a DIFFERENT
-# question -- "has NetworkManager finished its startup pass yet" -- which on this
-# hardware is already true by the time Gaming Mode starts (graphical.target at
-# 20.25 s, PROGRESS.md 5.35) and so normally costs nothing.
+# Phase 1's ceiling. "Has NetworkManager finished its startup pass yet" -- two
+# consecutive healthy boots (81bc61eb, 9146c58a) burned the FULL 5 s here (NM
+# startup incomplete at +5 s, connectivity confirmed +3 s after), so treat this
+# bound as live evidence against, not as a settled number: any retune needs a
+# fresh measurement series, not reasoning. Phase 1's job is making phase 2's
+# `-x` answer meaningful rather than premature -- read the note above
+# render_steam_wait_online.
 readonly STEAM_WAIT_STARTUP_SECONDS=5
 readonly NM_ONLINE_BIN=/usr/bin/nm-online
-
 # 🔴 THE ONE CHANNEL THAT SURVIVES THE FIRST BOOT.
 #
 # Both artefacts in this section run ONCE, during the two minutes nobody can
@@ -1737,6 +1740,32 @@ readonly AUDIO_CARD_NICK='sof-nau8821-max'
 # it a second time.
 readonly AUDIO_CARD_MATCH_KEY='device.nick'
 
+# --- Boot must never wait on the network (2026-09-17, Deck-verified) --------
+#
+# THE DEFECT THIS EXISTS FOR. Upstream's image enables
+# NetworkManager-wait-online.service via
+# /etc/systemd/system/network-online.target.wants/ (fresh-4.json manifest), so a
+# stock install orders network-online.target behind a wait that, on a Deck with
+# no Wi-Fi, is reached only by TIMEOUT -- and the cost lands on exactly the
+# machines least able to afford it. Nothing in the boot/login path may order on
+# it: Gaming Mode must paint first, Wi-Fi joins in the background.
+#
+# MEASURED on the operator's Deck 2026-09-17, both halves:
+#   * `systemctl is-enabled NetworkManager-wait-online.service` -> masked, and
+#     `systemd-networkd-wait-online.service` -> masked;
+#   * both are /etc symlinks to /dev/null dated Sep 17 06:58 (i.e. applied by
+#     hand on the test rig, owned by no stage -- the gap this stage closes);
+#   * `network-online.target.wants/` still carries the vendor's
+#     NetworkManager-wait-online.service symlink, which a mask overrides;
+#   * sddm.service, gamescope-session.target, steam-launcher.service and every
+#     unit this script ships carry NO After=/Wants=/Requires= on
+#     network-online.target (verified from the live unit graph the same day).
+# The steam-launcher wait below is an ExecStartPre= AFTER the session paints,
+# not an ordering on the target -- that distinction is the whole design.
+readonly WAIT_ONLINE_MASK_NM=NetworkManager-wait-online.service
+readonly WAIT_ONLINE_MASK_NETWORKD=systemd-networkd-wait-online.service
+readonly WAIT_ONLINE_WANTS_LINK=/etc/systemd/system/network-online.target.wants/NetworkManager-wait-online.service
+
 readonly -a INSTALL_STAGES=(
   stage-preconditions
   stage-session-select
@@ -1749,6 +1778,11 @@ readonly -a INSTALL_STAGES=(
   # drop-in on Valve's steam-launcher.service and a splash for Steam's first
   # run, neither of which is worth anything if the stubs above did not land.
   stage-steam-first-run
+  # Beside the network-racy Steam start, and for the same reason: the image
+  # enables NetworkManager-wait-online via network-online.target.wants, and a
+  # no-Wi-Fi Deck must never pay its timeout to reach a session. Masking here
+  # owns what the Deck-verified 2026-09-17 state left as hand-applied symlinks.
+  stage-mask-wait-online
   stage-greeter-rotation
   stage-sddm-resilience
   stage-return-icon
@@ -1858,6 +1892,11 @@ readonly -a BAKE_STAGES=(
   stage-timezone-helper
   stage-priv-write-helper
   stage-steam-first-run
+  # Beside the Steam start it protects, in both lists for the same reason:
+  # every installed Deck must carry this or it pays the wait's timeout on the
+  # boots that can least afford it. A mask is inert on a machine with no such
+  # service file, so this is safe on the installer's non-Deck hardware too.
+  stage-mask-wait-online
   stage-greeter-rotation
   stage-sddm-resilience
   stage-return-icon
@@ -3872,10 +3911,11 @@ EOF
 #      is not connecting, so it returns at once instead of burning 20 s at every
 #      Gaming Mode start. A Deck that IS connecting gets waited for, which is the
 #      one-second race PROGRESS.md 5.35 measured.
-#
 # ⚠️ `-x` is checked at runtime rather than assumed: if this nm-online does not
-# have it, phase 2 says so and Steam starts anyway. Unverified on the target's
-# NetworkManager -- see the report for the command that settles it.
+# have it, phase 2 says so and Steam starts anyway. The Deck-verified shape is
+# presence -- `nm-online -x -t 1` -> rc 0 on the target's NetworkManager
+# 2026-09-17 -- but a future NetworkManager could still drop the flag, so the
+# runtime check stays. See the failure report for the command that settles it.
 render_steam_wait_online() {
   cat <<EOF
 #!/usr/bin/env bash
@@ -3889,8 +3929,9 @@ ${INSTALL_MARKER}
 # lasting damage, and it is avoidable by starting one second later.
 #
 # WHY NOT network-online.target: on a Deck with no network that target is
-# reached only by timeout, and here NetworkManager-wait-online.service is masked
-# so it is never reached at all. See the constants block in ${PROG}.sh.
+# reached only by timeout, and NetworkManager-wait-online.service is masked by
+# stage-mask-wait-online (re-verified on the Deck 2026-09-17), so it is never
+# reached at all. See the constants block in ${PROG}.sh.
 set -uo pipefail
 
 # Two destinations, on purpose. The journal is the convenient one; the file is
@@ -4300,6 +4341,87 @@ EOF
   log "      ~/${SPLASH_MARKER_REL}; remove that file to see it again."
   log "      What it did lands in ~/${FIRST_BOOT_LOG_REL}, which"
   log "      survives the boot the journal did not."
+}
+
+# ---------------------------------------------------------------------------
+# stage-mask-wait-online -- the boot must never wait on the network
+# ---------------------------------------------------------------------------
+#
+# Read the "Boot must never wait on the network" constants block above first.
+# Upstream's image enables NetworkManager-wait-online.service through
+# ${WAIT_ONLINE_WANTS_LINK} (fresh-4.json manifest), so a stock install waits
+# on network-online.target -- by TIMEOUT on a Deck with no Wi-Fi, on exactly
+# the boots that can least afford it. Masking both wait-online units is what
+# keeps network-online.target out of the boot/login path: with nothing pulling
+# the target, nothing in that path can be ordered on it. Gaming Mode paints
+# first; Wi-Fi joins in the background.
+#
+# 🔴 A MASK, NOT A DISABLE, and the distinction is load-bearing in both
+# directions: `disable` only removes the wants symlink, leaving the unit
+# startable by anything that Wants= it -- including the vendor's own symlink,
+# which is still on disk -- while a mask (`/etc/... -> /dev/null`) refuses
+# every start. And it must be OUR mask, shipped from src/ like every other
+# artefact: the operator's Deck carried exactly these two symlinks, applied by
+# hand 2026-09-17 and owned by no stage, which is a P32-shaped gap -- known
+# good state reachable by no code path.
+#
+# What it does NOT do, deliberately: it touches no After=/Wants=/Requires=
+# lines anywhere, ours or upstream's -- the Deck-verified 2026-09-17 unit graph
+# has none in the boot/login path -- and it does not guard "the Steam wait",
+# which is an ExecStartPre= AFTER the session paints, not an ordering on the
+# target. A future unit that introduces such an ordering is a code change to be
+# caught by the no-network-wait suite pins, not by this mask.
+stage_mask_wait_online() {
+  # Masking is the one `systemctl` verb whose shape IS the artefact: the
+  # enablement symlink a mask replaces is itself a symlink, so there is no
+  # assert_ours_or_absent-able file content to guard here -- the read-back
+  # (is-enabled == masked on a Deck, /dev/null symlinks re-read in a chroot)
+  # is the whole proof.
+  local unit
+  log "overriding ${WAIT_ONLINE_WANTS_LINK} -- the image's enablement symlink -- with masks, so no boot waits on network-online.target"
+  if in_chroot; then
+    # No manager to ask: arch-chroot's systemctl talks to the INSTALLER's
+    # manager, not the target's -- `mask` here would mask the installer's own
+    # units, and `is-enabled` would answer for the wrong machine. So the mask
+    # is written the way `mask` writes it -- /etc/systemd/system/<unit> ->
+    # /dev/null, which IS what mask writes -- and read back the same way. Both
+    # units, not just the first: a loop that dies halfway leaves half the wait.
+    $SUDO install -d -m 0755 -o root -g root /etc/systemd/system ||
+      fail "could not create /etc/systemd/system"
+    for unit in "${WAIT_ONLINE_MASK_NM}" "${WAIT_ONLINE_MASK_NETWORKD}"; do
+      $SUDO ln -sf /dev/null "/etc/systemd/system/${unit}" ||
+        fail "could not mask ${unit} -- the symlink is what the next boot reads"
+      [[ -L /etc/systemd/system/${unit} ]] ||
+        fail "wrote /etc/systemd/system/${unit} but it is not a symlink on re-read, so ${unit} is not masked and nothing would say so"
+    done
+    log "verified (file content): /etc/systemd/system/${WAIT_ONLINE_MASK_NM} and /etc/systemd/system/${WAIT_ONLINE_MASK_NETWORKD} both resolve to /dev/null"
+    defer "whether systemd reports both wait-online units as masked cannot be checked at install time -- 'systemctl is-enabled' needs the target's manager, which has never booted. Both masks ARE installed as /dev/null symlinks and were read back. Confirm on the installed machine with: systemctl is-enabled ${WAIT_ONLINE_MASK_NM} ${WAIT_ONLINE_MASK_NETWORKD}"
+    log "stage-mask-wait-online: ok"
+    return 0
+  fi
+
+  for unit in "${WAIT_ONLINE_MASK_NM}" "${WAIT_ONLINE_MASK_NETWORKD}"; do
+    log "masking ${unit} so no boot waits on network-online.target"
+    $SUDO systemctl mask "$unit" ||
+      fail "could not mask ${unit}. Without the mask a Deck with no Wi-Fi pays network-online.target's timeout before it reaches a session."
+  done
+
+  $SUDO systemctl daemon-reload ||
+    fail "systemctl daemon-reload failed; the masks are on disk but systemd has not read them"
+
+  # Ask the manager what it RESOLVED, not what was written -- the sddm-resilience
+  # lesson: a unit file that looks right and did not apply is the failure mode.
+  # NOTE `is-enabled` exits non-zero for anything but 'enabled' (masked -> 1),
+  # so the state is captured WITHOUT `|| fail`: failing on the exit code would
+  # fail on the very answer being asserted.
+  local state
+  for unit in "${WAIT_ONLINE_MASK_NM}" "${WAIT_ONLINE_MASK_NETWORKD}"; do
+    state=$($SUDO systemctl is-enabled "$unit" 2>&1) || true
+    [[ $state == masked ]] ||
+      fail "'systemctl is-enabled ${unit}' reports '${state}', not 'masked'. The mask did not take -- a no-Wi-Fi Deck would still wait on network-online.target."
+  done
+  log "verified: systemd reports both wait-online units as masked, so nothing in the boot/login path can order on network-online.target"
+  log "stage-mask-wait-online: ok"
 }
 
 # ---------------------------------------------------------------------------
@@ -9079,6 +9201,16 @@ ENVIRONMENT
                                     does not reach a console):
                                       sudo touch ${BOOT_DEFAULT_OVERRIDE}
                                       sudo systemctl disable ${BOOT_DEFAULT_UNIT_NAME}
+  ${PROG}.sh stage-mask-wait-online
+                                    mask NetworkManager-wait-online.service and
+                                    systemd-networkd-wait-online.service, so no
+                                    boot waits on network-online.target -- by
+                                    timeout on a Deck with no Wi-Fi, on exactly
+                                    the boots that can least afford it. Gaming
+                                    Mode paints first; Wi-Fi joins in the
+                                    background. The Steam start's bounded wait
+                                    is an ExecStartPre= after the session
+                                    paints, not an ordering on the target.
   ${PROG}.sh stage-power-button     make ONE SHORT PRESS of the power button
                                     suspend the Deck, in both modes. Writes two
                                     files and reloads nothing -- it takes effect

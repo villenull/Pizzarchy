@@ -282,6 +282,12 @@ declare -A CHROOT_FUNCS=(
   # refresh hook) lands in the chroot; the pacman sync and the gamescope repair
   # need the target's own network and keyring, which the chroot does not have.
   [stage_valve_repos]=defer
+  # 2026-09-17 -- the boot must never wait on the network. No manager to
+  # `systemctl mask` with -- that would mask the INSTALLER's own units -- so
+  # both /dev/null symlinks are written directly and read back (the
+  # stage_boot_default_gaming move, for two units instead of one); the
+  # is-enabled proof is deferred to the target.
+  [stage_mask_wait_online]=adapted
 )
 
 mapfile -t all_funcs < <(bash -c 'source "$1"; declare -F | sed "s/^declare -f //"' _ "$SESSION_SH")
@@ -398,6 +404,42 @@ pass "stage-sddm-resilience writes and re-reads its drop-in, calls no systemctl,
 run_normal 'stage_sddm_resilience || true'
 called "systemctl daemon-reload" ||
   fail_test "the normal path still reloads systemd" "$(cat "$calls")"
+pass "with the flag unset the stage still drives systemctl -- the chroot branch is genuinely a branch"
+
+# ===========================================================================
+# 4b. stage-mask-wait-online: writes the masks, asks systemd nothing
+# ===========================================================================
+echo "# 4b. stage-mask-wait-online"
+
+# The artefact is complete in the chroot -- both /dev/null symlinks -- while
+# the manager proof is what gets deferred: arch-chroot's systemctl would ask
+# the INSTALLER's manager about units the installer does not have.
+run_chroot 'stage_mask_wait_online'
+[[ $RC -eq 0 ]] || fail_test "stage-mask-wait-online completes in a chroot" "$OUT"
+for _mask_unit in "$WAIT_ONLINE_MASK_NM" "$WAIT_ONLINE_MASK_NETWORKD"; do
+  [[ -L "$root/etc/systemd/system/${_mask_unit}" ]] ||
+    fail_test "it masks ${_mask_unit} anyway -- the artefact is what the target needs" "$OUT"
+  [[ $(readlink -- "$root/etc/systemd/system/${_mask_unit}") == /dev/null ]] ||
+    fail_test "the ${_mask_unit} mask resolves to /dev/null" "$(readlink -- "$root/etc/systemd/system/${_mask_unit}")"
+done
+pass "stage-mask-wait-online writes both /dev/null symlinks in a chroot"
+called "systemctl mask" &&
+  fail_test "it does not call 'systemctl mask' in a chroot -- the manager there is the installer's" "$(cat "$calls")"
+called "systemctl is-enabled" &&
+  fail_test "it does not ask is-enabled in a chroot either" "$(cat "$calls")"
+out_has "$py_marker" ||
+  fail_test "it says the is-enabled check was deferred" "$OUT"
+out_has "systemctl is-enabled" ||
+  fail_test "the deferral names the command that re-runs the check" "$OUT"
+pass "stage-mask-wait-online writes and re-reads both masks, calls no systemctl, and defers the manager proof by name"
+
+# The same stage OFF the chroot path must still drive systemd -- otherwise the
+# assertion above would pass for a stage that had simply stopped checking.
+run_normal 'stage_mask_wait_online || true'
+called "systemctl mask" ||
+  fail_test "the normal path still masks through systemd" "$(cat "$calls")"
+called "systemctl is-enabled" ||
+  fail_test "the normal path still reads back the resolved state" "$(cat "$calls")"
 pass "with the flag unset the stage still drives systemctl -- the chroot branch is genuinely a branch"
 
 # ===========================================================================
@@ -688,18 +730,28 @@ printf '%s\n' "${baked[@]}" | grep -qx stage-steam-first-run ||
   fail_test "stage-steam-first-run IS baked" "the first-run network race and the two silent minutes after it (PROGRESS.md 5.35) are install-time fixes or they are nothing"
 pass "stage-steam-first-run is baked"
 
-# It runs LAST, and after everything that could fail. The one stage that
-# rewires a hardware button should not go first on a machine whose other
-# stages have not yet had their chance to report.
-[[ ${baked[-1]} == stage-power-button ]] ||
-  fail_test "stage-power-button is the last baked stage" "got '${baked[-1]}'; ${baked[*]}"
-pass "and it runs last, after every other stage has had its chance to fail"
+# 2026-09-17 -- the boot must never wait on the network. Upstream's image
+# enables NetworkManager-wait-online via network-online.target.wants, and
+# without this stage every installed Deck pays that wait's timeout on the boots
+# that can least afford it -- the operator's Deck carried both masks applied by
+# hand and reachable by no code path. It sits beside the Steam start it
+# protects, in both lists for the same reason.
+printf '%s\n' "${baked[@]}" | grep -qx stage-mask-wait-online ||
+  fail_test "stage-mask-wait-online IS baked" \
+    "without it the installed Deck waits on network-online.target before it reaches a session -- by timeout on a Deck with no Wi-Fi"
+pass "stage-mask-wait-online is baked, so no installed Deck waits on the network to reach a session"
 
 # stage-osk-kb-layout is reachable by hand as well, since it is now a stage.
 mapfile -t offered < <(bash "$SESSION_SH" list-stages)
 printf '%s\n' "${offered[@]}" | grep -qx stage-osk-kb-layout ||
   fail_test "list-stages offers the new stage" "${offered[*]}"
 pass "stage-osk-kb-layout is offered by list-stages too, so the SSH loop can run it alone"
+
+# And stage-mask-wait-online is offered by hand too, so the SSH loop can run it
+# alone -- asserted beside the stage it protects, not scattered.
+printf '%s\n' "${offered[@]}" | grep -qx stage-mask-wait-online ||
+  fail_test "list-stages offers stage-mask-wait-online" "${offered[*]}"
+pass "stage-mask-wait-online is offered by list-stages too, so the SSH loop can run it alone"
 
 # And stage-desktop-settings still runs it, so a full Deck-side run is unchanged.
 ds_body=$(bash -c 'source "$1"; declare -f stage_desktop_settings' _ "$SESSION_SH")

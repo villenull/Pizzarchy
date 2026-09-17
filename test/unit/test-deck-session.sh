@@ -1960,6 +1960,75 @@ grep -qx 'WantedBy=graphical.target' "$alive_unit" ||
     "the same target that pulls in the display manager it watches, so the pair is armed and disarmed together"
 pass "the alive unit is wanted by graphical.target, required by nothing, and delays nothing"
 
+# ---------------------------------------------------------------------------
+# 9c-ter. No unit in the boot/login chain waits on the network
+# ---------------------------------------------------------------------------
+#
+# 🔴 WHY THIS SECTION EXISTS. A Deck with no Wi-Fi must reach Gaming Mode
+# without paying network-online.target's timeout: Gaming Mode paints first and
+# Wi-Fi joins in the background. Upstream's image enables
+# NetworkManager-wait-online via network-online.target.wants (fresh-4.json
+# manifest), and the operator's Deck carried both wait-online masks applied BY
+# HAND -- reachable by no code path, the P32 gap that stage-mask-wait-online
+# closes. Every property below is invisible on a connected Deck: an ordering
+# on a target nothing pulls still parses, starts, logs success and changes
+# nothing -- until the Wi-Fi is off and the boot pays for it.
+#
+# Deck-verified 2026-09-17, both halves: wait-online masked (both units), and
+# sddm.service, gamescope-session.target, steam-launcher.service plus every
+# unit this script ships carry NO After=/Wants=/Requires= on
+# network-online.target -- read off the live unit graph, not reasoned.
+
+# --- the shipped units name no network ordering ------------------------------
+# Rendered, not installed: the directives below are the whole unit as systemd
+# would parse its ordering half, and a directive added in src/ lands here.
+for _net_unit_render in "render_boot_default_unit" "render_boot_alive_unit"; do
+  _net_unit_file="$work/net-$RANDOM.service"
+  "$_net_unit_render" >"$_net_unit_file"
+  ! grep -v '^[[:space:]]*#' "$_net_unit_file" | grep -qE 'network-online\.target|network\.target' ||
+    fail_test "${_net_unit_render} names no network target in a directive" \
+      "an ordering on network-online.target is a timeout on a Deck with no network -- and here the target is never reached at all, because the wait-online units are masked. File:"$'\n'"$(cat "$_net_unit_file")"
+done
+pass "the boot and alive units order on the display manager and local-fs only -- no network target in any directive"
+
+# --- the wait-online masks are constants, not string literals ------------------
+# Two independently-typed copies of a unit name is how a mask for the wrong
+# name gets shipped: masked, verified, and masking nothing.
+[[ $WAIT_ONLINE_MASK_NM == NetworkManager-wait-online.service ]] ||
+  fail_test "WAIT_ONLINE_MASK_NM names the unit the image enables" "got '${WAIT_ONLINE_MASK_NM}'"
+[[ $WAIT_ONLINE_MASK_NETWORKD == systemd-networkd-wait-online.service ]] ||
+  fail_test "WAIT_ONLINE_MASK_NETWORKD names the unit that shadows it" "got '${WAIT_ONLINE_MASK_NETWORKD}'"
+[[ $WAIT_ONLINE_WANTS_LINK == /etc/systemd/system/network-online.target.wants/NetworkManager-wait-online.service ]] ||
+  fail_test "WAIT_ONLINE_WANTS_LINK names the vendor symlink the mask overrides" "got '${WAIT_ONLINE_WANTS_LINK}'"
+pass "the mask constants name both wait-online units and the vendor wants-symlink the mask overrides"
+
+# --- the stage masks, it does not disable ---------------------------------------
+# A `disable` removes the wants symlink and leaves the unit startable by
+# anything that Wants= it -- including the vendor's own symlink. Asserted on
+# the stage body, because that is the only place the verb exists.
+_mask_body=$(declare -f stage_mask_wait_online)
+grep -q 'systemctl mask' <<<"$_mask_body" ||
+  fail_test "stage_mask_wait_online masks rather than disables" \
+    "no 'systemctl mask' in the stage body -- a disable leaves the wait startable"
+! grep -qE 'systemctl (disable|stop) +(.*)?(wait-online|WAIT_ONLINE)' <<<"$_mask_body" ||
+  fail_test "the stage never disables a wait-online unit" \
+    "a disable alongside the mask is the half-fix wearing a belt: the disable is what gets copied next time"
+pass "stage-mask-wait-online masks both wait-online units -- disable would leave the wait startable"
+
+# --- and the Steam wait stays an ExecStartPre=, never an ordering ---------------
+# The bounded connectivity wait is AFTER the session paints (in-session,
+# exit-0, nm-online's own -x bound) -- promoting it to an After=/Wants= on
+# network-online.target would put the session behind the very timeout this
+# section exists to keep out of the boot path.
+_wait_dropin_src=$(sed -n '/^stage_steam_first_run()/,/^}/p' "$REPO_ROOT/src/deck-session.sh")
+! grep -qE '^(After|Wants|Requires)=.*network' <<<"$_wait_dropin_src" ||
+  fail_test "stage-steam-first-run adds no network ordering to steam-launcher" \
+    "the wait is an ExecStartPre= after the session paints; an ordering would gate the session on the network it is racing"
+grep -qF 'ExecStartPre=${STEAM_WAIT_ONLINE_BIN}' <<<"$_wait_dropin_src" ||
+  fail_test "the Steam wait is still an ExecStartPre=" \
+    "the drop-in must carry exactly 'ExecStartPre=${STEAM_WAIT_ONLINE_BIN}' -- the exit-0 bounded wait, not an ordering"
+pass "the Steam connectivity wait stays an ExecStartPre= after the session paints -- never an ordering on the boot path"
+
 grep -qx "ConditionPathExists=${BOOT_DEFAULT_BIN}" "$alive_unit" ||
   fail_test "the alive unit is conditioned on its helper existing" \
     "a unit whose ExecStart is missing fails with 203/EXEC at every boot, which is noise that would train someone to ignore ${BOOT_ALIVE_UNIT_NAME}"

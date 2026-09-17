@@ -420,6 +420,12 @@ if [[ $verb == show ]]; then
   var="FAKE_SYSTEMCTL_SHOW_${prop}"
   printf '%s\n' "${!var-}"
 fi
+# `systemctl is-enabled <unit>` answers "masked" unless a case overrides it via
+# FAKE_SYSTEMCTL_SHOW_masked -- stage_mask_wait_online reads the resolved state
+# back from the manager, and the stub must be able to report both halves.
+if [[ $verb == is-enabled ]]; then
+  printf '%s\n' "${FAKE_SYSTEMCTL_SHOW_masked-masked}"
+fi
 exit 0
 STUB_SYSTEMCTL
 
@@ -4721,6 +4727,65 @@ grep -qF "${AUDIO_CARD_MATCH_KEY} = \"${AUDIO_CARD_NICK}\"" <<<"$audio_drift_ren
   fail_test "the drifted copy renders a rule the shipped read-back would reject" \
     "it still contains the shipped match key, so this case proves nothing"
 pass "a drifted match key renders a rule that no longer carries ${AUDIO_CARD_MATCH_KEY}, which is exactly what the stage's read-back refuses"
+
+# ===========================================================================
+# 15b. stage-mask-wait-online -- the boot never waits on the network
+# ===========================================================================
+#
+# 🔴 WHY THIS SECTION EXISTS. Upstream's image enables
+# NetworkManager-wait-online.service via network-online.target.wants
+# (fresh-4.json manifest), and the operator's Deck carried exactly these two
+# masks applied BY HAND -- reachable by no code path, the P32 gap again. A Deck
+# with no Wi-Fi must reach Gaming Mode without paying network-online.target's
+# timeout; Gaming Mode paints first and Wi-Fi joins in the background.
+#
+# What this proves, and why each case would otherwise be silent:
+#   * both units masked, not disabled -- disable leaves the unit startable by
+#     anything that Wants= it, including the vendor's own wants symlink;
+#   * the resolved state read back from the manager, not just the write --
+#     the sddm-resilience lesson;
+#   * the chroot branch writes /dev/null symlinks AND reads them back, and
+#     names its deferral -- arch-chroot's manager is the installer's;
+#   * the stage is in BOTH lists, or installed Decks still pay the timeout.
+reset_root
+run_stage_body stage_mask_wait_online
+ok_rc 0 "stage-mask-wait-online completes against a fake root"
+ok_called "systemctl mask ${WAIT_ONLINE_MASK_NM}" \
+  "it masks ${WAIT_ONLINE_MASK_NM} -- a disable would leave the unit startable by the vendor's own wants symlink"
+ok_called "systemctl mask ${WAIT_ONLINE_MASK_NETWORKD}" \
+  "and it masks ${WAIT_ONLINE_MASK_NETWORKD} too -- one of the two is half the wait"
+ok_before "systemctl mask ${WAIT_ONLINE_MASK_NM}" "daemon-reload" \
+  "the reload happens after the masks, so systemd reads what was just written"
+ok_called "systemctl is-enabled ${WAIT_ONLINE_MASK_NM}" \
+  "and it reads back the RESOLVED state from the manager, not just the write -- the sddm-resilience lesson"
+ok_called "systemctl is-enabled ${WAIT_ONLINE_MASK_NETWORKD}" \
+  "for both units, not just the first -- a loop dying halfway leaves half the wait"
+ok_in_out "as masked" \
+  "and reports the resolved state rather than only that it passed"
+# --- the negative: a mask that did not take fails loudly -------------------
+# FAKE_SYSTEMCTL_SHOW_masked="" makes the stub's is-enabled arm answer empty,
+# which is what an unapplied mask looks like from the manager's side.
+export FAKE_SYSTEMCTL_SHOW_masked=""
+reset_root
+run_stage_body stage_mask_wait_online
+ok_failed "an is-enabled answer that is not 'masked' fails the stage"
+ok_in_err "not 'masked'" \
+  "the failure says the mask did not take -- a no-Wi-Fi Deck would still wait on network-online.target"
+unset FAKE_SYSTEMCTL_SHOW_masked
+
+# --- the lists: every installed Deck must carry this ------------------------
+printf '%s\n' "${INSTALL_STAGES[@]}" | grep -qx 'stage-mask-wait-online' ||
+  fail_test "stage-mask-wait-online is in INSTALL_STAGES" "a bare run would skip it"
+printf '%s\n' "${BAKE_STAGES[@]}" | grep -qx 'stage-mask-wait-online' ||
+  fail_test "stage-mask-wait-online is in BAKE_STAGES" \
+    "the ISO's installer would not run it, so every installed Deck would still wait on the network to reach a session"
+pass "the stage is in BOTH stage lists -- a bare run and the ISO installer take the same path"
+
+# --- the dispatch name resolves ----------------------------------------------
+declare -F stage_mask_wait_online >/dev/null ||
+  fail_test "the stage function exists under the name run_stage derives from the list entry" \
+    "run_stage maps 'stage-mask-wait-online' to stage_mask_wait_online, which does not exist"
+pass "stage-mask-wait-online resolves to stage_mask_wait_online(), the name run_stage derives"
 
 # ===========================================================================
 # 16. The harness's own safety invariant
