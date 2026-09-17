@@ -58,7 +58,6 @@
 #
 # ⚠️ `steamdeck-dsp` used to be the second entry here. It moved to
 # deck-mirror.packages + deck-install.packages on 2026-08-15 (operator
-# decision): it is firmware, the machine needs it to have working audio at all,
-# and it now rides in the offline mirror the way linux-firmware-neptune always
-# has. Do not move `steam` after it.
+# decision): it is firmware, the machine needs it to have working audio at
+# all, and it now rides in the offline mirror. Do not move `steam` after it.
 steam

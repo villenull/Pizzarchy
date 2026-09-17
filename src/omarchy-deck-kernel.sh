@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # omarchy-deck-kernel.sh
 #
-# Self-contained Neptune kernel + Limine UKI setup for Steam Deck, for a
-# system installed from Omarchy Quattro (archinstall + Limine + UKI).
+# Self-contained linux-omarchy kernel + Limine UKI setup for Steam Deck, for
+# a system installed from Omarchy Quattro (archinstall + Limine + UKI).
 #
 # Fixes the upstream bugs in PLAN.md §8:
 #   8.1 - No dependency on a separate common-script.sh fetched via a
@@ -32,15 +32,16 @@
 # Valve actually publishes today turned up four premises that no longer
 # hold. All four would have caused a hard failure or a wrong boot entry:
 #
-#   1. Valve's kernel packages no longer ship /boot/vmlinuz-<pkg>, and no
-#      longer ship an /etc/mkinitcpio.d/<pkg>.preset at all. Verified by
-#      unpacking linux-neptune-611-6.11.11.valve29-1 and
-#      linux-neptune-618-6.18.39.valve1-1: each contains exactly
+#   1. Kernel packages ship no /boot/vmlinuz-<pkg> and no
+#      /etc/mkinitcpio.d/<pkg>.preset at all. Verified by unpacking the
+#      retired linux-neptune-611-6.11.11.valve29-1 and
+#      linux-neptune-618-6.18.39.valve1-1: each contained exactly
 #      usr/lib/modules/<kver>/{pkgbase,vmlinuz} and nothing under /boot or
 #      /etc. The draft's existence checks for both files, and its entire
 #      "patch default_uki in the preset" stage, were therefore dead ends.
 #      PLAN.md §8.3's preset bug is real but is now moot on current
-#      packages -- there is no preset to be wrong.
+#      packages -- there is no preset to be wrong. (Same shape holds for
+#      linux-omarchy: the UKI path is discovered, never constructed.)
 #
 #   2. Omarchy Quattro does not use mkinitcpio presets to build UKIs. It
 #      uses limine-mkinitcpio-hook, whose pacman hook enumerates
@@ -50,9 +51,9 @@
 #      CUSTOM_UKI_NAME from /etc/default/limine when set ("omarchy" on
 #      Quattro) and the machine-id otherwise -- so the path is discovered,
 #      never constructed (see find_uki_for).
-#      Installing the Neptune kernel is therefore *most* of the job; this
-#      script's real work is making sure that machinery actually ran and
-#      producing a loud failure when it did not.
+#      Verifying the linux-omarchy kernel's UKI is therefore *most* of the
+#      job; this script's real work is making sure that machinery actually
+#      ran and producing a loud failure when it did not.
 #
 #   3. The stock Limine config on a real Omarchy Quattro install has no
 #      `/Arch Linux (linux)` entry. It is a nested tree written by
@@ -65,10 +66,9 @@
 #      (/etc/default/limine via limine-entry-tool) and entries are created
 #      by limine-entry-tool itself.
 #
-#   4. `linux-neptune-611` is four series behind. Valve currently ships
-#      series 60, 61, 65, 68, 611, 615, 616, 618 and 72. See the
-#      NEPTUNE_SERIES constant below for why this script still pins 611
-#      and how to move the pin.
+#   4. (Retired 2026-09-17: this item pinned the Valve Neptune series. The
+#      Neptune stack is retired; the kernel is now upstream's generic
+#      linux-omarchy, tracked by KERNEL_PKG below.)
 #
 # Deliberate scope decision: this script supports the limine-mkinitcpio-hook
 # UKI mechanism only. A plain-archinstall Limine system without that hook
@@ -120,12 +120,10 @@
 #     else's stage": the alternative is a stage that guesses where the ESP is,
 #     which is PLAN.md §8.3 all over again.
 #
-#   * Prerequisites that a probe cannot satisfy -- the Valve repos for
-#     stage-kernel, an installed kernel for stage-uki -- are detected and
-#     reported as missing prerequisites naming the stage to run, rather than
-#     surfacing as the confusing downstream failure they used to
-#     ("the Valve repos returned no linux-neptune-* packages at all", which
-#     reads like a mirror-layout change).
+#   * Prerequisites that a probe cannot satisfy -- an installed kernel for
+#     stage-uki -- are detected and reported as missing prerequisites naming
+#     the stage to run, rather than surfacing as a confusing downstream
+#     failure (a missing kernel used to read like a mirror-layout change).
 #
 #   * Interactivity is a mode, not a hope. See the NONINTERACTIVE block
 #     below: a run whose stdin is not a terminal cannot prompt, and the one
@@ -183,9 +181,7 @@ usage_error() {
 #     blocking on an inherited pipe or socket forever.
 #   * sudo is only ever attempted with -n; a password requirement becomes a
 #     fast, specific failure instead of a hang (see stage_preconditions).
-# Every pacman invocation is already --noconfirm, and the conflict question
-# --ask=4 answers is pre-answered by number rather than by suppressing all
-# questions -- see stage_kernel.
+# Every pacman invocation is already --noconfirm.
 #
 # Override either way with OMARCHY_DECK_NONINTERACTIVE=1/0 or
 # --non-interactive/--interactive.
@@ -204,52 +200,21 @@ esac
 export SYSTEMD_PAGER=
 
 # ---------------------------------------------------------------------------
-# The kernel version constant. This is the ONLY place a Neptune version
-# appears in this script -- package name, UKI filename and Limine entry name
-# are all derived from it, and every regeneration/prune path below is keyed
-# on the `linux-neptune-*` glob rather than on this value.
-#
-# WHY PINNED RATHER THAN "TRACK LATEST" (PLAN.md §11, task step 2):
-#
-#   * The series suffix is not orderable. Valve's published series are
-#     60, 61, 65, 68, 611, 615, 616, 618, 72. Sorted as integers, 618 > 72;
-#     sorted as text, "68" > "618". Neither is right -- 72 (7.2.x) is the
-#     newest. "Latest" cannot be computed from the package name at all, so
-#     any auto-latest scheme is guessing.
-#   * "Latest" is currently a release candidate. linux-neptune-72 is
-#     7.2.0.rc3.valve.beta1. Auto-tracking would silently move users onto a
-#     beta kernel during a routine `pacman -Syu`.
-#   * The whole point of this project is that a wrong boot-chain guess is
-#     expensive to discover. A pin that needs a one-line human bump is the
-#     cheap failure; an auto-bump onto an unvalidated kernel is not.
-#
-# What *is* dynamic: the script reads the repos to confirm the pinned series
-# actually exists, and tells you exactly which series are available if it
-# does not (see stage_kernel). It never silently falls back to another one.
-#
-# TO MOVE THE PIN: change NEPTUNE_SERIES_DEFAULT, test on hardware, and note
-# the validated series in PROGRESS.md. Override for a one-off test with
-# OMARCHY_DECK_NEPTUNE_SERIES=618 ./omarchy-deck-kernel.sh
-#
-# 611 is the series validated live on the operator's OLED Deck. Nothing
-# newer has been validated on hardware, and per CLAUDE.md untested hardware
-# claims do not ship.
+# The kernel. Upstream's generic kernel, adopted by operator decision
+# 2026-09-17 (v4.0.4 rebase); the Valve Neptune series pin is retired.
+# Package name, UKI filename and Limine entry name are all derived from it.
 # ---------------------------------------------------------------------------
-readonly NEPTUNE_SERIES_DEFAULT=611
+readonly KERNEL_PKG="linux-omarchy"
 
-NEPTUNE_SERIES=${OMARCHY_DECK_NEPTUNE_SERIES:-$NEPTUNE_SERIES_DEFAULT}
-[[ $NEPTUNE_SERIES =~ ^[0-9]+$ ]] ||
-  usage_error "OMARCHY_DECK_NEPTUNE_SERIES must be digits only (e.g. 611, 618, 72), got: '$NEPTUNE_SERIES'"
-readonly NEPTUNE_SERIES
-readonly KERNEL_PKG="linux-neptune-${NEPTUNE_SERIES}"
+# Globs used by the enumerate/reconcile paths: the exact pkgbase plus the
+# `linux-omarchy-*` variants (fallback entries, future suffixed builds),
+# mirroring migration 1789325478's own verification
+# (`limine-entry-tool --tree` showing the new entry).
+readonly KERNEL_PKGBASE_GLOB='linux-omarchy*'
 
-# Glob (not the pinned version) used by every enumerate/prune path, so a
-# version bump reconciles stale entries instead of stacking duplicates.
-readonly NEPTUNE_PKGBASE_GLOB='linux-neptune-*'
-
-# Valve repos. steamdeck-dsp and linux-firmware-neptune both live in
-# jupiter-staging; holo-staging is added because Omarchy's Deck packages
-# expect it to be present, not because this script pulls from it.
+# Valve repos. steamdeck-dsp lives in jupiter-staging; holo-staging is added
+# because Omarchy's Deck packages expect it to be present, not because this
+# script pulls from it.
 readonly -a VALVE_REPOS=(jupiter-staging holo-staging)
 # shellcheck disable=SC2016 # $repo/$arch are pacman's own variables and must reach pacman.conf unexpanded
 readonly VALVE_MIRROR='https://steamdeck-packages.steamos.cloud/archlinux-mirror/$repo/os/$arch'
@@ -360,9 +325,9 @@ stage_preconditions() {
 #   (vs 6.18.43), plymouth 22.02 (vs 26.134), and the entire mesa/vulkan stack.
 #
 # The test Deck runs ARCH's mesa and vulkan-radeon and Gaming Mode works, so
-# Valve's are not merely riskier, they are unnecessary. Meanwhile every package
-# THIS script installs (linux-neptune-611, its headers, linux-firmware-neptune,
-# steamdeck-dsp) exists only in Valve's repos, so order cannot affect them.
+# Valve's are not merely riskier, they are unnecessary. Meanwhile the Deck
+# packages this stack still needs from Valve (steamdeck-dsp, Valve's
+# gamescope build) exist only in Valve's repos, so order cannot affect them.
 #
 # The defect's entire practical surface is one package, and the fix is to
 # qualify it at the call site rather than to reorder anything:
@@ -405,17 +370,17 @@ EOF
   log "repos ready (${added} added this run, $(( ${#VALVE_REPOS[@]} - added )) already present)"
 }
 
-# require_valve_repos <stage-name> -- hard prerequisite check for the stages
-# that need Valve's packages to exist (TASK-T1 step 6).
+# require_valve_repos <stage-name> -- hard prerequisite check for the helpers
+# that need Valve's packages to exist.
 #
 # In a full run stage_repos has already satisfied this and the check is a
-# formality. Invoked on its own, a stage may hit a system where it has not,
+# formality. Invoked on its own, a probe may hit a system where it has not,
 # and the failure that produced further down was actively misleading: an
-# unconfigured repo makes `pacman -Sl` print nothing, which stage_kernel
-# reported as "the Valve repos returned no linux-neptune-* packages at all --
-# the mirror layout may have changed". That sends the reader to Valve's
-# mirror to debug a missing line in their own pacman.conf. Name the missing
-# prerequisite and the stage that provides it instead.
+# unconfigured repo makes `pacman -Sl` print nothing, which used to read as
+# "the Valve repos returned no packages at all -- the mirror layout may have
+# changed". That sends the reader to Valve's mirror to debug a missing line
+# in their own pacman.conf. Name the missing prerequisite and the stage that
+# provides it instead.
 require_valve_repos() {
   local caller=$1 repo
   for repo in "${VALVE_REPOS[@]}"; do
@@ -492,29 +457,28 @@ stage_esp_detect() {
 }
 
 # ---------------------------------------------------------------------------
-# Stage 3: kernel + firmware
+# Retired stages (Neptune install path, removed 2026-09-17).
 # ---------------------------------------------------------------------------
+#
+# stage_kernel (pacman install of `linux-neptune-*` + Valve firmware),
+# stage_firmware_swap (the `pacman -Rdd` of Arch's split linux-firmware so
+# Valve's linux-firmware-neptune could land), and the neptune_series_available
+# / colliding_arch_firmware probes that served them are retired with the
+# Neptune stack. The kernel now arrives via archinstall `kernels=` +
+# the runtime's own package lists; this script verifies and points at it
+# rather than installing it. Recorded so the next reader does not "restore"
+# a `-Rdd` dance pacstrap could never have run.
 
-# neptune_series_available -- every linux-neptune-<digits> package name the
-# configured repos offer, one per line. Excludes -headers, -wip, -kasan,
-# -drm-exec and similar variants.
-neptune_series_available() {
-  local repo
-  for repo in "${VALVE_REPOS[@]}"; do
-    pacman -Sl "$repo" 2>/dev/null | awk '$2 ~ /^linux-neptune-[0-9]+$/ { print $2 }'
-  done | sort -u
-}
-
-# installed_neptune_pkgbases -- pkgbase of every installed Neptune kernel,
-# read from /usr/lib/modules/*/pkgbase (the same source limine-mkinitcpio-hook
-# uses). Glob-keyed, so it sees every version, not just the pinned one.
-installed_neptune_pkgbases() {
+# installed_kernel_pkgbases -- pkgbase of every installed kernel matching
+# our glob, read from /usr/lib/modules/*/pkgbase (the same source
+# limine-mkinitcpio-hook uses).
+installed_kernel_pkgbases() {
   local f name
   for f in /usr/lib/modules/*/pkgbase; do
     [[ -f $f ]] || continue
     name=$(<"$f")
     # shellcheck disable=SC2053 # intentional glob match, not a string compare
-    if [[ $name == $NEPTUNE_PKGBASE_GLOB ]]; then printf '%s\n' "$name"; fi
+    if [[ $name == $KERNEL_PKGBASE_GLOB ]]; then printf '%s\n' "$name"; fi
   done | sort -u
 }
 
@@ -531,130 +495,6 @@ kernel_module_dir() {
   return 1
 }
 
-# colliding_arch_firmware -- installed linux-firmware* packages that Valve's
-# linux-firmware-neptune will collide with on disk.
-#
-# Arch split linux-firmware into per-vendor subpackages
-# (linux-firmware-amdgpu, -atheros, -other, ...) with the old name kept as a
-# metapackage. Valve's linux-firmware-neptune still declares
-# conflicts/replaces against only `linux-firmware` and `linux-firmware-whence`,
-# so pacman happily removes those two and then dies in the file-conflict
-# check against the ten subpackages nobody declared anything about:
-#   "linux-firmware-neptune: /usr/lib/firmware/... exists in filesystem
-#    (owned by linux-firmware-other)"
-# Found by running this script in a VM (vm-kernel-idempotency-test.sh), not
-# by reading the PKGBUILDs. This is an upstream packaging gap on Valve's side
-# and a candidate for the DRAFT-upstream-bugs report.
-#
-# Prints one package name per line; empty output means nothing collides.
-colliding_arch_firmware() {
-  pacman -Qq 2>/dev/null |
-    grep -E '^linux-firmware(-[a-z0-9-]+)?$' |
-    grep -vE 'neptune|^linux-firmware-whence$' || true
-}
-
-# stage_firmware_swap -- make room for Valve's firmware, idempotently.
-#
-# NOT done with --overwrite: overwriting would leave the Arch subpackages
-# still owning those paths, so the next `pacman -Syu` would silently restore
-# Arch's firmware over Valve's and nobody would find out until hardware
-# misbehaved. Removing the packages is the honest end state, and it is what
-# SteamOS itself ships.
-stage_firmware_swap() {
-  local -a colliding=()
-  mapfile -t colliding < <(colliding_arch_firmware)
-
-  if [[ ${#colliding[@]} -eq 0 ]]; then
-    log "firmware: no Arch linux-firmware packages left to displace"
-    return 0
-  fi
-
-  if pacman -Qq linux-firmware-neptune >/dev/null 2>&1; then
-    log "firmware: linux-firmware-neptune already installed alongside ${colliding[*]} -- leaving them alone"
-    return 0
-  fi
-
-  # Checked before anything is removed, not after: this stage's whole job is
-  # to leave the system with no firmware for the few seconds until
-  # stage_kernel installs Valve's. Discovering *then* that the repo holding
-  # the replacement was never configured would be the worst possible moment.
-  require_valve_repos "stage-firmware-swap"
-
-  log "firmware: removing Arch's split linux-firmware packages so Valve's can be installed: ${colliding[*]}"
-  # -dd because linux-firmware is a hard dependency of every installed kernel;
-  # the replacement is installed immediately below, in the same script run.
-  $SUDO pacman -Rdd --noconfirm "${colliding[@]}" ||
-    fail "could not remove Arch's linux-firmware packages (${colliding[*]}). Nothing has been changed; the system still has its original firmware."
-
-  local remaining
-  remaining=$(colliding_arch_firmware | tr '\n' ' ')
-  [[ -z ${remaining// /} ]] ||
-    fail "pacman -Rdd exited 0 but these are still installed: ${remaining}. THE SYSTEM MAY NOW HAVE PARTIAL FIRMWARE -- run 'pacman -S linux-firmware' before rebooting."
-
-  # Said out loud because this stage is individually runnable (TASK-T1 step 6)
-  # and, alone, it is the one stage that leaves the system in a worse state
-  # than it found it. In a full run stage_kernel is the very next thing to
-  # execute and closes the window; run on its own, nothing does.
-  log "firmware: this system now has NO firmware installed. 'stage-kernel' installs Valve's replacement (linux-firmware-neptune) -- do not reboot before it has run."
-}
-
-stage_kernel() {
-  require_valve_repos "stage-kernel"
-
-  local -a available
-  mapfile -t available < <(neptune_series_available)
-  [[ ${#available[@]} -gt 0 ]] ||
-    fail "the Valve repos returned no linux-neptune-* packages at all -- the mirror layout may have changed"
-
-  local found=0 pkg
-  for pkg in "${available[@]}"; do
-    if [[ $pkg == "$KERNEL_PKG" ]]; then found=1; break; fi
-  done
-  # Loud, actionable, never a silent fallback to a different kernel.
-  [[ $found -eq 1 ]] ||
-    fail "pinned kernel '${KERNEL_PKG}' is not available in the Valve repos. Available: ${available[*]}. Update NEPTUNE_SERIES_DEFAULT in this script (and validate on hardware) rather than picking one at runtime."
-
-  log "installing ${KERNEL_PKG} + firmware (pinned series ${NEPTUNE_SERIES}; ${#available[@]} series available upstream)"
-
-  # --ask=4 is ALPM_QUESTION_CONFLICT_PKG, and it is load-bearing.
-  #
-  # linux-firmware-neptune declares `replaces`/`conflicts`/`provides` against
-  # stock linux-firmware. pacman only honours `replaces` during a full -Su;
-  # under a targeted -S it surfaces as "linux-firmware-neptune and
-  # linux-firmware are in conflict. Remove linux-firmware? [y/N]", whose
-  # default is *No* -- so plain --noconfirm aborts the whole transaction with
-  # "unresolvable package conflicts". Found by running this in a VM
-  # (vm-kernel-idempotency-test.sh); it is the same shape of bug as PLAN.md
-  # §8.4's yay/yay-bin conflict.
-  #
-  # --ask=4 pre-answers only the conflict question, not every question, so a
-  # corrupted package or an unexpected provider choice still stops the run.
-  # A whole-system -Syu would also work but would drag an unrelated full
-  # upgrade into a kernel script.
-  $SUDO pacman -S --needed --noconfirm --ask=4 \
-    "${KERNEL_PKG}" \
-    "${KERNEL_PKG}-headers" \
-    linux-firmware-neptune \
-    steamdeck-dsp ||
-    fail "kernel/firmware package installation failed. If stage_firmware_swap removed Arch's linux-firmware packages just before this, the system is currently without firmware -- run 'pacman -S linux-firmware' before rebooting."
-
-  # Verify against the filesystem and the local db, not pacman's exit code
-  # (PLAN.md §8.1).
-  local moddir
-  moddir=$(kernel_module_dir "$KERNEL_PKG") ||
-    fail "pacman reported success but no /usr/lib/modules/*/pkgbase contains '${KERNEL_PKG}'. Nothing was actually installed; do not reboot."
-  [[ -f "$moddir/vmlinuz" ]] ||
-    fail "kernel modules dir ${moddir} exists but has no vmlinuz -- the package layout changed, see PLAN.md §11"
-
-  local p
-  for p in "${KERNEL_PKG}" "${KERNEL_PKG}-headers" linux-firmware-neptune steamdeck-dsp; do
-    pacman -Qq "$p" >/dev/null 2>&1 ||
-      fail "pacman exited 0 but '${p}' is not in the local package database"
-  done
-
-  log "kernel installed: ${KERNEL_PKG} (${moddir##*/})"
-}
-
 # ---------------------------------------------------------------------------
 # Stage 4: UKI + Limine entry
 #
@@ -667,11 +507,8 @@ stage_kernel() {
 # find_uki_for <pkgbase> -- the UKI limine-mkinitcpio-hook built for a kernel,
 # discovered rather than constructed.
 #
-# The filename prefix is NOT predictable: limine-mkinitcpio-install uses
-# CUSTOM_UKI_NAME from /etc/default/limine when it is set and matches
-# ^[a-z0-9]+$, and the machine-id otherwise. Omarchy Quattro sets it to
 # "omarchy", so the real files are `omarchy_linux.efi`,
-# `omarchy_linux-neptune-611.efi` -- an earlier version of this script
+# `omarchy_linux-omarchy.efi` -- an earlier version of this script
 # assumed the machine-id form and looked for a file that never existed.
 # Discovering the path keeps the "never assume a path" property that the
 # whole of PLAN.md §8.3 is about.
@@ -700,8 +537,8 @@ find_uki_for() {
 # entries boot a snapshot's copy of the same UKI, under a path that embeds the
 # very same basename:
 #
-#   path: boot():/EFI/Linux/omarchy_linux-neptune-611.efi#<hash>
-#   path: boot():/<machine-id>/limine_history/omarchy_linux-neptune-611.efi_sha256_<h>#<hash>
+#   path: boot():/EFI/Linux/omarchy_linux-omarchy.efi#<hash>
+#   path: boot():/<machine-id>/limine_history/omarchy_linux-omarchy.efi_sha256_<h>#<hash>
 #
 # A substring count sees 2 and calls a correct boot chain broken. Worse, it
 # also defeats reconcile_uki's up-to-date test (which requires exactly 1), so
@@ -731,7 +568,7 @@ limine_entry_count() {
 # menu, and nothing anywhere would ever have reported that.
 #
 # WHY AN ENTRY PATH AND NOT AN INDEX: `default_entry` accepts a 1-based index
-# or an entry path like `Omarchy/linux-neptune-611` (Limine CONFIG.md,
+# or an entry path like `Omarchy/linux-omarchy` (Limine CONFIG.md,
 # "default_entry"). The index form is fragile by construction here:
 # limine-snapper-sync inserts and removes a Snapshots submenu as snapshots
 # come and go, so the number an index resolves to is not stable. The path
@@ -744,7 +581,7 @@ limine_entry_count() {
 # ---------------------------------------------------------------------------
 
 # limine_menu_path_for <uki-path> -- the menu path (e.g.
-# "Omarchy/linux-neptune-611") of the entry whose `path:` line boots that
+# "Omarchy/linux-omarchy") of the entry whose `path:` line boots that
 # UKI. Parsed from the config rather than assumed, so a different
 # TARGET_OS_NAME or menu nesting still resolves. Returns 1 if no entry
 # references the UKI.
@@ -853,12 +690,12 @@ apply_default_entry() {
   log "default_entry verified: $(limine_default_entry) (boots ${uki##*/} unattended)"
 }
 
-# default_entry_pick_pkgbase -- which installed Neptune kernel the default
-# should boot. Prints the pkgbase, or returns: 1 = none installed,
-# 2 = ambiguous (pin not installed, several others are).
+# default_entry_pick_pkgbase -- which installed kernel the default should
+# boot. Prints the pkgbase, or returns: 1 = none installed,
+# 2 = ambiguous (exact pkgbase not installed, several variants are).
 default_entry_pick_pkgbase() {
   local -a installed=()
-  mapfile -t installed < <(installed_neptune_pkgbases)
+  mapfile -t installed < <(installed_kernel_pkgbases)
   if in_list "$KERNEL_PKG" "${installed[@]}"; then
     printf '%s\n' "$KERNEL_PKG"
     return 0
@@ -875,35 +712,35 @@ stage_default_entry() {
   pkgbase=$(default_entry_pick_pkgbase) || rc=$?
   case $rc in
     0) ;;
-    1) fail "no linux-neptune-* kernel is installed -- nothing for default_entry to boot. Run '${PROG}.sh stage-kernel' first." ;;
-    2) fail "the pinned ${KERNEL_PKG} is not installed but several other Neptune kernels are ($(installed_neptune_pkgbases | tr '\n' ' ')) -- ambiguous. Set OMARCHY_DECK_NEPTUNE_SERIES to the series the default should boot and re-run." ;;
+    1) fail "no linux-omarchy kernel is installed -- nothing for default_entry to boot. Install '${KERNEL_PKG}' first (archinstall kernels= or pacman -S)." ;;
+    2) fail "the exact ${KERNEL_PKG} is not installed but several other linux-omarchy variants are ($(installed_kernel_pkgbases | tr '\n' ' ')) -- ambiguous. Resolve by hand and re-run." ;;
     *) fail "internal error: default_entry_pick_pkgbase returned ${rc}" ;;
   esac
   if [[ $pkgbase != "$KERNEL_PKG" ]]; then
-    log "pinned ${KERNEL_PKG} is not installed; defaulting to the only installed Neptune kernel: ${pkgbase}"
+    log "exact ${KERNEL_PKG} is not installed; defaulting to the only installed linux-omarchy variant: ${pkgbase}"
   fi
   apply_default_entry "$pkgbase"
 }
 
-# reconcile flavor: same policy, but a machine with no Neptune kernel at all
-# is a deliberate state (everything just got removed) -- warn loudly and leave
-# default_entry alone rather than guess at a non-Neptune default.
+# reconcile flavor: same policy, but a machine with no linux-omarchy kernel
+# at all is a deliberate state (everything just got removed) -- warn loudly
+# and leave default_entry alone rather than guess at a non-omarchy default.
 reconcile_default_entry() {
   local pkgbase rc=0
   pkgbase=$(default_entry_pick_pkgbase) || rc=$?
   case $rc in
     0) apply_default_entry "$pkgbase" ;;
-    1) log "WARNING: no linux-neptune-* kernel installed -- leaving default_entry as '$(limine_default_entry)'. If that no longer resolves, Limine falls back to its first entry." ;;
-    2) fail "reconcile: pinned ${KERNEL_PKG} not installed and several other Neptune kernels are -- ambiguous default_entry. Set OMARCHY_DECK_NEPTUNE_SERIES and re-run '${PROG}.sh stage-default-entry'." ;;
+    1) log "WARNING: no linux-omarchy kernel installed -- leaving default_entry as '$(limine_default_entry)'. If that no longer resolves, Limine falls back to its first entry." ;;
+    2) fail "reconcile: exact ${KERNEL_PKG} not installed and several other linux-omarchy variants are -- ambiguous default_entry. Resolve by hand and re-run '${PROG}.sh stage-default-entry'." ;;
   esac
 }
 
 # reconcile_uki <pkgbase> -- verify, and repair only if verification fails,
-# the UKI and Limine entry for ONE installed Neptune kernel.
+# the UKI and Limine entry for ONE installed linux-omarchy kernel.
 #
 # Parameterised by pkgbase (rather than closing over KERNEL_PKG) because the
-# pacman hook has to reconcile whatever is installed, which after a pin move
-# or a partial upgrade is not necessarily the pinned series.
+# pacman hook has to reconcile whatever is installed, which after a variant
+# change or a partial upgrade is not necessarily the exact pkgbase.
 reconcile_uki() {
   local pkgbase=$1
   local uki moddir
@@ -942,7 +779,7 @@ reconcile_uki() {
     if [[ $(limine_entry_count "$uki") -eq 0 ]]; then
       log "registering Limine entry for ${pkgbase}"
       $SUDO limine-entry-tool --add-uki "$pkgbase" "$uki" \
-        --comment "Neptune kernel (${moddir##*/})" ||
+        --comment "Omarchy kernel (${moddir##*/})" ||
         fail "limine-entry-tool --add-uki failed for ${pkgbase}"
     fi
   fi
@@ -958,29 +795,28 @@ reconcile_uki() {
 }
 
 stage_uki() {
-  # Was "internal error": before TASK-T1 step 6 the only caller was main(),
-  # which had just run stage_kernel, so reaching this meant a bug in this
-  # script. It is now a reachable user path -- `stage-uki` invoked before
-  # `stage-kernel` -- so it says which prerequisite is missing and what to
-  # run, and lists what IS installed so a pin mismatch is obvious.
+  # The kernel arrives via archinstall, not via this script, so reaching this
+  # without it installed means the install step was skipped -- say which
+  # prerequisite is missing and what IS installed so a variant mismatch is
+  # obvious.
   local installed
-  installed=$(installed_neptune_pkgbases | tr '\n' ' ')
+  installed=$(installed_kernel_pkgbases | tr '\n' ' ')
   kernel_module_dir "$KERNEL_PKG" >/dev/null ||
-    fail "stage-uki needs ${KERNEL_PKG} installed, but no /usr/lib/modules/*/pkgbase names it (installed Neptune kernels: ${installed:-none}). Run '${PROG}.sh stage-kernel' first, or the full run with no arguments."
+    fail "stage-uki needs ${KERNEL_PKG} installed, but no /usr/lib/modules/*/pkgbase names it (installed linux-omarchy variants: ${installed:-none}). Install the kernel first (archinstall kernels= or pacman -S), or the full run with no arguments."
   reconcile_uki "$KERNEL_PKG"
 }
 
 # ---------------------------------------------------------------------------
-# Stage 5: prune stale Neptune artifacts (glob-keyed, per task step 2)
+# Stage: prune stale linux-omarchy artifacts (glob-keyed)
 #
-# Keyed on the linux-neptune-* glob, never on the pinned version, so moving
-# the pin removes the old series' entry instead of leaving a stale one that
-# boots a kernel whose modules have been uninstalled.
+# Keyed on the linux-omarchy* glob, never on the exact pkgbase, so a variant
+# change removes the old entry instead of leaving a stale one that boots a
+# kernel whose modules have been uninstalled.
 # ---------------------------------------------------------------------------
 
 stage_prune() {
   local -a installed=()
-  mapfile -t installed < <(installed_neptune_pkgbases)
+  mapfile -t installed < <(installed_kernel_pkgbases)
 
   # Enumerate with an elevated `find`, not a shell glob. Until
   # stage_esp_permissions has run, the ESP is mounted 0700, so a glob
@@ -989,7 +825,7 @@ stage_prune() {
   # -- PLAN.md §8.1's failure mode, reintroduced.
   local -a uki_files=()
   mapfile -t uki_files < <($SUDO find "$ESP_PATH/EFI/Linux" -maxdepth 1 -type f \
-    -name "*_${NEPTUNE_PKGBASE_GLOB}.efi" 2>/dev/null | LC_ALL=C sort)
+    -name "*_${KERNEL_PKGBASE_GLOB}.efi" 2>/dev/null | LC_ALL=C sort)
 
   local removed=0 f base keep
   for f in "${uki_files[@]}"; do
@@ -1022,9 +858,9 @@ stage_prune() {
   if [[ $removed -eq 0 ]]; then
     # State the evidence, not just the verdict: "nothing to do" and "could not
     # look" must never print the same line.
-    log "prune: nothing stale (${#uki_files[@]} Neptune UKI(s) on the ESP; installed Neptune kernels: ${installed[*]:-none})"
+    log "prune: nothing stale (${#uki_files[@]} linux-omarchy UKI(s) on the ESP; installed kernels: ${installed[*]:-none})"
   else
-    log "prune: removed ${removed} stale Neptune boot artifact(s)"
+    log "prune: removed ${removed} stale linux-omarchy boot artifact(s)"
   fi
 }
 
@@ -1033,7 +869,7 @@ stage_prune() {
 # ---------------------------------------------------------------------------
 
 # stage_reconcile -- what the pacman hook runs. Glob-keyed over every
-# installed Neptune kernel, then prune.
+# installed linux-omarchy kernel, then prune.
 #
 # Deliberately does NOT include stage_repos (a `pacman -Sy` inside a pacman
 # transaction would deadlock on the database lock) or stage_esp_permissions
@@ -1043,12 +879,12 @@ stage_prune() {
 # which is also why upstream's own PostTransaction hook can call `pacman -Qqo`.
 stage_reconcile() {
   local -a installed=()
-  mapfile -t installed < <(installed_neptune_pkgbases)
+  mapfile -t installed < <(installed_kernel_pkgbases)
 
   if [[ ${#installed[@]} -eq 0 ]]; then
-    log "reconcile: no linux-neptune-* kernel is installed -- pruning only"
+    log "reconcile: no linux-omarchy kernel is installed -- pruning only"
   else
-    log "reconcile: verifying ${#installed[@]} installed Neptune kernel(s): ${installed[*]}"
+    log "reconcile: verifying ${#installed[@]} installed linux-omarchy kernel(s): ${installed[*]}"
     local pkgbase
     for pkgbase in "${installed[@]}"; do
       reconcile_uki "$pkgbase"
@@ -1081,7 +917,7 @@ hook_text() {
 #
 # This hook does NOT build UKIs and does NOT register Limine entries as its
 # normal path, because limine-mkinitcpio-hook already does both, correctly,
-# for every kernel package including linux-neptune-*:
+# for every kernel package including linux-omarchy:
 #
 #   INSTALL / UPGRADE -- /etc/pacman.d/hooks/90-mkinitcpio-install.hook
 #     (shipped by limine-mkinitcpio-hook into /etc, where it shadows
@@ -1093,7 +929,7 @@ hook_text() {
 #     /usr/share/libalpm/scripts/limine-mkinitcpio-install, which reads each
 #     pkgbase file, builds \$ESP/EFI/Linux/<prefix>_<pkgbase>.efi (prefix =
 #     CUSTOM_UKI_NAME from /etc/default/limine, else the machine-id) and
-#     calls limine-entry-tool --add-uki. A plain \`pacman -S linux-neptune-*\`
+#     calls limine-entry-tool --add-uki. A plain \`pacman -S linux-omarchy\`
 #     reinstall counts as Upgrade (libalpm classifies a reinstall as an
 #     upgrade because the package is already in the local db), so a reinstall
 #     is fully covered.
@@ -1103,8 +939,8 @@ hook_text() {
 #     90-limine-mkinitcpio-remove-post.hook (PostTransaction, runs
 #     limine-mkinitcpio-remove post, which drops the Limine entries and
 #     deletes the UKI files -- limine-entry-tool --remove-all deletes files
-#     unless --keep-files is passed). So \`pacman -Rns linux-neptune-611\`
-#     after a bump to -612 IS cleaned up; that is not the gap.
+#     unless --keep-files is passed). So \`pacman -Rns linux-omarchy\`
+#     followed by a reinstall IS cleaned up; that is not the gap.
 #
 # ===========================================================================
 # THE GAPS THIS HOOK ACTUALLY CLOSES
@@ -1130,14 +966,14 @@ hook_text() {
 #    /var/lib/limine/removed_kernels.list is deleted unconditionally, so a
 #    failed removal is forgotten permanently. The result is a Limine entry
 #    pointing at a UKI that is gone. Nothing upstream ever revisits it.
-#    stage_prune (glob-keyed on linux-neptune-*, not on any pinned version)
+#    stage_prune (glob-keyed on linux-omarchy*, not on any exact version)
 #    reconciles that on the next transaction.
 #
 # So: this hook VERIFIES, and only repairs when verification fails. For every
-# installed linux-neptune-* it asserts the UKI exists, is newer than the
+# installed linux-omarchy kernel it asserts the UKI exists, is newer than the
 # vmlinuz it was built from, and is referenced exactly once in the Limine
 # config; it rebuilds via limine-mkinitcpio only when one of those is false,
-# and it prunes UKIs/entries belonging to Neptune kernels that are no longer
+# and it prunes UKIs/entries belonging to kernels that are no longer
 # installed. That makes it idempotent by construction -- the healthy path
 # writes nothing, so repeat runs cannot duplicate entries.
 #
@@ -1145,16 +981,12 @@ hook_text() {
 # WHAT THIS HOOK DELIBERATELY DOES NOT DO
 # ===========================================================================
 #
-# The linux-firmware-neptune conflict (the --ask=4 fix in ${PROG}.sh's
-# stage_kernel) is NOT handled here, and no ALPM hook can handle it: libalpm
-# asks "Remove linux-firmware? [y/N]" during transaction *preparation*, before
-# any hook -- including PreTransaction hooks -- has run. There is nothing to
-# hook. In practice it only bites on the first swap, which stage_kernel owns;
-# once Arch's split linux-firmware-* packages are gone there is nothing left
-# to conflict with and a routine \`pacman -Syu\` upgrades
-# linux-firmware-neptune in place. It recurs only if something drags Arch's
-# linux-firmware back in as a dependency, and the fix for that belongs in
-# packaging (a \`conflicts\` entry on the Deck package, T5), not in a hook.
+# The retired Neptune firmware swap (the --ask=4 fix the old stage_kernel
+# carried for linux-firmware-neptune) is NOT handled here, and no ALPM hook
+# could have handled it: libalpm asks "Remove linux-firmware? [y/N]" during
+# transaction *preparation*, before any hook -- including PreTransaction
+# hooks -- has run. Moot after the rebase: linux-omarchy uses Arch's own
+# linux-firmware, so there is no swap and nothing to conflict with.
 #
 # ===========================================================================
 
@@ -1163,11 +995,11 @@ Type = Package
 Operation = Install
 Operation = Upgrade
 Operation = Remove
-Target = linux-neptune-*
-Target = linux-firmware-neptune
+Target = linux-omarchy*
+Target = linux-omarchy-headers
 
 [Action]
-Description = Verifying Neptune UKIs and Limine entries (omarchy-deck)
+Description = Verifying linux-omarchy UKIs and Limine entries (omarchy-deck)
 When = PostTransaction
 Exec = ${HOOK_SCRIPT_PATH} reconcile
 HOOK
@@ -1449,22 +1281,23 @@ stage_esp_permissions() {
 #   * stage-hook comes BEFORE stage-esp-permissions. The hook is what keeps
 #     the boot chain correct across future updates, and it must not be hostage
 #     to a umount/mount cycle that can legitimately fail on a busy ESP.
-#   * stage-hook comes AFTER the kernel stages: it is only worth installing
+#   * stage-hook comes AFTER the verify stages: it is only worth installing
 #     once this run has proven the machinery it verifies actually works here.
 #
 # The stage names are the ones TASK-T1 step 6 asked for, updated to the stages
-# that actually exist. Two of that task file's five names have no counterpart
-# and are NOT accepted as aliases, because both would be lies: `stage-bootloader`
-# (the Limine entry is not written by this script -- limine-entry-tool writes
-# it, from stage-uki) and `stage-permissions` (spelled stage-esp-permissions,
-# since it is specifically the ESP's mount options). An unknown name is a
-# usage error listing the real ones, not a guess at what was meant.
+# that actually exist. Three of that task file's names have no counterpart
+# and are NOT accepted as aliases, because all three would be lies:
+# `stage-bootloader` (the Limine entry is not written by this script --
+# limine-entry-tool writes it, from stage-uki), `stage-permissions` (spelled
+# stage-esp-permissions, since it is specifically the ESP's mount options),
+# `stage-kernel` and `stage-firmware-swap` (the Neptune install path, retired
+# 2026-09-17 -- the kernel arrives via archinstall, not via this script).
+# An unknown name is a usage error listing the real ones, not a guess at
+# what was meant.
 readonly -a INSTALL_STAGES=(
   stage-preconditions
   stage-repos
   stage-esp-detect
-  stage-firmware-swap
-  stage-kernel
   stage-uki
   stage-prune
   stage-default-entry
@@ -1530,7 +1363,7 @@ run_install() {
   done
 
   log "done. Reboot and select the '${KERNEL_PKG}' entry from the Limine menu."
-  log "after boot, confirm with: uname -r  (expect it to contain 'neptune-${NEPTUNE_SERIES}')"
+  log "after boot, confirm with: uname -r  (expect it to contain 'omarchy')"
 }
 
 usage() {
@@ -1541,7 +1374,7 @@ commands:
   install      (default, and what running with no arguments does) the full
                run: every stage below, in order.
   reconcile    verify -- and repair only if verification fails -- the UKI and
-               Limine entry of every installed linux-neptune-* kernel, then
+               Limine entry of every installed linux-omarchy kernel, then
                prune artifacts of ones that are no longer installed. This is
                what ${HOOK_PATH} runs; it touches no repos, installs nothing,
                and never unmounts the ESP.
@@ -1556,9 +1389,9 @@ $(printf '  %s\n' "${INSTALL_STAGES[@]}")
 
   Running one stage first runs stage-preconditions, and stage-esp-detect when
   the stage needs the ESP. Both only probe -- nothing is installed, written or
-  unmounted by them. A stage whose real prerequisite is missing (repos not
-  synced for stage-kernel, no kernel installed for stage-uki) fails loudly and
-  says which stage to run first; it never proceeds on a guess.
+  unmounted by them. A stage whose real prerequisite is missing (no kernel
+  installed for stage-uki) fails loudly and says what to install first; it
+  never proceeds on a guess.
 
 options:
   --non-interactive  never prompt; fail fast instead. Implied when stdin is
@@ -1574,7 +1407,6 @@ exit codes:
   2  usage error (unknown stage/command/option, or a bad env var value)
 
 environment:
-  OMARCHY_DECK_NEPTUNE_SERIES  override the pinned series (digits only)
   OMARCHY_DECK_FORCE_UKI       rebuild the UKI even when it verifies clean
   OMARCHY_DECK_SCRIPT_PATH     path to install as ${HOOK_SCRIPT_PATH}
   OMARCHY_DECK_NONINTERACTIVE  1/0 -- force the mode instead of detecting it

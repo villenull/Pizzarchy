@@ -14,7 +14,7 @@
 #   VM_SMP             default min(nproc,4)
 #   VM_RUN_TIMEOUT_SEC default 3600
 #   VM_OVMF_CODE / VM_OVMF_VARS  override firmware probing
-#   VM_NEPTUNE_SERIES  default 611; must match the image's kernel
+#   VM_KERNEL_PKG      default linux-omarchy; must match the image's kernel
 #
 # WHAT IT ASSERTS, AND WHY EACH ONE IS THERE
 #
@@ -22,7 +22,7 @@
 #                   /etc/pacman.d/hooks/95-omarchy-deck-kernel.hook and an
 #                   executable /usr/local/bin/omarchy-deck-kernel behind.
 #
-#   reinstall 1     `pacman -S linux-neptune-<series>` (a reinstall, which
+#   reinstall 1     `pacman -S linux-omarchy` (a reinstall, which
 #                   libalpm classifies as an Upgrade) fires BOTH upstream's
 #                   90-mkinitcpio-install hook and this project's 95- hook,
 #                   the UKI is really regenerated, and the Limine config
@@ -48,15 +48,15 @@
 #                   notice and rebuild -- if it only ever verified on a
 #                   healthy system it would be decoration.
 #
-#   gap B           Fabricate a stale linux-neptune-999 UKI + Limine entry,
+#   gap B           Fabricate a stale linux-omarchy-999 UKI + Limine entry,
 #                   the state upstream's remove path leaves behind when
 #                   limine-entry-tool fails (post_remove never checks it and
 #                   deletes removed_kernels.list unconditionally). The
 #                   reconcile's prune must remove both.
 #
-#   remove          `pacman -Rdd linux-neptune-<series>` fires the hook with
-#                   zero Neptune kernels installed; UKI and entry must both
-#                   be gone and the run must still exit 0.
+#   remove          `pacman -Rdd linux-omarchy` fires the hook with
+#                   zero linux-omarchy kernels installed; UKI and entry must
+#                   both be gone and the run must still exit 0.
 #
 # WHY THE ORACLE IS A NONCE, AND NOT AN mtime SENTINEL OR A BARE sha256
 #
@@ -164,22 +164,7 @@ MEM_MB=${VM_MEM_MB:-4096}
 DEFAULT_SMP=$(( $(nproc) < 4 ? $(nproc) : 4 ))
 SMP=${VM_SMP:-$DEFAULT_SMP}
 RUN_TIMEOUT=${VM_RUN_TIMEOUT_SEC:-3600}
-SERIES=${VM_NEPTUNE_SERIES:-611}
-
-log() { printf '[vm-kernel-hook] %s\n' "$*" >&2; }
-fail() { log "FAIL: $*"; exit 1; }
-
-[[ -f $REPO_ROOT/src/omarchy-deck-kernel.sh ]] || fail "omarchy-deck-kernel.sh not found next to this script"
-
-for tool in qemu-system-x86_64 qemu-img mcopy sfdisk base64; do
-  command -v "$tool" >/dev/null || fail "$tool not found"
-done
-
-if [[ ! -f $BASE_DISK ]]; then
-  log "substrate image not found at $BASE_DISK -- building it"
-  IMG_NEPTUNE_SERIES=$SERIES "$REPO_ROOT/test/images/vm-neptune-image.sh" "$BASE_DISK" ||
-    fail "could not build the substrate image"
-fi
+KERNEL_PKG=${VM_KERNEL_PKG:-linux-omarchy}
 
 find_ovmf() {
   local c
@@ -245,10 +230,9 @@ exec {xtrace_fd}>>"$OUT/probe.trace"
 BASH_XTRACEFD=$xtrace_fd
 set -x
 
-SERIES=${OMARCHY_DECK_NEPTUNE_SERIES:-611}
-KP="linux-neptune-${SERIES}"
+KP=${VM_KERNEL_PKG:-linux-omarchy}
 UKI="/boot/EFI/Linux/omarchy_${KP}.efi"
-STALE_KP="linux-neptune-999"
+STALE_KP="linux-omarchy-999"
 STALE_UKI="/boot/EFI/Linux/omarchy_${STALE_KP}.efi"
 HOOK=/etc/pacman.d/hooks/95-omarchy-deck-kernel.hook
 HOOK_SCRIPT=/usr/local/bin/omarchy-deck-kernel
@@ -332,15 +316,8 @@ snap() {
   refs=$(LC_ALL=C command grep -acE "^[[:space:]]*path:.*/EFI/Linux/omarchy_${KP}\.efi(#|[[:space:]]|$)" /boot/limine.conf 2>/dev/null || true)
   [[ -f $STALE_UKI ]] && stale_present=1
   stale_refs=$(LC_ALL=C command grep -acE "^[[:space:]]*path:.*/EFI/Linux/omarchy_${STALE_KP}\.efi(#|[[:space:]]|$)" /boot/limine.conf 2>/dev/null || true)
-  nept=$(find /boot/EFI/Linux -maxdepth 1 -name '*linux-neptune-*.efi' 2>/dev/null | wc -l)
-  emit "${tag}.uki_present=${present}"
-  emit "${tag}.uki_sha=${sha}"
-  # OBSERVATION, not an assertion -- see the mtime note at the top of the file.
-  emit "${tag}.uki_mtime=${mtime}"
-  emit "${tag}.entry_refs=${refs}"
-  emit "${tag}.stale_present=${stale_present}"
-  emit "${tag}.stale_refs=${stale_refs}"
-  emit "${tag}.neptune_ukis=${nept}"
+  nept=$(find /boot/EFI/Linux -maxdepth 1 -name '*linux-omarchy*.efi' 2>/dev/null | wc -l)
+  emit "${tag}.omarchy_ukis=${nept}"
   emit "${tag}.limine_conf_present=${conf_present}"
   emit "${tag}.limine_conf_lines=${conf_lines}"
   {
@@ -367,7 +344,7 @@ hooks_fired() {
   [[ -f $file ]] && log_lines=$(LC_ALL=C command grep -ac '' "$file" 2>/dev/null || echo 0)
   emit "${tag}.log_lines=${log_lines}"
   LC_ALL=C command grep -qaF 'Updating linux initcpios' "$file" && up=1
-  LC_ALL=C command grep -qaF 'Verifying Neptune UKIs and Limine entries' "$file" && ours=1
+  LC_ALL=C command grep -qaF 'Verifying linux-omarchy UKIs and Limine entries' "$file" && ours=1
   # Did OUR hook fall through to a rebuild, or did it only verify? On a
   # healthy transaction it must only verify -- upstream's hook has already
   # rebuilt by the time a 95- hook runs.
@@ -483,10 +460,9 @@ Before=graphical.target
 
 [Service]
 Type=oneshot
-Environment=OMARCHY_DECK_NEPTUNE_SERIES=${SERIES}
+Environment=VM_KERNEL_PKG=${KERNEL_PKG}
 ExecStartPre=/usr/bin/cp /boot/omarchy-deck-hook-probe.sh /root/omarchy-deck-hook-probe.sh
 ExecStartPre=/usr/bin/cp /boot/omarchy-deck-kernel.sh /root/omarchy-deck-kernel.sh
-ExecStart=/usr/bin/bash /root/omarchy-deck-hook-probe.sh
 TimeoutStartSec=0
 RemainAfterExit=yes
 StandardOutput=journal+console
@@ -630,7 +606,7 @@ check "reinstall2_exit"              "$(field reinstall2_exit)" 0
 check "reinstall2.our_hook_fired"    "$(field reinstall2.our_hook_fired)" 1
 check "reinstall2.uki_content_changed" "$(field reinstall2.uki_content_changed)" 1
 check "after_reinstall2.entry_refs"  "$(field after_reinstall2.entry_refs)" 1
-check "after_reinstall2.neptune_ukis" "$(field after_reinstall2.neptune_ukis)" 1
+check "after_reinstall2.omarchy_ukis" "$(field after_reinstall2.omarchy_ukis)" 1
 
 # 4. gap A — the reconcile repairs a missing UKI
 check "gapA_uki_removed"        "$(field gapA_uki_removed)" 1

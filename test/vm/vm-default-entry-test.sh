@@ -8,14 +8,14 @@
 #   VM_RUN_TIMEOUT_SEC           whole-run ceiling, default 1800
 #   VM_MEM_MB / VM_SMP           guest size, defaults 4096 / 4
 #   VM_OVMF_CODE / VM_OVMF_VARS  override firmware probing
-#   OMARCHY_DECK_NEPTUNE_SERIES  series under test, default 611
+#   VM_KERNEL_PKG  kernel under test, default linux-omarchy; must match the image's kernel
 #
 # ===========================================================================
 # WHAT THIS PROVES, AND WHY A BOOT IS THE ONLY HONEST PROOF
 # ===========================================================================
 #
 # stage-default-entry writes Limine's `default_entry:` as an ENTRY PATH
-# ("Omarchy/linux-neptune-611") rather than a positional index, because
+# ("Omarchy/linux-omarchy") rather than a positional index, because
 # limine-snapper-sync renumbers indices as snapshots come and go.
 #
 # The path form was applied by hand on the operator's Deck and the machine
@@ -32,7 +32,7 @@
 #      into an EFI variable. This is the bootloader's own testimony, not an
 #      inference.
 #   2. `uname -r` -- the non-first entry chosen boots a DIFFERENT KERNEL
-#      (the stock `linux` UKI, not Neptune), so the running kernel string is
+#      (the stock `linux` UKI, not linux-omarchy), so the running kernel string is
 #      an independent witness that cannot agree with a first-entry fallback.
 #
 # Two boots, one QEMU invocation: boot 1 runs the failure tests and plants
@@ -67,7 +67,7 @@ BASE_DISK=${1:-$REPO_ROOT/test/images/neptune-substrate.raw}
 RUN_TIMEOUT=${VM_RUN_TIMEOUT_SEC:-1800}
 MEM_MB=${VM_MEM_MB:-4096}
 SMP=${VM_SMP:-4}
-SERIES=${OMARCHY_DECK_NEPTUNE_SERIES:-611}
+KERNEL_PKG=${VM_KERNEL_PKG:-linux-omarchy}
 
 WORK=${VM_WORK_DIR:-$(mktemp -d /var/tmp/vm-default-entry.XXXXXX)}
 
@@ -77,7 +77,7 @@ fail() { log "FAIL: $*"; exit 1; }
 [[ -f $REPO_ROOT/src/omarchy-deck-kernel.sh ]] || fail "omarchy-deck-kernel.sh not found next to this script"
 if [[ ! -f $BASE_DISK ]]; then
   log "substrate image not found at $BASE_DISK -- building it"
-  IMG_NEPTUNE_SERIES=$SERIES "$REPO_ROOT/test/images/vm-neptune-image.sh" "$BASE_DISK" ||
+  IMG_KERNEL_PKG=$KERNEL_PKG "$REPO_ROOT/test/images/vm-neptune-image.sh" "$BASE_DISK" ||
     fail "could not build the substrate image"
 fi
 
@@ -149,8 +149,7 @@ exec {xtrace_fd}>>"$OUT/probe.trace"
 BASH_XTRACEFD=$xtrace_fd
 set -x
 
-SERIES=${OMARCHY_DECK_NEPTUNE_SERIES:-611}
-KP="linux-neptune-${SERIES}"
+KP=${VM_KERNEL_PKG:-linux-omarchy}
 SCRIPT=/root/omarchy-deck-kernel.sh
 CONF=/boot/limine.conf
 RESULTS=$OUT/results
@@ -269,22 +268,22 @@ if [[ ! -f /root/defenttest/phase1-done ]]; then
 
   cp "$CONF" "$OUT/limine.conf.original"
 
-  neptune_path=$(menu_path_of "omarchy_${KP}.efi"); nrc=$?
+  deck_path=$(menu_path_of "omarchy_${KP}.efi"); nrc=$?
   stock_path=$(menu_path_of "omarchy_linux.efi"); src=$?
   first_path=$(first_menu_path)
-  emit "phase1.neptune_menu_path_rc=$nrc"
+  emit "phase1.deck_menu_path_rc=$nrc"
   emit "phase1.stock_menu_path_rc=$src"
-  emit "phase1.neptune_menu_path=$neptune_path"
+  emit "phase1.deck_menu_path=$deck_path"
   emit "phase1.stock_menu_path=$stock_path"
   emit "phase1.first_menu_path=$first_path"
 
   # The boot-proof target must not be first. The stock `linux` entry is used
-  # if it qualifies; if the menu ever ordered it first, neptune would be the
+  # if it qualifies; if the menu ever ordered it first, linux-omarchy would be the
   # non-first one instead.
   if [[ -n $stock_path && $stock_path != "$first_path" ]]; then
     chosen=$stock_path chosen_kind=stock
-  elif [[ -n $neptune_path && $neptune_path != "$first_path" ]]; then
-    chosen=$neptune_path chosen_kind=neptune
+  elif [[ -n $deck_path && $deck_path != "$first_path" ]]; then
+    chosen=$deck_path chosen_kind=omarchy
   else
     chosen="" chosen_kind=none
   fi
@@ -310,7 +309,7 @@ if [[ ! -f /root/defenttest/phase1-done ]]; then
   rm -f "/boot/EFI/Linux/omarchy2_${KP}.efi"
 
   # --- F3: menu entry missing -> stage-default-entry refuses -----------------
-  # Strip the Neptune entry's path: line (keep the file valid otherwise).
+  # Strip the linux-omarchy entry's path: line (keep the file valid otherwise).
   #
   # ⚠️ AN INVERTED GREP THAT MATCHES NOTHING IS A COPY, AND A COPY MAKES THIS
   # WHOLE TEST MEASURE THE HEALTHY CASE. If the pattern ever drifts away from
@@ -361,22 +360,22 @@ else
   emit "phase2.selected_matches_chosen=$([[ -n $chosen && $sel == "$chosen" ]] && echo 1 || echo 0)"
 
   # Independent witness: the chosen stock entry boots the stock kernel, which
-  # contains no 'neptune'. A first-entry fallback would have booted Neptune.
+  # contains no 'omarchy'. A first-entry fallback would have booted linux-omarchy.
   running=$(uname -r)
   emit "phase2.uname=$running"
   case $chosen_kind in
-    stock)   [[ $running != *neptune* ]] && emit "phase2.kernel_witness=1" || emit "phase2.kernel_witness=0" ;;
-    neptune) [[ $running == *neptune* ]] && emit "phase2.kernel_witness=1" || emit "phase2.kernel_witness=0" ;;
+    stock)   [[ $running != *omarchy* ]] && emit "phase2.kernel_witness=1" || emit "phase2.kernel_witness=0" ;;
+    omarchy) [[ $running == *omarchy* ]] && emit "phase2.kernel_witness=1" || emit "phase2.kernel_witness=0" ;;
     *)       emit "phase2.kernel_witness=0" ;;
   esac
 
-  # --- the stage under test: repair to the Neptune path, prove idempotent ----
+  # --- the stage under test: repair to the linux-omarchy path, prove idempotent ----
   run_isolated "$OUT/repair1.out" bash "$SCRIPT" stage-default-entry
   emit "repair.first_exit=$?"
   emit "repair.default_after=$(read_default)"
-  neptune_path=$(menu_path_of "omarchy_${KP}.efi")
-  emit "repair.expected=$neptune_path"
-  emit "repair.matches=$([[ -n $neptune_path && $(read_default) == "$neptune_path" ]] && echo 1 || echo 0)"
+  deck_path=$(menu_path_of "omarchy_${KP}.efi")
+  emit "repair.expected=$deck_path"
+  emit "repair.matches=$([[ -n $deck_path && $(read_default) == "$deck_path" ]] && echo 1 || echo 0)"
 
   h_before=$(sha256sum "$CONF" | cut -d' ' -f1)
   run_isolated "$OUT/repair2.out" bash "$SCRIPT" stage-default-entry
@@ -418,7 +417,7 @@ Before=graphical.target
 
 [Service]
 Type=oneshot
-Environment=OMARCHY_DECK_NEPTUNE_SERIES=${SERIES}
+Environment=VM_KERNEL_PKG=${KERNEL_PKG}
 ExecStartPre=/usr/bin/cp /boot/omarchy-deck-defent-probe.sh /root/omarchy-deck-defent-probe.sh
 ExecStartPre=/usr/bin/cp /boot/omarchy-deck-kernel.sh /root/omarchy-deck-kernel.sh
 ExecStart=/usr/bin/bash /root/omarchy-deck-defent-probe.sh
@@ -520,7 +519,7 @@ check_nonempty() {
 
 # Phase 1 ran and could resolve both entries in the menu.
 check "phase1.ran"                 "$(field phase1.ran)" 1
-check "phase1.neptune_menu_path_rc" "$(field phase1.neptune_menu_path_rc)" 0
+check "phase1.deck_menu_path_rc" "$(field phase1.deck_menu_path_rc)" 0
 check "phase1.stock_menu_path_rc"   "$(field phase1.stock_menu_path_rc)" 0
 check_nonempty "phase1.first_menu_path" "$(field phase1.first_menu_path)"
 
@@ -544,7 +543,7 @@ check "fail.no_menu_entry_msg"   "$(field fail.no_menu_entry_msg)" 1
 check "fail.config_restored"     "$(field fail.config_restored)" 1
 
 # ⚠️ F3's subject is an ABSENCE, so prove the absence was MANUFACTURED. The
-# inverted grep that removes the Neptune path: line is a copy when its pattern
+# inverted grep that removes the linux-omarchy path: line is a copy when its pattern
 # stops matching, and a copy would make F3 exercise the healthy config. These
 # two say at least one line really left.
 strip_before=$(field fail.strip_lines_before)

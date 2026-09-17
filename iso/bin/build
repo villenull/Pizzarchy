@@ -115,7 +115,7 @@
 # Env vars:
 #   OMARCHY_DECK_ISO_BUILD_DIR   scratch root (default: see above)
 #   OMARCHY_INSTALL_DEBUG        passed through to build-iso.sh unchanged
-#   OMARCHY_DECK_RUNTIME_SRC      path to an existing basecamp/omarchy
+#   OMARCHY_DECK_RUNTIME_SRC      path to an existing omacom/omarchy
 #                                 checkout. Default: a clone this script
 #                                 manages under the scratch root, checked out
 #                                 at iso/RUNTIME's sha. When you point this at
@@ -126,7 +126,7 @@
 #                                 (makepkg copies the whole tree, untracked
 #                                 files included), so "dirty" really is
 #                                 "unreproducible", not pedantry.
-#   OMARCHY_DECK_PKGS_SRC         path to an existing omacom-io/omarchy-pkgs
+#   OMARCHY_DECK_PKGS_SRC         path to an existing omacom/omarchy-pkgs
 #                                 checkout -- the PKGBUILDs. REQUIRED unless
 #                                 iso/PKGS exists, because this repo does not
 #                                 yet pin that third input; see step 2b.
@@ -231,7 +231,7 @@ RUNTIME_PIN=$PIN_SHA
 build_log "runtime pin: $RUNTIME_SLUG@$RUNTIME_PIN (enforced below -- §2 mechanism A)"
 
 # The package names build-iso.sh derives from OMARCHY_ISO_REF (its `case`).
-# As of omarchy-iso 174dd82 ("Install the published Omarchy packages in the
+# As of omarchy-iso 7cfb7111 ("Install the published Omarchy packages in the
 # default build") that case maps ONLY edge|dev|local -> the -dev packages, and
 # quattro (our ref) -> the released omarchy/omarchy-settings. We pass these in
 # explicitly (step 7's `-e`), which overrides the case either way -- named ONCE
@@ -239,32 +239,26 @@ build_log "runtime pin: $RUNTIME_SLUG@$RUNTIME_PIN (enforced below -- §2 mechan
 # disagree about which files to look for. Same lesson as §3's S1: three
 # consumers of one list must read one list.
 #
-# 🔴 We keep the -dev NAMES on the stable channel, deliberately (the 4.0.0
-# stable rebase, 2026-08-15; docs/findings/T9-stable-rebase-remaining.md).
-# The released `omarchy` package carries a STATIC pkgver (`4.0.0-1`) with no
-# `.g<sha>`, and guard 6.4b's whole job is proving the ISO's runtime was built
-# from iso/RUNTIME rather than pulled from the channel -- a check that has no
-# purchase on a version that cannot name a commit. `omarchy-dev`'s PKGBUILD
-# derives `4.0.0.r<count>.g<sha>` from the source tree's git history, so the
-# pin stays verifiable.
-#
-# This costs nothing in content: measured 2026-08-15, pkgs.omarchy.org/stable
-# serves BOTH `omarchy-4.0.0-1` and `omarchy-dev-4.0.0.r1744.gf002044-1` -- and
-# that `gf002044` is exactly iso/RUNTIME's pin, i.e. on the stable channel the
-# -dev build IS the release commit. (On `edge` it is not: edge already serves
-# r1746.gb724f76, two commits past the release. Another reason BUILD_MIRROR is
-# stable.)
-RUNTIME_PACKAGE=omarchy-dev
-SETTINGS_PACKAGE=omarchy-settings-dev
+# 🔴 We ship the STATIC package names on the stable channel (the 4.0.4
+# rebase, 2026-09-17). The released `omarchy` / `omarchy-settings` packages
+# carry a STATIC pkgver (`4.0.4-1`) with no `.g<sha>`, and
+# builder/build-omarchy-packages.sh builds exactly these names from the
+# mounted sources into the offline mirror. Guard 6.4b proves --local-source
+# took effect by matching the built version against the static pin below,
+# not by looking for a sha in the version string.
+RUNTIME_PACKAGE=omarchy
+SETTINGS_PACKAGE=omarchy-settings
 NVIM_PACKAGE=omarchy-nvim
+RUNTIME_PKGVER=4.0.4
+SETTINGS_PKGVER=4.0.4
 
 # ---------------------------------------------------------------------------
 # Guard 6.1 -- ref and mirror must agree, and this build sets them itself.
 #
-# As of the stable rebase (2026-08-15, iso/UPSTREAM=174dd82), the known-good
+# As of the 4.0.4 rebase (2026-09-17, iso/UPSTREAM=7cfb7111), the known-good
 # target is Omarchy 4.0.0 stable, built with **quattro/stable** -- upstream's
 # omarchy-iso-make default (OMARCHY_ISO_REF=quattro, OMARCHY_MIRROR=stable) now
-# agrees with us, because 174dd82 made the default quattro build install the
+# agrees with us, because 7cfb7111 kept the default quattro build installing the
 # published packages. Refuse any other combination rather than silently
 # overriding one a caller already exported -- a caller who set OMARCHY_MIRROR=edge
 # expecting the old beta packages must be told no, not built a different ISO than
@@ -272,7 +266,7 @@ NVIM_PACKAGE=omarchy-nvim
 #
 # T5b note: upstream's `omarchy-iso-make --local-source` sets
 # OMARCHY_ISO_REF=local. We deliberately keep 'quattro' while mounting the
-# same two source trees. At 174dd82 build-iso.sh's `case` maps ONLY edge|dev|local
+# same two source trees. At 7cfb7111 build-iso.sh's `case` maps ONLY edge|dev|local
 # -> the -dev packages; quattro and local both fall through to the released
 # omarchy/omarchy-settings, so keeping 'quattro' selects the right packages, and
 # OMARCHY_ISO_REF's only other effects are the /root/omarchy_iso_ref stamp and
@@ -334,8 +328,8 @@ build_log "scratch root: $SCRATCH_ROOT (outside the repo)"
 # not offered.
 #
 # 🔴 The third input nobody pinned. --local-source needs the PKGBUILDs too,
-# and omacom-io/omarchy-pkgs decides what actually lands in /usr/bin (its
-# omarchy-dev recipe ships all of bin/ except three files). T5-fork-plan.md
+# and omacom/omarchy-pkgs decides what actually lands in /usr/bin (its
+# omarchy recipe ships all of bin/ except three files). T5-fork-plan.md
 # §2 names it as a requirement but pins only two of the three inputs, so
 # there is no iso/PKGS to enforce and choosing its value is an operator
 # decision, not this script's. Until that file exists the path must be given
@@ -403,7 +397,7 @@ if [[ -f "$ISO_ROOT/PKGS" ]]; then
   build_log "pkgs pin OK: $PKGS_SLUG@$CHECKOUT_HEAD ($PKGS_SRC)"
 else
   [[ -n ${OMARCHY_DECK_PKGS_SRC:-} ]] ||
-    build_fail "no iso/PKGS pin file and no OMARCHY_DECK_PKGS_SRC. --local-source needs the omacom-io/omarchy-pkgs PKGBUILDs as well as the runtime (T5-fork-plan.md §2 mechanism A), and this repo pins only two of the three build inputs. Clone https://github.com/omacom-io/omarchy-pkgs and set OMARCHY_DECK_PKGS_SRC=<path>, or create iso/PKGS containing 'omacom-io/omarchy-pkgs@<sha>' to pin it properly -- which is the operator decision this slice deliberately did not make for you."
+    build_fail "no iso/PKGS pin file and no OMARCHY_DECK_PKGS_SRC. --local-source needs the omacom/omarchy-pkgs PKGBUILDs as well as the runtime (T5-fork-plan.md §2 mechanism A), and this repo pins only two of the three build inputs. Clone https://github.com/omacom/omarchy-pkgs and set OMARCHY_DECK_PKGS_SRC=<path>, or create iso/PKGS containing 'omacom/omarchy-pkgs@<sha>' to pin it properly -- which is the operator decision this slice deliberately did not make for you."
   PKGS_SRC=$OMARCHY_DECK_PKGS_SRC
   [[ -d $PKGS_SRC ]] || build_fail "OMARCHY_DECK_PKGS_SRC=$PKGS_SRC is not a directory"
   PKGS_SRC=$(cd -- "$PKGS_SRC" && pwd)
@@ -414,7 +408,7 @@ else
     build_fail "OMARCHY_DECK_PKGS_SRC=$PKGS_SRC has local modifications. The PKGBUILDs decide what lands in /usr/bin; an edited copy makes the result unreproducible and guard 6.4b meaningless:"$'\n'"$pkgs_dirty"
   pkgs_head=$(git -C "$PKGS_SRC" rev-parse HEAD)
   build_log "⚠️  pkgs source is UNPINNED: using $PKGS_SRC at $pkgs_head"
-  build_log "⚠️  pin it by creating iso/PKGS with: omacom-io/omarchy-pkgs@$pkgs_head"
+  build_log "⚠️  pin it by creating iso/PKGS with: omacom/omarchy-pkgs@$pkgs_head"
 fi
 
 # All three, because build-omarchy-packages.sh builds all three and stops on
@@ -1648,22 +1642,23 @@ latest_iso=$(find "${built_isos[@]}" -maxdepth 0 -printf '%T@ %p\n' | sort -rn |
 # part -- 6.4a is the cheap early gate. What this one buys is the difference
 # between shipping an ISO that dies at phase 5 and not shipping one at all.
 #
-# It also answers the question 6.4a cannot: DID THE PIN TAKE EFFECT? Both
-# PKGBUILDs compute pkgver as <base>.r<count>.g<short sha> from the source
-# tree's git history, so a package version that does not carry iso/RUNTIME's
-# short sha means the offline mirror holds a channel build, not ours --
-# --local-source silently not having applied is precisely the failure this
-# slice exists to prevent, and it is invisible in a green build log.
+# It also answers the question 6.4a cannot: DID THE PIN TAKE EFFECT? The
+# released packages carry STATIC versions (pkgver=4.0.4, no .g<sha>), so a
+# package version that is not RUNTIME_PKGVER/SETTINGS_PKGVER means the
+# offline mirror holds a channel build (or a stale build from another pin),
+# not ours -- --local-source silently not having applied is precisely the
+# failure this slice exists to prevent, and it is invisible in a green build
+# log. The pin is the recipe: both PKGBUILDs build _commit=c668141e (the
+# v4.0.4 tag) at pkgver 4.0.4, and the version is what the mirror can show.
 #
 # ✅ THE SYMMETRY 6.4a GREW FIRST IS NOW HERE. This half used to ask only
-# omarchy-dev + omarchy-settings-dev, so the day a literal
-# /usr/bin/omarchy-deck-* appeared in the orchestrator, 6.4a passed and this
-# guard failed -- after Docker, with the wrong diagnosis ("check
-# pkgbuilds/omarchy-dev's package() exclusion list"), i.e. the same
-# wrong-diagnosis bug 6.4a had just been fixed for, six gigabytes later. It now
-# reads OUR built packages out of the same offline mirror, by the same rule
-# (.PKGINFO is the authority on which package a file is; usr/bin/* members are
-# the provider set), and keeps the two sets separate in every message.
+# the -dev names, so the day a literal /usr/bin/omarchy-deck-* appeared in
+# the orchestrator, 6.4a passed and this guard failed -- after Docker, with
+# the wrong diagnosis, i.e. the same wrong-diagnosis bug 6.4a had just been
+# fixed for, six gigabytes later. It now reads OUR built packages out of the
+# same offline mirror, by the same rule (.PKGINFO is the authority on which
+# package a file is; usr/bin/* members are the provider set), and keeps the
+# two sets separate in every message.
 #
 # 🔴 AN ABSENT PACKAGE OF OURS IS A REJECTION, NOT A QUIET PASS. The set of
 # packages we owe is derived above from configs/deck/pkgbuilds/*/PKGBUILD in the
@@ -1672,14 +1667,10 @@ latest_iso=$(find "${built_isos[@]}" -maxdepth 0 -printf '%T@ %p\n' | sort -rn |
 # absence of expectation, it is an expectation that went unmet: the local
 # package build did not run. Passing on it would be this project's recurring
 # failure -- "found nothing" reported as "found no problems"
-# (docs/PROGRESS.md §5.30c) -- and the consequence is concrete, because
-# omarchy-deck is listed in deck-install.packages: pacstrap fails on a target
-# the offline mirror does not carry, ~1000 packages into an install, on a
-# device with no terminal.
-#
-# The version question is asked of our packages too, but differently, because
-# the pin is a different one. omarchy-dev's version must carry iso/RUNTIME's
-# sha; omarchy-deck's pkgver is hand-set in a commit (its PKGBUILD forbids a
+# The version question is asked of our packages too, and the rule is the
+# same shape: the pin is the recipe. omarchy/omarchy-settings must be exactly
+# RUNTIME_PKGVER/SETTINGS_PKGVER (static 4.0.4 built from _commit=c668141e);
+# omarchy-deck's pkgver is hand-set in a commit (its PKGBUILD forbids a
 # derived one, since /configs is a bind mount with no .git), so the pin is the
 # recipe itself. The offline mirror is PERSISTENT across builds (guard 6.3), so
 # without this a build whose deck-packages.patch stopped applying would silently
@@ -1753,15 +1744,18 @@ find_mirror_package() {
 # --- provider set 1: the pinned runtime's own packages ---------------------
 
 RUNTIME_PROVIDED_BINS=()
-for pkg_name in "$RUNTIME_PACKAGE" "$SETTINGS_PACKAGE"; do
+_runtime_pkgs=("$RUNTIME_PACKAGE" "$SETTINGS_PACKAGE")
+_runtime_vers=("$RUNTIME_PKGVER" "$SETTINGS_PKGVER")
+for _i in 0 1; do
+  pkg_name=${_runtime_pkgs[$_i]} want_ver=${_runtime_vers[$_i]}
   find_mirror_package "$pkg_name"
 
   [[ -n $MIRROR_PKG_FILE ]] ||
     reject_iso "guard 6.4b: no $pkg_name package in $OFFLINE_MIRROR_DIR. --local-source should have built one from $RUNTIME_SLUG@$RUNTIME_SHORT; its absence means the local build did not run and the ISO's runtime came from the '$BUILD_MIRROR' channel instead -- an unpinned runtime, which is the whole thing this slice removes."
 
   case $MIRROR_PKG_VER in
-    *".g$RUNTIME_SHORT"*) ;;
-    *) reject_iso "guard 6.4b: $pkg_name is version '$MIRROR_PKG_VER', which does not carry iso/RUNTIME's commit ($RUNTIME_SHORT). Both PKGBUILDs derive pkgver from the source tree's git history, so this package was NOT built from $RUNTIME_SLUG@$RUNTIME_HEAD. The runtime pin did not take effect." ;;
+    "$want_ver"|"$want_ver"-*) ;;
+    *) reject_iso "guard 6.4b: $pkg_name is version '$MIRROR_PKG_VER', expected '$want_ver' (pkgver built from $RUNTIME_SLUG@$RUNTIME_HEAD). The released packages carry static versions with no .g<sha>, so a different version means this package was NOT built from the pinned tree. The runtime pin did not take effect." ;;
   esac
   RUNTIME_PROVIDED_BINS+=("${MIRROR_PKG_BINS[@]}")
   build_log "guard 6.4b: $pkg_name $MIRROR_PKG_VER built from $RUNTIME_SLUG@$RUNTIME_SHORT (${#MIRROR_PKG_BINS[@]} usr/bin entries)"

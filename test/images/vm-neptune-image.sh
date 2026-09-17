@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # vm-neptune-image.sh -- build a minimal bootable substrate for testing the
-# Neptune boot chain in QEMU, without building an Omarchy ISO first.
+# linux-omarchy boot chain in QEMU, without building an Omarchy ISO first.
 #
 # Usage: ./vm-neptune-image.sh [output.raw] [work-dir]
 #
 # Env vars (all optional):
 #   IMG_SIZE_GB        default 14
 #   IMG_ESP_MB         default 1024
-#   IMG_NEPTUNE_SERIES default 611  (pre-installed into the image)
+#   IMG_KERNEL_PKG     default linux-omarchy (pre-installed into the image)
 #   IMG_DOCKER_IMAGE   default archlinux/archlinux:latest
 #   IMG_OMARCHY_SERVER default https://pkgs.omarchy.org/edge/$arch
 #   IMG_LIMINE_PIN     default 'limine=12.5.2-1 limine-mkinitcpio-hook=1.37.1-1
@@ -22,9 +22,9 @@
 # install, and the artifact is not kept in the repo.
 #
 # What T1 step 3 has to test is narrower: how pacman's ALPM hooks behave
-# around limine-mkinitcpio-hook when a linux-neptune-* package is installed,
+# around limine-mkinitcpio-hook when a linux-omarchy package is installed,
 # reinstalled or removed. That needs a system with limine, limine-mkinitcpio-
-# hook, a real vfat ESP mounted the way Omarchy mounts it, and a Neptune
+# hook, a real vfat ESP mounted the way Omarchy mounts it, and the Deck
 # kernel -- not an Omarchy install. So this builds exactly that, in minutes,
 # reproducibly, from packages.
 #
@@ -41,8 +41,8 @@
 #      `<machine-id>_<pkgbase>.efi`.
 #   3. A vfat ESP at /boot mounted fmask=0077,dmask=0077 -- archinstall's
 #      UKI hardening, i.e. PLAN.md 8.5's precondition.
-#   4. The Valve repos and a real linux-neptune-* kernel installed through
-#      them, including the linux-firmware-neptune swap.
+#   4. A real linux-omarchy kernel installed from the [omarchy] repo (the
+#      same package the product verifies).
 #   5. A btrfs root with snapper + limine-snapper-sync and ONE REAL SNAPSHOT,
 #      so limine.conf carries the Snapshots submenu whose limine_history/
 #      path lines embed the same UKI basenames as the real entries.
@@ -87,7 +87,7 @@ WORK=${2:-$(mktemp -d /var/tmp/vm-neptune-image.XXXXXX)}
 
 SIZE_GB=${IMG_SIZE_GB:-14}
 ESP_MB=${IMG_ESP_MB:-1024}
-SERIES=${IMG_NEPTUNE_SERIES:-611}
+KERNEL_PKG=${IMG_KERNEL_PKG:-linux-omarchy}
 DOCKER_IMAGE=${IMG_DOCKER_IMAGE:-archlinux/archlinux:latest}
 # shellcheck disable=SC2016 # $arch is pacman's variable and must stay unexpanded
 OMARCHY_SERVER=${IMG_OMARCHY_SERVER:-'https://pkgs.omarchy.org/edge/$arch'}
@@ -124,7 +124,7 @@ fail() { log "FAIL: $*"; exit 1; }
 command -v docker >/dev/null || fail "docker not found"
 docker info >/dev/null 2>&1 || fail "cannot talk to the docker daemon (is the current user in the 'docker' group?)"
 
-[[ $SERIES =~ ^[0-9]+$ ]] || fail "IMG_NEPTUNE_SERIES must be digits only, got '$SERIES'"
+[[ $KERNEL_PKG =~ ^[a-z0-9][a-z0-9.+-]*$ ]] || fail "IMG_KERNEL_PKG must be a package name, got '$KERNEL_PKG'"
 
 mkdir -p "$WORK" || fail "could not create work dir $WORK"
 log "work dir: $WORK"
@@ -140,14 +140,13 @@ set -euo pipefail
 
 SIZE_GB=$1
 ESP_MB=$2
-SERIES=$3
+KERNEL_PKG=$3
 OMARCHY_SERVER=$4
 HOST_UID=$5
 HOST_GID=$6
 LIMINE_PIN=$7
 
 IMG=/out/disk.raw
-KERNEL_PKG="linux-neptune-${SERIES}"
 
 step() { printf '\n=== [build] %s ===\n' "$*" >&2; }
 die()  { printf '[build] FAIL: %s\n' "$*" >&2; exit 1; }
@@ -424,29 +423,20 @@ grep -qF 'omarchy_linux.efi' /mnt/boot/limine.conf ||
 [[ -f /mnt/boot/EFI/BOOT/BOOTX64.EFI ]] ||
   die "no fallback /boot/EFI/BOOT/BOOTX64.EFI -- OVMF has no NVRAM entry to fall back to and the guest will not boot"
 
-step "installing ${KERNEL_PKG} through the Valve repos"
+step "installing ${KERNEL_PKG} from the [omarchy] repo"
 arch-chroot /mnt pacman -Sy --noconfirm >/dev/null || die "pacman -Sy failed in the chroot"
 
-# Same firmware swap omarchy-deck-kernel.sh's stage_firmware_swap performs,
-# for the same reason (Valve's linux-firmware-neptune only declares conflicts
-# against `linux-firmware` and `linux-firmware-whence`, not against Arch's ten
-# split subpackages). Done here so the guest starts from a realistic state and
-# the VM run does not spend its time re-downloading firmware.
-mapfile -t colliding < <(arch-chroot /mnt pacman -Qq | grep -E '^linux-firmware(-[a-z0-9-]+)?$' | grep -vE 'neptune|^linux-firmware-whence$' || true)
-if ((${#colliding[@]})); then
-  arch-chroot /mnt pacman -Rdd --noconfirm "${colliding[@]}" >/dev/null ||
-    die "could not remove Arch's linux-firmware packages: ${colliding[*]}"
-fi
-
-arch-chroot /mnt pacman -S --needed --noconfirm --ask=4 \
-  "${KERNEL_PKG}" "${KERNEL_PKG}-headers" linux-firmware-neptune ||
+# No firmware swap: linux-omarchy uses Arch's own linux-firmware, which
+# pacstrap already installed. The retired stage_firmware_swap's `-Rdd` dance
+# has no counterpart here by design.
+arch-chroot /mnt pacman -S --needed --noconfirm \
+  "${KERNEL_PKG}" "${KERNEL_PKG}-headers" ||
   die "could not install ${KERNEL_PKG}"
 
 [[ -f "/mnt/boot/EFI/Linux/omarchy_${KERNEL_PKG}.efi" ]] ||
   die "installed ${KERNEL_PKG} but no omarchy_${KERNEL_PKG}.efi on the ESP -- upstream's install hook did not build it"
 grep -qF "omarchy_${KERNEL_PKG}.efi" /mnt/boot/limine.conf ||
-  die "the Neptune UKI exists but is not referenced in /boot/limine.conf"
-
+  die "the linux-omarchy UKI exists but is not referenced in /boot/limine.conf"
 step "snapper config + one real snapshot + limine-snapper-sync (substrate property 5)"
 # --no-dbus: there is no snapperd/dbus in a chroot. create-config makes the
 # .snapshots subvolume and /etc/snapper/configs/root.
@@ -464,11 +454,9 @@ snap_count=$(arch-chroot /mnt snapper --no-dbus -c root list --columns number 2>
 arch-chroot /mnt limine-snapper-sync || die "limine-snapper-sync failed"
 
 # Verify the artifact, not the exit code: the submenu must reference the
-# Neptune UKI's basename under limine_history/.
+# kernel UKI's basename under limine_history/.
 grep -E "limine_history.*omarchy_${KERNEL_PKG}" /mnt/boot/limine.conf >/dev/null ||
-  die "limine-snapper-sync exited 0 but /boot/limine.conf has no limine_history reference to omarchy_${KERNEL_PKG}.efi -- the Snapshots submenu the substrate exists to provide is missing. Config follows:
-$(cat /mnt/boot/limine.conf)"
-
+  die "limine-snapper-sync exited 0 but /boot/limine.conf has no limine_history reference to omarchy_${KERNEL_PKG}.efi -- the Snapshots submenu the substrate exists to provide is missing."
 step "default_entry: 2 (substrate property 6 -- the fragile index form)"
 if grep -qE '^[[:space:]]*default_entry:' /mnt/boot/limine.conf; then
   sed -i -E 's/^[[:space:]]*default_entry:.*/default_entry: 2/' /mnt/boot/limine.conf
@@ -517,7 +505,7 @@ docker run --rm \
   -v "$WORK:/out" \
   "$DOCKER_IMAGE" \
   /out/build-in-container.sh \
-  "$SIZE_GB" "$ESP_MB" "$SERIES" "$OMARCHY_SERVER" "$(id -u)" "$(id -g)" "$LIMINE_PIN" ||
+  "$SIZE_GB" "$ESP_MB" "$KERNEL_PKG" "$OMARCHY_SERVER" "$(id -u)" "$(id -g)" "$LIMINE_PIN" ||
   fail "the in-container build failed (work dir preserved: $WORK)"
 
 [[ -f "$WORK/disk.raw" ]] || fail "the container reported success but produced no disk.raw (work dir: $WORK)"
@@ -535,10 +523,8 @@ if [[ -f $REPO_ROOT/test/lib/vm-disk-image.sh ]] && command -v mdir >/dev/null 2
     fail "could not locate an ESP in the produced image"
   listing=$(MTOOLS_SKIP_CHECK=1 mdir -b -i "$WORK/disk.raw@@${esp_offset}" "::/EFI/Linux" 2>/dev/null) ||
     fail "the produced image's ESP has no /EFI/Linux directory"
-  grep -qi "omarchy_linux-neptune-${SERIES}.efi" <<<"$listing" ||
-    fail "the produced image's ESP has no omarchy_linux-neptune-${SERIES}.efi (got: ${listing})"
-  log "verified from the host: ESP contains omarchy_linux-neptune-${SERIES}.efi"
+  grep -qi "omarchy_${KERNEL_PKG}.efi" <<<"$listing" ||
+    fail "the produced image's ESP has no omarchy_${KERNEL_PKG}.efi (got: ${listing})"
+  log "verified from the host: ESP contains omarchy_${KERNEL_PKG}.efi"
 fi
-
-mv "$WORK/disk.raw" "$OUT" || fail "could not move the image to $OUT"
 log "done: $OUT ($(du -h --apparent-size "$OUT" | cut -f1) apparent, $(du -h "$OUT" | cut -f1) on disk)"

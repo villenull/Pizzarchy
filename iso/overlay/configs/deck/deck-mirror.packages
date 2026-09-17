@@ -54,22 +54,14 @@
 # build -- squashfs block alignment and the offline repo db will move it a
 # little. Re-measure after the next build rather than quoting this line.
 
-# --- kernel and firmware (jupiter-staging; Valve-only, no name overlap) ------
+# --- retired kernel slot (jupiter-staging; Valve-only, no name overlap) -----
 #
-# 611 matches src/omarchy-deck-kernel.sh's NEPTUNE_SERIES_DEFAULT. That file
-# explains why it is not simply "the newest": nothing newer has been validated
-# on hardware, and CLAUDE.md does not ship untested hardware claims. If the
-# series moves, move it in all three places (here, deck-install.packages, and
-# src/omarchy-deck-kernel.sh).
-#
-# DUAL ENTRY -- but only linux-neptune-611. The bare name is in
-# deck-install.packages as of 2026-08-15, so pacstrap installs it from this
-# mirror. Left BARE here rather than qualified because P16's overlap audit
-# measured no name collision -- it exists only in jupiter-staging, so repo order
-# cannot pick the wrong build, and `sort -u` collapses the identical pair before
-# `pacman -Syw` ever sees it. (`gamescope` below is the opposite case and must be
-# qualified.)
-linux-neptune-611
+# 🔴 RETIRED 2026-09-17 (v4.0.4 rebase): `linux-neptune-611` lived here (and
+# in deck-install.packages) as a DUAL ENTRY. Operator decision adopts
+# upstream's generic `linux-omarchy`, which arrives via the runtime's own
+# `install/omarchy-other.packages` -- no mirror line of ours is needed, and
+# carrying 350+ MiB of kernel nobody installs is the P32 defect, repeated.
+# Recorded so the next reader does not "restore" it.
 
 # ❌ REMOVED 2026-08-15 (P33/F1): `linux-firmware-neptune`, 366,612,354 B /
 # 349.6 MiB. Recorded here so the next reader does not "restore" it.
@@ -110,55 +102,12 @@ linux-neptune-611
 # ⚠️ This is now a REGRESSION CHECK, not a discovery: any future hardware run
 # must still show Wi-Fi, audio and gamescope up without Valve's firmware.
 
-# 🔴 READER: NOBODY, ON PURPOSE. This is the one entry in this file that is
-# deliberately mirror-only, and the reasoning has to be written down or the
-# next reader will "fix" it into deck-install.packages.
-#
-# Kernel headers are only needed to BUILD modules against this kernel. Nothing
-# on the target does: `dkms`, `linux-headers` and every *-dkms package live in
-# omarchy-other.packages, which is the hardware-alternatives list -- carried in
-# the mirror, never installed, because `_runtime_package_list` reads
-# omarchy-base.packages and nothing else. Checked against the pinned runtime's
-# lists 2026-08-15: omarchy-base.packages (150 lines) contains no dkms, no
-# headers, and no module-building package at all.
-#
-# Cost: 35,403,648 B / 33.8 MiB, measured 2026-08-15 (a "~10 MiB" estimate stood
-# here until then).
-#
-# 🔴 ITS STATED JUSTIFICATION IS FALSE, MEASURED 2026-08-15 (P33/F1). This block
-# read: "It stays in the mirror rather than being deleted because a Deck that
-# later wants a DKMS module has no other source for headers matching a Valve
-# kernel, and the cost is 33.8 MiB against a 350 MiB firmware package sitting
-# beside it. If T5g's size gate needs space, cut the firmware above first."
-# BOTH halves are now dead:
-#
-#  * The firmware is cut (above), so nothing bigger and reader-less sits beside
-#    it. This is now the first cut if space is needed -- and the ONLY
-#    reader-less entry left in the file.
-#  * "No other source" does not survive contact with the shipped product. The
-#    mirror is a BIND MOUNT from the live ISO (phases_impl.py
-#    `_prepare_target_setup`), not a copy, so it does not survive the install.
-#    Read off the operator's Deck over SSH, installed from our own ISO:
-#      /var/cache/omarchy/mirror/offline   exists and is EMPTY (0 entries)
-#      /var/cache/pacman/pkg/              no neptune package of any kind
-#      pacman -Q linux-neptune-611-headers / dkms / linux-headers   all not found
-#      /etc/pacman.conf repos              core extra multilib omarchy -- NO
-#                                          jupiter-staging, no holo
-#    So the mirror copy is reachable ONLY during the install window, and nothing
-#    in that window builds modules (omarchy-base.packages has no dkms, no
-#    headers -- and the running Deck confirms none were installed). A user who
-#    later wants these headers must add the Valve repos and fetch them online,
-#    which is exactly what src/omarchy-deck-kernel.sh's `require_valve_repos`
-#    does. That is the same route the firmware takes, and it does not read this
-#    file.
-#
-# ⚠️ NOT CUT IN THE SAME CHANGE, DELIBERATELY. P33/F1 was scoped to the firmware
-# and told to recommend rather than act on this line; 33.8 MiB is 0.55% of the
-# ISO and there is no written size gate to force the call. The evidence above is
-# the recommendation: it is a cut, and it is the coordinator's to take. Do not
-# re-justify this line on the DKMS argument without re-measuring it -- that is
-# what this block is here to stop.
-linux-neptune-611-headers
+# 🔴 RETIRED 2026-09-17 (v4.0.4 rebase): `linux-neptune-611-headers` lived
+# here, mirror-only, reader-less. Upstream now guarantees matching headers
+# for its own kernels (migration 1789444024 installs `linux-omarchy-headers`
+# whenever `linux-omarchy` is present), so a Valve-headers line has no reader
+# today and no reader after the rebase. This executes the cut P33/F1 already
+# recommended. Recorded so the next reader does not "restore" it.
 
 # --- Valve's audio DSP firmware ----------------------------------------------
 #
@@ -171,12 +120,7 @@ linux-neptune-611-headers
 # It was in deck-fetch.packages until 2026-08-15 (T5-fork-plan.md §4.1 chose
 # fetch-not-bundle on redistribution grounds). Operator decision 2026-08-15
 # reversed that on the grounds that it is FIRMWARE the machine needs to have
-# working audio at all. (The reversal was originally argued as "same posture as
-# linux-firmware-neptune, which has always been carried" -- that analogy died
-# later the same day when the firmware was cut, and the audio argument, which
-# was always the real one, is unaffected. Three files outside this one still
-# carry the dead analogy: deck-fetch.packages, deck-install.packages and
-# orchestrator/deck_pkgs.py.) `steam` did NOT move and is still fetched.
+# working audio at all. `steam` did NOT move and is still fetched.
 #
 # Verified against the live repo 2026-08-15: jupiter-staging carries
 # steamdeck-dsp-0.38-1-any.pkg.tar.zst; holo-staging is configured but carries

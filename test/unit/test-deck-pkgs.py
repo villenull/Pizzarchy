@@ -311,15 +311,17 @@ check_true(
     "jupiter-staging/steamdeck-dsp" in mirror_raw,
 )
 
-check_true("the Neptune kernel is now pacstrapped", "linux-neptune-611" in install_names)
 check(
-    "🔴 linux-firmware-neptune is NOT pacstrapped -- it would kill the install "
-    "at phase 3 (Valve declares conflicts against linux-firmware and -whence "
-    "only, but Arch split it into ten subpackages, so pacman removes those two "
-    "and then dies on file conflicts with the rest; measured in a VM by "
-    "src/omarchy-deck-kernel.sh's colliding_arch_firmware/stage_firmware_swap, "
-    "and pacstrap has no -Rdd step). Safe to omit: linux-neptune-611's "
-    ".PKGINFO depends only on coreutils/initramfs/kmod",
+    "🔴 RETIRED 2026-09-17: no Neptune kernel line remains -- linux-omarchy "
+    "arrives via the runtime's install/omarchy-other.packages + archinstall "
+    "kernels=, so a line here would pacstrap a SECOND kernel",
+    "linux-neptune-611" in install_names,
+    False,
+)
+check(
+    "🔴 linux-firmware-neptune is NOT pacstrapped (unchanged) -- Valve declares "
+    "conflicts against linux-firmware and -whence only, but Arch split it "
+    "into ten subpackages, and pacstrap has no -Rdd step",
     "linux-firmware-neptune" in install_names,
     False,
 )
@@ -337,20 +339,12 @@ check(
     False,
 )
 check(
-    "🔴 the kernel HEADERS are deliberately mirror-only (nothing on the target "
-    "builds modules)",
-    "linux-neptune-611-headers" in install_names,
+    "🔴 RETIRED 2026-09-17: the Neptune headers line is gone too -- upstream "
+    "migration 1789444024 guarantees linux-omarchy-headers, so the mirror-only "
+    "reader-less line has no reader today or after the rebase (executes the "
+    "P33/F1 recommended cut)",
+    "linux-neptune-611-headers" in install_names or "linux-neptune-611-headers" in mirror_raw,
     False,
-)
-check_true(
-    "…and still carried, for now. ⚠️ NOT because 'a later DKMS build has a "
-    "source' — that justification was MEASURED FALSE on 2026-08-15 (P33/F1): "
-    "the mirror is a bind mount, not a copy, so on the installed Deck "
-    "/var/cache/omarchy/mirror/offline is EMPTY and no Valve repo is configured. "
-    "It survives this round only because P33/F1 was scoped to the firmware. See "
-    "deck-mirror.packages for the evidence; if the coordinator takes the "
-    "recommended cut, flip this check and the annotated-entry count below",
-    "linux-neptune-611-headers" in mirror_raw,
 )
 check_true("mangoapp's package is installed, not merely carried", "mangohud" in install_names)
 check_true("…and its 32-bit half too", "lib32-mangohud" in install_names)
@@ -444,10 +438,11 @@ for entry, block in mirror_entries_with_comment_blocks(mirror_text):
     )
 
 check(
-    "exactly one deliberate no-reader entry remains (linux-neptune-611-headers). "
-    "If this number grows, something was carried without an installer again",
+    "no deliberate no-reader entry remains (the headers line was the only one, "
+    "retired 2026-09-17). If this number grows, something was carried without "
+    "an installer again",
     annotated,
-    1,
+    0,
 )
 
 

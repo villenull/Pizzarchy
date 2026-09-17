@@ -10,25 +10,22 @@
 #        src/omarchy-deck-kernel.sh  <->  test/lib/vm-assertions.sh
 #   2. The Valve repo / mirror / SigLevel block
 #        src/omarchy-deck-kernel.sh  <->  test/images/vm-neptune-image.sh
-#   3. The firmware-collision regex pair
-#        src/omarchy-deck-kernel.sh  <->  test/images/vm-neptune-image.sh
-#   4. The pinned Neptune series
+#   3. (Retired 2026-09-17: the firmware-collision regex pair died with
+#      stage_firmware_swap -- linux-omarchy uses Arch's own firmware, so
+#      there is no swap and nothing to collide. The section below asserts
+#      the retirement, not the pair.)
+#   4. The Deck kernel package name
 #        src/omarchy-deck-kernel.sh  <->  test/images/vm-neptune-image.sh
 #
 # Each one is a place where the TEST can stay green after the PRODUCT has been
 # fixed, or the product can be fixed while the test still asserts the old
-# world. Nothing else in this repo compares them -- the substrate builder even
-# says "same firmware swap omarchy-deck-kernel.sh's stage_firmware_swap
-# performs" and "added the same way stage_repos adds them" in prose, which is
-# a claim no code checks.
+# world.
 #
-# Three of the four turned out to have MORE than two copies. Those extra copies
-# are asserted here too, and flagged in the report, because a pair that is
-# really a quintet is worse than the inventory recorded:
+# Two of the four turned out to have MORE than two copies. Those extra copies
+# are asserted here too, and flagged in the report:
 #
-#   - the Neptune series default is repeated in three test/vm suites as well
-#   - the Valve mirror's HOSTNAME is repeated in those same three suites'
-#     network pre-check
+#   - the Valve mirror's HOSTNAME is repeated in three VM suites' network
+#     pre-check
 #   - the Valve repo NAMES are repeated in vm-kernel-stage-test.sh's awk
 #     stripper, which is what makes its "no Valve repos" precondition case
 #     mean anything
@@ -426,146 +423,78 @@ mapfile -t extra_repos < <(
 pass "fact 2e: vm-kernel-stage-test.sh's awk strips exactly the product's Valve repos"
 
 # =============================================================================
-# FACT 3 -- the firmware-collision regex pair
+# FACT 3 -- retired: the firmware-collision regex pair is GONE
 #
-#   src/omarchy-deck-kernel.sh       colliding_arch_firmware()
-#   test/images/vm-neptune-image.sh  the same two greps, inline
+#   src/omarchy-deck-kernel.sh       colliding_arch_firmware() -- deleted
+#   test/images/vm-neptune-image.sh  the inline swap -- must be deleted too
 #
-# One upstream fact: Valve's linux-firmware-neptune declares conflicts against
-# `linux-firmware` and `linux-firmware-whence` only, not against Arch's ten
-# split subpackages. Both copies encode it as an include regex and an exclude
-# regex. Asserted EQUAL: the substrate is supposed to leave the guest in the
-# state stage_firmware_swap leaves a Deck, and a narrower regex on the
-# substrate side would leave collisions the product would have cleared -- so
-# the VM run would exercise a conflict resolution real Decks never hit.
+# linux-omarchy uses Arch's own linux-firmware, so there is no Valve firmware
+# swap and nothing to collide with. Asserted ABSENT on both sides: a copy
+# that survived on either side would claim a conflict resolution real Decks
+# never hit (product side) or hand the VM suites a guest in a state the
+# product would never produce (substrate side).
 # =============================================================================
 
-fw_fn=$(sed -n '/^colliding_arch_firmware()/,/^}/p' "$KERNEL")
-require_extract "colliding_arch_firmware() (product side)" \
-  "${KERNEL}: colliding_arch_firmware() { ... }" 3 "$fw_fn"
+if grep -vE '^[[:space:]]*#' "$KERNEL" | grep -qE '^(colliding_arch_firmware\(\)|stage_firmware_swap\(\))'; then
+  fail "FACT 3 DIVERGED (retirement): the firmware-collision probe survived" \
+    "src/omarchy-deck-kernel.sh still defines a firmware-swap function, but stage_firmware_swap is retired -- linux-omarchy uses Arch's firmware, so there is nothing to collide with."
+fi
+pass "fact 3a: the product carries no firmware-collision probe"
 
-# grep_pattern <flags> <text> -- the single-quoted PATTERN of the first
-# `grep <flags> '...'` in the text.
-grep_pattern() {
-  local flags=$1
-  sed -nE "s/^.*grep ${flags} '([^']*)'.*\$/\1/p" | head -n 1
-}
-
-product_fw_include=$(grep_pattern -E <<<"$fw_fn")
-product_fw_exclude=$(grep_pattern -vE <<<"$fw_fn")
-require_extract "the firmware include regex (product side)" \
-  "${KERNEL}: colliding_arch_firmware()'s \`grep -E\`" 1 "$product_fw_include"
-require_extract "the firmware exclude regex (product side)" \
-  "${KERNEL}: colliding_arch_firmware()'s \`grep -vE\`" 1 "$product_fw_exclude"
-
-fw_lines=$(grep -c 'mapfile -t colliding' "$BUILDER" || true)
-[[ $fw_lines -eq 1 ]] ||
-  fail "EXTRACTION FAILED (ambiguous): the substrate's firmware swap" \
-    "found ${fw_lines} 'mapfile -t colliding' lines in ${BUILDER}, expected exactly 1"
-fw_line=$(grep 'mapfile -t colliding' "$BUILDER")
-substrate_fw_include=$(grep_pattern -E <<<"$fw_line")
-substrate_fw_exclude=$(grep_pattern -vE <<<"$fw_line")
-require_extract "the firmware include regex (test side)" \
-  "${BUILDER}: the \`grep -E\` on the mapfile line" 1 "$substrate_fw_include"
-require_extract "the firmware exclude regex (test side)" \
-  "${BUILDER}: the \`grep -vE\` on the mapfile line" 1 "$substrate_fw_exclude"
-pass "all four halves of the firmware-collision regex pair extract"
-
-[[ $product_fw_include == "$substrate_fw_include" ]] ||
-  fail "FACT 3 DIVERGED: the firmware-collision INCLUDE regex" \
-    "src/omarchy-deck-kernel.sh       colliding_arch_firmware() grep -E:
-  ${product_fw_include}
-test/images/vm-neptune-image.sh  its inline grep -E:
-  ${substrate_fw_include}
-These select which installed linux-firmware* packages collide with Valve's.
-Different regexes mean the substrate hands the VM suites a guest in a state
-stage_firmware_swap would never produce."
-pass "fact 3a: both copies use the same include regex (${product_fw_include})"
-
-[[ $product_fw_exclude == "$substrate_fw_exclude" ]] ||
-  fail "FACT 3 DIVERGED: the firmware-collision EXCLUDE regex" \
-    "src/omarchy-deck-kernel.sh       colliding_arch_firmware() grep -vE:
-  ${product_fw_exclude}
-test/images/vm-neptune-image.sh  its inline grep -vE:
-  ${substrate_fw_exclude}
-This is the half that spares Valve's own package and linux-firmware-whence.
-A copy that spares less would have the substrate remove what the product
-keeps (or the reverse), silently."
-pass "fact 3b: both copies use the same exclude regex (${product_fw_exclude})"
-
+if grep -vE '^[[:space:]]*#' "$BUILDER" | grep -qE 'colliding|linux-firmware-neptune|-Rdd'; then
+  fail "FACT 3 DIVERGED (retirement): the substrate still performs a firmware swap" \
+    "test/images/vm-neptune-image.sh still references a colliding/firmware-neptune/-Rdd swap. The guest must start from Arch firmware + linux-omarchy, the state the retired stage_firmware_swap leaves behind by never running."
+fi
+pass "fact 3b: the substrate performs no firmware swap"
 # =============================================================================
-# FACT 4 -- the pinned Neptune series
+# FACT 4 -- the Deck kernel package name
 #
-#   src/omarchy-deck-kernel.sh       NEPTUNE_SERIES_DEFAULT
-#   test/images/vm-neptune-image.sh  IMG_NEPTUNE_SERIES default
-#   + three test/vm suites, which the inventory did not record
+#   src/omarchy-deck-kernel.sh       KERNEL_PKG
+#   test/images/vm-neptune-image.sh  KERNEL_PKG
 #
-# 611 is the one series validated on the operator's OLED Deck. The substrate
-# pre-installs a kernel; the product installs one. If the two numbers drift,
-# every VM suite tests the product's handling of a kernel that is not the one
-# it ships -- and the failure surfaces as a missing UKI, which reads like a
-# limine bug.
+# The substrate pre-installs a kernel; the product verifies one. If the two
+# names drift, every VM suite tests the product's handling of a kernel that
+# is not the one it ships -- and the failure surfaces as a missing UKI,
+# which reads like a limine bug.
 #
-# Asserted EQUAL across every default in the repo. The VM suites' defaults are
-# in scope because they are the values a bare `./test/vm/...` run uses, which
-# is how they are always run by hand.
+# Asserted EQUAL. A bare `./test/vm/...` run uses the substrate default,
+# which is how the suites are always run by hand.
 # =============================================================================
 
-product_series=$(sed -nE 's/^readonly NEPTUNE_SERIES_DEFAULT=([0-9]+).*$/\1/p' "$KERNEL")
-require_extract "the pinned Neptune series (product side)" \
-  "${KERNEL}: readonly NEPTUNE_SERIES_DEFAULT=<digits>" 1 "$product_series"
+product_pkg=$(sed -nE 's/^readonly KERNEL_PKG="([^"]+)".*$/\1/p' "$KERNEL")
+require_extract "the Deck kernel package (product side)" \
+  "${KERNEL}: readonly KERNEL_PKG=\"<name>\"" 1 "$product_pkg"
 
-substrate_series=$(sed -nE 's/^SERIES=\$\{IMG_NEPTUNE_SERIES:-([0-9]+)\}.*$/\1/p' "$BUILDER")
-require_extract "the pinned Neptune series (test side)" \
-  "${BUILDER}: SERIES=\${IMG_NEPTUNE_SERIES:-<digits>}" 1 "$substrate_series"
-pass "both copies of the Neptune series pin extract (product ${product_series}, substrate ${substrate_series})"
-
-[[ $product_series == "$substrate_series" ]] ||
-  fail "FACT 4 DIVERGED: the pinned Neptune series" \
-    "src/omarchy-deck-kernel.sh       NEPTUNE_SERIES_DEFAULT=${product_series}
-test/images/vm-neptune-image.sh  IMG_NEPTUNE_SERIES default=${substrate_series}
-The substrate would pre-install linux-neptune-${substrate_series} while the
-product installs linux-neptune-${product_series}. Both numbers move together,
-after validating on hardware (see the NEPTUNE_SERIES_DEFAULT header comment)."
-pass "fact 4a: the substrate's series default matches the product's pin (${product_series})"
-
-# 4b. Every other `*NEPTUNE_SERIES:-<digits>}` default in the tree. Swept
-# rather than listed so a NEW copy is caught the day it is added.
-mapfile -t series_defaults < <(
-  grep -rEn --include='*.sh' '\$\{[A-Z_]*NEPTUNE_SERIES:-[0-9]+\}' \
-    "$REPO_ROOT/src" "$REPO_ROOT/test" "$REPO_ROOT/tools" || true
-)
-require_extract "the repo-wide sweep for hard-coded series defaults" \
-  "grep over src/ test/ tools/ for \${*NEPTUNE_SERIES:-<digits>}" 2 \
-  "$(printf '%s\n' "${series_defaults[@]:-}")"
-for hit in "${series_defaults[@]}"; do
-  hit_series=$(sed -nE 's/^.*NEPTUNE_SERIES:-([0-9]+)\}.*$/\1/p' <<<"$hit")
-  [[ -n $hit_series ]] ||
-    fail "EXTRACTION FAILED: could not read the series out of a swept line" "$hit"
-  [[ $hit_series == "$product_series" ]] ||
-    fail "FACT 4 DIVERGED (further copy): a hard-coded Neptune series" \
-      "src/omarchy-deck-kernel.sh pins ${product_series}; this line defaults to ${hit_series}:
-  ${hit#"$REPO_ROOT"/}
-Copies of this number: ${#series_defaults[@]} across the tree (grep for
-'NEPTUNE_SERIES:-'). All of them move together with the pin."
-done
-pass "fact 4b: all ${#series_defaults[@]} hard-coded series defaults in the tree agree with the pin (${product_series})"
-
-# 4c. The package-name shape either side builds around that number. The series
-# is only half the fact; `linux-neptune-` is the other half, and a rename on
-# one side would leave the numbers agreeing about nothing.
-product_pkg=$(sed -nE 's/^readonly KERNEL_PKG="([^"$]*)\$\{NEPTUNE_SERIES\}".*$/\1/p' "$KERNEL")
-substrate_pkg=$(sed -nE 's/^KERNEL_PKG="([^"$]*)\$\{SERIES\}".*$/\1/p' "$BUILDER")
-require_extract "the kernel package prefix (product side)" \
-  "${KERNEL}: readonly KERNEL_PKG=\"...\${NEPTUNE_SERIES}\"" 1 "$product_pkg"
-require_extract "the kernel package prefix (test side)" \
-  "${BUILDER}: KERNEL_PKG=\"...\${SERIES}\"" 1 "$substrate_pkg"
+substrate_pkg=$(sed -nE 's/^KERNEL_PKG=\$\{IMG_KERNEL_PKG:-([^}]+)\}.*$/\1/p' "$BUILDER")
+require_extract "the Deck kernel package (test side)" \
+  "${BUILDER}: KERNEL_PKG=\${IMG_KERNEL_PKG:-<name>}" 1 "$substrate_pkg"
 [[ $product_pkg == "$substrate_pkg" ]] ||
-  fail "FACT 4 DIVERGED: the Neptune package-name prefix" \
-    "src/omarchy-deck-kernel.sh       KERNEL_PKG prefix: ${product_pkg}
-test/images/vm-neptune-image.sh  KERNEL_PKG prefix: ${substrate_pkg}
-Both sides pin the same series number but build a different package name from
-it, so the substrate installs one kernel and the product looks for another."
-pass "fact 4c: both sides build the package name as '${product_pkg}<series>'"
+  fail "FACT 4 DIVERGED: the Deck kernel package name" \
+    "src/omarchy-deck-kernel.sh       KERNEL_PKG=${product_pkg}
+test/images/vm-neptune-image.sh  KERNEL_PKG=${substrate_pkg}
+The substrate would pre-install ${substrate_pkg} while the product verifies
+${product_pkg}. Both names move together with the adopt decision."
+pass "fact 4a: the substrate's kernel package matches the product's pin (${product_pkg})"
+
+# 4b. No Neptune series DEFAULT or Neptune kernel CONSTRUCTOR may survive in
+# code anywhere in the tree. Swept rather than listed so a reintroduced copy
+# is caught the day it lands. Only two shapes count: `${...NEPTUNE_SERIES:-<digits>}`
+# env defaults and `KERNEL_PKG="linux-neptune...` constructors -- prose
+# mentions (retirement notes, assertion messages) are not code and do not
+# match. This file itself is excluded: it must spell the patterns to sweep
+# them.
+mapfile -t series_code < <(
+  grep -rEn --include='*.sh' 'NEPTUNE_SERIES:-|KERNEL_PKG="linux-neptune' \
+    "$REPO_ROOT/src" "$REPO_ROOT/test" "$REPO_ROOT/tools" "$REPO_ROOT/iso" || true
+)
+mapfile -t series_code < <(
+  printf '%s\n' "${series_code[@]:-}" | grep -v 'test-duplicated-upstream-facts.sh' || true
+)
+((${#series_code[@]} == 0)) ||
+  fail "FACT 4 DIVERGED (retirement residue): Neptune defaults survive in code" \
+    "these lines still default to a Neptune series or construct a Neptune package name:
+  $(printf '%s\n' "${series_code[@]}" | sed "s|^${REPO_ROOT}/||")
+Remove them or move the note into a comment."
+pass "fact 4b: no Neptune series default or package constructor survives in code (src/test/tools/iso)"
 
 printf 'all duplicated-upstream-fact tests passed\n'

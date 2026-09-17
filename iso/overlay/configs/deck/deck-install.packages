@@ -171,11 +171,10 @@ lib32-mangohud
 #
 # T5-fork-plan.md §4.1 chose FETCH for this package on redistribution grounds
 # (`Licenses: Proprietary`, no licence text shipped --
-# docs/findings/P16-redistribution-and-trademark.md §1). That decision was
-# reversed by the operator on 2026-08-15: it now rides in the offline mirror,
-# the same posture `linux-firmware-neptune` has always had, and for the same
-# reason -- it is FIRMWARE the machine needs to have working audio at all, and
-# a first boot with tinny speakers is not a degradation anyone can act on.
+# docs/findings/P16-redistribution-and-trademark.md §1). Reversed by the
+# operator on 2026-08-15: it now rides in the offline mirror because it is
+# FIRMWARE the machine needs to have working audio at all, and a first boot
+# with tinny speakers is not a degradation anyone can act on.
 #
 # The bare name is here; `jupiter-staging/steamdeck-dsp` is in
 # deck-mirror.packages, which is what decides the build and keeps the online
@@ -189,59 +188,29 @@ lib32-mangohud
 steamdeck-dsp
 
 # ---------------------------------------------------------------------------
-# 🔴 THE NEPTUNE KERNEL AND ITS FIRMWARE -- boot-chain-affecting, deliberately
+# 🔴 RETIRED 2026-09-17 (v4.0.4 rebase): the Neptune kernel is gone.
 # ---------------------------------------------------------------------------
 #
-# READER: pacstrap, from the offline mirror, during the target install.
+# This block used to pacstrap `linux-neptune-611` as THE kernel, with
+# `detect_kernel` feeding archinstall `kernels=[ "linux-neptune-611" ]`.
+# Operator decision 2026-09-17 adopts upstream's generic `linux-omarchy`:
+# it reaches the target via the runtime's own `install/omarchy-other.packages`
+# (which lists `linux-omarchy` + headers at the v4.0.4 pin) merged with this
+# file into `omarchy-base.packages`, plus archinstall `kernels=` from
+# `deck-form.sh`'s retargeted `detect_kernel`. No replacement line here --
+# adding one would pacstrap a SECOND kernel and hand Limine a boot order to
+# choose. Recorded so the next reader does not "restore" it.
 #
-# deck-mirror.packages' own header argued the opposite of these two lines, and
-# it is worth reading before changing them: "linux-neptune-* is a KERNEL.
-# Pacstrapping it makes limine-mkinitcpio-hook build a second UKI and gives
-# limine-entry-tool a boot order to choose -- that is boot-chain work." That
-# caution was correct about the RISK and wrong about the alternative: carrying
-# a kernel in the mirror and installing it nowhere is not caution, it is 350+
-# MiB of ISO that changes nothing. Measured on the first hardware boot: the
-# installed system ran stock `linux 7.1.8-arch1-3`, with no Neptune kernel and
-# no linux-firmware-neptune anywhere on it
-# (docs/findings/P32-steam-never-installed.md).
+# 🔴 linux-firmware-neptune is DELIBERATELY NOT HERE, and must not be added
+# (unchanged): Valve's package conflicts against only `linux-firmware` and
+# `linux-firmware-whence` while Arch ships ten split subpackages -- pacman
+# removes the two it was told about and dies in the file-conflict check.
+# PACSTRAP HAS NO `-Rdd` STEP. Arch's own linux-firmware-* covers amdgpu and
+# the ath11k radio.
 #
-# Operator decision, 2026-08-15: pacstrap them.
-#
-# 611 matches src/omarchy-deck-kernel.sh's NEPTUNE_SERIES_DEFAULT -- not "the
-# newest", because nothing newer has been validated on hardware. If the series
-# moves, move it in BOTH files and in deck-mirror.packages.
-#
-# ✅ THE STOCK-KERNEL GAP IS CLOSED (2026-08-15, later the same day). This
-# block used to warn that the target ALSO pacstraps stock `linux` via
-# archinstall's own `kernels=` (phase 3 of 14, long before configure_deck), so
-# a Deck carried two kernels and `limine-entry-tool` -- not us -- decided which
-# one booted. That slice has now landed, by the route this comment named:
-# `deck-form.sh` overrides upstream's `detect_kernel()` (it is sourced into
-# `configurator` at patched line 1057, 101 lines BEFORE the top-level
-# `kernel_choice=$(detect_kernel)` at 1158, measured on the patched file), so
-# `user_configuration.json` carries "kernels": [ "linux-neptune-611" ] and
-# archinstall pacstraps Neptune as THE kernel. One kernel, one UKI.
-# Operator decision: Neptune only, no stock-linux fallback entry.
-#
-# 🔴 linux-firmware-neptune is DELIBERATELY NOT HERE, and must not be added.
-# It would kill the install at phase 3. Valve's package declares
-# conflicts/replaces against only `linux-firmware` and `linux-firmware-whence`,
-# but Arch split that into ten per-vendor subpackages -- so pacman removes the
-# two it was told about and then dies in the file-conflict check:
-#   "linux-firmware-neptune: /usr/lib/firmware/... exists in filesystem
-#    (owned by linux-firmware-other)"
-# Measured in a VM by src/omarchy-deck-kernel.sh (see its
-# `colliding_arch_firmware` / `stage_firmware_swap`, ~534-584), which works
-# around it with an explicit `pacman -Rdd` of the colliding subpackages.
-# PACSTRAP HAS NO SUCH STEP. Safe to omit: `linux-neptune-611`'s .PKGINFO
-# depends only on coreutils/initramfs/kmod, so nothing drags it in, and Arch's
-# own linux-firmware-* covers amdgpu and the ath11k radio. It stays in
-# deck-mirror.packages so the post-install swap has a local source.
-#
-# ⚠️ ESP SIZE, now a smaller question but still unmeasured: one UKI measured
-# 74,987,520 B on hardware. With Neptune-only there should be exactly one --
-# which is itself a thing the next build must confirm rather than assume.
-linux-neptune-611
+# ⚠️ ESP SIZE, still unmeasured: one UKI measured 74,987,520 B on hardware.
+# With linux-omarchy-only there should be exactly one -- which is itself a
+# thing the next build must confirm rather than assume.
 
 # --- python-evdev -----------------------------------------------------------
 #

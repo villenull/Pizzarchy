@@ -31,8 +31,7 @@ WHAT IS STILL FETCHED, AND WHAT STOPPED BEING FETCHED
 
 Only ``steam``. ``steamdeck-dsp`` moved into the offline mirror on 2026-08-15
 (operator decision): it is firmware, a first boot with tinny speakers is not a
-degradation anyone can act on, and it now has the same redistribution posture
-``linux-firmware-neptune`` always had. ``steam`` stays online because bundling
+degradation anyone can act on. ``steam`` stays online because bundling
 the client raises a Steam Subscriber Agreement question this project has not
 taken on, and because the installer's S0 screen already discloses that it is
 downloaded from Valve during setup.

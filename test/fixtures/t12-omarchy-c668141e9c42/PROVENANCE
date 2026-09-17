@@ -5,10 +5,11 @@ identical to what the pinned runtime installs under /usr/share/omarchy, which is
 the only reason the tests are worth anything: a hand-written approximation of the
 context lines would let a patch pass here and reject on the device.
 
-  Source      https://github.com/basecamp/omarchy
-  Ref         f0020448         (the RUNTIME pin = tag v4.0.0, Omarchy 4.0.0
-                                stable; see iso/RUNTIME, docs/PROGRESS.md §5.31)
-  Fetched     2026-08-15, via `git show f0020448:<path>` from a full clone
+  Source      https://github.com/omacom/omarchy (moved from basecamp/omarchy;
+                both remotes resolve tag v4.0.4 to the identical SHA)
+  Ref         c668141e         (the RUNTIME pin = tag v4.0.4, Omarchy 4.0.4
+                                stable; see iso/RUNTIME)
+  Fetched     2026-09-17, via `git show c668141e:<path>` from a full clone
   Licence     MIT (upstream repo)
 
   shell/plugins/lock/Service.qml     551 lines
@@ -17,21 +18,13 @@ context lines would let a patch pass here and reject on the device.
     sha256 282f055fdd439301c2249fc3ca579d88621080c8c4df150d6a15555b7c8581df
   default/foot/screensaver.ini         7 lines
     sha256 053150146bccb101eb2f14e0622376cff4d62563c3b1a16ae7dd8668be7ac51c
-    Added 2026-08-16 for patch 0030-screensaver-font-fits-panel. Last touched
-    upstream at 7debca9f477500d650187a8a160b871bb31c38e9, which is BEFORE the
-    pin, so this file is at f0020448 like the other two.
 
-Replaces test/fixtures/t12-omarchy-6d7826d (the beta-2/edge pin), retired
-2026-08-15 with the 4.0.0 stable rebase. What actually moved between the two:
-
-  * Service.qml  471 -> 551 lines. Upstream added the stranded-lock recovery
-    path and reworked the fingerprint/PAM flow, which shifted our blank-timer
-    block from line ~373 to ~416 and rewrote the `onTriggered` body just below
-    it. Patch 0010 still applies -- its context lines are byte-identical and the
-    applier uses offset-tolerant `git apply` -- so this is drift, not a break.
-    Classified in docs/findings/T9-stable-delta-classification.md (delta B).
-  * limine.conf  UNCHANGED, byte for byte (same sha256 as at 6d7826d). Patch
-    0020's target did not move at all across 127 upstream commits.
+Replaces test/fixtures/t12-omarchy-f0020448ca87 (the 4.0.0 pin), retired
+2026-09-17 with the 4.0.4 rebase. All three files are byte-identical between
+f0020448 and c668141e (verified by cmp against `git show` at both refs), so
+this is a rename, not a content change: all three shipped patches still
+apply, and the delta classification lives in
+docs/findings/v404-delta-classification.md.
 
 ⚠️ WHEN iso/RUNTIME MOVES, THIS DIRECTORY MUST MOVE WITH IT. Refetch both
 files at the new ref, rename the directory, and re-run

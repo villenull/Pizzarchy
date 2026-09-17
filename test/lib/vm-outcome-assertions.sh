@@ -51,23 +51,22 @@ set -uo pipefail
 # could read out of the product instead.
 # ---------------------------------------------------------------------------
 
-# outcome::neptune_series <repo-root>
-# The Neptune kernel series, read from src/omarchy-deck-kernel.sh's
-# NEPTUNE_SERIES_DEFAULT — the pin that file's own comment calls the one to
-# move ("If the series moves, move it in both places",
-# iso/overlay/configs/deck/deck-mirror.packages). Fails loudly rather than
-# defaulting: a wrong series here would assert the presence of a kernel nobody
-# ships and read as a broken install.
-outcome::neptune_series() {
-  local repo_root=$1 series
-  series=$(grep -oE '^readonly NEPTUNE_SERIES_DEFAULT=[0-9]+' \
+# outcome::deck_kernel_pkg <repo-root>
+# The Deck kernel package, read from src/omarchy-deck-kernel.sh's
+# KERNEL_PKG -- the pin the ISO and the installed system agree on.
+# Fails loudly rather than defaulting: a wrong name here would assert the
+# presence of a kernel nobody ships and read as a broken install.
+outcome::deck_kernel_pkg() {
+  local repo_root=$1 pkg
+  pkg=$(grep -oE '^readonly KERNEL_PKG="[^"]+"' \
     "$repo_root/src/omarchy-deck-kernel.sh" 2>/dev/null | head -n1) || true
-  series=${series##*=}
-  if [[ ! $series =~ ^[0-9]+$ ]]; then
-    echo "outcome::neptune_series: no 'readonly NEPTUNE_SERIES_DEFAULT=<n>' in $repo_root/src/omarchy-deck-kernel.sh — refusing to guess a kernel series" >&2
+  pkg=${pkg#readonly KERNEL_PKG=\"}
+  pkg=${pkg%\"}
+  if [[ -z $pkg ]]; then
+    echo "outcome::deck_kernel_pkg: no 'readonly KERNEL_PKG=\"<name>\"' in $repo_root/src/omarchy-deck-kernel.sh -- refusing to guess a kernel package" >&2
     return 1
   fi
-  printf '%s\n' "$series"
+  printf '%s\n' "$pkg"
 }
 
 # ---------------------------------------------------------------------------
@@ -305,24 +304,21 @@ outcome::sfs_count() {
 outcome::log() { printf '[outcome] %s\n' "$*" >&2; }
 
 # outcome::check_installed_root <root-mount> <repo-root> [uki-name...]
-#
-# Everything the installed machine needs in order to boot Neptune and reach
-# Gaming Mode. Pass the UKI names the harness already discovered on the ESP
-# (disk_image::esp_extract_ukis); pass none to skip only the UKI pair, which
-# is reported as a FAIL rather than quietly omitted.
+# Everything the installed machine needs in order to boot linux-omarchy and
+# reach Gaming Mode. Pass the UKI names the harness already discovered on the
+# ESP (disk_image::esp_extract_ukis); pass none to skip only the UKI pair,
+# which is reported as a FAIL rather than quietly omitted.
 outcome::check_installed_root() {
   local root_at=$1 repo_root=$2
   shift 2
   local -a uki_names=("$@")
   local db_dir="$root_at/var/lib/pacman/local"
-  local names_file pkg series neptune_pkg path mode found status
+  local names_file kernel_pkg path mode found status
 
-  series=$(outcome::neptune_series "$repo_root") || {
-    screens::check "the Neptune series is readable from src/omarchy-deck-kernel.sh (this batch cannot run without it)" no yes
+  kernel_pkg=$(outcome::deck_kernel_pkg "$repo_root") || {
+    screens::check "the Deck kernel package is readable from src/omarchy-deck-kernel.sh (this batch cannot run without it)" no yes
     return 1
   }
-  neptune_pkg="linux-neptune-${series}"
-
   names_file=$(mktemp)
   if ! outcome::pacman_pkgnames "$db_dir" >"$names_file"; then
     screens::check "the target's pacman local db is readable at var/lib/pacman/local" no yes
@@ -338,10 +334,10 @@ outcome::check_installed_root() {
 
   # --- packages that must be there ----------------------------------------
   #
-  # steamdeck-dsp / linux-neptune-611 / gamescope: docs/findings/P32-steam-never-installed.md
+  # steamdeck-dsp / linux-omarchy / gamescope: docs/findings/P32-steam-never-installed.md
   # steam:        same finding, and the direct cause of the black panel
   # omarchy-deck: our own package; nothing else installs the patch applier
-  for pkg in steam steamdeck-dsp "$neptune_pkg" gamescope omarchy-deck; do
+  for pkg in steam steamdeck-dsp "$kernel_pkg" gamescope omarchy-deck; do
     screens::check "installed on the target: $pkg [guards against P32-steam-never-installed]" \
       "$(outcome::package_installed "$names_file" "$pkg" && echo yes || echo no)" yes || true
   done
@@ -405,9 +401,9 @@ outcome::check_installed_root() {
       "${#uki_names[@]}" 1
     found=no
     for path in "${uki_names[@]}"; do
-      outcome::uki_matches_pkgbase "$path" "$neptune_pkg" && found=yes
+      outcome::uki_matches_pkgbase "$path" "$kernel_pkg" && found=yes
     done
-    screens::check "the UKI is the Neptune one: <prefix>_${neptune_pkg}.efi (found: ${uki_names[*]}) [guards against P32-steam-never-installed §'the installed system runs stock linux']" \
+    screens::check "the UKI is the linux-omarchy one: <prefix>_${kernel_pkg}.efi (found: ${uki_names[*]}) [guards against P32-steam-never-installed §'the installed system runs stock linux']" \
       "$found" yes
   fi
 

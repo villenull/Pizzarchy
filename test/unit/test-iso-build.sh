@@ -347,7 +347,7 @@ EOF
   local pk="$root/pkgs-src"
   git_init "$pk"
   local recipe
-  for recipe in omarchy-dev omarchy-settings-dev omarchy-nvim; do
+  for recipe in omarchy omarchy-settings omarchy-nvim; do
     mkdir -p "$pk/pkgbuilds/$recipe"
     printf 'pkgname=%s\n' "$recipe" >"$pk/pkgbuilds/$recipe/PKGBUILD"
   done
@@ -792,7 +792,7 @@ pass "--local-source's PKGBUILD checkout must be named explicitly while this rep
 
 f22="$work/f22"
 make_fixture "$f22"
-printf 'edited\n' >>"$f22/pkgs-src/pkgbuilds/omarchy-dev/PKGBUILD"
+printf 'edited\n' >>"$f22/pkgs-src/pkgbuilds/omarchy/PKGBUILD"
 run_build "$f22"
 [[ $BUILD_STATUS -eq 1 ]] || fail "a dirty pkgs checkout must be refused" "status=$BUILD_STATUS $BUILD_OUT"
 [[ $BUILD_OUT == *"local modifications"* ]] || fail "the refusal names the reason" "$BUILD_OUT"
@@ -802,11 +802,11 @@ pass "a dirty pkgs checkout is refused -- the PKGBUILDs decide what reaches /usr
 
 f23="$work/f23"
 make_fixture "$f23"
-rm -rf "$f23/pkgs-src/pkgbuilds/omarchy-dev"
+rm -rf "$f23/pkgs-src/pkgbuilds/omarchy"
 git_commit_all "$f23/pkgs-src" 'drop the runtime pkgbuild'
 run_build "$f23"
-[[ $BUILD_STATUS -eq 1 ]] || fail "a pkgs checkout with no omarchy-dev PKGBUILD must be refused" "status=$BUILD_STATUS $BUILD_OUT"
-[[ $BUILD_OUT == *"pkgbuilds/omarchy-dev"* ]] || fail "the refusal names the missing recipe" "$BUILD_OUT"
+[[ $BUILD_STATUS -eq 1 ]] || fail "a pkgs checkout with no omarchy PKGBUILD must be refused" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"pkgbuilds/omarchy"* ]] || fail "the refusal names the missing recipe" "$BUILD_OUT"
 [[ $BUILD_OUT != *"docker is required"* ]] || fail "it must stop the build" "$BUILD_OUT"
 # build-omarchy-packages.sh builds three recipes and stops on the first it
 # cannot find, so checking only the runtime's would move the failure into the
@@ -826,7 +826,7 @@ f24="$work/f24"
 make_fixture "$f24"
 run_build "$f24"
 [[ $BUILD_OUT == *"pkgs source is UNPINNED"* ]] || fail "an unpinned pkgs checkout is announced" "$BUILD_OUT"
-[[ $BUILD_OUT == *"omacom-io/omarchy-pkgs@$FIXTURE_PKGS_SHA"* ]] ||
+[[ $BUILD_OUT == *"omacom/omarchy-pkgs@$FIXTURE_PKGS_SHA"* ]] ||
   fail "the warning prints the line that would pin it, with the real sha" "$BUILD_OUT"
 pass "an unpinned pkgs checkout is loudly reported with its sha and the fix"
 
@@ -851,9 +851,9 @@ f26="$work/f26"
 make_fixture "$f26"
 scratch26="$work/scratch-26"
 mirror26="$scratch26/offline-mirror-cache/mirror/offline"
-make_fake_package "$mirror26" omarchy-dev "4.0.0.r1617.g${FIXTURE_RUNTIME_SHA:0:7}" \
+make_fake_package "$mirror26" omarchy "4.0.4-1" \
   omarchy-setup-system omarchy-provision-user
-make_fake_package "$mirror26" omarchy-settings-dev "4.0.0.r1617.g${FIXTURE_RUNTIME_SHA:0:7}" \
+make_fake_package "$mirror26" omarchy-settings "4.0.4-1" \
   omarchy-upload-log
 BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f26" \
   "OMARCHY_DECK_ISO_BUILD_DIR=$scratch26" \
@@ -867,7 +867,7 @@ docker_args=$(cat "$work/docker-args-26")
   fail "the runtime checkout is mounted at /omarchy-source" "$docker_args"
 [[ $docker_args == *"$f26/pkgs-src:/omarchy-pkgs:ro"* ]] ||
   fail "the pkgs checkout is mounted at /omarchy-pkgs" "$docker_args"
-[[ $docker_args == *"OMARCHY_RUNTIME_PACKAGE=omarchy-dev"* ]] ||
+[[ $docker_args == *"OMARCHY_RUNTIME_PACKAGE=omarchy"* ]] ||
   fail "the runtime package name is stated to the container, not re-derived there" "$docker_args"
 pass "--local-source: both source trees are mounted and the package names are passed explicitly"
 
@@ -879,8 +879,8 @@ f27="$work/f27"
 make_fixture "$f27"
 scratch27="$work/scratch-27"
 mirror27="$scratch27/offline-mirror-cache/mirror/offline"
-make_fake_package "$mirror27" omarchy-dev "4.0.0.r1617.g${FIXTURE_RUNTIME_SHA:0:7}" omarchy-provision-user
-make_fake_package "$mirror27" omarchy-settings-dev "4.0.0.r1617.g${FIXTURE_RUNTIME_SHA:0:7}" omarchy-upload-log
+make_fake_package "$mirror27" omarchy "4.0.4-1" omarchy-provision-user
+make_fake_package "$mirror27" omarchy-settings "4.0.4-1" omarchy-upload-log
 BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f27" \
   "OMARCHY_DECK_ISO_BUILD_DIR=$scratch27" \
   "DOCKER_STUB_ARGS=$work/docker-args-27" \
@@ -896,14 +896,16 @@ BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f27" \
   fail "the rejected ISO must not keep its .iso name"
 pass "guard 6.4b catches what 6.4a structurally cannot, and renames the ISO it rejects"
 
-# The pin that did not take: a channel build (its pkgver carries someone
-# else's commit) sitting in the mirror where our local build should be.
+# The pin that did not take: a stale build (its pkgver names another version)
+# sitting in the mirror where our local build should be. The released packages
+# carry static versions with no .g<sha>, so the guard compares against the
+# 4.0.4 pin, not against a commit string.
 f28="$work/f28"
 make_fixture "$f28"
 scratch28="$work/scratch-28"
 mirror28="$scratch28/offline-mirror-cache/mirror/offline"
-make_fake_package "$mirror28" omarchy-dev "4.0.0.r1652.g1c9dfc5" omarchy-setup-system omarchy-provision-user
-make_fake_package "$mirror28" omarchy-settings-dev "4.0.0.r1652.g1c9dfc5" omarchy-upload-log
+make_fake_package "$mirror28" omarchy "4.0.0-1" omarchy-setup-system omarchy-provision-user
+make_fake_package "$mirror28" omarchy-settings "4.0.4-1" omarchy-upload-log
 BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f28" \
   "OMARCHY_DECK_ISO_BUILD_DIR=$scratch28" \
   "DOCKER_STUB_ARGS=$work/docker-args-28" \
@@ -911,8 +913,8 @@ BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f28" \
 [[ $BUILD_STATUS -eq 1 ]] || fail "a runtime package not built from iso/RUNTIME must be refused" "status=$BUILD_STATUS $BUILD_OUT"
 [[ $BUILD_OUT == *"runtime pin did not take effect"* ]] ||
   fail "the refusal says the pin did not take effect" "$BUILD_OUT"
-[[ $BUILD_OUT == *"4.0.0.r1652.g1c9dfc5"* ]] || fail "the refusal quotes the version it found" "$BUILD_OUT"
-pass "guard 6.4b rejects a package whose version does not carry iso/RUNTIME's commit (--local-source silently not applying)"
+[[ $BUILD_OUT == *"4.0.0-1"* ]] || fail "the refusal quotes the version it found" "$BUILD_OUT"
+pass "guard 6.4b rejects a package whose version is not the pinned 4.0.4 (--local-source silently not applying)"
 
 # No local build in the mirror at all: the channel path, which is the state
 # this whole slice removes.
@@ -925,7 +927,7 @@ BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f29" \
   "DOCKER_STUB_ARGS=$work/docker-args-29" \
   "DOCKER_STUB_RELEASE=$scratch29/release"
 [[ $BUILD_STATUS -eq 1 ]] || fail "an offline mirror with no locally built runtime must be refused" "status=$BUILD_STATUS $BUILD_OUT"
-[[ $BUILD_OUT == *"no omarchy-dev package in"* ]] || fail "the refusal says which package is absent" "$BUILD_OUT"
+[[ $BUILD_OUT == *"no omarchy package in"* ]] || fail "the refusal says which package is absent" "$BUILD_OUT"
 [[ $BUILD_OUT != *"did not take effect"* ]] ||
   fail "an absent package must be reported as absent, not as a version mismatch against an empty version" "$BUILD_OUT"
 pass "guard 6.4b refuses an offline mirror with no locally built runtime -- an empty scan is not a pass"
@@ -937,8 +939,8 @@ f30="$work/f30"
 make_fixture "$f30"
 scratch30="$work/scratch-30"
 mirror30="$scratch30/offline-mirror-cache/mirror/offline"
-make_fake_package "$mirror30" omarchy-dev "4.0.0.r1617.g${FIXTURE_RUNTIME_SHA:0:7}"
-make_fake_package "$mirror30" omarchy-settings-dev "4.0.0.r1617.g${FIXTURE_RUNTIME_SHA:0:7}"
+make_fake_package "$mirror30" omarchy "4.0.4-1"
+make_fake_package "$mirror30" omarchy-settings "4.0.4-1"
 BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f30" \
   "OMARCHY_DECK_ISO_BUILD_DIR=$scratch30" \
   "DOCKER_STUB_ARGS=$work/docker-args-30" \
@@ -957,9 +959,9 @@ f31="$work/f31"
 make_fixture "$f31"
 scratch31="$work/scratch-31"
 mirror31="$scratch31/offline-mirror-cache/mirror/offline"
-make_fake_package "$mirror31" omarchy-dev "4.0.0.r1617.g${FIXTURE_RUNTIME_SHA:0:7}" \
+make_fake_package "$mirror31" omarchy "4.0.4-1" \
   omarchy-setup-system omarchy-provision-user
-make_fake_package "$mirror31" omarchy-settings-dev "4.0.0.r1617.g${FIXTURE_RUNTIME_SHA:0:7}" omarchy-upload-log
+make_fake_package "$mirror31" omarchy-settings "4.0.4-1" omarchy-upload-log
 NO_BSDTAR_PATH="$work/no-bsdtar-bin"
 mkdir -p "$NO_BSDTAR_PATH"
 while IFS= read -r -d '' entry; do
@@ -1086,9 +1088,9 @@ f36="$work/f36"
 make_fixture "$f36"
 scratch36="$work/scratch-36"
 mirror36="$scratch36/offline-mirror-cache/mirror/offline"
-make_fake_package "$mirror36" omarchy-dev "4.0.0.r1617.g${FIXTURE_RUNTIME_SHA:0:7}" \
+make_fake_package "$mirror36" omarchy "4.0.4-1" \
   omarchy-setup-system omarchy-provision-user
-make_fake_package "$mirror36" omarchy-settings-dev "4.0.0.r1617.g${FIXTURE_RUNTIME_SHA:0:7}" \
+make_fake_package "$mirror36" omarchy-settings "4.0.4-1" \
   omarchy-upload-log
 make_sudoers_package "$mirror36" omarchy-deck "1.0.0-1" 'deck ALL=(ALL) NOPASSWD: ALL'
 BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f36" \
@@ -1131,15 +1133,21 @@ ISO_ROOT="$REPO_ROOT/iso"
 
 [[ -f "$ISO_ROOT/UPSTREAM" ]] || fail "iso/UPSTREAM exists"
 upstream_content=$(cat "$ISO_ROOT/UPSTREAM")
-[[ $upstream_content == "omacom-io/omarchy-iso@174dd82b157b" ]] ||
-  fail "iso/UPSTREAM has the exact pin (4.0.0 stable rebase, 2026-08-15)" "got: $upstream_content"
-pass "iso/UPSTREAM is exactly 'omacom-io/omarchy-iso@174dd82b157b'"
+[[ $upstream_content == "omacom/omarchy-iso@7cfb7111a068" ]] ||
+  fail "iso/UPSTREAM has the exact pin (4.0.4 rebase, 2026-09-17)" "got: $upstream_content"
+pass "iso/UPSTREAM is exactly 'omacom/omarchy-iso@7cfb7111a068'"
 
 [[ -f "$ISO_ROOT/RUNTIME" ]] || fail "iso/RUNTIME exists"
 runtime_content=$(cat "$ISO_ROOT/RUNTIME")
-[[ $runtime_content == "basecamp/omarchy@f0020448ca87" ]] ||
-  fail "iso/RUNTIME has the exact pin (Omarchy 4.0.0 stable, tag v4.0.0)" "got: $runtime_content"
-pass "iso/RUNTIME is exactly 'basecamp/omarchy@f0020448ca87'"
+[[ $runtime_content == "omacom/omarchy@c668141e9c42" ]] ||
+  fail "iso/RUNTIME has the exact pin (Omarchy 4.0.4, tag v4.0.4)" "got: $runtime_content"
+pass "iso/RUNTIME is exactly 'omacom/omarchy@c668141e9c42'"
+
+[[ -f "$ISO_ROOT/PKGS" ]] || fail "iso/PKGS exists"
+pkgs_content=$(cat "$ISO_ROOT/PKGS")
+[[ $pkgs_content == "omacom/omarchy-pkgs@5fe236736607" ]] ||
+  fail "iso/PKGS has the exact pin (Omarchy pkgs 4.0.4, Release omarchy 4.0.4)" "got: $pkgs_content"
+pass "iso/PKGS is exactly 'omacom/omarchy-pkgs@5fe236736607'"
 
 [[ -d "$ISO_ROOT/overlay/configs/airootfs" ]] || fail "iso/overlay/configs/airootfs/ exists"
 [[ -d "$ISO_ROOT/overlay/patches" ]] || fail "iso/overlay/patches/ exists"
@@ -1457,8 +1465,8 @@ fi
 
 if [[ -e "$ISO_ROOT/upstream/.git" ]]; then
   real_head=$(git -C "$ISO_ROOT/upstream" rev-parse HEAD)
-  [[ $real_head == 174dd82b157b* ]] ||
-    fail "iso/upstream is checked out at the pinned commit" "HEAD=$real_head, expected 174dd82b157b*"
+  [[ $real_head == 7cfb7111a068* ]] ||
+    fail "iso/upstream is checked out at the pinned commit" "HEAD=$real_head, expected 7cfb7111a068*"
   real_dirty=$(git -C "$ISO_ROOT/upstream" status --porcelain)
   [[ -z $real_dirty ]] || fail "iso/upstream has no local modifications" "$real_dirty"
   pass "the real iso/upstream submodule is checked out clean, exactly at the UPSTREAM pin"
@@ -2121,9 +2129,9 @@ pass "🔴 guard 6.4a fails loudly when it cannot derive a PKGBUILD's /usr/bin t
 #     ARTIFACT.
 #
 # Section 21 fixed the cheap half. Until this section, 6.4b still asked only
-# omarchy-dev + omarchy-settings-dev, so a literal /usr/bin/omarchy-deck-* in
+# omarchy + omarchy-settings, so a literal /usr/bin/omarchy-deck-* in
 # the orchestrator passed 6.4a and failed 6.4b -- after Docker, ~40 minutes and
-# ~6 GB later, with a diagnosis pointing at omarchy-dev's exclusion list, which
+# ~6 GB later, with a diagnosis pointing at the runtime's exclusion list, which
 # is not where the fix lives.
 #
 # The four claims here are the ones that make the widening a guard rather than
@@ -2134,12 +2142,12 @@ pass "🔴 guard 6.4a fails loudly when it cannot derive a PKGBUILD's /usr/bin t
 # ===========================================================================
 
 # deck_mirror_fixture <fixture-root> <mirror-dir> -- the two runtime packages
-# every post-docker run needs, at the fixture's own runtime sha.
+# every post-docker run needs, at the static 4.0.4 pin.
 deck_mirror_fixture() {
   local mirror=$1
-  make_fake_package "$mirror" omarchy-dev "4.0.0.r1617.g${FIXTURE_RUNTIME_SHA:0:7}" \
+  make_fake_package "$mirror" omarchy "4.0.4-1" \
     omarchy-setup-system omarchy-provision-user
-  make_fake_package "$mirror" omarchy-settings-dev "4.0.0.r1617.g${FIXTURE_RUNTIME_SHA:0:7}" \
+  make_fake_package "$mirror" omarchy-settings "4.0.4-1" \
     omarchy-upload-log
 }
 

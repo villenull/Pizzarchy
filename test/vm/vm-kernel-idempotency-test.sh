@@ -16,7 +16,7 @@
 #   VM_SMP             default min(nproc,4)
 #   VM_RUN_TIMEOUT_SEC default 3600
 #   VM_OVMF_CODE / VM_OVMF_VARS  override firmware probing
-#   VM_NEPTUNE_SERIES  passed through to the script under test
+#   (no kernel env: the kernel is upstream's linux-omarchy, tracked by KERNEL_PKG)
 #
 # Design notes, and why it looks like this:
 #
@@ -77,7 +77,6 @@ MEM_MB=${VM_MEM_MB:-4096}
 DEFAULT_SMP=$(( $(nproc) < 4 ? $(nproc) : 4 ))
 SMP=${VM_SMP:-$DEFAULT_SMP}
 RUN_TIMEOUT=${VM_RUN_TIMEOUT_SEC:-3600}
-NEPTUNE_SERIES=${VM_NEPTUNE_SERIES:-}
 
 log() { printf '[vm-kernel-idem] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -275,7 +274,6 @@ Before=graphical.target
 
 [Service]
 Type=oneshot
-Environment=OMARCHY_DECK_NEPTUNE_SERIES=${NEPTUNE_SERIES}
 ExecStartPre=/usr/bin/cp /boot/omarchy-deck-idem-probe.sh /root/omarchy-deck-idem-probe.sh
 ExecStartPre=/usr/bin/cp /boot/omarchy-deck-kernel.sh /root/omarchy-deck-kernel.sh
 ExecStart=/usr/bin/bash /root/omarchy-deck-idem-probe.sh

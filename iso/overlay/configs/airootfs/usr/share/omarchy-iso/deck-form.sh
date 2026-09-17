@@ -3249,19 +3249,20 @@ deck_final_summary() {
 }
 
 # ===========================================================================
-# S6 -- THE KERNEL. One kernel on the installed Deck, and it is Neptune.
+# S6 -- THE KERNEL. One kernel on the installed Deck, and it is linux-omarchy.
 # ===========================================================================
 #
-# Operator decision, 2026-08-15, final: the installed Deck boots
-# linux-neptune-611 and NOTHING ELSE. No stock `linux`, no second kernel, no
-# fallback entry.
+# Operator decision, 2026-09-17 (v4.0.4 rebase): the installed Deck boots
+# linux-omarchy and NOTHING ELSE. No stock `linux`, no second kernel, no
+# fallback entry. Upstream's own default is now linux-omarchy for non-T2
+# machines, so the Deck branch agrees with stock omarchy-iso on the package
+# name -- the override still exists because T2 probing must never run on Deck
+# hardware, and because a bare upstream default is not a Deck decision.
 #
 # 🔴 WHY THIS IS AN OVERRIDE AND NOT A PACKAGE-LIST LINE.
 #
-# Adding `linux-neptune-611` to deck-install.packages (which Agent A did, and
-# which is still required -- see DECK_KERNEL_PKG below) does NOT remove stock
-# `linux`. Stock `linux` does not come from any package list this repo owns.
-# It comes from archinstall itself:
+# Stock `linux` does not come from any package list this repo owns. It comes
+# from archinstall itself:
 #
 #   archinstall_adapter.py:139   Installer(..., kernels=arch_config.kernels)
 #   phases_impl.py:257           installer.minimal_installation(...)
@@ -3272,16 +3273,20 @@ deck_final_summary() {
 #   configurator:824             "kernels": [ "$kernel_choice" ],   (free_space)
 #   configurator:1213            "kernels": [ "$kernel_choice" ],   (full_disk)
 #
-# and `$kernel_choice` is assigned, at both sites, from `detect_kernel`. So
-# without this override the target gets TWO kernels and TWO UKIs, and which
-# one Limine boots is decided by limine-entry-tool's ordering rather than by
-# us -- exactly the "which one actually boots?" ambiguity this project exists
-# to remove. (Nobody has measured ESP headroom for two ~75 MB UKIs either.)
+# and `$kernel_choice` is assigned, at both sites, from `detect_kernel`. As
+# of omarchy-iso 7cfb7111 upstream's own default answer is linux-omarchy for
+# non-T2 machines -- the right package, chosen for the wrong reason. Without
+# this override a Deck would still land on linux-omarchy, but only because no
+# T2 PCI ID matched, and a future upstream default move would silently move
+# the Deck with it. The override names the Deck kernel deliberately, and
+# keeps Deck detection ahead of the T2 probe, so the target gets ONE kernel
+# and ONE UKI and Limine's ordering never decides what boots.
+# (Nobody has measured ESP headroom for two ~75 MB UKIs either.)
 #
 # 🔴 THE ORDERING, WHICH IS THE ONLY THING THAT MAKES THIS WORK.
 #
 # A redefinition only takes effect if the `source` happens before the CALL.
-# Verified against the pinned submodule iso/upstream @ 174dd82b, by line
+# Verified against the pinned submodule iso/upstream @ 7cfb7111a, by line
 # number, not by memory:
 #
 #   414   detect_kernel() { ... }                  definition
@@ -3290,13 +3295,16 @@ deck_final_summary() {
 #   1035  defer_provisioning=false                 <-- deck-form-invocation.patch
 #   1036  install_target="full_disk"                   hunk 1's context anchor;
 #                                                      the `source` lands HERE
+#                                                      (patched file: 1057)
 #   1040  wait_for_stable_terminal                 top-level flow starts
 #   1107  kernel_choice=$(detect_kernel)           TOP LEVEL, column 0
+#                                                  (patched file: 1158)
 #
 # Both call sites are reached AFTER the source:
 #
 #   * Line 1107 is the one every Deck install takes (the full_disk branch).
-#     It is 71 lines BELOW the insertion point. Unambiguous.
+#     It is 101 lines BELOW the insertion point (patched file: 1158 vs 1057).
+#     Unambiguous.
 #   * Line 665 is a function BODY. Bodies resolve names at call time, not at
 #     definition time, and run_partition_decide's only caller is
 #     select_installation:1021, which itself only runs from line 1078 -- also
@@ -3309,23 +3317,20 @@ deck_final_summary() {
 # everything above 1031 is definitions. test-deck-form.sh asserts this
 # ordering mechanically against the pinned file so an upstream move that
 # hoisted the call above the anchor fails the suite instead of silently
-# reverting the target to stock `linux`.
+# reverting the target to an unpinned kernel.
 
 # --- the package name ------------------------------------------------------
 #
-# 🔴 THIS NAME EXISTS IN FOUR PLACES AND THEY MUST AGREE. It is not derived at
+# 🔴 THIS NAME EXISTS IN TWO PLACES AND THEY MUST AGREE. It is not derived at
 # runtime, deliberately:
 #
-#   iso/overlay/configs/deck/deck-mirror.packages     linux-neptune-611
-#                                                     (+ -headers, mirror-only)
-#   iso/overlay/configs/deck/deck-install.packages    linux-neptune-611
-#   src/omarchy-deck-kernel.sh                        NEPTUNE_SERIES_DEFAULT=611
-#   here                                              DECK_NEPTUNE_SERIES=611
+#   install/omarchy-other.packages (upstream runtime)   linux-omarchy
+#   here                                                DECK_KERNEL_PKG
 #
 # WHY NOT DERIVE IT FROM THE SHIPPED LIST. The obvious derivation is to grep
 # /usr/share/omarchy-iso/omarchy-base.packages (which build-iso.sh builds by
 # merging deck-install.packages into the runtime's base list) for
-# `^linux-neptune-[0-9]*$`. Rejected, because the derivation has failure modes
+# `^linux-omarchy$`. Rejected, because the derivation has failure modes
 # and this function CANNOT REPORT ONE. It is called as `$(detect_kernel)` --
 # a command substitution, i.e. a subshell. `abort`/`exit` from in here kills
 # only the subshell; configurator (no `set -e`) then carries on with
@@ -3334,16 +3339,14 @@ deck_final_summary() {
 # same shape as the two silently-wrong globals this suite already pins.
 #
 # So the copies are held in agreement where failure is free and loud instead:
-# test-deck-form.sh reads all three other files and fails if any disagrees.
-# One CHECKED copy, not four hand-kept ones.
+# test-deck-form.sh reads the runtime's omarchy-other.packages and fails if
+# it disagrees. One CHECKED copy, not two hand-kept ones.
 #
-# The series is the constant and the package name is derived from it, matching
-# src/omarchy-deck-kernel.sh's own KERNEL_PKG construction exactly. 611 is the
-# series validated live on the operator's OLED Deck; see that file's long
-# "WHY PINNED RATHER THAN TRACK LATEST" block for why this is not "the newest"
-# (the suffix is not orderable, and the newest is a release candidate).
-readonly DECK_NEPTUNE_SERIES=611
-readonly DECK_KERNEL_PKG="linux-neptune-${DECK_NEPTUNE_SERIES}"
+# linux-omarchy is upstream's generic kernel (pkgbase linux-omarchy,
+# 7.2.5-4 at the v4.0.4 pin), adopted by operator decision 2026-09-17. The
+# Valve Neptune series pin is retired with it: there is no series suffix to
+# track on a generic kernel.
+readonly DECK_KERNEL_PKG="linux-omarchy"
 
 # --- the hardware predicate ------------------------------------------------
 #
@@ -3355,7 +3358,7 @@ readonly DECK_KERNEL_PKG="linux-neptune-${DECK_NEPTUNE_SERIES}"
 # is "Valve". The QEMU suites feed the same strings
 # (`-smbios type=1,manufacturer=Valve,product=Galileo`).
 #
-# 🔴 WHAT AN LCD DECK (Jupiter) GETS, AND WHY. It gets linux-neptune-611, the
+# 🔴 WHAT AN LCD DECK (Jupiter) GETS, AND WHY. It gets linux-omarchy, the
 # same as an OLED. This is a deliberate call, not an oversight:
 #
 #   * CLAUDE.md's constraint is "OLED is the only VERIFIED hardware ... don't
@@ -3369,19 +3372,19 @@ readonly DECK_KERNEL_PKG="linux-neptune-${DECK_NEPTUNE_SERIES}"
 #     support." Diverging here would leave the ISO's installer and the
 #     installed system's own kernel manager disagreeing about what a Deck is.
 #   * The alternative is worse on its own terms. Refusing here does not mean
-#     "no kernel"; it means the else branch, which means stock `linux` on a
-#     Steam Deck -- no Valve patches, and the machine this ISO exists for
-#     lands on the one kernel this project's whole premise says is wrong.
-#   * Valve does not ship a per-model kernel. The published series are
-#     60/61/65/68/611/615/616/618/72 (enumerated in src/omarchy-deck-kernel.sh);
-#     there is no linux-neptune-jupiter / -galileo split to choose between, so
-#     "the right kernel for a Jupiter" is not a different package.
+#     "no kernel"; it means the else branch, which on current upstream is
+#     still linux-omarchy -- but reached by accident (no T2 PCI ID) rather
+#     than by Deck detection, and hostage to the next upstream default move.
+#     Naming it here makes the Deck path deliberate rather than coincidental.
+#   * linux-omarchy is a single generic kernel: there is no per-model split
+#     to choose between, so "the right kernel for a Jupiter" is not a
+#     different package.
 #
-# ⚠️ Being honest about what is unproven: this has never been booted on a
-# Jupiter. Neither has stock `linux`. NOTHING anywhere in this repo may state
+# ⚠️ Being honest about what is unproven: linux-omarchy has never been booted
+# on a Jupiter by this project. NOTHING anywhere in this repo may state
 # that LCD is supported on the strength of this comment -- the claim being
-# made here is only "Neptune is the better of two unverified options on that
-# model", which is a reasoned default, not a measurement.
+# made here is only "the generic kernel is the better of the unverified
+# options on that model", which is a reasoned default, not a measurement.
 #
 # The two sysfs reads are behind DECK_* overrides so the [U] suite can fake
 # every branch in a temp dir, matching DECK_NET_SYSFS / DECK_LSBLK_BIN etc.
@@ -3414,16 +3417,16 @@ deck_form_is_steam_deck() {
 #
 # The name is upstream's exactly. It has to be: a definition under any other
 # name is not a broken override, it is NO override, silently, and the target
-# quietly gets stock `linux` back while every unit test on the helper above
-# stays green. test-deck-form.sh's override-name scanner already covers this
-# class, and a dedicated assertion pins this one by definition site.
+# quietly gets whatever upstream's default is while every unit test on the
+# helper above stays green. test-deck-form.sh's override-name scanner already
+# covers this class, and a dedicated assertion pins this one by definition site.
 detect_kernel() {
   if deck_form_is_steam_deck; then
     printf '%s\n' "$DECK_KERNEL_PKG"
     return 0
   fi
 
-  # TRANSCRIBED FROM UPSTREAM, iso/upstream @ 174dd82b, configurator:414-420,
+  # TRANSCRIBED FROM UPSTREAM, iso/upstream @ 7cfb7111a, configurator:414-420,
   # verbatim apart from the DECK_LSPCI_BIN test seam (which defaults to the
   # bare `lspci` upstream calls). Upstream's own comment: "T2 Macs need their
   # own kernel for keyboard/wifi drivers."
@@ -3432,11 +3435,12 @@ detect_kernel() {
   # machine that is not a Deck -- a QEMU install, a developer's laptop, a T2
   # Mac someone points this ISO at -- the answer must be exactly what stock
   # omarchy-iso would have given, or this override has changed behaviour it
-  # was never asked to change.
+  # was never asked to change. At 7cfb7111 that answer is linux-t2 on T2
+  # Macs, linux-omarchy everywhere else.
   local lspci_bin=${DECK_LSPCI_BIN:-lspci}
   if "$lspci_bin" -nn 2>/dev/null | grep -q "106b:180[12]"; then
     echo "linux-t2"
   else
-    echo "linux"
+    echo "linux-omarchy"
   fi
 }

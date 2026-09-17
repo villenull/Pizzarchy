@@ -101,7 +101,7 @@ outcome_selftest_root() {
   done
   # The prefix trap, in both roots.
   for pkg in linux-api-headers-7.1-1 linux-firmware-20260810-1 \
-    steamdeck-dsp-1.0-1 linux-neptune-611-6.11.11-1 gamescope-3.16.25-3 \
+    steamdeck-dsp-1.0-1 linux-omarchy-7.2.5-3 gamescope-3.16.25-3 \
     omarchy-deck-0.2.0-1; do
     mkdir -p "$db/$pkg"
     : >"$db/$pkg/desc"
@@ -133,14 +133,14 @@ if [[ ${VM_OUTCOME_SELFTEST:-0} == 1 ]]; then
   outcome_selftest_root "$WORK/selftest-good" good
   before_total=$SCREENS_CHECKS_TOTAL before_passed=$SCREENS_CHECKS_PASSED
   outcome::check_installed_root "$WORK/selftest-good" "$REPO_ROOT" \
-    "omarchy_linux-neptune-611.efi" >/dev/null 2>&1
+    "omarchy_linux-omarchy.efi" >/dev/null 2>&1
   good_total=$((SCREENS_CHECKS_TOTAL - before_total))
   good_failed=$((good_total - (SCREENS_CHECKS_PASSED - before_passed)))
 
   outcome_selftest_root "$WORK/selftest-bad" bad
   before_total=$SCREENS_CHECKS_TOTAL before_passed=$SCREENS_CHECKS_PASSED
   outcome::check_installed_root "$WORK/selftest-bad" "$REPO_ROOT" \
-    omarchy_linux.efi omarchy_linux-neptune-611.efi >/dev/null 2>&1
+    omarchy_linux.efi omarchy_linux-omarchy.efi >/dev/null 2>&1
   bad_total=$((SCREENS_CHECKS_TOTAL - before_total))
   bad_failed=$((bad_total - (SCREENS_CHECKS_PASSED - before_passed)))
 

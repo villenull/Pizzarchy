@@ -3396,16 +3396,16 @@ done
 pass "L2: the pre-reboot warning is on the last screen deck-form.sh owns, on every path through it"
 
 # ===========================================================================
-# S6: the kernel -- linux-neptune-611 ONLY, and the ordering that makes it work
+# S6: the kernel -- linux-omarchy ONLY, and the ordering that makes it work
 # ===========================================================================
 #
 # 🔴 THE ORDERING IS THE WHOLE TEST. A function override only takes effect if
 # the `source` runs before the CALL. If upstream ever hoists
 # `kernel_choice=$(detect_kernel)` above deck-form-invocation.patch's insertion
-# point, our detect_kernel is dead code, `kernel_choice` becomes stock `linux`,
-# the target gets two kernels and two UKIs, and EVERY OTHER ASSERTION IN THIS
-# SECTION STILL PASSES -- the passing state would be indistinguishable from
-# the not-having-run state (docs/PROGRESS.md §5.30c). So this is asserted
+# point, our detect_kernel is dead code, `kernel_choice` becomes whatever
+# upstream's default is, the target gets two kernels and two UKIs, and EVERY
+# OTHER ASSERTION IN THIS SECTION STILL PASSES -- the passing state would be
+# indistinguishable from the not-having-run state (docs/PROGRESS.md §5.30c).
 # against the REAL PATCHED FILE, not against a remembered line number: the
 # patch is applied to a scratch copy of the pinned configurator and the
 # resulting line numbers are compared. Same technique test-deck-dashboard.sh
@@ -3447,7 +3447,7 @@ top_calls=$(awk '$0 == "kernel_choice=$(detect_kernel)" { n++ } END { print n+0 
 call_line=$(awk '$0 == "kernel_choice=$(detect_kernel)" { print NR; exit }' "$patched_conf")
 
 [[ $call_line -gt $src_line ]] ||
-  fail "🔴 THE OVERRIDE IS DEAD CODE: the top-level kernel_choice=\$(detect_kernel) (line $call_line) runs BEFORE deck-form.sh is sourced (line $src_line). detect_kernel below would never apply and the target would silently get stock 'linux' plus a second kernel. Do not 'fix' this here -- the source line's placement is owned by iso/overlay/patches/deck-form-invocation.patch."
+  fail "🔴 THE OVERRIDE IS DEAD CODE: the top-level kernel_choice=\$(detect_kernel) (line $call_line) runs BEFORE deck-form.sh is sourced (line $src_line). detect_kernel below would never apply and the target would silently get upstream's default plus a second kernel. Do not 'fix' this here -- the source line's placement is owned by iso/overlay/patches/deck-form-invocation.patch."
 pass "the source (line $src_line) precedes the top-level detect_kernel call (line $call_line) -- the override actually applies"
 
 # The in-function call site, pinned as in-function. If upstream ever moves it
@@ -3469,11 +3469,11 @@ echo "--- S6 the override NAME, checked against upstream's own definition -----"
 
 # 🔴 A rename upstream must fail LOUDLY here. If upstream renames detect_kernel,
 # our definition stops overriding anything: `kernel_choice` silently reverts to
-# stock `linux` and the installed Deck gets two kernels. Nothing else in this
-# suite would notice -- detect_kernel would still return the Neptune name when
+# upstream's default and the installed Deck gets two kernels. Nothing else in this
+# suite would notice -- detect_kernel would still return the linux-omarchy name when
 # called directly by the tests below.
 LC_ALL=C grep -qE '^detect_kernel\(\) \{' "$CONFIGURATOR" ||
-  fail "upstream's configurator no longer DEFINES 'detect_kernel()' at column 0 -- deck-form.sh's override now overrides nothing, and the target would silently get stock 'linux'. Find upstream's new name and rename the override to match."
+  fail "upstream's configurator no longer DEFINES 'detect_kernel()' at column 0 -- deck-form.sh's override now overrides nothing, and the target would silently get upstream's default. Find upstream's new name and rename the override to match."
 pass "upstream still defines detect_kernel() under exactly that name"
 
 LC_ALL=C grep -qE '^detect_kernel\(\) \{' "$DECK_FORM_SH" ||
@@ -3491,7 +3491,7 @@ LC_ALL=C grep -qF '"kernels": [ "$kernel_choice" ]' "$CONFIGURATOR" ||
   fail "upstream's configurator no longer writes \"kernels\": [ \"\$kernel_choice\" ] into user_configuration.json -- detect_kernel no longer reaches archinstall, re-derive the mechanism"
 pass "upstream still routes detect_kernel -> kernel_choice -> user_configuration.json's \"kernels\" array"
 
-echo "--- S6 Deck hardware gets Neptune, and nothing else does ----------------"
+echo "--- S6 Deck hardware gets linux-omarchy, and nothing else does ----------"
 
 mk_dmi() {
   local dir=$1
@@ -3514,10 +3514,10 @@ printf '00:02.0 VGA compatible controller [0300]: Red Hat, Inc. Virtio GPU [1af4
 EOF
 chmod +x "$work/bin-lspci/lspci-t2" "$work/bin-lspci/lspci-plain"
 
-expected_kernel="linux-neptune-611"
+expected_kernel="linux-omarchy"
 [[ $DECK_KERNEL_PKG == "$expected_kernel" ]] ||
   fail "DECK_KERNEL_PKG must be the operator-decided kernel package" "expected $expected_kernel, got $DECK_KERNEL_PKG"
-pass "DECK_KERNEL_PKG is the pinned Neptune package name ($expected_kernel)"
+pass "DECK_KERNEL_PKG is the adopted upstream kernel name ($expected_kernel)"
 
 # OLED. The only VERIFIED hardware in this project (CLAUDE.md), and the model
 # every QEMU suite fakes via -smbios product=Galileo.
@@ -3530,15 +3530,15 @@ got=$(DECK_DMI_PRODUCT="$work/dmi-galileo/product_name" \
 pass "OLED Deck (Galileo) -> $DECK_KERNEL_PKG"
 
 # LCD. Deliberate, documented, and UNVERIFIED -- see deck-form.sh's S6 block.
-# It gets Neptune because the else branch would give a Steam Deck stock
-# `linux`, which is worse. This assertion exists so that decision cannot be
-# reversed by accident, only on purpose.
+# It gets linux-omarchy by Deck detection, not by accident of the else branch.
+# This assertion exists so that decision cannot be reversed by accident, only
+# on purpose.
 mk_dmi "$work/dmi-jupiter" Jupiter Valve
 got=$(DECK_DMI_PRODUCT="$work/dmi-jupiter/product_name" \
       DECK_DMI_VENDOR="$work/dmi-jupiter/sys_vendor" \
       DECK_LSPCI_BIN="$work/bin-lspci/lspci-t2" detect_kernel)
 [[ $got == "$DECK_KERNEL_PKG" ]] ||
-  fail "an LCD Deck (Jupiter/Valve) must also install $DECK_KERNEL_PKG -- the alternative is stock 'linux' on a Steam Deck. LCD remains UNVERIFIED hardware; this is a reasoned default, not a support claim." "got: $got"
+  fail "an LCD Deck (Jupiter/Valve) must also install $DECK_KERNEL_PKG -- Deck detection must win over the T2 probe. LCD remains UNVERIFIED hardware; this is a reasoned default, not a support claim." "got: $got"
 pass "LCD Deck (Jupiter) -> $DECK_KERNEL_PKG (deliberate; LCD is unverified either way)"
 
 # The T2 fake above is deliberately in play on the Jupiter case: Deck detection
@@ -3575,9 +3575,9 @@ mk_dmi "$work/dmi-generic" "20BES07600" "LENOVO"
 got=$(DECK_DMI_PRODUCT="$work/dmi-generic/product_name" \
       DECK_DMI_VENDOR="$work/dmi-generic/sys_vendor" \
       DECK_LSPCI_BIN="$work/bin-lspci/lspci-plain" detect_kernel)
-[[ $got == "linux" ]] ||
-  fail "non-Deck, non-T2 hardware must get upstream's exact answer: the string 'linux'" "got: $got"
-pass "non-Deck, non-T2 -> 'linux' (upstream's exact string, unchanged)"
+[[ $got == "linux-omarchy" ]] ||
+  fail "non-Deck, non-T2 hardware must get upstream's exact answer: the string 'linux-omarchy'" "got: $got"
+pass "non-Deck, non-T2 -> 'linux-omarchy' (upstream's exact string, unchanged)"
 
 got=$(DECK_DMI_PRODUCT="$work/dmi-generic/product_name" \
       DECK_DMI_VENDOR="$work/dmi-generic/sys_vendor" \
@@ -3606,7 +3606,7 @@ echo "--- S6 the detection reads ONLY seams a temp dir can fake ---------------"
 got=$(DECK_DMI_PRODUCT="$work/does-not-exist/product_name" \
       DECK_DMI_VENDOR="$work/does-not-exist/sys_vendor" \
       DECK_LSPCI_BIN="$work/bin-lspci/lspci-plain" detect_kernel)
-[[ $got == "linux" ]] ||
+[[ $got == "linux-omarchy" ]] ||
   fail "unreadable DMI nodes must fall through to upstream's branch, not crash and not guess Deck" "got: $got"
 pass "absent/unreadable DMI nodes -> not a Deck -> upstream's branch"
 
@@ -3616,7 +3616,7 @@ mk_dmi "$work/dmi-empty" "" ""
 got=$(DECK_DMI_PRODUCT="$work/dmi-empty/product_name" \
       DECK_DMI_VENDOR="$work/dmi-empty/sys_vendor" \
       DECK_LSPCI_BIN="$work/bin-lspci/lspci-plain" detect_kernel)
-[[ $got == "linux" ]] ||
+[[ $got == "linux-omarchy" ]] ||
   fail "empty DMI values must not match the Deck predicate" "got: $got"
 pass "empty DMI values -> not a Deck"
 
@@ -3647,42 +3647,50 @@ echo "--- S6 the kernel name agrees across every file that names it ----------"
 
 # 🔴 THE DESYNC GATE. deck-form.sh deliberately does NOT derive this name at
 # runtime -- it cannot report a derivation failure from inside `$(...)` (see its
-# own S6 block). The four copies are held in agreement HERE instead, where
+# own S6 block). The two copies are held in agreement HERE instead, where
 # failing is free and loud.
-MIRROR_PKGS="$REPO_ROOT/iso/overlay/configs/deck/deck-mirror.packages"
-INSTALL_PKGS="$REPO_ROOT/iso/overlay/configs/deck/deck-install.packages"
 KERNEL_SH="$REPO_ROOT/src/omarchy-deck-kernel.sh"
-for f in "$MIRROR_PKGS" "$INSTALL_PKGS" "$KERNEL_SH"; do
-  [[ -r $f ]] || fail "$f is missing -- the kernel-name desync gate cannot run, and is not being skipped silently"
-done
+[[ -r $KERNEL_SH ]] || fail "$KERNEL_SH is missing -- the kernel-name desync gate cannot run, and is not being skipped silently"
 
-[[ $DECK_KERNEL_PKG =~ ^linux-neptune-[0-9]+$ ]] ||
-  fail "DECK_KERNEL_PKG must look like a Valve Neptune package name" "got: $DECK_KERNEL_PKG"
+[[ $DECK_KERNEL_PKG == "linux-omarchy" ]] ||
+  fail "DECK_KERNEL_PKG must be the adopted upstream kernel name" "got: $DECK_KERNEL_PKG"
 
-# Exact whole-line matches: deck-mirror.packages also carries
-# 'linux-neptune-611-headers', which a substring grep would happily accept.
-n=$(awk -v pkg="$DECK_KERNEL_PKG" '$0 == pkg { n++ } END { print n+0 }' "$INSTALL_PKGS")
-[[ $n -eq 1 ]] ||
-  fail "deck-install.packages must contain exactly one bare '$DECK_KERNEL_PKG' line -- that list is what makes pacstrap install it on the target, offline" "found $n"
-pass "deck-install.packages names exactly $DECK_KERNEL_PKG (the target install list)"
+LC_ALL=C grep -qE '^readonly KERNEL_PKG="linux-omarchy"$' "$KERNEL_SH" ||
+  fail "src/omarchy-deck-kernel.sh's KERNEL_PKG disagrees with deck-form.sh's DECK_KERNEL_PKG=$DECK_KERNEL_PKG. The ISO would install one kernel and the installed system's own kernel manager would maintain another."
+pass "src/omarchy-deck-kernel.sh tracks the same kernel ($DECK_KERNEL_PKG)"
 
-n=$(awk -v pkg="$DECK_KERNEL_PKG" '$0 == pkg { n++ } END { print n+0 }' "$MIRROR_PKGS")
-[[ $n -eq 1 ]] ||
-  fail "deck-mirror.packages must contain exactly one bare '$DECK_KERNEL_PKG' line -- without it the package is not in the offline mirror and archinstall's minimal_installation cannot resolve it, killing the install at phase 3" "found $n"
-pass "deck-mirror.packages carries exactly $DECK_KERNEL_PKG (the offline mirror)"
+# Cross-check against the runtime: install/omarchy-other.packages at the
+# v4.0.4 pin must list linux-omarchy, or the mirror cannot carry it.
+# The runtime checkout is not in this repo; resolve it the same way
+# iso/bin/build does (explicit env, else scratch-managed clone).
+if [[ -n ${OMARCHY_DECK_RUNTIME_SRC:-} ]]; then
+  _rt_src=$OMARCHY_DECK_RUNTIME_SRC
+else
+  _rt_src="$work/rt-src"
+  if [[ ! -e $_rt_src/.git ]]; then
+    _rt_pin=$(head -n1 "$REPO_ROOT/iso/RUNTIME")
+    _rt_slug=${_rt_pin%@*} _rt_sha=${_rt_pin#*@}
+    git clone --quiet "https://github.com/${_rt_slug}.git" "$_rt_src" 2>/dev/null || true
+    git -C "$_rt_src" checkout --quiet --detach "$_rt_sha" 2>/dev/null || true
+  fi
+fi
+if [[ -r $_rt_src/install/omarchy-other.packages ]]; then
+  LC_ALL=C grep -qxF "$DECK_KERNEL_PKG" "$_rt_src/install/omarchy-other.packages" ||
+    fail "the runtime's install/omarchy-other.packages does not list '$DECK_KERNEL_PKG' -- the offline mirror cannot carry the kernel detect_kernel names"
+  pass "the runtime's omarchy-other.packages lists $DECK_KERNEL_PKG (the offline mirror source)"
+else
+  pass "runtime checkout not available offline -- skipping the omarchy-other.packages cross-check (iso/RUNTIME names the pin)"
+fi
 
-LC_ALL=C grep -qE "^readonly NEPTUNE_SERIES_DEFAULT=${DECK_NEPTUNE_SERIES}$" "$KERNEL_SH" ||
-  fail "src/omarchy-deck-kernel.sh's NEPTUNE_SERIES_DEFAULT disagrees with deck-form.sh's DECK_NEPTUNE_SERIES=$DECK_NEPTUNE_SERIES. The ISO would install one Neptune series and the installed system's own kernel manager would maintain another."
-pass "src/omarchy-deck-kernel.sh pins the same Neptune series ($DECK_NEPTUNE_SERIES)"
-
-# ONE kernel. The operator decision is not "add Neptune", it is "Neptune only".
-n=$(awk '$0 == "linux" { n++ } END { print n+0 }' "$INSTALL_PKGS")
+# ONE kernel. The operator decision is "linux-omarchy only": no Neptune line
+# may remain in the target install list, and no second kernel either.
+n=$(awk '$0 == "linux" { n++ } END { print n+0 }' "$REPO_ROOT/iso/overlay/configs/deck/deck-install.packages")
 [[ $n -eq 0 ]] ||
   fail "deck-install.packages names stock 'linux' as a bare entry -- the installed Deck must carry exactly ONE kernel, and two UKIs means Limine's ordering decides what boots instead of us"
-n=$(awk '/^linux-neptune-[0-9]+$/ { n++ } END { print n+0 }' "$INSTALL_PKGS")
-[[ $n -eq 1 ]] ||
-  fail "deck-install.packages must name exactly ONE linux-neptune-* kernel" "found $n"
-pass "the target install list names exactly one kernel, and it is not stock 'linux'"
+n=$(awk '/^linux-neptune-[0-9]+(-headers)?$/ { n++ } END { print n+0 }' "$REPO_ROOT/iso/overlay/configs/deck/deck-install.packages")
+[[ $n -eq 0 ]] ||
+  fail "deck-install.packages still names a retired linux-neptune-* kernel" "found $n"
+pass "the target install list carries no retired Neptune kernel and no stock 'linux'"
 
 echo "========================================================================"
 echo "ALL deck-form.sh TESTS PASSED"

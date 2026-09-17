@@ -17,11 +17,11 @@
 #   VM_RUN_TIMEOUT_SEC default 3600
 #   VM_STAGE_TIMEOUT_SEC default 900  -- per single-stage invocation, in-guest
 #   VM_OVMF_CODE / VM_OVMF_VARS  override firmware probing
-#   VM_NEPTUNE_SERIES  default 611; must match the image's kernel
+#   VM_KERNEL_PKG  default linux-omarchy; must match the image's kernel
 #
 # WHAT IT ASSERTS, AND WHY EACH ONE IS THERE
 #
-#   cli             `list-stages` prints exactly the nine stages, in full-run
+#   cli             `list-stages` prints exactly the eight stages, in full-run
 #                   order. Asserted against a list written out here rather
 #                   than read from the script, so a stage silently vanishing
 #                   from the CLI is a test failure and not a new baseline.
@@ -50,15 +50,13 @@
 #                   the pacman hook -- both of which call the no-argument form
 #                   -- still get what they got before.
 #
-#   prereqs         The three ways to invoke a stage out of order, each of
-#                   which must fail LOUDLY rather than proceed on a guess:
-#                   stage-uki with no such kernel installed, stage-kernel with
-#                   the Valve repos absent from pacman.conf, and stage-kernel
-#                   with a pinned series the repos do not carry. Asserted on
-#                   exit code AND on the message naming the stage to run
-#                   first, because a non-zero exit with a misleading message
-#                   is how the original "the mirror layout may have changed"
-#                   failure wasted time.
+#   prereqs         The one way to invoke a stage out of order that must
+#                   fail LOUDLY rather than proceed on a guess: stage-uki
+#                   with no such kernel installed. Asserted on exit code AND
+#                   on the message naming what to install first, because a
+#                   non-zero exit with a misleading message is how the
+#                   original "the mirror layout may have changed" failure
+#                   wasted time.
 #
 #   nonint          The one code path that could really hang forever: sudo
 #                   asking for a password. A user with password-required sudo
@@ -96,7 +94,7 @@ DEFAULT_SMP=$(( $(nproc) < 4 ? $(nproc) : 4 ))
 SMP=${VM_SMP:-$DEFAULT_SMP}
 RUN_TIMEOUT=${VM_RUN_TIMEOUT_SEC:-3600}
 STAGE_TIMEOUT=${VM_STAGE_TIMEOUT_SEC:-900}
-SERIES=${VM_NEPTUNE_SERIES:-611}
+KERNEL_PKG=${VM_KERNEL_PKG:-linux-omarchy}
 
 log() { printf '[vm-kernel-stage] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -108,8 +106,6 @@ EXPECTED_STAGES=(
   stage-preconditions
   stage-repos
   stage-esp-detect
-  stage-firmware-swap
-  stage-kernel
   stage-uki
   stage-prune
   stage-default-entry
@@ -125,7 +121,7 @@ done
 
 if [[ ! -f $BASE_DISK ]]; then
   log "substrate image not found at $BASE_DISK -- building it"
-  IMG_NEPTUNE_SERIES=$SERIES "$REPO_ROOT/test/images/vm-neptune-image.sh" "$BASE_DISK" ||
+  IMG_KERNEL_PKG=$KERNEL_PKG "$REPO_ROOT/test/images/vm-neptune-image.sh" "$BASE_DISK" ||
     fail "could not build the substrate image"
 fi
 
@@ -194,8 +190,7 @@ BASH_XTRACEFD=$xtrace_fd
 set -x
 
 STAGE_TIMEOUT=${STAGE_TIMEOUT_SEC:-900}
-SERIES=${OMARCHY_DECK_NEPTUNE_SERIES:-611}
-KP="linux-neptune-${SERIES}"
+KP=${VM_KERNEL_PKG:-linux-omarchy}
 
 # Nothing may execute out of /boot: bash holds an open fd on the script it is
 # running, which makes the ESP busy and breaks stage-esp-permissions' umount
@@ -311,49 +306,52 @@ emit "full_vs_stages_diff_exit=$?"
 
 # --- 4. missing prerequisites must fail loudly, not guess --------------------
 
-# 4a. stage-uki for a kernel that is not installed.
-run_isolated "$OUT/prereq-uki.out" env OMARCHY_DECK_NEPTUNE_SERIES=999 bash "$SCRIPT" stage-uki
+# 4a. stage-uki for a kernel that is not installed. The probe hides every
+# installed linux-omarchy* pkgbase behind a moved-aside copy, runs the
+# stage, then restores -- a missing kernel must fail loudly and name the
+# install step, not proceed on a guess.
+mkdir -p "$OUT/pkgbase-hide"
+for _pb in /usr/lib/modules/*/pkgbase; do
+  [[ -f $_pb ]] || continue
+  mv "$_pb" "$OUT/pkgbase-hide/" 2>/dev/null || true
+done
+run_isolated "$OUT/prereq-uki.out" bash "$SCRIPT" stage-uki
 emit "prereq.uki_exit=$?"
-emit "prereq.uki_names_stage_kernel=$(LC_ALL=C command grep -qaF 'stage-kernel' "$OUT/prereq-uki.out" && echo 1 || echo 0)"
+emit "prereq.uki_names_install=$(LC_ALL=C command grep -qaF 'Install' "$OUT/prereq-uki.out" && echo 1 || echo 0)"
+for _pb in "$OUT"/pkgbase-hide/pkgbase; do
+  [[ -f $_pb ]] || continue
+  for _d in /usr/lib/modules/*/; do
+    [[ -d $_d ]] || continue
+    cp "$_pb" "${_d}pkgbase" 2>/dev/null || true
+  done
+done
+rm -rf "$OUT/pkgbase-hide"
 
-# 4b. stage-kernel with the Valve repos removed from pacman.conf. Restored
-# immediately afterwards, and the restore is verified -- a test that leaves the
-# system it is measuring in a different state than it found it would poison
-# every assertion after it.
+# 4b. stage-repos with the Valve repos removed from pacman.conf: it must
+# re-add them (exit 0), proving the stage repairs rather than assumes.
+# Restored afterwards regardless, and the restore is verified -- a test
+# that leaves the system it is measuring in a different state than it
+# found it would poison every assertion after it.
 cp /etc/pacman.conf "$OUT/pacman.conf.orig"
 awk '
   /^\[jupiter-staging\]/ || /^\[holo-staging\]/ { skip = 1; next }
   /^\[/ { skip = 0 }
   !skip { print }
 ' "$OUT/pacman.conf.orig" >/etc/pacman.conf
-# ⚠️ ONE OF THESE PROVES AN ABSENCE, SO THE OTHER PROVES IT WAS LOOKING.
-# `repos_stripped` reports 1 when the grep finds nothing -- and `grep -q`
-# against a file it cannot read exits 2, which lands in the same `else` branch.
-# An awk that wrote an empty /etc/pacman.conf would therefore report a perfect
-# strip, and section 4b would then measure a stage failing for the wrong
-# reason. The control greps for a section that must SURVIVE the strip: together
-# they say "jupiter-staging is gone AND this is still a real pacman.conf".
+# ONE OF THESE PROVES AN ABSENCE comment (kept): `repos_stripped` reports 1
+# when the grep finds nothing -- and `grep -q` against a file it cannot
+# read exits 2, which lands in the same `else` branch. The control greps
+# for a section that must SURVIVE the strip: together they say
+# "jupiter-staging is gone AND this is still a real pacman.conf".
 emit "prereq.repos_stripped=$(LC_ALL=C command grep -qaE '^\[jupiter-staging\]' /etc/pacman.conf && echo 0 || echo 1)"
 emit "prereq.strip_control_core_survived=$(LC_ALL=C command grep -qaE '^\[core\]' /etc/pacman.conf && echo 1 || echo 0)"
 
-run_isolated "$OUT/prereq-repos.out" bash "$SCRIPT" stage-kernel
+run_isolated "$OUT/prereq-repos.out" bash "$SCRIPT" stage-repos
 emit "prereq.norepos_exit=$?"
-emit "prereq.norepos_names_stage_repos=$(LC_ALL=C command grep -qaF 'stage-repos' "$OUT/prereq-repos.out" && echo 1 || echo 0)"
-
-# stage-firmware-swap in the same state must stay a no-op: there is nothing of
-# Arch's left to displace, so it never reaches the repo requirement. A no-op
-# stage that started failing because of a prerequisite it does not use would be
-# a regression in the other direction.
-run_isolated "$OUT/prereq-fw.out" bash "$SCRIPT" stage-firmware-swap
-emit "prereq.firmware_noop_exit=$?"
+emit "prereq.norepos_repairs=$(LC_ALL=C command grep -qaF 'adding to /etc/pacman.conf' "$OUT/prereq-repos.out" && echo 1 || echo 0)"
 
 cp "$OUT/pacman.conf.orig" /etc/pacman.conf
 emit "prereq.repos_restored=$(cmp -s "$OUT/pacman.conf.orig" /etc/pacman.conf && echo 1 || echo 0)"
-
-# 4c. a pinned series the repos do not carry.
-run_isolated "$OUT/prereq-series.out" env OMARCHY_DECK_NEPTUNE_SERIES=999 bash "$SCRIPT" stage-kernel
-emit "prereq.badseries_exit=$?"
-emit "prereq.badseries_lists_available=$(LC_ALL=C command grep -qaF "linux-neptune-${SERIES}" "$OUT/prereq-series.out" && echo 1 || echo 0)"
 
 # --- 5. non-interactivity, actually tested -----------------------------------
 
@@ -387,8 +385,8 @@ setsid --wait timeout "$STAGE_TIMEOUT" bash "$SCRIPT" stage-prune >"$OUT/nonint-
 emit "nonint.stdin_closed_exit=$?"
 
 # stdin on a fifo whose writer never writes: the shape in which a stray read
-# blocks forever rather than seeing EOF. stage-kernel is used because it is the
-# stage that spawns pacman, so this also covers what a child inherits.
+# blocks forever rather than seeing EOF. stage-repos is used because it is
+# the stage that spawns pacman, so this also covers what a child inherits.
 mkfifo "$OUT/blocking.fifo" 2>/dev/null
 # Held open read-write by the probe itself. A read-write open of a fifo never
 # blocks, and it keeps a writer alive so the child's read-only open returns
@@ -397,7 +395,7 @@ mkfifo "$OUT/blocking.fifo" 2>/dev/null
 # the probe wedged at open() with no report ever produced, which is a worse
 # failure mode than the bug it is looking for.
 exec {fifo_fd}<>"$OUT/blocking.fifo"
-setsid --wait timeout "$STAGE_TIMEOUT" bash "$SCRIPT" stage-kernel \
+setsid --wait timeout "$STAGE_TIMEOUT" bash "$SCRIPT" stage-repos \
   >"$OUT/nonint-fifo.out" 2>&1 <"$OUT/blocking.fifo"
 emit "nonint.stdin_blocking_fifo_exit=$?"
 exec {fifo_fd}>&-
@@ -434,12 +432,8 @@ emit "final_state_diff_exit=$?"
   cat "$OUT/state.pass2-vs-full.diff"
   echo "=== PREREQ: stage-uki without the kernel ==="
   cat "$OUT/prereq-uki.out"
-  echo "=== PREREQ: stage-kernel without the repos ==="
+  echo "=== PREREQ: stage-repos without the repos ==="
   cat "$OUT/prereq-repos.out"
-  echo "=== PREREQ: stage-firmware-swap without the repos (no-op) ==="
-  cat "$OUT/prereq-fw.out"
-  echo "=== PREREQ: stage-kernel with an unavailable series ==="
-  cat "$OUT/prereq-series.out"
   echo "=== NONINT: unprivileged user, no tty, no stdin ==="
   cat "$OUT/nonint-user.out"
   echo "=== NONINT: stdin closed ==="
@@ -470,7 +464,7 @@ Before=graphical.target
 
 [Service]
 Type=oneshot
-Environment=OMARCHY_DECK_NEPTUNE_SERIES=${SERIES}
+Environment=VM_KERNEL_PKG=${KERNEL_PKG}
 Environment=STAGE_TIMEOUT_SEC=${STAGE_TIMEOUT}
 ExecStartPre=/usr/bin/cp /boot/omarchy-deck-stage-probe.sh /root/omarchy-deck-stage-probe.sh
 ExecStartPre=/usr/bin/cp /boot/omarchy-deck-kernel.sh /root/omarchy-deck-kernel.sh
@@ -607,17 +601,14 @@ check "full_vs_stages_diff_exit"  "$(field full_vs_stages_diff_exit)" 0
 
 # 4. missing prerequisites fail loudly and name the stage to run
 check     "prereq.uki_exit"                  "$(field prereq.uki_exit)" 1
-check     "prereq.uki_names_stage_kernel"    "$(field prereq.uki_names_stage_kernel)" 1
+check     "prereq.uki_names_install"         "$(field prereq.uki_names_install)" 1
 check     "prereq.repos_stripped"            "$(field prereq.repos_stripped)" 1
 # The positive control for the line above: without it, "jupiter-staging is not
 # in pacman.conf" is also satisfied by pacman.conf being empty or unreadable.
 check     "prereq.strip_control_core_survived" "$(field prereq.strip_control_core_survived)" 1
-check     "prereq.norepos_exit"              "$(field prereq.norepos_exit)" 1
-check     "prereq.norepos_names_stage_repos" "$(field prereq.norepos_names_stage_repos)" 1
-check     "prereq.firmware_noop_exit"        "$(field prereq.firmware_noop_exit)" 0
+check     "prereq.norepos_exit"              "$(field prereq.norepos_exit)" 0
+check     "prereq.norepos_repairs"           "$(field prereq.norepos_repairs)" 1
 check     "prereq.repos_restored"            "$(field prereq.repos_restored)" 1
-check     "prereq.badseries_exit"            "$(field prereq.badseries_exit)" 1
-check     "prereq.badseries_lists_available" "$(field prereq.badseries_lists_available)" 1
 
 # 5. no prompt can block, proven rather than asserted
 check     "nonint.sudo_n_fails_for_tester"   "$(field nonint.sudo_n_fails_for_tester)" 1
