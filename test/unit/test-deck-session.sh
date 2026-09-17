@@ -2332,11 +2332,12 @@ pass "no call site in src/deck-session.sh uses the unguarded '\$SUDO -u <user>' 
 #   E2  the bounded wait -- an ExecStartPre= on Valve's steam-launcher.service.
 #       A non-zero exit there means Steam does not start, i.e. a Wi-Fi problem
 #       becomes an unusable Deck. It must exit 0 on every path there is.
-#   E1  the splash -- a fullscreen "don't turn me off, Steam is unpacking"
-#       notice. A splash that cannot exit is a permanently black-with-text
-#       panel, which is strictly worse than the two minutes of black it
-#       replaces. It must come down: when Steam appears, when its viewer dies,
-#       and when neither happens.
+#   E1  the cover -- a branded fullscreen "Starting Steam…" drawn at EVERY
+#       Gaming Mode start, until Steam's UI shows. A cover that cannot exit is
+#       a permanently black-with-text panel, which is strictly worse than the
+#       black it replaces. It must come down: when Steam appears (plus a
+#       measured grace for its first frame), when its viewer dies, and when
+#       neither happens.
 echo "# 10. Steam's first run"
 
 sfr_work=$(mktemp -d)
@@ -2485,11 +2486,10 @@ grep -q "$FIRST_BOOT_LOG_REL" "$wait_sh" ||
   fail_test "the wait leaves a record that outlives the boot" \
     "it does not mention ~/${FIRST_BOOT_LOG_REL}, so its outcome is journal-only -- and the one boot it runs on is the one whose journal was not retained"
 pass "the wait also appends to ~/${FIRST_BOOT_LOG_REL}, which survives the boot"
-
-# --- E1: the splash comes down ---------------------------------------------
+# --- E1: the cover comes down ----------------------------------------------
 splash_sh="$sfr_work/splash"
 bash -c 'source "$1"; render_steam_splash' _ "$REPO_ROOT/src/deck-session.sh" >"$splash_sh"
-bash -n "$splash_sh" || fail_test "the rendered splash is valid bash" "$(cat "$splash_sh")"
+bash -n "$splash_sh" || fail_test "the rendered cover is valid bash" "$(cat "$splash_sh")"
 pass "render_steam_splash emits syntactically valid bash"
 
 # A fake viewer that never exits on its own -- the whole question is whether
@@ -2505,16 +2505,20 @@ chmod +x "$viewer_stub"
 splash_image="$sfr_work/splash.png"
 : >"$splash_image"
 
-# splash_variant <deadline-seconds> -> a runnable copy with the real viewer and
-# image paths redirected at the stubs. The deadline is shrunk so the timeout
-# case is testable in seconds rather than in minutes; everything else about the
-# script is the shipped text.
+# splash_variant <deadline-seconds> <settle-seconds> -> a runnable copy with the
+# real viewer/image paths redirected at the stubs and the timings shrunk where
+# the case needs it. A deadline of 0 keeps the shipped value (60 s); a settle
+# of 0 keeps the shipped grace. Everything else is the shipped text.
 splash_variant() {
-  local deadline=$1 out="$sfr_work/splash-run"
-  sed -e "s|${SPLASH_VIEWER}|${viewer_stub}|g" \
-      -e "s|${SPLASH_IMAGE}|${splash_image}|g" \
-      -e "s|+ ${SPLASH_MAX_SECONDS} ))|+ ${deadline} ))|" \
-      "$splash_sh" >"$out"
+  local deadline=$1 settle=$2 out="$sfr_work/splash-run"
+  cp "$splash_sh" "$out"
+  sed -i -e "s|${SPLASH_VIEWER}|${viewer_stub}|g" \
+      -e "s|${SPLASH_IMAGE}|${splash_image}|g" "$out"
+  [[ $deadline -eq 0 ]] || sed -i -e "s|+ ${SPLASH_MAX_SECONDS} ))|+ ${deadline} ))|" "$out"
+  # The grace appears twice in the shipped text (the "until … plus Ns" line and
+  # the "holding Ns" line) plus its sleep; shrink all three so the case stays
+  # fast without changing what is asserted.
+  [[ $settle -eq 0 ]] || sed -i -e "s|plus ${SPLASH_SETTLE_SECONDS}s|plus ${settle}s|g; s|holding ${SPLASH_SETTLE_SECONDS}s|holding ${settle}s|g; s|^\(\s*\)sleep ${SPLASH_SETTLE_SECONDS}$|\1sleep ${settle}|" "$out"
   chmod +x "$out"
   printf '%s' "$out"
 }
@@ -2531,10 +2535,10 @@ splash_home="$sfr_work/home"
 viewer_mark="$sfr_work/viewer.mark"
 
 # GAMESCOPE_WAYLAND_DISPLAY is set for every run that is meant to DRAW, because
-# the script now refuses to draw without it -- see the (e) case below, which is
-# the one that checks the refusal.
-run_splash() {   # run_splash <deadline> [READY=1]
-  local script; script=$(splash_variant "$1")
+# the script waits only SPLASH_ENV_WAIT_SECONDS for it -- see the (e) case
+# below, which is the one that checks the wait and the refusal.
+run_splash() {   # run_splash <deadline> [READY=1 [SETTLE=0]]
+  local script; script=$(splash_variant "$1" "${3:-0}")
   rm -rf "$splash_home"; mkdir -p "$splash_home"
   : >"$viewer_mark"
   SPLASH_RC=0
@@ -2545,24 +2549,33 @@ run_splash() {   # run_splash <deadline> [READY=1]
   SPLASH_ELAPSED=$((SECONDS - SPLASH_SECONDS))
 }
 
-# (a) Steam appears -- the NORMAL exit. It must come down promptly and the
-#     viewer must not survive it.
-run_splash 120 1
+# (a) Steam appears -- the NORMAL exit. It must hold the grace (the process
+#     precedes its first frame) and then come down, and no viewer may survive.
+#     The grace is shrunk to 1 s here so the case stays fast; the shipped 2 s
+#     is asserted on the source below, not by waiting for it.
+run_splash 0 1 1
 [[ $SPLASH_RC -eq 0 ]] ||
-  fail_test "the splash exits 0 when Steam appears" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
+  fail_test "the cover exits 0 when Steam appears" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
 grep -q 'splash down' <<<"$SPLASH_OUT" ||
   fail_test "and says it came down" "$SPLASH_OUT"
-[[ $SPLASH_ELAPSED -lt 30 ]] ||
-  fail_test "it comes down promptly once Steam is up" "took ${SPLASH_ELAPSED}s"
+grep -q 'holding 1s for its first frame' <<<"$SPLASH_OUT" ||
+  fail_test "and it names the grace it held" "$SPLASH_OUT"
+[[ $SPLASH_ELAPSED -ge 1 && $SPLASH_ELAPSED -lt 30 ]] ||
+  fail_test "the grace is honoured, then it comes down promptly" "took ${SPLASH_ELAPSED}s against a 1s test grace"
 pgrep -f "$viewer_stub" >/dev/null 2>&1 &&
-  fail_test "no viewer process survives the splash" "one is still running -- a splash that leaves its viewer up IS the permanently black-with-text panel"
-pass "🔴 THE SPLASH EXITS: Steam appearing brings it down in ${SPLASH_ELAPSED}s, and no viewer survives"
+  fail_test "no viewer process survives the cover" "one is still running -- a cover that leaves its viewer up IS the permanently black-with-text panel"
+pass "🔴 THE COVER EXITS: Steam appearing holds the 1s test grace, then comes down in ${SPLASH_ELAPSED}s, and no viewer survives"
+# The SHIPPED grace is sized by Deck measurement (steamwebhelper start to first
+# paint), not by this run: assert the constant carries the measured value.
+[[ $SPLASH_SETTLE_SECONDS -eq 2 ]] ||
+  fail_test "the shipped grace is the measured 2s" \
+    "SPLASH_SETTLE_SECONDS=${SPLASH_SETTLE_SECONDS}. The 2026-09-17 boot showed steamwebhelper start 07:02:01, cover down 07:02:06; re-size only from a fresh Deck measurement of start-vs-first-paint, never by reasoning."
 
 # (b) Steam NEVER appears -- the deadline. This is the case that decides whether
-#     a splash bug is a message you miss or a Deck you cannot use.
+#     a cover bug is a message you miss or a Deck you cannot use.
 run_splash 4
 [[ $SPLASH_RC -eq 0 ]] ||
-  fail_test "the splash exits 0 on its deadline too" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
+  fail_test "the cover exits 0 on its deadline too" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
 grep -q 'splash down (deadline)' <<<"$SPLASH_OUT" ||
   fail_test "the deadline path names itself" "$SPLASH_OUT"
 [[ $SPLASH_ELAPSED -lt 30 ]] ||
@@ -2571,25 +2584,35 @@ pgrep -f "$viewer_stub" >/dev/null 2>&1 &&
   fail_test "the deadline path kills the viewer too" "the viewer outlived its own script"
 pass "🔴 AND IT EXITS WITHOUT STEAM: the deadline fires, the viewer is killed, nothing is left drawing"
 
-# (c) Shown ONCE. Later boots reach Gaming Mode in ~39 s and a splash in front
-#     of a client that is about to draw would be a defect of its own.
+# (c) EVERY boot draws. The p34 one-shot gate ("shown ONCE") is retired: the
+#     operator's report is a black window at every boot, long after the first.
+#     What the marker still does is attribute each draw to its implementation.
 marker="$splash_home/$SPLASH_MARKER_REL"
-[[ -e $marker ]] ||
-  fail_test "the splash leaves a marker" "expected ${marker}"
-script=$(splash_variant 120)
+[[ -s $marker ]] ||
+  fail_test "the cover stamps its implementation" "expected ${marker}"
+read -r marker_id _ <"$marker"
+[[ $marker_id == "$SPLASH_ATTEMPT_ID" ]] ||
+  fail_test "the marker records WHICH implementation drew" \
+    "first field is '${marker_id}', expected '${SPLASH_ATTEMPT_ID}'. Without it a first-boot.log line cannot be told apart from one left by a different build."
+# A second start draws again, to its (shrunk) deadline: pgrep says Steam never
+# appears, so the 4 s variant bounds the case instead of the shipped 60 s.
+script=$(splash_variant 4 0)
 SPLASH_RC=0
 SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/second.mark" \
+  GAMESCOPE_WAYLAND_DISPLAY=gamescope-0 \
   PATH="$sfr_bin:$PATH" timeout 30 "$script" 2>&1) || SPLASH_RC=$?
-[[ $SPLASH_RC -eq 0 && -z $SPLASH_OUT ]] ||
-  fail_test "a second run does nothing at all" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
-[[ ! -s $sfr_work/second.mark ]] ||
-  fail_test "and starts no viewer" "the second boot would cover a Gaming Mode that is about to draw"
-pass "shown once: the marker makes every later boot a no-op, so ~39 s boots are untouched"
+[[ $SPLASH_RC -eq 0 ]] ||
+  fail_test "a second run still exits 0" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
+grep -q 'splash down (deadline)' <<<"$SPLASH_OUT" ||
+  fail_test "and a second run still draws to its deadline" "$SPLASH_OUT"
+[[ -s $sfr_work/second.mark ]] ||
+  fail_test "and starts its viewer again" "the every-boot cover must draw at every start, not just the first"
+pass "every boot draws: the marker attributes, it does not gate"
 
 # (d) A missing image or viewer is today's black screen, not a failure. This is
 #     the degradation the whole placement decision is about.
 rm -f "$splash_image"
-script=$(splash_variant 120)
+script=$(splash_variant 0 0)
 SPLASH_RC=0
 rm -rf "$splash_home"; mkdir -p "$splash_home"
 SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/third.mark" \
@@ -2600,28 +2623,60 @@ grep -q 'showing nothing' <<<"$SPLASH_OUT" ||
   fail_test "and it says so" "$SPLASH_OUT"
 pass "a missing image degrades to today's black screen, loudly, with exit 0"
 
-# (e) 🔴 NO COMPOSITOR TO DRAW ON. P33 fell through this branch in SILENCE: the
-#     `if [[ -n ${GAMESCOPE_WAYLAND_DISPLAY:-} ]]` had no else, so a session
-#     environment that did not load meant /usr/bin/imv (a wrapper that picks
-#     Wayland only when WAYLAND_DISPLAY is set) execing imv-x11 against a DISPLAY
-#     a user unit does not have, dying instantly, and leaving a black panel and
-#     no explanation. That is one of the shapes the 2026-08-16 boot could have
+# (e) 🔴 THE COMPOSITOR ARRIVES LATE. After= orders unit STARTS, not readiness:
+#     the env file is written once gamescope reports its displays, which can
+#     land after this unit execs -- and in a ~17 s window a lost race is a lost
+#     cover. So a missing variable is waited for, not fallen through: P33 fell
+#     through this branch in SILENCE, execing imv-x11 against a DISPLAY a user
+#     unit does not have, dying instantly, and leaving a black panel and no
+#     explanation. That is one of the shapes the 2026-08-16 boot could have
 #     had, and it was indistinguishable from every other one.
 : >"$splash_image"
-script=$(splash_variant 120)
+# (e-i) the file appears mid-wait: the cover finds it and draws. Bounded with a
+# 4 s deadline (pgrep says Steam never appears) so the draw proves the race is
+# won without waiting out the shipped 60 s.
+script=$(splash_variant 4 0)
 rm -rf "$splash_home"; mkdir -p "$splash_home"
+env_file="$sfr_work/runtime/gamescope-environment"
+mkdir -p "$sfr_work/runtime"
+rm -f "$env_file"
+# Appear after 1 s, well inside the 5 s wait.
+( sleep 1; printf 'GAMESCOPE_WAYLAND_DISPLAY=gamescope-0\n' >"$env_file" ) &
+late_pid=$!
 SPLASH_RC=0
 SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/fourth.mark" \
+  XDG_RUNTIME_DIR="$sfr_work/runtime" \
   PATH="$sfr_bin:$PATH" timeout 30 "$script" 2>&1) || SPLASH_RC=$?
+wait "$late_pid" 2>/dev/null || true
+[[ $SPLASH_RC -eq 0 ]] ||
+  fail_test "a late compositor is not a failed unit" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
+[[ -s $sfr_work/fourth.mark ]] ||
+  fail_test "a compositor that arrives inside the wait IS drawn on" \
+    "the env file appeared 1s in and no viewer started -- the race the wait exists to win. got:"$'\n'"$SPLASH_OUT"
+grep -q 'drawing '"$SPLASH_ATTEMPT_ID"' on gamescope' <<<"$SPLASH_OUT" ||
+  fail_test "and the draw names its implementation" "$SPLASH_OUT"
+pass "🔴 a late GAMESCOPE_WAYLAND_DISPLAY is waited for and drawn on"
+# (e-ii) the file never appears: named, no viewer, exit 0.
+script=$(splash_variant 0 0)
+rm -rf "$splash_home"; mkdir -p "$splash_home"
+rm -rf "$sfr_work/runtime-empty"; mkdir -p "$sfr_work/runtime-empty"
+SPLASH_RC=0
+SPLASH_SECONDS=$SECONDS
+SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/fourth-miss.mark" \
+  XDG_RUNTIME_DIR="$sfr_work/runtime-empty" \
+  PATH="$sfr_bin:$PATH" timeout 30 "$script" 2>&1) || SPLASH_RC=$?
+SPLASH_ELAPSED=$((SECONDS - SPLASH_SECONDS))
 [[ $SPLASH_RC -eq 0 ]] ||
   fail_test "no compositor is not a failed unit" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
-grep -q 'GAMESCOPE_WAYLAND_DISPLAY is not set' <<<"$SPLASH_OUT" ||
+grep -q 'GAMESCOPE_WAYLAND_DISPLAY is not set after' <<<"$SPLASH_OUT" ||
   fail_test "🔴 a missing session environment is NAMED, not fallen through" \
     "P33 was silent here and the failure was unattributable. got:"$'\n'"$SPLASH_OUT"
-[[ ! -s $sfr_work/fourth.mark ]] ||
+[[ $SPLASH_ELAPSED -ge ${SPLASH_ENV_WAIT_SECONDS} ]] ||
+  fail_test "the wait really waited" "gave up after ${SPLASH_ELAPSED}s, not ${SPLASH_ENV_WAIT_SECONDS}s"
+[[ ! -s $sfr_work/fourth-miss.mark ]] ||
   fail_test "and no viewer is started at all" \
     "starting one against the OUTER session puts it behind gamescope's fullscreen surface, where it is invisible AND still has to be killed"
-pass "🔴 no GAMESCOPE_WAYLAND_DISPLAY: says so by name, starts no viewer, exits 0"
+pass "🔴 no GAMESCOPE_WAYLAND_DISPLAY after ${SPLASH_ENV_WAIT_SECONDS}s: says so by name, starts no viewer, exits 0"
 
 # (f) 🔴 THE VIEWER DIES IMMEDIATELY -- the shape a real "nothing was drawn"
 #     takes, and the one P33 reported as the neutral "the viewer exited".
@@ -2661,61 +2716,52 @@ grep -q 'FAILED' "$splash_log" ||
   fail_test "and the failure is greppable in the file, not only on stderr" "$(cat "$splash_log")"
 pass "🔴 A VIEWER THAT NEVER DREW IS A NAMED FAILURE, and its own stderr is in ~/${FIRST_BOOT_LOG_REL}"
 
-# (g) 🔴 A MARKER FROM A DIFFERENT IMPLEMENTATION DOES NOT SILENCE THIS ONE.
-#     P33's marker held only a date and was written before the attempt, so the
-#     boot that drew nothing disabled the feature on that Deck for ever -- any
-#     fix would have been untestable without a human deleting a dotfile by hand,
-#     on a device with no keyboard.
-marker="$splash_home/$SPLASH_MARKER_REL"
-[[ -s $marker ]] || fail_test "the marker is written" "expected ${marker}"
-read -r marker_id _ <"$marker"
-[[ $marker_id == "$SPLASH_ATTEMPT_ID" ]] ||
-  fail_test "the marker records WHICH implementation ran" \
-    "first field is '${marker_id}', expected '${SPLASH_ATTEMPT_ID}'. Without it, 'has this splash run' cannot be distinguished from 'has A splash run'."
-# A P33-shaped marker: a bare date, exactly what is on the operator's Deck now.
-date -Iseconds >"$marker"
-SPLASH_RC=0
-SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/sixth.mark" \
-  GAMESCOPE_WAYLAND_DISPLAY=gamescope-0 \
-  PATH="$sfr_bin:$PATH" timeout 60 "$script" 2>&1) || SPLASH_RC=$?
-grep -q 'gets its own single attempt' <<<"$SPLASH_OUT" ||
-  fail_test "🔴 a P33 marker (a bare date) does not suppress this splash" \
-    "this is the state the operator's Deck is in RIGHT NOW: a marker written by a splash that drew nothing. If it suppresses the fix, the fix cannot be tested. got:"$'\n'"$SPLASH_OUT"
-[[ -s $sfr_work/sixth.mark ]] ||
-  fail_test "and it really attempted to draw" "no viewer was started"
-# ...and having attempted, it must not attempt again.
-SPLASH_RC=0
-SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/seventh.mark" \
-  GAMESCOPE_WAYLAND_DISPLAY=gamescope-0 \
-  PATH="$sfr_bin:$PATH" timeout 30 "$script" 2>&1) || SPLASH_RC=$?
-[[ $SPLASH_RC -eq 0 && -z $SPLASH_OUT ]] ||
-  fail_test "one attempt per implementation, not one per boot" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
-[[ ! -s $sfr_work/seventh.mark ]] ||
-  fail_test "and the second boot starts no viewer" "the ~39 s boots would be covered again"
-pass "🔴 ONE ATTEMPT PER IMPLEMENTATION: a P33-era marker yields exactly one retry, and then none"
+# (g) 🔴 HISTORY: a p33/p34 marker never silences this cover. P33's marker held
+#     only a date and was written before the attempt, so the boot that drew
+#     nothing disabled the feature on that Deck for ever -- any fix would have
+#     been untestable without a human deleting a dotfile by hand, on a device
+#     with no keyboard. The p34 gate keyed on the id for the same reason. Both
+#     shapes must still draw: the marker attributes, it does not gate.
+for stale in "$(date -Iseconds)" "p34-1 $(date -Iseconds)"; do
+  printf '%s\n' "$stale" >"$marker"
+  SPLASH_RC=0
+  SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/sixth.mark" \
+    GAMESCOPE_WAYLAND_DISPLAY=gamescope-0 \
+    PATH="$sfr_bin:$PATH" timeout 60 "$script" 2>&1) || SPLASH_RC=$?
+  [[ $SPLASH_RC -eq 0 ]] ||
+    fail_test "a stale marker ('${stale}') is not a failed unit" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
+  [[ -s $sfr_work/sixth.mark ]] ||
+    fail_test "a stale marker ('${stale}') still draws" "no viewer was started -- the p33/p34 silencing, reintroduced"
+  : >"$sfr_work/sixth.mark"
+done
+pass "🔴 STALE MARKERS NEVER SILENCE THE COVER: a p33 date and a p34 id both still draw"
 
-# An unreadable marker is treated as "already shown", because the bias of this
-# whole design is to miss a message rather than to cover a Gaming Mode.
+# An unreadable marker still draws too -- there is no gate left for it to hold
+# shut. Attribution may be missing, but the cover is not.
 : >"$marker"
 SPLASH_RC=0
 SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/eighth.mark" \
   GAMESCOPE_WAYLAND_DISPLAY=gamescope-0 \
   PATH="$sfr_bin:$PATH" timeout 30 "$script" 2>&1) || SPLASH_RC=$?
-[[ $SPLASH_RC -eq 0 && ! -s $sfr_work/eighth.mark ]] ||
-  fail_test "an empty marker does not become a splash at every boot" \
+[[ $SPLASH_RC -eq 0 && -s $sfr_work/eighth.mark ]] ||
+  fail_test "an empty marker still draws" \
     "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
-pass "an unreadable marker reads as 'already shown' -- the safe direction"
+pass "an empty marker still draws -- the marker attributes, it does not gate"
 
-# --- the wording is the requirement ----------------------------------------
+# --- the wording must be true on every boot --------------------------------
 #
-# The operator asked for "something to tell users like don't turn me off. steam
-# is unpacking." Not paraphrased -- that IS the specification.
+# The p34 image said "Don't turn me off. Steam is unpacking. It does this
+# once, the first time you start. It takes a couple of minutes." -- correct on
+# the first boot, false on every later one. This draws at EVERY start, so no
+# first-boot-only words may ship on it. The operator owns the exact copy (as
+# they did the original); until they choose new words the requirement is
+# negative: nothing untrue on 99% of boots.
 #
 # 🔴 RENDERED TO A PATH WITH NO EXTENSION, ON PURPOSE. That is what the stage
 # does (it renders into a mktemp file and then `install`s it), and ImageMagick
 # picks its output codec from the extension: an earlier version of this called
 # it with a name ending in .png, passed, and would have shipped a stage that
-# failed with "no encode delegate" on every real install -- installing no splash
+# failed with "no encode delegate" on every real install -- installing no cover
 # at all, quietly, because the stage's gate treats a failed render as "no
 # ImageMagick here". A test that is easier on the code than production is worse
 # than no test.
@@ -2725,23 +2771,27 @@ if bash -c 'source "$1"; render_steam_splash_image "$2"' _ "$REPO_ROOT/src/deck-
   if command -v identify >/dev/null 2>&1 || command -v magick >/dev/null 2>&1; then
     got=$( { command -v magick >/dev/null 2>&1 && magick identify -format '%wx%h' "$splash_png"; } || identify -format '%wx%h' "$splash_png" )
     [[ $got == "$size" ]] ||
-      fail_test "the message is drawn at gamescope's logical size" \
+      fail_test "the cover is drawn at gamescope's logical size" \
         "got ${got}, expected ${size}. The panel is 800x1280 PORTRAIT and gamescope applies its own transform, so a portrait image here would be the one thing on the Deck rotated the wrong way."
-    pass "the message renders at ${got} -- gamescope's landscape logical output, not the panel's portrait scanout"
+    pass "the cover renders at ${got} -- gamescope's landscape logical output, not the panel's portrait scanout"
   fi
 else
-  note "ImageMagick is not on this machine, so the message image was not rendered here (the stage warns and installs no splash in that case, which is today's behaviour)"
+  note "ImageMagick is not on this machine, so the cover image was not rendered here (the stage warns and installs no cover in that case, which is today's behaviour)"
 fi
 
 # The words themselves, checked on the source so they survive a machine with no
-# ImageMagick.
+# ImageMagick. Positive: it says what is true every time. Negative: no
+# first-boot-only words.
 img_body=$(bash -c 'source "$1"; declare -f render_steam_splash_image' _ "$REPO_ROOT/src/deck-session.sh")
-for phrase in "Don't turn me off." "Steam is unpacking."; do
-  [[ $img_body == *"$phrase"* ]] ||
-    fail_test "the splash says what the operator asked for" \
-      "missing: '${phrase}'. The wording is the requirement, not a placeholder."
+[[ $img_body == *"Starting Steam"* ]] ||
+  fail_test "the cover says what is true at every start" \
+    "missing 'Starting Steam'. Until the operator chooses new words, that is the message."
+for stale in "unpacking" "turn me off" "first time you start" "couple of minutes"; do
+  [[ $img_body != *"$stale"* ]] ||
+    fail_test "the every-boot cover carries no first-boot-only words" \
+      "found '${stale}' -- true once, false on every later boot, worse than the black it covers."
 done
-pass "the message says \"Don't turn me off.\" and \"Steam is unpacking.\" -- the operator's own words"
+pass "the cover says \"Starting Steam…\" and nothing that is only true on the first boot"
 
 rm -rf "$sfr_work"
 

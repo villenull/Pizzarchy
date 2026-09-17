@@ -1209,28 +1209,34 @@ readonly STEAM_WAIT_SECONDS=20
 # render_steam_wait_online.
 readonly STEAM_WAIT_STARTUP_SECONDS=5
 readonly NM_ONLINE_BIN=/usr/bin/nm-online
-# 🔴 THE ONE CHANNEL THAT SURVIVES THE FIRST BOOT.
+# 🔴 THE ONE CHANNEL THAT SURVIVES THE BOOT.
 #
-# Both artefacts in this section run ONCE, during the two minutes nobody can
-# see, and P33 shipped both reporting only to the journal. That was measurably
-# the wrong choice: PROGRESS.md 5.35 recorded that `journalctl --list-boots` on
-# the installed Deck showed **only boot 0** -- the first boot was never
-# captured -- so the stage's own advice ("confirm on the first boot with
-# journalctl --user -u ...") was unanswerable at the moment it mattered, and the
-# splash's failure on 2026-08-16 left no trace anywhere.
+# The wait runs at every Gaming Mode start and the cover draws at every one,
+# both in seconds nobody is watching -- and P33 shipped both reporting only to
+# the journal. That was measurably the wrong choice: PROGRESS.md 5.35 recorded
+# that `journalctl --list-boots` on the installed Deck showed **only boot 0**
+# -- the first boot was never captured -- so the stage's own advice ("confirm
+# on the first boot with journalctl --user -u ...") was unanswerable at the
+# moment it mattered, and the cover's failure on 2026-08-16 left no trace
+# anywhere.
 #
 # So every branch of both scripts also appends one timestamped line to a FILE in
 # the desktop user's home. It is readable in Desktop Mode with a text editor, by
 # a person with no terminal and no SSH, after any number of reboots.
 readonly FIRST_BOOT_LOG_REL=.local/state/deck-session/first-boot.log
 
-# 🆕 E1 -- THE "DON'T TURN ME OFF" SPLASH.
+# 🆕 E1 -- THE GAMING MODE COVER.
 #
-# For ~2 minutes on the first boot, gamescope is up, Steam is updating itself
-# headless, and the panel is black with no channel to say so: the cmdline is
+# From the moment gamescope paints until Steam's UI shows, the panel would
+# otherwise be black with no channel to say why: the cmdline is
 # `quiet splash loglevel=0 systemd.show_status=false`, so the console prints
-# nothing, and plymouth-quit ran at 659 ms -- three orders of magnitude before
-# the window opens.
+# nothing. Measured on the Deck 2026-09-17: the cover drew at 07:01:49 and came
+# down at 07:02:06 (17 s) -- gamescope up ~15 s into the session start, Steam's
+# UI ~27 s. That window exists at EVERY Gaming Mode start, not just the first:
+# Steam's start (verify, CEF, gamepad UI) costs seconds even with nothing left
+# to update, now that the bootstrap runs at install time. So this draws at
+# every start, and the image it shows must be true on all of them -- no
+# first-boot-only words (see render_steam_splash_image).
 #
 # 🔴 IT LIVES IN THE SESSION, NOT THE BOOT PATH, and that was decided rather
 # than fallen into (docs/tasks/P33-fix-round.md §1). Holding plymouth past
@@ -1248,36 +1254,65 @@ readonly SPLASH_UNIT_NAME=deck-steam-splash.service
 readonly SPLASH_UNIT="/etc/systemd/user/${SPLASH_UNIT_NAME}"
 readonly SPLASH_BIN=/usr/local/lib/deck-session/steam-first-boot-splash
 readonly SPLASH_IMAGE=/usr/local/share/deck-session/steam-first-boot.png
-# Relative to the desktop user's home. Shown ONCE: later boots reach Gaming
-# Mode in ~39 s and the splash must not appear in front of a client that is
-# about to draw. Written BEFORE anything is displayed, deliberately -- a splash
-# that crashes must not get a second attempt at every boot forever.
+# (Historical names: both were coined for the one-shot "first boot" splash and
+# are kept so an upgrade replaces the same files rather than stranding the old
+# unit and script beside the new ones.)
+# Relative to the desktop user's home. ATTRIBUTION, not a gate: every Gaming
+# Mode start draws, and this stamps WHICH implementation drew last so a
+# first-boot.log line can be attributed to a build. It used to gate the splash
+# to one attempt per implementation ("shown ONCE"); the operator's report -- a
+# black window at every boot, long after the first -- falsified the premise
+# that later boots have nothing to cover, so the gate is retired. Written
+# BEFORE anything is displayed, as before, so a crash still leaves a record of
+# which build attempted the draw.
 readonly SPLASH_MARKER_REL=.local/state/deck-session/steam-first-boot-shown
-# 🔴 THE MARKER IS STAMPED WITH THIS, AND THAT IS WHY THE FIX IS TESTABLE AT ALL.
+# 🔴 THE MARKER IS STAMPED WITH THIS, AND THAT IS WHY A DRAW IS ATTRIBUTABLE.
 #
-# P33's marker held only a date, and it was written before the attempt (see
-# above -- that ordering is deliberate and is kept). The consequence was not
-# noticed until hardware: the 2026-08-16 boot drew nothing, wrote the marker
-# anyway, and thereby disabled the feature on that Deck **for ever**. Any fix
-# shipped afterwards would have been untestable without a human deleting a
-# dotfile by hand, on a device with no keyboard.
+# P33's marker held only a date, and it was written before the attempt. The
+# consequence was not noticed until hardware: the 2026-08-16 boot drew nothing,
+# wrote the marker anyway, and thereby disabled the feature on that Deck
+# **for ever**. Any fix shipped afterwards would have been untestable without a
+# human deleting a dotfile by hand, on a device with no keyboard.
 #
-# So the marker records WHICH implementation had its one attempt. A marker whose
-# first field is not this string -- including every P33 marker, which starts
-# with a date -- is treated as belonging to a different implementation, and this
-# one gets its own single attempt. The safety property is unchanged: one attempt
-# per implementation, never one per boot.
+# So the marker records WHICH implementation drew last. It no longer decides
+# whether this one draws -- every start does -- but a first-boot.log line
+# without it cannot be told apart from a line left by a different build, which
+# is what made P33's failure unattributable.
 #
-# ⚠️ BUMP THIS when the splash changes in a way that deserves another attempt on
-# a Deck that has already run it. Do not bump it for a comment.
-readonly SPLASH_ATTEMPT_ID=p34-1
-# Seconds. The measured update was 123 s end to end; this is that with room and
+# ⚠️ BUMP THIS when the splash changes in a way that deserves attribution to a
+# new implementation. Do not bump it for a comment.
+readonly SPLASH_ATTEMPT_ID=p35-1
+# Seconds. The measured cover is ~17 s end to end; this is that with room and
 # a hard stop. It is a CEILING, not a duration -- the normal exit is Steam's UI
-# appearing.
-readonly SPLASH_MAX_SECONDS=300
-# The process that only exists once the Steam CLIENT is running. The updater
-# that runs during those two minutes is not it, which is what makes this a
-# usable "Steam is drawing now" signal rather than "Steam was started".
+# showing. Kept short on purpose: this runs at every boot now, so a wedged
+# readiness check must cost a minute of cover, never minutes of splash over a
+# live Gaming Mode.
+readonly SPLASH_MAX_SECONDS=60
+# Seconds of grace AFTER the readiness signal before the cover comes down. The
+# signal is a process existing; the first painted frame comes after it, so an
+# instant handover risks uncovering frames of black -- the defect this covers.
+# Measured so far: steamwebhelper started 07:02:01, the cover came down 07:02:06
+# (2 s settle plus detection) on 2026-09-17. Whether 2 s leaves no uncovered
+# frame against Steam's actual first paint is a Deck measurement still to take:
+# this constant is the knob it sizes. Larger overstays a drawn UI; smaller risks
+# black. Do not set it to 0.
+readonly SPLASH_SETTLE_SECONDS=2
+# Seconds between readiness checks once drawn. Fast so the handover lands
+# promptly after the grace; the deadline is still computed once up front, so a
+# fast loop cannot push it out.
+readonly SPLASH_POLL_SECONDS=0.25
+# Seconds to wait for gamescope's session environment before giving up. After=
+# orders unit STARTS, not readiness: the env file is written once gamescope
+# reports its displays, which can land after this unit execs. 5 s at 0.1 s
+# covers that race; past it the missing file is a real, named state, not a
+# momentary ordering, and the script exits to today's black screen.
+readonly SPLASH_ENV_WAIT_SECONDS=5
+# The process that only exists once the Steam CLIENT is running. Steam's
+# pre-UI work (verify, CEF start) does not include it, which is what makes its
+# appearance a usable "Steam is coming up" signal -- PLUS the settle grace
+# above, because a process existing still precedes its first painted frame.
+# Watched on hardware 2026-09-17 (start 07:02:01, cover down 07:02:06); the
+# grace that leaves no uncovered frame against first paint is still to measure.
 readonly SPLASH_STEAM_READY_PROC=steamwebhelper
 # gamescope's logical output, which is landscape: the panel is 800x1280 portrait
 # and gamescope applies its own transform (that is why Gaming Mode is exempt
@@ -3981,11 +4016,11 @@ exit 0
 EOF
 }
 
-# The splash. Written to stdout, same seam.
+# The cover. Written to stdout, same seam.
 #
 # 🔴 THE THREE BOUNDS, AND WHY THERE ARE THREE. A splash that cannot exit is a
-# permanently black-with-text panel, which is strictly worse than the two silent
-# minutes it replaces. So no single mechanism is trusted to end it:
+# permanently black-with-text panel, which is strictly worse than the black it
+# covers. So no single mechanism is trusted to end it:
 #
 #   1. this script's own deadline (${SPLASH_MAX_SECONDS}s), which it enforces
 #      itself and which does not depend on detecting Steam at all;
@@ -3994,15 +4029,17 @@ EOF
 #   3. PartOf=gamescope-session.target, so ending the session ends this.
 #
 # The NORMAL exit is none of those -- it is ${SPLASH_STEAM_READY_PROC}
-# appearing, which is the Steam client's UI process and cannot be running while
-# the updater is still unpacking. ⚠️ That signal is REASONED, not measured: it
-# has not been watched on hardware, which is exactly why it is not the only way
-# out.
+# appearing, PLUS a ${SPLASH_SETTLE_SECONDS}s grace. The process existing
+# precedes its first painted frame, so an instant handover risks uncovering
+# frames of black -- the defect this covers. The grace is sized by Deck
+# measurement (see SPLASH_SETTLE_SECONDS): larger overstays a drawn UI, smaller
+# risks black. Both the detection and the handover are timestamped in
+# ~/${FIRST_BOOT_LOG_REL} so the next measurement can re-size it.
 render_steam_splash() {
   cat <<EOF
 #!/usr/bin/env bash
 #
-# "Don't turn me off. Steam is unpacking." -- shown once, on the first boot.
+# "Starting Steam…" -- at every Gaming Mode start, until Steam's UI shows.
 ${INSTALL_MARKER}
 #
 # Read the "Steam's first run" constants block in ${PROG}.sh before changing
@@ -4022,35 +4059,19 @@ say() {
 
 marker="\${HOME:-/home/\$(id -un)}/${SPLASH_MARKER_REL}"
 
-# ONCE PER IMPLEMENTATION. Later boots reach Gaming Mode in ~39 s and there is
-# nothing to cover, so a splash that ran must not run again -- but a marker left
-# by a DIFFERENT build must not silence this one for ever either. That is not
-# hypothetical: it is what P33's date-only marker did to this Deck on
-# 2026-08-16. Read the SPLASH_ATTEMPT_ID note in ${PROG}.sh.
-if [[ -e \$marker ]]; then
-  seen=""
-  read -r seen _ <"\$marker" 2>/dev/null || true
-  if [[ -z \$seen ]]; then
-    # Present but empty or unreadable. We cannot tell which implementation ran,
-    # so we assume one did: this whole design would rather miss a message than
-    # cover a Gaming Mode that is about to draw.
-    say "\${marker} exists but could not be read; treating the splash as already shown"
-    exit 0
-  fi
-  if [[ \$seen == ${SPLASH_ATTEMPT_ID} ]]; then
-    exit 0
-  fi
-  say "\${marker} records attempt '\${seen}', not '${SPLASH_ATTEMPT_ID}' -- a different splash from the one that already ran, so this one gets its own single attempt"
-fi
-
-# 🔴 WRITTEN BEFORE ANYTHING IS DRAWN. If displaying the splash is what breaks
-# this machine, it gets exactly one chance to do so -- not one per boot, for
-# ever. The cost of being wrong in this direction is missing the message once;
-# the cost of being wrong in the other is a Deck that covers its own screen at
-# every start.
+# ATTRIBUTION, NOT A GATE. Every Gaming Mode start draws; this stamps which
+# implementation drew last so a first-boot.log line can be attributed to a
+# build. It used to gate the splash to one attempt per implementation, until
+# the operator's report -- a black window at every boot, long after the
+# first -- showed later boots have a window to cover too. History kept because
+# it explains the shape: P33's date-only marker, written before the attempt,
+# let the 2026-08-16 boot that drew nothing silence the feature for ever.
+# Read the SPLASH_ATTEMPT_ID note in ${PROG}.sh.
+# 🔴 STILL WRITTEN BEFORE ANYTHING IS DRAWN, so a crash leaves a record of
+# which build attempted the draw.
 mkdir -p "\$(dirname "\$marker")" 2>/dev/null || true
 printf '%s %s\n' "${SPLASH_ATTEMPT_ID}" "\$(date -Iseconds)" >"\$marker" 2>/dev/null ||
-  say "could not write \${marker}; the splash may be shown again next boot"
+  say "could not write \${marker}; attribution for this draw is missing"
 
 [[ -r ${SPLASH_IMAGE} ]] || { say "FAILED: ${SPLASH_IMAGE} is missing; showing nothing. Re-run 'deck-session.sh stage-steam-first-run' on this machine to draw and install it."; exit 0; }
 [[ -x ${SPLASH_VIEWER} ]] || { say "FAILED: ${SPLASH_VIEWER} is missing; showing nothing. Install the 'imv' package."; exit 0; }
@@ -4061,18 +4082,39 @@ printf '%s %s\n' "${SPLASH_ATTEMPT_ID}" "\$(date -Iseconds)" >"\$marker" 2>/dev/
 # OUTER session's, and a client on that one would be behind gamescope's own
 # fullscreen surface where nobody would ever see it.
 #
-# 🔴 AND IF IT IS NOT SET, SAY SO AND STOP. P33 fell through this branch in
-# silence, which on the target means /usr/bin/imv (a two-line wrapper: Wayland if
+# 🔴 POLLED, NOT ASSERTED. After= orders unit STARTS, not readiness: the env
+# file is written once gamescope reports its displays, which can land AFTER
+# this unit execs -- and in a ~17 s window a lost race is a lost cover. So a
+# missing variable waits up to ${SPLASH_ENV_WAIT_SECONDS}s at 0.1 s for the
+# compositor to announce itself, RE-READING %t/gamescope-environment each pass
+# (polling the shell variable alone could never succeed: nothing in this
+# process changes it). Past the wait it is a real, named state --
+# EnvironmentFile= is prefixed '-' precisely so it cannot fail the unit -- and
+# the script names it and stops. P33 fell through the missing case in silence,
+# which on the target means ${SPLASH_VIEWER} (a two-line wrapper: Wayland if
 # WAYLAND_DISPLAY is set, X11 otherwise) execs imv-x11 against a DISPLAY that a
 # user unit does not have, dies in under a second, and leaves a black panel and
-# no explanation. A missing session environment is a real, diagnosable state --
-# EnvironmentFile= is prefixed '-' precisely so it cannot fail the unit -- and it
-# must be named rather than guessed at from the outside.
+# no explanation.
+if [[ -z \${GAMESCOPE_WAYLAND_DISPLAY:-} ]]; then
+  waited=0
+  # 10 polls per second for SPLASH_ENV_WAIT_SECONDS (5 s): integer arithmetic
+  # only, so no fractional sleep counting and no bc.
+  while [[ -z \${GAMESCOPE_WAYLAND_DISPLAY:-} && \$waited -lt $(( ${SPLASH_ENV_WAIT_SECONDS} * 10 )) ]]; do
+    env_file="\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}/gamescope-environment"
+    if [[ -r \$env_file ]]; then
+      env_val="\$(grep -E '^GAMESCOPE_WAYLAND_DISPLAY=' "\$env_file" 2>/dev/null | tail -n 1 | cut -d= -f2-)"
+      [[ -n \$env_val ]] && GAMESCOPE_WAYLAND_DISPLAY="\$env_val"
+    fi
+    [[ -n \${GAMESCOPE_WAYLAND_DISPLAY:-} ]] && break
+    sleep 0.1
+    waited=\$(( waited + 1 ))
+  done
+fi
 if [[ -n \${GAMESCOPE_WAYLAND_DISPLAY:-} ]]; then
   export WAYLAND_DISPLAY=\$GAMESCOPE_WAYLAND_DISPLAY
-  say "drawing on gamescope's nested display (WAYLAND_DISPLAY=\${WAYLAND_DISPLAY})"
+  say "drawing ${SPLASH_ATTEMPT_ID} on gamescope's nested display (WAYLAND_DISPLAY=\${WAYLAND_DISPLAY})"
 else
-  say "FAILED: GAMESCOPE_WAYLAND_DISPLAY is not set, so there is no compositor to draw on and no way to tell one from the outer session. %t/gamescope-environment was missing or did not contain it. Showing nothing."
+  say "FAILED: GAMESCOPE_WAYLAND_DISPLAY is not set after ${SPLASH_ENV_WAIT_SECONDS}s, so there is no compositor to draw on and no way to tell one from the outer session. %t/gamescope-environment was missing or did not contain it. Showing nothing."
   exit 0
 fi
 
@@ -4083,7 +4125,7 @@ fi
 ${SPLASH_VIEWER} -f -x ${SPLASH_IMAGE} >>"\$log_file" 2>&1 &
 viewer=\$!
 started=\$(date +%s)
-say "showing ${SPLASH_IMAGE} (pid \${viewer}) until ${SPLASH_STEAM_READY_PROC} appears, or ${SPLASH_MAX_SECONDS}s, whichever comes first"
+say "showing ${SPLASH_IMAGE} (pid \${viewer}) until ${SPLASH_STEAM_READY_PROC} appears plus ${SPLASH_SETTLE_SECONDS}s, or ${SPLASH_MAX_SECONDS}s, whichever comes first"
 
 # The deadline is computed once, up front, so nothing inside the loop can push
 # it out -- a loop that re-reads its own bound is a loop that can fail to end.
@@ -4093,11 +4135,11 @@ while [[ \$(date +%s) -lt \$deadline ]]; do
   # The viewer died on its own (no compositor, unsupported image, killed).
   # Nothing left to take down, and no reason to keep counting.
   #
-  # 🔴 AND HOW LONG IT LASTED IS THE WHOLE DIAGNOSIS. A viewer that ran for two
-  # minutes handed over to Steam; a viewer that was gone in four seconds never
-  # drew a frame, and that is the case P33 shipped with no way to tell apart --
-  # both were reported as the neutral "the viewer exited". Its own stderr is
-  # immediately above this line in the same file.
+  # 🔴 AND HOW LONG IT LASTED IS THE WHOLE DIAGNOSIS. A viewer that ran for the
+  # whole cover handed over to Steam; a viewer that was gone in four seconds
+  # never drew a frame, and that is the case P33 shipped with no way to tell
+  # apart -- both were reported as the neutral "the viewer exited". Its own
+  # stderr is immediately above this line in the same file.
   if ! kill -0 "\$viewer" 2>/dev/null; then
     alive=\$(( \$(date +%s) - started ))
     if [[ \$alive -lt 5 ]]; then
@@ -4109,13 +4151,16 @@ while [[ \$(date +%s) -lt \$deadline ]]; do
     break
   fi
   if pgrep -x ${SPLASH_STEAM_READY_PROC} >/dev/null 2>&1; then
-    # A short settle so the message does not vanish a frame before Steam's own
-    # first frame lands, which would read as a flicker rather than a handover.
-    sleep 2
+    # The process existing precedes its first painted frame: hold the cover
+    # through the grace so the handover lands on Steam's UI, not on black.
+    # Timestamped separately so the next Deck measurement can re-size the
+    # grace against Steam's actual first paint.
+    say "${SPLASH_STEAM_READY_PROC} detected; holding ${SPLASH_SETTLE_SECONDS}s for its first frame"
+    sleep ${SPLASH_SETTLE_SECONDS}
     reason="${SPLASH_STEAM_READY_PROC} is running"
     break
   fi
-  sleep 2
+  sleep ${SPLASH_POLL_SECONDS}
 done
 
 if [[ -n \$viewer ]]; then
@@ -4133,13 +4178,16 @@ exit 0
 EOF
 }
 
-# Draw the message. Not a heredoc, because the artefact is a PNG: ImageMagick
+# Draw the cover art. Not a heredoc, because the artefact is a PNG: ImageMagick
 # is asked to make it at install time so that nothing has to render text at
-# first boot, on the one machine that is already busy.
+# boot, on the one machine that is already busy.
 #
-# THE WORDING IS THE REQUIREMENT, not a placeholder. The operator asked for
-# "something to tell users like don't turn me off. steam is unpacking." -- in
-# those terms, so that is what it says, in those terms.
+# NEUTRAL BY REQUIREMENT: this draws at EVERY Gaming Mode start, so nothing on
+# it may be true only on the first one. The p34 image said "Don't turn me off.
+# Steam is unpacking. It does this once, the first time you start. It takes a
+# couple of minutes." -- correct once, false on every later boot. The operator
+# owns the exact words (as they did the original); until they choose new ones
+# this says "Starting Steam…" and nothing else, which is true on all of them.
 render_steam_splash_image() {   # render_steam_splash_image <outfile> [magick]
   local out=$1
   local magick=${2:-}
@@ -4165,11 +4213,8 @@ render_steam_splash_image() {   # render_steam_splash_image <outfile> [magick]
 
   "$magick" -size "$SPLASH_IMAGE_SIZE" xc:'#0e0e12' \
     "${fontargs[@]+"${fontargs[@]}"}" -gravity center \
-    -fill '#f2f2f5' -pointsize 84 -annotate +0-150 "Don't turn me off." \
-    -fill '#f2f2f5' -pointsize 64 -annotate +0-40  "Steam is unpacking." \
-    -fill '#9a9aa6' -pointsize 34 -annotate +0+70  "It does this once, the first time you start." \
-    -fill '#9a9aa6' -pointsize 34 -annotate +0+120 "It takes a couple of minutes." \
-    -fill '#9a9aa6' -pointsize 34 -annotate +0+170 "The screen stays dark while it works." \
+    -fill '#f2f2f5' -pointsize 96 -annotate +0-20 "Starting Steam…" \
+    -fill '#9a9aa6' -pointsize 34 -annotate +0+90 "Gaming Mode is loading." \
     "png:$out"
 }
 # 🔴 'png:' IS LOAD-BEARING AND IS NOT DECORATION. ImageMagick picks its output
@@ -4222,20 +4267,20 @@ EOF
   log "verified: ${STEAM_LAUNCHER_UNIT} waits up to ${STEAM_WAIT_STARTUP_SECONDS}s for NetworkManager's startup"
   log "          pass and then up to ${STEAM_WAIT_SECONDS}s for real connectivity, and starts regardless"
 
-  # --- E1: the splash -------------------------------------------------------
+  # --- E1: the cover --------------------------------------------------------
   #
   # 🔴 GATED, AND ABSENCE IS NOT A FAILURE. Everything above is installed
-  # whatever happens here: the race fix and the splash are independent, and a
+  # whatever happens here: the race fix and the cover are independent, and a
   # target without ImageMagick should still stop showing the error modal. A
-  # missing splash is the behaviour this Deck has today.
+  # missing cover is the behaviour this Deck has today.
   local out
   out=$(mktemp) || fail "mktemp failed"
   local imrc=0
   render_steam_splash_image "$out" >/dev/null 2>&1 || imrc=$?
   if [[ $imrc -ne 0 || ! -s $out ]]; then
     rm -f "$out"
-    warn "could not draw ${SPLASH_IMAGE} (ImageMagick returned ${imrc}, or produced nothing). The 'don't turn me off' splash is NOT installed; the first boot will show ~2 minutes of black panel while Steam updates itself, which is exactly today's behaviour. The connectivity fix above IS installed. Install imagemagick and re-run this stage to add the splash."
-    log "stage-steam-first-run: ok (without the splash)"
+    warn "could not draw ${SPLASH_IMAGE} (ImageMagick returned ${imrc}, or produced nothing). The Gaming Mode cover is NOT installed; every Gaming Mode start will show the black window while Steam starts, which is exactly today's behaviour. The connectivity fix above IS installed. Install imagemagick and re-run this stage to add the cover."
+    log "stage-steam-first-run: ok (without the cover)"
     return 0
   fi
 
@@ -4244,18 +4289,18 @@ EOF
   rm -f "$out"
   log "drew ${SPLASH_IMAGE} (${SPLASH_IMAGE_SIZE}, gamescope's landscape logical output)"
 
-  # 🔴 CHECKED HERE, NOT ONLY AT FIRST BOOT. The splash script checks its viewer
-  # too and degrades correctly, but it does that once, in the two minutes nobody
-  # is watching, on a machine whose first-boot journal is not retained
-  # (PROGRESS.md 5.35). Install time is the moment a missing viewer can still be
-  # reported to somebody who can act on it -- and it lands in
+  # 🔴 CHECKED HERE, NOT ONLY AT BOOT. The cover script checks its viewer too
+  # and degrades correctly, but it does that at every Gaming Mode start, in
+  # seconds nobody is watching, on a machine whose journal may not retain the
+  # boot (PROGRESS.md 5.35). Install time is the moment a missing viewer can
+  # still be reported to somebody who can act on it -- and it lands in
   # /var/log/omarchy-deck-install.json, which survives.
   #
   # A warning, not a failure: everything else in this stage is still worth
   # installing, and imv arriving later (it is in Omarchy's own base list) makes
-  # the splash work with no further action.
+  # the cover work with no further action.
   [[ -x $SPLASH_VIEWER ]] ||
-    warn "${SPLASH_VIEWER} is not on this target, so the splash will install but draw nothing on the first boot. It is line 60 of Omarchy's own omarchy-base.packages, so this means that package set did not land. Install 'imv'."
+    warn "${SPLASH_VIEWER} is not on this target, so the cover will install but draw nothing at Gaming Mode start. It is line 60 of Omarchy's own omarchy-base.packages, so this means that package set did not land. Install 'imv'."
 
   assert_ours_or_absent "$SPLASH_BIN" "another package's helper"
   assert_ours_or_absent "$SPLASH_UNIT" "another package's unit"
@@ -4270,16 +4315,18 @@ EOF
   cat >"$tmp" <<EOF
 ${INSTALL_MARKER}
 #
-# Say "don't turn me off" for the ~2 minutes of Steam's first-run self-update,
-# during which the panel is otherwise black -- PROGRESS.md 5.35.
+# Branded cover for the black window between gamescope painting and Steam's UI
+# showing, at every Gaming Mode start -- the operator's every-boot report that
+# retired the p34 one-shot gate. (Historical unit/script names kept so upgrades
+# replace the same files.)
 [Unit]
-Description=Deck first-boot notice while Steam unpacks itself
+Description=Deck Gaming Mode cover until Steam shows
 # PartOf, so ending the session ends this. One of the three independent bounds
-# on a splash that must never outlive Steam -- see render_steam_splash.
+# on a cover that must never outlive Steam -- see render_steam_splash.
 PartOf=gamescope-session.target
 After=gamescope-session.service
 # 🔴 NOTHING MAY DEPEND ON THIS. No Requires=, no Before= on steam-launcher: a
-# splash that fails must cost a message, never a session. Gaming Mode starting
+# cover that fails must cost a message, never a session. Gaming Mode starting
 # is the product; this is a courtesy on top of it.
 Before=${STEAM_LAUNCHER_UNIT}
 
@@ -4288,14 +4335,14 @@ Type=simple
 ExecStart=${SPLASH_BIN}
 # The environment gamescope publishes for the session -- the same file
 # ${STEAM_LAUNCHER_UNIT} reads, and where GAMESCOPE_WAYLAND_DISPLAY comes from.
-# '-' so a missing file is not a failure: without it the splash finds no
-# compositor, says so, and exits.
+# '-' so a missing file is not a failure: without it the cover waits
+# ${SPLASH_ENV_WAIT_SECONDS}s, says so, and exits.
 EnvironmentFile=-%t/gamescope-environment
 # BOUND 2 OF 3, and the one systemd enforces regardless of what the script is
 # doing. ${SPLASH_MAX_SECONDS}s is the script's own deadline plus slack, so in
 # a healthy run this never fires.
 RuntimeMaxSec=$((SPLASH_MAX_SECONDS + 30))
-# A splash that failed is not a failed boot.
+# A cover that failed is not a failed boot.
 SuccessExitStatus=0 1
 Restart=no
 
@@ -4331,14 +4378,14 @@ EOF
     # 5.35), so the first boot -- the only one this runs on -- was already gone
     # by the time anyone asked. Both scripts now append to a file in the user's
     # home instead, readable in Desktop Mode with no terminal and no SSH.
-    defer "whether the splash actually DRAWS cannot be checked at install time -- it needs a running gamescope session, and the target has never booted. It is installed, enabled for gamescope-session.target, and bounded three ways so it cannot outlive Steam. After the first boot, read ~/${FIRST_BOOT_LOG_REL} -- every branch of both first-run scripts writes one timestamped line there, and a line beginning 'FAILED:' names the cause."
+    defer "whether the cover actually DRAWS cannot be checked at install time -- it needs a running gamescope session, and the target has never booted. It is installed, enabled for gamescope-session.target, and bounded three ways so it cannot outlive Steam. After the next boot, read ~/${FIRST_BOOT_LOG_REL} -- every branch of both first-run scripts writes one timestamped line there, and a line beginning 'FAILED:' names the cause."
   fi
 
   log "stage-steam-first-run: ok"
-  log "NOTE: the splash is shown ONCE per implementation (${SPLASH_ATTEMPT_ID}), on the"
-  log "      first Gaming Mode session, and is bounded at ${SPLASH_MAX_SECONDS}s by the script,"
+  log "NOTE: the cover draws at EVERY Gaming Mode start (${SPLASH_ATTEMPT_ID}), and is"
+  log "      bounded at ${SPLASH_MAX_SECONDS}s by the script,"
   log "      $((SPLASH_MAX_SECONDS + 30))s by systemd, and by the session itself. Its marker is"
-  log "      ~/${SPLASH_MARKER_REL}; remove that file to see it again."
+  log "      ~/${SPLASH_MARKER_REL} (attribution only -- every start draws)."
   log "      What it did lands in ~/${FIRST_BOOT_LOG_REL}, which"
   log "      survives the boot the journal did not."
 }
@@ -9244,14 +9291,14 @@ Stages also cover Gaming Mode / display defects (PROGRESS.md 5.11, 5.14, 5.15):
   stage-priv-write-helper  steamos-priv-write, so Gaming Mode's brightness
                            slider stops falling back to blanket 'sudo tee'
                            and 'sudo chmod a+w' on system nodes
-  stage-steam-first-run    two fixes for Steam's FIRST start (PROGRESS.md 5.35):
+  stage-steam-first-run    two fixes for Steam's start (PROGRESS.md 5.35):
                            a bounded ${STEAM_WAIT_SECONDS}s wait for connectivity before Steam
                            starts, so the "Steam needs to be online to update."
-                           modal never appears; and a one-time fullscreen
-                           "don't turn me off, Steam is unpacking" notice for
-                           the ~2 minutes it then spends updating itself behind
-                           a black panel. Both degrade to today's behaviour --
-                           the wait always exits 0, and the splash is bounded
+                           modal never appears; and a branded fullscreen
+                           "Starting Steam…" cover for the black window between
+                           gamescope painting and Steam's UI showing, at every
+                           Gaming Mode start. Both degrade to today's behaviour --
+                           the wait always exits 0, and the cover is bounded
                            three ways so it cannot outlive Steam. Both write
                            every outcome to ~/${FIRST_BOOT_LOG_REL},
                            because the first boot's journal is not retained.
