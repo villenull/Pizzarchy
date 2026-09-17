@@ -2424,7 +2424,14 @@ stage_valve_repos() {
     fail "could not resolve ${invoking_user}'s home directory"
   [[ -n $home ]] || fail "empty home directory for ${invoking_user}"
   local user_hook="${home}/${VALVE_HOOK_REL}" tmp
-  tmp=$(mktemp) || fail "mktemp failed"
+  # mktemp under $TMPDIR (inherited, often /tmp with 0777+t): the file is
+  # root-owned when this stage runs under sudo, and run_as_desktop_user drops
+  # to the invoking user -- who cannot read root's 0600 tmp. Deck-verified
+  # 2026-09-17: install failed 'cannot open ... for reading: Permission denied'.
+  # So stage in the INVOKING user's home (same uid that will read it back)
+  # instead of the shared tmp dir.
+  tmp=$(run_as_desktop_user "$invoking_user" mktemp "${home}/.cache-valve-hook.XXXXXX") ||
+    fail "mktemp failed"
   render_valve_hook >"$tmp" || { rm -f "$tmp"; fail "could not render ${VALVE_HOOK_NAME}"; }
   bash -n "$tmp" ||
     { rm -f "$tmp"; fail "the rendered refresh hook is not valid bash: refusing to install a hook that would break every future refresh."; }
@@ -8996,7 +9003,14 @@ run_stage() {
   local fn=${stage//-/_}
   declare -F "$fn" >/dev/null || usage_error "unknown stage '${stage}'"
   # Every stage needs the probes; they install nothing and write nothing.
-  [[ $stage == stage-preconditions ]] || stage_preconditions
+  # EXCEPT the repair stage: stage-valve-repos exists precisely to fix the
+  # absence stage_preconditions refuses to run without (no Gaming Mode session
+  # file after an update swapped Valve's gamescope for Arch's -- Deck-verified
+  # 2026-09-17). Gating the repair on the probe it repairs is a deadlock, so
+  # it runs on the hardware gate alone.
+  if [[ $stage != stage-preconditions && $stage != stage-valve-repos ]]; then
+    stage_preconditions
+  fi
   "$fn"
 }
 
