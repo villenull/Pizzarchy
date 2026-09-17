@@ -1658,8 +1658,17 @@ check("a gappy set of workspaces steps by position, not by number",
        m.next_workspace_id(7, [1, 4, 7], m.WORKSPACE_STICK_RIGHT),
        m.next_workspace_id(1, [1, 4, 7], -m.WORKSPACE_STICK_RIGHT)],
       [4, 1, 7])
-check("one workspace means nowhere to go, in either direction",
-      [m.next_workspace_id(1, [1], d) for d in (1, -1)], [None, None])
+# 🆕 A SINGLE workspace is not a dead end to the right: right CREATES the
+# adjacent one, the same way SUPER+2 opens workspace 2 on a fresh desktop.
+# Left steps down, except from 1 -- there is no workspace 0 to create.
+check("🆕 right from a SINGLE workspace creates the adjacent one",
+      m.next_workspace_id(1, [1], m.WORKSPACE_STICK_RIGHT), 2)
+check("🆕 ...from a higher single workspace too",
+      m.next_workspace_id(5, [5], m.WORKSPACE_STICK_RIGHT), 6)
+check("🆕 left from a single workspace above 1 steps down",
+      m.next_workspace_id(3, [3], -m.WORKSPACE_STICK_RIGHT), 2)
+check("🆕 only left from a single workspace 1 has nowhere to go",
+      m.next_workspace_id(1, [1], -m.WORKSPACE_STICK_RIGHT), None)
 check("no workspaces at all means nowhere to go",
       m.next_workspace_id(1, [], 1), None)
 # Being on the scratchpad is a real state: its id is not in the list at all.
@@ -1759,7 +1768,8 @@ check("nothing waits on it -- the input loop must never freeze on a workspace",
 check("and it is an argv, never a shell string", _fake.calls[0][1].get("shell"), None)
 check("it runs with the RESOLVED session environment, like every other spawn",
       _fake.calls[0][1].get("env") is not None, True)
-check("a successful step says nothing on stderr", _err, "")
+check("a successful step reports the resolved dispatch in the journal",
+      ("workspace-next 1 -> 2" in _err), True)
 
 _result, _fake, _err = with_fake_subprocess(
     lambda: m.run_workspace("workspace-prev", read=ws_reader(1, [1, 2, 3])))
@@ -1784,9 +1794,18 @@ check("...and names the binary it needed", m.WORKSPACE_LIST_ARGV[0] in _err, Tru
 check("...and says the rest of the mapper is unaffected",
       "the rest of the mapper is unaffected" in _err, True)
 
+# 🆕 Right from a single workspace CREATES the adjacent one end to end; only
+# left from 1 is the nowhere-to-go case (no workspace 0 to create).
 _result, _fake, _err = with_fake_subprocess(
     lambda: m.run_workspace("workspace-next", read=ws_reader(1, [1])))
-check("a desktop with ONE workspace spawns nothing and explains itself",
+check("🆕 right from a SINGLE workspace dispatches the created adjacent one",
+      ([argv for argv, _kw in _fake.calls], _result),
+      ([m.workspace_focus_argv(2)], True))
+check("🆕 ...and the journal carries the resolved dispatch as evidence",
+      "workspace-next 1 -> 2" in _err, True)
+_result, _fake, _err = with_fake_subprocess(
+    lambda: m.run_workspace("workspace-prev", read=ws_reader(1, [1])))
+check("left from a single workspace 1 spawns nothing and explains itself",
       (_fake.calls, _result, "nowhere to go" in _err), ([], False, True))
 check("...naming the workspace it was on, so the log is diagnosable",
       "1" in _err, True)

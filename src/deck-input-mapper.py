@@ -3261,14 +3261,19 @@ def run_brightness(action: str, dry_run: bool = False) -> bool:
 # list, which means asking the compositor two questions first.
 #
 # ⚠️ WHAT "THE LAST WORKSPACE" MEANS HERE: the highest-numbered workspace that
-# EXISTS. Not workspace 10, and not a workspace conjured for the occasion. That
+# EXISTS. Not workspace 10. (Right from a single-workspace desktop is the one
+# deliberate exception below: it focuses an adjacent workspace the compositor
+# then creates.) That
 # is the same set Omarchy's own SUPER+TAB walks (`hl.dsp.focus({ workspace =
 # "e+1" })` is Hyprland's "next EXISTING workspace"), so the controller and the
 # keyboard agree about what a workspace is -- the same principle CLOSE_WINDOW_ARGV
-# applies to the close binding. The visible consequence, and it is worth knowing
-# before someone reports it as a bug: on a desktop with ONE workspace this chord
-# has nowhere to go and does nothing, exactly as SUPER+TAB does nothing there.
-# `run_workspace` says so in the journal rather than failing silently.
+# applies to the close binding. Right from a desktop with exactly ONE
+# workspace [C] is the one DELIBERATE exception to "existing workspaces only":
+# it focuses C+1, which the compositor CREATES -- the same way SUPER+2 opens
+# workspace 2 on a fresh desktop, so the dispatch stays a plain "go there".
+# Left from [C] with C > 1 steps down to C-1 the same way; only left from [1]
+# has nowhere to go (there is no workspace 0), and `run_workspace` says so in
+# the journal rather than failing silently.
 
 
 def workspace_ids_from_json(workspaces_json: str) -> list[int] | None:
@@ -3329,14 +3334,21 @@ def active_workspace_from_json(active_json: str) -> int | None:
 def next_workspace_id(current: int, ids: list[int], direction: int) -> int | None:
     """The workspace one step from `current`, WRAPPING at both ends.
 
-    None when there is nowhere to go: no ordinary workspaces at all, or only the
-    one we are already on.
+    None when there is nowhere to go: no ordinary workspaces at all, or left
+    from workspace 1 on a single-workspace desktop (there is no workspace 0).
 
     🔴 THE WRAP THE OPERATOR ASKED FOR is left-from-the-first -> the last.
     Right-from-the-last -> the first is the symmetric case; they did NOT ask for
     it and it is implemented anyway, because the alternative is a control that
     wraps one way and dead-ends the other. Flagged as an inference in the
     handover, not smuggled in as a requirement.
+
+    🆕 A SINGLE workspace [C] is not a dead end to the right: right steps to
+    C+1, which focusing CREATES -- the same way SUPER+2 opens workspace 2 on a
+    fresh desktop. Left steps to C-1, or nowhere when C is 1. Verified live on
+    the Deck: the mapper held --grab, the dispatch form works, and the
+    left-stick chord proves the queueing path; the flick did nothing only
+    because one workspace is a ring of one, which the user reads as broken.
 
     ⚠️ A `current` THAT IS NOT IN THE LIST is a real state, not a bug: the
     scratchpad is a workspace with a negative id that `workspace_ids_from_json`
@@ -3348,6 +3360,11 @@ def next_workspace_id(current: int, ids: list[int], direction: int) -> int | Non
         return None
     if current not in ids:
         return ids[0] if direction > 0 else ids[-1]
+    if len(ids) == 1:
+        sole = ids[0]
+        if direction > 0:
+            return sole + 1
+        return sole - 1 if sole > 1 else None
     target = ids[(ids.index(current) + direction) % len(ids)]
     return None if target == current else target
 
@@ -3431,11 +3448,12 @@ def run_workspace(action: str, dry_run: bool = False,
     current, ids = state
     target = next_workspace_id(current, ids, direction)
     if target is None:
-        # Not a failure, and said plainly so it is not read as one. This is the
-        # fresh-desktop case: one workspace, nowhere to flick to.
+        # Not a failure, and said plainly so it is not read as one. The only
+        # ring this small is left-from-1 on a single-workspace desktop: there
+        # is no workspace 0 to create, so there is nowhere to flick to.
         print(f"deck-input-mapper: STEAM + the right stick has nowhere to go "
-              f"from workspace {current} -- it moves between the workspaces that "
-              "EXIST, exactly as Omarchy's own next-workspace binding does",
+              f"from workspace {current} -- left from workspace 1 steps toward "
+              "workspace 0, which does not exist and is never created",
               file=sys.stderr, flush=True)
         return False
     argv = workspace_focus_argv(target)
@@ -3448,6 +3466,7 @@ def run_workspace(action: str, dry_run: bool = False,
               f"`{argv[0]}` is installed and on PATH; the rest of the mapper is "
               "unaffected", file=sys.stderr, flush=True)
         return False
+    print(f"{action} {current} -> {target}", file=sys.stderr, flush=True)
     return True
 
 
