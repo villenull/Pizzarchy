@@ -66,7 +66,7 @@ image — see [Recovery](#recovery).
 
 ![Back to Gaming Mode: the Omarchy menu, System, and Steam comes up](docs/images/gaming-switch.gif)
 
-![fastfetch on the installed Deck: Valve's Neptune kernel, Hyprland, Omarchy 4.0](docs/images/desktop-fastfetch.png)
+![fastfetch on an installed Deck (a 4.0.0-era build, on Valve's Neptune kernel): Hyprland, Omarchy 4.0](docs/images/desktop-fastfetch.png)
 
 ---
 
@@ -74,16 +74,18 @@ image — see [Recovery](#recovery).
 
 1. **Get the image.**
 
-   **[omarchy-deck-2026.08.18-P40-x86_64.iso](https://archive.org/details/pizzarchy-2026.08.18-P40)** — 6.1 GB, from the Internet Archive.
+   **[pizzarchy-omarchy-4.0.4-2026-09-20-x86_64.iso](https://archive.org/details/pizzarchy-2026.09.20-4.0.4)** — 6.2 GB, from the Internet Archive.
+
+   Tested and accepted by the operator on the project's own Deck OLED on 2026-09-20 — one machine, by eye. No clean-reinstall run or full hardware matrix is claimed; the build-side evidence is in the [release notes](https://github.com/villenull/Pizzarchy/releases/tag/v2026.09.20-4.0.4).
 
    ```
-   sha256  b555017eaa02fb17d341b0f6fc8f268cea3e0258bf70c5ca963b25eccaf74195
+   sha256  2fa7a02031185615f41dd12ec078e136a749edd40a591a6f9930ee1f7d25f814
    ```
 
    Check it before you install — a truncated download looks like a bad ISO:
 
    ```bash
-   sha256sum omarchy-deck-2026.08.18-P40-x86_64.iso
+   sha256sum pizzarchy-omarchy-4.0.4-2026-09-20-x86_64.iso
    ```
 
 2. **Write it to a USB stick.** [Ventoy](https://www.ventoy.net) gets installed onto the stick once; after that you copy `.iso` files onto it like ordinary files, and it boots to a menu listing whatever you have dropped there.
@@ -125,7 +127,7 @@ image — see [Recovery](#recovery).
 
 | | |
 |---|---|
-| Kernel | Valve's Neptune kernel, the same one SteamOS runs |
+| Kernel | `linux-omarchy`, the kernel Omarchy 4.0.4 ships and installs itself |
 | Boot | Limine, booting to Gaming Mode by default |
 | Gaming Mode | gamescope, stock behaviour, Steam already installed and up to date |
 | Desktop Mode | Omarchy / Hyprland, reachable from the Steam menu |
@@ -167,7 +169,7 @@ This install replaces SteamOS. To go back, use **Valve's official Steam Deck Rec
 
 ## How it works
 
-A fork of Omarchy's own installer with a Steam Deck overlay: a controller-driven form layer over the install screens, an input mapper that turns the gamepad into keyboard events (including an on-screen keyboard drawn on the console), Valve's Neptune kernel and audio DSP, and a session layer that preserves gamescope while adding a route to the Omarchy desktop.
+A fork of Omarchy's own installer with a Steam Deck overlay: a controller-driven form layer over the install screens, an input mapper that turns the gamepad into keyboard events (including an on-screen keyboard drawn on the console), Valve's gamescope and audio DSP, and a session layer that preserves gamescope while adding a route to the Omarchy desktop.
 
 The ISO carries a complete package mirror — around 1,300 packages — so the system itself installs from the USB stick rather than over the network. That is why the install is quick and does not fall over on a slow connection. The internet requirement is for **Steam specifically**, which is downloaded from Valve during setup rather than redistributed here.
 
@@ -204,4 +206,4 @@ Read docs/START-HERE.md and begin.
 
 **An independent project. Not affiliated with, endorsed by, or supported by Basecamp or Valve.** "Omarchy" and "Steam Deck" are used descriptively, to say what this installs and what it runs on.
 
-MIT — see [LICENSE](LICENSE). Omarchy, SteamOS, gamescope, and Valve's kernel and firmware packages are covered by their own licenses.
+MIT — see [LICENSE](LICENSE). Omarchy and its `linux-omarchy` kernel, SteamOS, gamescope, and Valve's firmware packages are covered by their own licenses.

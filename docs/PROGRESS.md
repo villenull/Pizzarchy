@@ -3949,6 +3949,45 @@ whatever the mirrors served at 21:41Z, so a rebuild is not expected to be bit-id
 
 ---
 
+### 5.48 🆕 PUBLISHED — the 4.0.4 ISO is on the Internet Archive and tagged on GitHub (2026-09-20, operator-authorised)
+
+**First public release since `v2026.08.18-P40`, and the first 4.0.4 one.** The operator
+booted and tested this exact image on the test Deck OLED and accepted it ("looks good to
+me"), then authorised publication. That acceptance is **one machine, by eye** — not a clean
+reinstall from scratch, not a VM install run, and not a hardware feature matrix. The
+published wording says exactly that, in both places.
+
+| | |
+|---|---|
+| Internet Archive item | `pizzarchy-2026.09.20-4.0.4` — <https://archive.org/details/pizzarchy-2026.09.20-4.0.4> |
+| ISO URL | <https://archive.org/download/pizzarchy-2026.09.20-4.0.4/pizzarchy-omarchy-4.0.4-2026-09-20-x86_64.iso> |
+| GitHub release | `v2026.09.20-4.0.4`, "Pizzarchy 2026.09.20 (Omarchy 4.0.4)" — <https://github.com/villenull/Pizzarchy/releases/tag/v2026.09.20-4.0.4> |
+| Release assets | `SHA256SUMS` only. **GitHub caps release assets at 2 GiB**; a 5.73 GiB ISO cannot be attached, which is why the Archive carries it and the release links out |
+| Published as | a normal (latest) release, **not** a prerelease — matching the P40 convention, and the image is operator-accepted |
+
+**Remote verification, before publishing** (the release was drafted first and held): IA's own
+metadata entry for the file reports **size 6,154,983,424** with server-side
+md5 `fa1662881a734a51fef20df54c6e7beb` and sha1 `d0019394c1f67067c8555fc34bb214fd19d67281`
+— both computed locally from the artefact *before* upload, so the Archive independently
+arrived at the same digests. IA publishes no sha256; ours (`2fa7a020…5f814`, §5.47) is in
+`SHA256SUMS` on both the item and the release. The public download URL answers `302` to the
+node and then `200` with `content-length: 6154983424`, and the details page answers `200`.
+
+**Docs updated with it.** `README.md`'s install step now points at the new filename, the new
+item and the new sha256 (it had carried `omarchy-deck-2026.08.18-P40-x86_64.iso` and
+`b555017e…4195`), and three stale claims went with it: the "What's supported" kernel row and
+the "How it works" paragraph still said **Valve's Neptune kernel**, which 4.0.4 retired in
+favour of `linux-omarchy` (`65ea804`), and the licence line attributed a kernel to Valve that
+is no longer shipped. The fastfetch screenshot's caption now says which era it is from
+rather than reading as a claim about this build.
+
+⚠️ **What is still not claimed anywhere.** No LCD support (OLED only), no stable/RC label, no
+statement about third-party licences beyond "each under its own" — the repo's MIT covers this
+project's code and nothing it redistributes. The §5.45 hand-over question stays open and is
+listed as a known issue rather than as fixed.
+
+---
+
 ## 6. Blocked on human
 
 - 🆕 **P3.6 — bring the Deck to Omarchy 4.0.0 stable (operator-present).** Runbook
@@ -3988,7 +4027,8 @@ whatever the mirrors served at 21:41Z, so a rebuild is not expected to be bit-id
 - **Anything touching TDP, fan curves, or charge limits** — every time, no
   exceptions. Genuine hardware-damage risk.
 - **Any public action** — repos, upstream issues, outreach. One draft staged
-  (§5.6).
+  (§5.6). ✅ Exercised once with explicit authorisation: the 2026-09-20
+  publication of the 4.0.4 ISO to the Internet Archive and GitHub (§5.48).
 
 Retired from this list 2026-08-10: "do not wipe the Deck" (superseded by
 §2.5's planned-rebuild posture), the DeckShift manual removal and its `/tmp`
