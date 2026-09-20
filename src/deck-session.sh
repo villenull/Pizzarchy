@@ -1200,6 +1200,14 @@ readonly STEAM_WAIT_DROPIN="/etc/systemd/user/${STEAM_LAUNCHER_UNIT}.d/50-deck-w
 # EVERY Gaming Mode start, in-session, AFTER gamescope paints, never on the
 # boot/login path -- that placement is what keeps it from gating the session.
 readonly STEAM_WAIT_SECONDS=20
+# ⚠️ SINCE 2026-09-20 BOTH CEILINGS ARE FIRST-RUN-ONLY IN PRACTICE. A machine
+# with an installed Steam client (Steam's own manifest + a runnable steam.sh
+# under the same root) returns before the wait reaches nm-online at all -- the
+# operator asked for "let an already-installed Steam start while Wi-Fi connects",
+# and that is render_steam_wait_online's early return (PROGRESS.md 5.46). These
+# bounds are unchanged for everything else: a first run, a root that cannot be
+# read, a client that is missing or truncated.
+#
 # Phase 1's ceiling. "Has NetworkManager finished its startup pass yet" -- two
 # consecutive healthy boots (81bc61eb, 9146c58a) burned the FULL 5 s here (NM
 # startup incomplete at +5 s, connectivity confirmed +3 s after), so treat this
@@ -1235,8 +1243,9 @@ readonly FIRST_BOOT_LOG_REL=.local/state/deck-session/first-boot.log
 # UI ~27 s. That window exists at EVERY Gaming Mode start, not just the first:
 # Steam's start (verify, CEF, gamepad UI) costs seconds even with nothing left
 # to update, now that the bootstrap runs at install time. So this draws at
-# every start, and the image it shows must be true on all of them -- no
-# first-boot-only words (see render_steam_splash_image).
+# every start -- and it shows the boot splash itself, so there is nothing on it
+# that can be true on one start and false on the next (see
+# render_steam_splash_image; before 2026-09-20 it carried copy instead).
 #
 # 🔴 IT LIVES IN THE SESSION, NOT THE BOOT PATH, and that was decided rather
 # than fallen into (docs/tasks/P33-fix-round.md §1). Holding plymouth past
@@ -1281,7 +1290,16 @@ readonly SPLASH_MARKER_REL=.local/state/deck-session/steam-first-boot-shown
 #
 # ⚠️ BUMP THIS when the splash changes in a way that deserves attribution to a
 # new implementation. Do not bump it for a comment.
-readonly SPLASH_ATTEMPT_ID=p35-1
+#
+# p35-2  the gamescope startup-focus bootstrap, so the cover is actually
+#        presented (GAMESCOPECTRL_BASELAYER_APPID 0 only while unset).
+# p36-1  the IMAGE became the boot splash's own artwork, at the operator's
+#        instruction (2026-09-20): the neutral "Starting Steam…" copy is gone
+#        and the plymouth theme's logo and background are drawn instead, so the
+#        handover is meant to look unchanged -- an INTENT a physical boot still
+#        has to confirm (docs/PROGRESS.md 5.45). Read
+#        render_steam_splash_image.
+readonly SPLASH_ATTEMPT_ID=p36-1
 # Seconds. The measured cover is ~17 s end to end; this is that with room and
 # a hard stop. It is a CEILING, not a duration -- the normal exit is Steam's UI
 # showing. Kept short on purpose: this runs at every boot now, so a wedged
@@ -1320,6 +1338,23 @@ readonly SPLASH_STEAM_READY_PROC=steamwebhelper
 # would be the one thing on the Deck rotated the wrong way.
 readonly SPLASH_IMAGE_SIZE=1280x800
 readonly SPLASH_VIEWER=/usr/bin/imv
+
+# 🆕 WHERE THE COVER'S ART COMES FROM: the boot splash on this machine, read at
+# INSTALL time by render_steam_splash_image. The operator's requirement is that
+# the Omarchy splash stays on the panel until Steam's UI shows, so the cover has
+# to BE that image -- our own wordmark, or a different background, would be a
+# visible change at the handover this exists to hide. Nothing here is invented:
+# the theme's script states its background colour and its mark, and both are
+# read off the target rather than shipped from this repo. A theme whose artwork
+# cannot be read installs NO cover and says which file it wanted (see the gate
+# in stage_steam_first_run) -- a guessed image is worse than the black it covers.
+readonly SPLASH_PLYMOUTH_CONF=/etc/plymouth/plymouthd.conf
+readonly SPLASH_PLYMOUTH_THEMES=/usr/share/plymouth/themes
+# plymouthd.conf's `Theme=` names the theme directory. This is the one value
+# here that is not read off the machine: it is used only when that file or that
+# key is unreadable, and it is Omarchy's own theme name (read off the Deck
+# 2026-09-20: `/etc/plymouth/plymouthd.conf` = `[Daemon] Theme=omarchy`).
+readonly SPLASH_PLYMOUTH_THEME_FALLBACK=omarchy
 
 # ⚠️ NO NEW PACKAGE IS NEEDED FOR ANY OF THIS, and that was CHECKED rather than
 # hoped for. All three tools this section leans on are already in Omarchy's own
@@ -3917,6 +3952,12 @@ EOF
 # swallowing a failure": the failure is loud, it just is not fatal, because being
 # fatal here is wrong.
 #
+# 🔴 AND SINCE 2026-09-20 IT IS A FIRST-RUN WAIT. An already-installed client --
+# Steam's own manifest plus a runnable steam.sh under the same root -- returns
+# before any of this: read the note above the early return in the rendered
+# script. The two ceilings below are what a machine with no installed client
+# still gets, unchanged: a genuine first run, or a root this cannot read.
+#
 # 🔴 WHY THIS IS NOT `nm-online -s`, WHICH IS WHAT P33 SHIPPED AND WHY IT DID
 # NOTHING. From nm-online(1), verbatim:
 #
@@ -3981,6 +4022,87 @@ say() {
   printf '%s deck-steam-wait-online: %s\n' "\$(date -Iseconds)" "\$1" >>"\$log_file" 2>/dev/null || true
 }
 
+# 🔴 AN ALREADY-INSTALLED CLIENT DOES NOT WAIT FOR THE NETWORK AT ALL.
+#
+# Operator requirement, 2026-09-20: "let an already-installed Steam start while
+# Wi-Fi connects". Only a genuine FIRST RUN needs this wait -- that run's updater
+# has to download the client before anything can paint, and it is the run that
+# hits "Steam needs to be online to update." (PROGRESS.md 5.35). Every later
+# start already has the client on disk.
+#
+# THE PREDICATE IS STEAM'S OWN, AND IT IS THREE FACTS, NOT A MARKER OF OURS.
+# Nothing of ours is consulted and nothing here touches the network: a marker
+# this project writes would go stale in exactly the cases that matter (Steam
+# reset, corrupt client, factory reset). All three are read out of Steam's own
+# root:
+#
+#   1. package/steam_client_*.installed -- the per-channel manifest Steam writes
+#      once a client has actually been installed there (measured on the Deck
+#      2026-09-20: steam_client_steamdeck_stable_ubuntu12.installed, 1.5 MB
+#      ASCII). The channel is in the name, hence the glob. package/ existing
+#      proves only that downloads exist, so the manifest is what is required --
+#      not the directory.
+#   2. steam.sh -- the script /usr/lib/steam/bin_steam.sh itself tests to decide
+#      a root is usable: its check_bootstrap function requires exactly that file
+#      to be executable under the root (read off the Deck 2026-09-20).
+#   3. the client executable steam.sh runs -- \${STEAMROOT}/ubuntu12_32/steam --
+#      because steam.sh existing says nothing about the client it launches. Which
+#      path that is, is steam.sh's own selection, not a guess: PLATFORM=ubuntu12_32
+#      and STEAMEXEPATH=\$PLATFORM/\$STEAMEXE, with \$STEAMROOT/steamrt64/steam as
+#      the only alternative -- and even that one only when the beta opt-in's
+#      .steam-enable-steamrt64-client marker is present AND steamrt64/steam is
+#      executable, because steam.sh falls back to the ubuntu12_32 client when the
+#      marker is there and that file is not (all read off the Deck's steam.sh,
+#      2026-09-20). A missing ubuntu12_64/steam is NOT a signal: this Deck has no
+#      such file, so keying on it would be wrong here and could rot anywhere.
+#
+# 🔴 ALL THREE ARE REQUIRED, AND EVERY OTHER OUTCOME RUNS THE WAIT BELOW
+# UNCHANGED: no manifest or an EMPTY one (never installed, or an install that did
+# not finish writing it -- the check is -s, size and not content, so a non-empty
+# but corrupt manifest is taken at its word and no integrity check is claimed), no
+# steam.sh (bin_steam.sh extracts that tarball offline, so steam.sh alone is a
+# FIRST run), no executable client behind steam.sh (an install that would have to
+# be re-fetched -- the case Main asked about), a root that is missing, unreadable
+# or a dangling symlink. That is not a fallback framework -- an unmet condition
+# simply does not return early, and the 5+20 bounded wait, including its
+# exit-0-on-every-path contract, is untouched.
+#
+# ⚠️ WHAT THIS CANNOT KNOW: whether Valve has published a MANDATORY client
+# update since that install. Answering that needs the network, and the operator
+# accepted that exposure for an installed client on 2026-09-20: Steam handles
+# connectivity and any required update itself, and may prompt or retry if the
+# network is not ready. It is also why the first run keeps the whole wait: there
+# the updater is the point of it.
+#
+# Valve's own root resolution in its own order: ~/.steam/steam (the data link
+# bin_steam.sh repairs), then the default data dir it repairs it FROM. Its legacy
+# ~/Steam is not checked -- a machine bootstrapped only there keeps the wait,
+# which is today's behaviour.
+steam_root=\$(readlink -e -q "\${HOME:-/home/\$(id -un)}/.steam/steam" || true)
+[[ -n \$steam_root && -d \$steam_root ]] ||
+  steam_root="\${XDG_DATA_HOME:-\${HOME:-/home/\$(id -un)}/.local/share}/Steam"
+# Which client is the runnable one is steam.sh's OWN ANSWER, not a guess (read
+# off the Deck 2026-09-20): PLATFORM=ubuntu12_32 and STEAMEXEPATH=\$PLATFORM/
+# \$STEAMEXE -- and the opt-in steamrt64 client only when the marker is there AND
+# that client is executable, because steam.sh itself falls through to the
+# ubuntu12_32 client when it is not.
+steam_client="\$steam_root/ubuntu12_32/steam"
+if [[ -e \$steam_root/.steam-enable-steamrt64-client && -x \$steam_root/steamrt64/steam ]]; then
+  steam_client="\$steam_root/steamrt64/steam"
+fi
+steam_manifest=""
+for f in "\$steam_root"/package/steam_client_*.installed; do
+  [[ -s \$f ]] && { steam_manifest="\$f"; break; }
+done
+# 🔴 ALL THREE, EACH ONE VALVE'S, AND EACH ONE NECESSARY. A manifest alone is a
+# download, not a client; steam.sh alone is the tarball bin_steam.sh extracts
+# OFFLINE on a first run; and a client path that is not executable is exactly the
+# incomplete install this must not report as ready.
+if [[ -n \$steam_manifest && -x \$steam_root/steam.sh && -x \$steam_client ]]; then
+  say "an installed Steam client is already here (\${steam_manifest} + \${steam_client}), so this is not a first run: starting Steam now, without waiting for the network. Steam handles connectivity and any required update itself, and may prompt or retry if the network is not ready."
+  exit 0
+fi
+
 if [[ ! -x ${NM_ONLINE_BIN} ]]; then
   say "${NM_ONLINE_BIN} is not installed, so connectivity cannot be waited for. Steam starts now; if this machine has no network yet it may show 'Steam needs to be online to update.' once and recover on its own retry."
   exit 0
@@ -4031,15 +4153,21 @@ EOF
 # The NORMAL exit is none of those -- it is ${SPLASH_STEAM_READY_PROC}
 # appearing, PLUS a ${SPLASH_SETTLE_SECONDS}s grace. The process existing
 # precedes its first painted frame, so an instant handover risks uncovering
-# frames of black -- the defect this covers. The grace is sized by Deck
-# measurement (see SPLASH_SETTLE_SECONDS): larger overstays a drawn UI, smaller
-# risks black. Both the detection and the handover are timestamped in
-# ~/${FIRST_BOOT_LOG_REL} so the next measurement can re-size it.
+# frames of black -- the defect this covers. The grace is sized from Deck
+# PROCESS timestamps only (see SPLASH_SETTLE_SECONDS): nothing here measures
+# Steam's first painted frame, and Steam writing its own focus selection can put
+# the cover behind Steam's window BEFORE this script exits -- so this script's
+# exit is not the handover, and no line below may claim the cover is or is not
+# on screen. Larger overstays a drawn UI; smaller risks black. Both the
+# detection and the handover are timestamped in ~/${FIRST_BOOT_LOG_REL} so the
+# next measurement can re-size it.
 render_steam_splash() {
   cat <<EOF
 #!/usr/bin/env bash
 #
-# "Starting Steam…" -- at every Gaming Mode start, until Steam's UI shows.
+# The Omarchy boot splash, held at every Gaming Mode start until Steam's UI
+# shows -- the same artwork the splash draws, so the panel is meant to look
+# unchanged across the handover (a physical boot has yet to confirm that).
 ${INSTALL_MARKER}
 #
 # Read the "Steam's first run" constants block in ${PROG}.sh before changing
@@ -4118,6 +4246,44 @@ else
   exit 0
 fi
 
+# Steam-controlled gamescope has no global focus until Steam sets its root
+# selection. A native Wayland viewer has app ID 0: select it only while both
+# controls are unset. Steam replaces this bootstrap selection with its own.
+# Measured with the Deck's gamescope: no presented frame before this property,
+# and a captured splash frame after it. A running viewer alone proves nothing.
+#
+# 🔴 A SELECTION THAT IS ALREADY THERE IS LEFT ALONE, AND THAT IS ALL THIS
+# ESTABLISHES. Steam writing its own (any value -- including 0, which can
+# present a native client) may put the cover behind Steam's window at any
+# moment; the log line in the else branch records which branch ran, never
+# whether the cover is on screen.
+if [[ -z \${DISPLAY:-} ]]; then
+  env_file="\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}/gamescope-environment"
+  if [[ -r \$env_file ]]; then
+    export DISPLAY="\$(sed -n 's/^DISPLAY=//p' "\$env_file" | tail -n 1)"
+  fi
+fi
+if [[ -n \${DISPLAY:-} ]] && command -v xprop >/dev/null 2>&1; then
+  if selection=\$(xprop -root GAMESCOPECTRL_BASELAYER_APPID GAMESCOPECTRL_BASELAYER_WINDOW 2>&1); then
+    if ! grep -q '=' <<<"\$selection"; then
+      if xprop -root -f GAMESCOPECTRL_BASELAYER_APPID 32c -set GAMESCOPECTRL_BASELAYER_APPID 0 >>"\$log_file" 2>&1; then
+        say "initialized gamescope startup focus for the native splash"
+      else
+        say "FAILED: could not initialize gamescope startup focus; cover may remain invisible"
+      fi
+    else
+      # NOT "the cover is not presented": an existing 0 could show it, and an
+      # existing Steam app id could hide it. All this line may say is which of
+      # the two branches the script took.
+      say "gamescope startup focus is already set; preserving the existing selection"
+    fi
+  else
+    say "FAILED: could not read gamescope startup focus: \$selection"
+  fi
+else
+  say "FAILED: gamescope DISPLAY or xprop is missing; cover may remain invisible"
+fi
+
 # 🔴 THE VIEWER'S OWN OUTPUT GOES IN THE LOG, NOT THE JOURNAL. This is the line
 # that says "Failed to connect to Wayland display" or "Unsupported image format"
 # -- the single most useful sentence there is when nothing appears -- and P33
@@ -4125,7 +4291,7 @@ fi
 ${SPLASH_VIEWER} -f -x ${SPLASH_IMAGE} >>"\$log_file" 2>&1 &
 viewer=\$!
 started=\$(date +%s)
-say "showing ${SPLASH_IMAGE} (pid \${viewer}) until ${SPLASH_STEAM_READY_PROC} appears plus ${SPLASH_SETTLE_SECONDS}s, or ${SPLASH_MAX_SECONDS}s, whichever comes first"
+say "viewer started for ${SPLASH_IMAGE} (pid \${viewer}) until ${SPLASH_STEAM_READY_PROC} appears plus ${SPLASH_SETTLE_SECONDS}s, or ${SPLASH_MAX_SECONDS}s, whichever comes first"
 
 # The deadline is computed once, up front, so nothing inside the loop can push
 # it out -- a loop that re-reads its own bound is a loop that can fail to end.
@@ -4179,19 +4345,57 @@ EOF
 }
 
 # Draw the cover art. Not a heredoc, because the artefact is a PNG: ImageMagick
-# is asked to make it at install time so that nothing has to render text at
+# is asked to make it at install time so that nothing has to render anything at
 # boot, on the one machine that is already busy.
 #
-# NEUTRAL BY REQUIREMENT: this draws at EVERY Gaming Mode start, so nothing on
-# it may be true only on the first one. The p34 image said "Don't turn me off.
-# Steam is unpacking. It does this once, the first time you start. It takes a
-# couple of minutes." -- correct once, false on every later boot. The operator
-# owns the exact words (as they did the original); until they choose new ones
-# this says "Starting Steam…" and nothing else, which is true on all of them.
-render_steam_splash_image() {   # render_steam_splash_image <outfile> [magick]
+# 🆕 IT IS THE BOOT SPLASH: SAME ARTWORK, SAME PLACEMENT, SAME COLOUR. The
+# operator's requirement (2026-09-20) is that the Omarchy splash stays on the
+# panel until Steam's UI shows, so this draws what the installed plymouth theme
+# draws and nothing else. Anything extra -- copy, a wordmark of ours, a spinner
+# -- is a visible change at exactly the handover this exists to hide; anything
+# left out is a visible blink. The p34/p35 image carried "Starting Steam…",
+# which was a different picture at that moment by design; it is gone.
+#
+# Both facts come from the theme's own script, read HERE, at install time, on
+# the machine that will boot it. Read off the Deck 2026-09-20, from
+# /usr/share/plymouth/themes/omarchy/omarchy.script:
+#
+#   Window.SetBackgroundTopColor(0.101, 0.105, 0.149);      # 0x1a1b26
+#   Window.SetBackgroundBottomColor(0.101, 0.105, 0.149);
+#   logo.image = Image("logo.png");                         # 800x188
+#   logo.sprite.SetX(Window.GetWidth() / 2 - logo.image.GetWidth() / 2);
+#   logo.sprite.SetY(Window.GetHeight() / 2 - logo.image.GetHeight() / 2);
+#
+# The triples are 0-1 floats and are CONVERTED TO 8 BIT HERE, with awk, because
+# ImageMagick does NOT read them the way this file first assumed: measured on
+# the Deck 2026-09-20, `xc:'srgb(0.101,0.105,0.149)'` stores 26 in a 16-bit
+# field -- #000000, a black cover -- and `%[hex:p{0,0}]` reporting
+# 001A001B0026 is 16-bit hex, so the check that "proved" it worked was reading
+# #00001A as #1A1B26. 0.101 -> 26 is arithmetic anyone can redo, and
+# splash_plymouth_color8 is what the unit test exercises. Equal top and bottom
+# (Omarchy's case, and what those two calls mean) is a flat fill. The mark is
+# composited at its own size, centred, exactly as the two Set* calls above
+# place it.
+#
+# The canvas is SPLASH_IMAGE_SIZE because that is the space plymouth composes
+# this theme in on the Deck: the panel is 800x1280 portrait and plymouth's DRM
+# renderer reads the connector's "panel orientation" and sets the primary
+# plane's "rotation" (renderers/drm.so: ply_pixel_buffer_new_with_device_rotation,
+# "panel orientation"), so the theme's Window.GetWidth() is the 1280x800 the
+# operator sees -- the same rectangle gamescope composites into.
+#
+# Exit: 0 drawn · 2 no ImageMagick · 3 the installed boot splash could not be
+# read (no theme directory, no script, no logo.png, a logo the script never
+# draws, or a TOP background colour the script does not state). 3 is deliberate
+# and is NOT a fallback: a cover that guesses changes the panel at the handover,
+# so the stage installs none and names the file it wanted. A missing BOTTOM
+# colour is not one of those cases -- a theme that sets only the top colour
+# paints one flat colour, and so does this (read the call below).
+render_steam_splash_image() {   # render_steam_splash_image <outfile> [magick] [theme-dir]
   local out=$1
   local magick=${2:-}
-  local font=""
+  local theme_dir=${3:-}
+  local theme theme_conf script_file logo top bottom
 
   if [[ -z $magick ]]; then
     if   command -v magick  >/dev/null 2>&1; then magick=magick
@@ -4200,22 +4404,68 @@ render_steam_splash_image() {   # render_steam_splash_image <outfile> [magick]
     fi
   fi
 
-  # A real font file if fontconfig can name one, and ImageMagick's built-in
-  # default otherwise. Not fatal either way: an ugly message is worth far more
-  # than no message, and a chroot with a cold fontconfig cache is ordinary.
-  if command -v fc-match >/dev/null 2>&1; then
-    font=$(fc-match -f '%{file}' 'monospace:bold' 2>/dev/null) || font=""
-    [[ -r $font ]] || font=""
-  fi
+  # Which theme is going to boot, then the files that theme runs. The third
+  # argument is how the unit test points this at a fixture; the stage and every
+  # installed path take the derived one.
+  [[ -n $theme_dir ]] || theme_dir=$(splash_plymouth_theme_dir)
+  theme=${theme_dir##*/}
+  theme_conf="$theme_dir/$theme.plymouth"
+  [[ -d $theme_dir && -r $theme_conf ]] || return 3
+  script_file=$(sed -n 's/^[[:space:]]*ScriptFile=[[:space:]]*//p' "$theme_conf" 2>/dev/null | tail -n 1)
+  script_file=${script_file:-"$theme_dir/$theme.script"}
+  [[ -r $script_file ]] || return 3
 
-  local -a fontargs=()
-  [[ -z $font ]] || fontargs=(-font "$font")
+  # The mark, at the size the theme draws it in (plymouth does not scale it).
+  # The name is the theme's own -- its script says Image("logo.png") -- and the
+  # REFERENCE is checked as well as the file: a stray logo.png that the script
+  # never draws is not the boot splash, and drawing it would be inventing one.
+  logo="$theme_dir/logo.png"
+  [[ -r $logo ]] || return 3
+  grep -qF 'Image("logo.png")' "$script_file" || return 3
 
-  "$magick" -size "$SPLASH_IMAGE_SIZE" xc:'#0e0e12' \
-    "${fontargs[@]+"${fontargs[@]}"}" -gravity center \
-    -fill '#f2f2f5' -pointsize 96 -annotate +0-20 "Starting Steam…" \
-    -fill '#9a9aa6' -pointsize 34 -annotate +0+90 "Gaming Mode is loading." \
-    "png:$out"
+  top=$(splash_plymouth_background "$script_file" SetBackgroundTopColor) || return 3
+  bottom=$(splash_plymouth_background "$script_file" SetBackgroundBottomColor) || bottom=$top
+  top=$(splash_plymouth_color8 "$top") || return 3
+  bottom=$(splash_plymouth_color8 "$bottom") || return 3
+
+  "$magick" -size "$SPLASH_IMAGE_SIZE" "gradient:srgb(${top})-srgb(${bottom})" \
+    "$logo" -gravity center -composite "png:$out"
+}
+# The directory of the theme plymouth will boot, absolute. Both halves are read
+# off the machine: the name from the daemon config, the root from the constant
+# above. Always prints something; the caller is what fails, loudly, when the
+# directory or the files inside it are not there.
+splash_plymouth_theme_dir() {
+  local theme
+  theme=$(sed -n 's/^[[:space:]]*Theme=[[:space:]]*//p' "$SPLASH_PLYMOUTH_CONF" 2>/dev/null | tail -n 1)
+  printf '%s/%s' "$SPLASH_PLYMOUTH_THEMES" "${theme:-$SPLASH_PLYMOUTH_THEME_FALLBACK}"
+}
+# One end of a plymouth theme's background, as "r,g,b" in the 0-1 floats the
+# theme writes -- ImageMagick reads those directly. Prints nothing and returns
+# non-zero for anything but exactly three numbers: a colour this cannot read is
+# a cover that would change the panel at the handover, and guessing one is the
+# defect being fixed here.
+splash_plymouth_background() {   # <script-file> <SetBackgroundTopColor|SetBackgroundBottomColor>
+  local script=$1 call=$2 args
+  args=$(sed -n "s/.*[Ww]indow\.${call}[[:space:]]*(\([^)]*\)).*/\1/p" "$script" 2>/dev/null | tail -n 1)
+  [[ $args =~ ^[[:space:]]*([0-9]*\.?[0-9]+)[[:space:]]*,[[:space:]]*([0-9]*\.?[0-9]+)[[:space:]]*,[[:space:]]*([0-9]*\.?[0-9]+)[[:space:]]*$ ]] ||
+    return 1
+  printf '%s,%s,%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+}
+# "0.101,0.105,0.149" -> "26,27,38": the 8-bit triple ImageMagick reads exactly
+# (checked on the Deck: `gradient:srgb(26,27,38)-srgb(26,27,38)` samples as
+# srgb(26,27,38)). awk because this is the one piece of float arithmetic in the
+# whole splash path, and because a shell that cannot do it must fail here --
+# inside render_steam_splash_image's rc-3 branch -- rather than draw black.
+splash_plymouth_color8() {   # <r,g,b as 0-1 floats>
+  local tri=$1 r g b out=""
+  IFS=, read -r r g b <<<"$tri" || return 1
+  [[ -n $r && -n $g && -n $b ]] || return 1
+  out=$(awk -v r="$r" -v g="$g" -v b="$b" 'BEGIN {
+    printf "%d,%d,%d", r * 255 + 0.5, g * 255 + 0.5, b * 255 + 0.5
+  }' 2>/dev/null) || return 1
+  [[ -n $out ]] || return 1
+  printf '%s' "$out"
 }
 # 🔴 'png:' IS LOAD-BEARING AND IS NOT DECORATION. ImageMagick picks its output
 # codec from the FILE EXTENSION, and the caller writes to a mktemp path, which
@@ -4279,7 +4529,17 @@ EOF
   render_steam_splash_image "$out" >/dev/null 2>&1 || imrc=$?
   if [[ $imrc -ne 0 || ! -s $out ]]; then
     rm -f "$out"
-    warn "could not draw ${SPLASH_IMAGE} (ImageMagick returned ${imrc}, or produced nothing). The Gaming Mode cover is NOT installed; every Gaming Mode start will show the black window while Steam starts, which is exactly today's behaviour. The connectivity fix above IS installed. Install imagemagick and re-run this stage to add the cover."
+    # Two different failures, two different fixes, and the second one must not
+    # be answered with "install imagemagick". 3 is the boot splash being
+    # unreadable, which is the one case where there is nothing honest to draw:
+    # the cover IS that artwork (read render_steam_splash_image).
+    local imnote="ImageMagick returned ${imrc}, or produced nothing"
+    local imfix="Install imagemagick and re-run this stage to add the cover."
+    if [[ $imrc -eq 3 ]]; then
+      imnote="the installed boot splash could not be read"
+      imfix="The cover is the plymouth theme's own artwork, so it looked for $(splash_plymouth_theme_dir)/logo.png and that theme's script (and for a background colour the script states). Fix the theme, or the Theme= name in ${SPLASH_PLYMOUTH_CONF}, and re-run this stage. A guessed image would change the panel at the handover, which is what this cover exists to prevent."
+    fi
+    warn "could not draw ${SPLASH_IMAGE} (${imnote}). The Gaming Mode cover is NOT installed; every Gaming Mode start will show the black window while Steam starts, which is exactly today's behaviour. The connectivity fix above IS installed. ${imfix}"
     log "stage-steam-first-run: ok (without the cover)"
     return 0
   fi
@@ -4287,7 +4547,7 @@ EOF
   $SUDO install -D -m 0644 -o root -g root "$out" "$SPLASH_IMAGE" ||
     fail "could not install ${SPLASH_IMAGE}"
   rm -f "$out"
-  log "drew ${SPLASH_IMAGE} (${SPLASH_IMAGE_SIZE}, gamescope's landscape logical output)"
+  log "drew ${SPLASH_IMAGE} (${SPLASH_IMAGE_SIZE}, gamescope's landscape logical output) from the boot splash itself: $(splash_plymouth_theme_dir)/logo.png on that theme's own background"
 
   # 🔴 CHECKED HERE, NOT ONLY AT BOOT. The cover script checks its viewer too
   # and degrades correctly, but it does that at every Gaming Mode start, in
@@ -9294,10 +9554,13 @@ Stages also cover Gaming Mode / display defects (PROGRESS.md 5.11, 5.14, 5.15):
   stage-steam-first-run    two fixes for Steam's start (PROGRESS.md 5.35):
                            a bounded ${STEAM_WAIT_SECONDS}s wait for connectivity before Steam
                            starts, so the "Steam needs to be online to update."
-                           modal never appears; and a branded fullscreen
-                           "Starting Steam…" cover for the black window between
-                           gamescope painting and Steam's UI showing, at every
-                           Gaming Mode start. Both degrade to today's behaviour --
+                           modal never appears; and the boot splash itself, held
+                           fullscreen for the black window between gamescope
+                           painting and Steam's UI showing, at every Gaming Mode
+                           start -- drawn at install time from the installed
+                           plymouth theme's own logo and background, so the
+                           handover is meant to be invisible (a physical boot
+                           still has to confirm it). Both degrade to today's behaviour --
                            the wait always exits 0, and the cover is bounded
                            three ways so it cannot outlive Steam. Both write
                            every outcome to ~/${FIRST_BOOT_LOG_REL},

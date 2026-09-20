@@ -2332,12 +2332,13 @@ pass "no call site in src/deck-session.sh uses the unguarded '\$SUDO -u <user>' 
 #   E2  the bounded wait -- an ExecStartPre= on Valve's steam-launcher.service.
 #       A non-zero exit there means Steam does not start, i.e. a Wi-Fi problem
 #       becomes an unusable Deck. It must exit 0 on every path there is.
-#   E1  the cover -- a branded fullscreen "Starting Steam…" drawn at EVERY
-#       Gaming Mode start, until Steam's UI shows. A cover that cannot exit is
-#       a permanently black-with-text panel, which is strictly worse than the
-#       black it replaces. It must come down: when Steam appears (plus a
-#       measured grace for its first frame), when its viewer dies, and when
-#       neither happens.
+#   E1  the cover -- the boot splash itself (the plymouth theme's own logo and
+#       background, composed at install time), held fullscreen at EVERY Gaming
+#       Mode start until Steam's UI shows. A cover that cannot exit is
+#       a permanently black panel, which is strictly worse than the
+#       black it replaces. It must come down: when Steam appears (plus a grace
+#       sized from process timestamps -- nothing has measured Steam's first
+#       painted frame), when its viewer dies, and when neither happens.
 echo "# 10. Steam's first run"
 
 sfr_work=$(mktemp -d)
@@ -2373,6 +2374,26 @@ grep -qE -- "-t ${STEAM_WAIT_SECONDS}\b" "$wait_sh" ||
     "STEAM_WAIT_SECONDS=${STEAM_WAIT_SECONDS}; the retry that succeeded was ONE second after the failure, so the number's job is to be small and finite"
 pass "the wait is bounded at ${STEAM_WAIT_SECONDS}s, passed to nm-online as its own timeout"
 
+# 🔴 EVERY CASE BELOW RUNS WITH HOME POINTED AT A FIXTURE, AND THAT IS
+# LOAD-BEARING. The helper returns early when an installed Steam client is under
+# $HOME (operator requirement, 2026-09-20), and the machine this suite is
+# written to run on -- the Deck -- has exactly that at its real $HOME. Without
+# the fixture, cases (a)-(d) would take the early return and prove nothing at
+# all about the wait. The fixture also keeps the helper's log lines out of the
+# real ~/${FIRST_BOOT_LOG_REL}.
+wait_home="$sfr_work/wait-home"
+rm -rf "$wait_home"; mkdir -p "$wait_home"
+nm_args="$sfr_work/nm.args"
+: >"$nm_args"
+# XDG_DATA_HOME is isolated as well as HOME, because the fallback Steam root is
+# ${XDG_DATA_HOME:-$HOME/.local/share}/Steam: a runner that exports it would
+# otherwise point the helper at the host's real Steam client and the wait cases
+# below would silently take the early return.
+wait_run() {   # wait_run <script> -- HOME + XDG_DATA_HOME isolated; sets SFR_OUT
+  SFR_OUT=$(HOME="$wait_home" XDG_DATA_HOME="$wait_home/.local/share" \
+    NM_ARGS="$nm_args" "$1" 2>&1) || return $?
+}
+
 # Now run it, in each of the three states the target can be in. nm-online is
 # reached by ABSOLUTE path (the constant), so each state is set up by pointing
 # that path somewhere rather than by PATH order -- which also means this suite
@@ -2383,7 +2404,7 @@ chmod +x "$wait_missing"
 
 # (a) nm-online missing entirely.
 SFR_RC=0
-SFR_OUT=$("$wait_missing" 2>&1) || SFR_RC=$?
+wait_run "$wait_missing" || SFR_RC=$?
 [[ $SFR_RC -eq 0 ]] ||
   fail_test "with no nm-online at all the wait still exits 0" "rc=${SFR_RC}"$'\n'"$SFR_OUT"
 grep -q 'not installed' <<<"$SFR_OUT" ||
@@ -2399,15 +2420,13 @@ printf '%s\n' "$*" >>"$NM_ARGS"
 exit 1
 NMSTUB
 chmod +x "$nm_stub"
-nm_args="$sfr_work/nm.args"
-: >"$nm_args"
 # The script calls nm-online by ABSOLUTE path (the constant), so the stub is
 # injected by pointing that path at it rather than by PATH order.
 wait_stubbed="$sfr_work/steam-wait-online-stubbed"
 sed "s|${NM_ONLINE_BIN}|${nm_stub}|g" "$wait_sh" >"$wait_stubbed"
 chmod +x "$wait_stubbed"
 SFR_RC=0
-SFR_OUT=$(NM_ARGS="$nm_args" "$wait_stubbed" 2>&1) || SFR_RC=$?
+wait_run "$wait_stubbed" || SFR_RC=$?
 [[ $SFR_RC -eq 0 ]] ||
   fail_test "a FAILED connectivity wait still exits 0" \
     "rc=${SFR_RC}. This runs as ExecStartPre= on steam-launcher.service: a non-zero exit here turns 'no Wi-Fi' into 'Gaming Mode does not start', which is a far worse defect than the modal this removes."$'\n'"$SFR_OUT"
@@ -2455,7 +2474,7 @@ cat >"$nm_stub" <<'NMSTUB'
 exit 0
 NMSTUB
 SFR_RC=0
-SFR_OUT=$(NM_ARGS="$nm_args" "$wait_stubbed" 2>&1) || SFR_RC=$?
+wait_run "$wait_stubbed" || SFR_RC=$?
 # shellcheck disable=SC2015  # `fail` exits; guard, not if-then-else
 [[ $SFR_RC -eq 0 ]] && grep -q 'connectivity confirmed' <<<"$SFR_OUT" ||
   fail_test "the connected case reports the connection" "rc=${SFR_RC}"$'\n'"$SFR_OUT"
@@ -2471,13 +2490,130 @@ printf '%s\n' "$*" >>"$NM_ARGS"
 exit 2
 NMSTUB
 SFR_RC=0
-SFR_OUT=$(NM_ARGS="$nm_args" "$wait_stubbed" 2>&1) || SFR_RC=$?
+wait_run "$wait_stubbed" || SFR_RC=$?
 [[ $SFR_RC -eq 0 ]] ||
   fail_test "an nm-online ERROR still exits 0" "rc=${SFR_RC}"$'\n'"$SFR_OUT"
 grep -q 'an error, not an answer' <<<"$SFR_OUT" ||
   fail_test "and is reported as an error rather than as 'offline'" \
     "the two want different fixes, and this script is the only thing that will ever have seen the difference:"$'\n'"$SFR_OUT"
 pass "nm-online exiting 2: exits 0 and names it an error, not an offline machine"
+
+# (e) 🔴 AN ALREADY-INSTALLED CLIENT MUST NOT TOUCH THE NETWORK AT ALL.
+#
+# The operator's requirement (2026-09-20): let an already-installed Steam start
+# while Wi-Fi connects. Only a first run needs the wait -- that run's updater has
+# to fetch the client, and it is the run that hits "Steam needs to be online to
+# update." (PROGRESS.md 5.35).
+#
+# The predicate is Steam's own state: a package/steam_client_*.installed
+# manifest beside a runnable steam.sh under the same root. The assertion here is
+# BEHAVIOURAL -- the nm-online stub is never invoked -- because that
+# non-invocation IS the saving (6-8 s of a network that was genuinely not up yet
+# on the boot that motivated this). A test that only checked the exit status
+# would pass while proving nothing.
+steam_client_fixture() {   # steam_client_fixture <home> <link|nolink|dangling|steamrt64>
+  local home=$1 link=$2
+  # Separate from the line above on purpose: `local` expands every word before it
+  # assigns any of them, so `local home=$1 root="$home/..."` reads an unset home
+  # (and with set -u that is a test-suite failure, not a warning).
+  local root="$home/.local/share/Steam"
+  mkdir -p "$root/package" "$root/ubuntu12_32"
+  printf '%s\n' steam_client_steamdeck_stable_ubuntu12 \
+    >"$root/package/steam_client_steamdeck_stable_ubuntu12.installed"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$root/steam.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$root/ubuntu12_32/steam"
+  chmod +x "$root/steam.sh" "$root/ubuntu12_32/steam"
+  if [[ $link == steamrt64 ]]; then
+    # Valve's beta opt-in: steam.sh execs steamrt64/steam when this marker is
+    # present, and the ubuntu12_32 client is not what runs.
+    mkdir -p "$root/steamrt64"
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$root/steamrt64/steam"
+    chmod +x "$root/steamrt64/steam"
+    : >"$root/.steam-enable-steamrt64-client"
+    rm -f "$root/ubuntu12_32/steam"
+  fi
+  if [[ $link == steamrt64-marker-only ]]; then
+    # The marker WITHOUT an executable steamrt64 client: steam.sh falls through
+    # to ubuntu12_32/steam, so this machine's client is runnable and the fast
+    # path must still fire.
+    : >"$root/.steam-enable-steamrt64-client"
+  fi
+  case $link in
+    link)
+      mkdir -p "$home/.steam"
+      ln -sfn ../.local/share/Steam "$home/.steam/steam" ;;
+    dangling)
+      # A data link that points nowhere. Steam's own launcher REPAIRS that from
+      # the default data dir (bin_steam.sh: check_bootstrap on DEFAULTSTEAMDIR,
+      # then repair_bootstrap), so an installed client behind a broken link is
+      # still an installed client and must not pay the wait.
+      mkdir -p "$home/.steam"
+      ln -sfn "$home/.steam/deck-session-test-absent" "$home/.steam/steam" ;;
+  esac
+}
+wait_fast_path() {   # wait_fast_path <spec> <why>
+  local spec=$1 why=$2
+  : >"$nm_args"
+  SFR_RC=0
+  wait_run "$wait_stubbed" || SFR_RC=$?
+  [[ $SFR_RC -eq 0 ]] ||
+    fail_test "the installed-client path still exits 0 (${spec})" "rc=${SFR_RC}"$'\n'"$SFR_OUT"
+  [[ ! -s $nm_args ]] ||
+    fail_test "NO nm-online call when the client is already installed (${spec})" \
+      "captured: $(cat "$nm_args"). ${why}"$'\n'"${SFR_OUT}"
+  [[ -s "$wait_home/${FIRST_BOOT_LOG_REL}" ]] ||
+    fail_test "and this branch leaves a record like every other one (${spec})" \
+      "nothing was written to ~/${FIRST_BOOT_LOG_REL} under the fixture home"
+}
+for spec in link nolink dangling steamrt64 steamrt64-marker-only; do
+  rm -rf "$wait_home"; mkdir -p "$wait_home"
+  steam_client_fixture "$wait_home" "$spec"
+  wait_fast_path "$spec" \
+    "The wait exists for a FIRST run; every later start already has the client on disk."
+done
+pass "🔴 an installed Steam client starts with NO nm-online call at all -- via the ~/.steam/steam data link, via the default data dir alone, behind a data link Steam itself would repair, on the beta opt-in's steamrt64 client, and on a machine with the opt-in marker but no steamrt64 binary (where steam.sh falls through to ubuntu12_32/steam)"
+
+# (f) Anything incomplete keeps the whole bounded wait. Each drift is a state
+#     that really occurs: the bootstrap tarball extracted but no client
+#     installed (bin_steam.sh does that extraction OFFLINE, so steam.sh alone is
+#     still a first run), a client script that is not executable, a manifest
+#     with no runnable client behind it, an EMPTY manifest file (the check is
+#     -s, size and not content, so a non-empty but corrupt manifest is taken at
+#     its word -- arbitrary corruption is not detected and is not claimed), and a
+#     broken data link with nothing under the default dir either. A predicate
+#     that passed on any of these would report "installed" for a client Steam is
+#     about to re-fetch -- and the wait is exactly what that run needs.
+for drift in missing-steam-sh steam-sh-not-executable no-manifest empty-manifest missing-client-binary broken-link-no-client; do
+  rm -rf "$wait_home"; mkdir -p "$wait_home"
+  steam_client_fixture "$wait_home" link
+  case $drift in
+    missing-steam-sh)
+      rm -f "$wait_home/.local/share/Steam/steam.sh" ;;
+    steam-sh-not-executable)
+      chmod -x "$wait_home/.local/share/Steam/steam.sh" ;;
+    no-manifest)
+      rm -f "$wait_home/.local/share/Steam/package/steam_client_steamdeck_stable_ubuntu12.installed" ;;
+    empty-manifest)
+      : >"$wait_home/.local/share/Steam/package/steam_client_steamdeck_stable_ubuntu12.installed" ;;
+    missing-client-binary)
+      # The case Main asked about: manifest and steam.sh are there, the client
+      # they point at is not. Marking that "installed" would hand Steam a start
+      # it has to re-fetch its client for -- the run the wait exists for.
+      rm -f "$wait_home/.local/share/Steam/ubuntu12_32/steam" ;;
+    broken-link-no-client)
+      rm -rf "$wait_home/.local/share/Steam"
+      ln -sfn "$wait_home/.steam/deck-session-test-absent" "$wait_home/.steam/steam" ;;
+  esac
+  : >"$nm_args"
+  SFR_RC=0
+  wait_run "$wait_stubbed" || SFR_RC=$?
+  [[ $SFR_RC -eq 0 ]] ||
+    fail_test "the conservative arm still exits 0 (${drift})" "rc=${SFR_RC}"$'\n'"$SFR_OUT"
+  [[ -s $nm_args ]] ||
+    fail_test "the wait still runs when the client is not usable (${drift})" \
+      "no nm-online call was made. An incomplete client IS a first run's problem -- Steam re-fetches it -- so the bounded wait has to stay."$'\n'"${SFR_OUT}"
+done
+pass "an incomplete or unusable client (missing steam.sh, non-executable steam.sh, no manifest, empty manifest, missing client binary, broken link with no client) keeps the full bounded wait"
 
 # The wait writes where the first boot can still be read from. §5.35 measured
 # that this Deck's persistent journal held only boot 0, so a first-run script
@@ -2531,6 +2667,17 @@ exit 1
 PSTUB
 chmod +x "$sfr_bin/pgrep"
 
+# Never let a sandboxed splash alter the test runner's real X server.
+cat >"$sfr_bin/xprop" <<'XSTUB'
+#!/usr/bin/env bash
+if [[ $* == *" -set "* ]]; then
+  [[ -z ${XPROP_WRITES:-} ]] || printf '%s\n' "$*" >>"$XPROP_WRITES"
+else
+  printf '%s\n' "${FOCUS_STATE:-GAMESCOPECTRL_BASELAYER_APPID: not found.}"
+fi
+XSTUB
+chmod +x "$sfr_bin/xprop"
+
 splash_home="$sfr_work/home"
 viewer_mark="$sfr_work/viewer.mark"
 
@@ -2551,8 +2698,12 @@ run_splash() {   # run_splash <deadline> [READY=1 [SETTLE=0]]
 
 # (a) Steam appears -- the NORMAL exit. It must hold the grace (the process
 #     precedes its first frame) and then come down, and no viewer may survive.
-#     The grace is shrunk to 1 s here so the case stays fast; the shipped 2 s
-#     is asserted on the source below, not by waiting for it.
+#     The grace is shrunk to 1 s here so the case stays fast, and the SHIPPED
+#     value is deliberately not asserted anywhere: this machine cannot measure
+#     Steam's first painted frame, and the only timestamps that exist
+#     (steamwebhelper start 07:02:01 -> cover down 07:02:06 on 2026-09-17) are
+#     process timestamps. Read SPLASH_SETTLE_SECONDS for what the constant is
+#     and is not sized from.
 run_splash 0 1 1
 [[ $SPLASH_RC -eq 0 ]] ||
   fail_test "the cover exits 0 when Steam appears" "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
@@ -2565,11 +2716,21 @@ grep -q 'holding 1s for its first frame' <<<"$SPLASH_OUT" ||
 pgrep -f "$viewer_stub" >/dev/null 2>&1 &&
   fail_test "no viewer process survives the cover" "one is still running -- a cover that leaves its viewer up IS the permanently black-with-text panel"
 pass "🔴 THE COVER EXITS: Steam appearing holds the 1s test grace, then comes down in ${SPLASH_ELAPSED}s, and no viewer survives"
-# The SHIPPED grace is sized by Deck measurement (steamwebhelper start to first
-# paint), not by this run: assert the constant carries the measured value.
-[[ $SPLASH_SETTLE_SECONDS -eq 2 ]] ||
-  fail_test "the shipped grace is the measured 2s" \
-    "SPLASH_SETTLE_SECONDS=${SPLASH_SETTLE_SECONDS}. The 2026-09-17 boot showed steamwebhelper start 07:02:01, cover down 07:02:06; re-size only from a fresh Deck measurement of start-vs-first-paint, never by reasoning."
+# With no Steam selection, bootstrap the splash; never overwrite a selection
+# already owned by Steam (whether app-based or window-based).
+xprop_writes="$sfr_work/xprop-writes"
+: >"$xprop_writes"
+DISPLAY=:test XPROP_WRITES="$xprop_writes" run_splash 1
+grep -qxF -- '-root -f GAMESCOPECTRL_BASELAYER_APPID 32c -set GAMESCOPECTRL_BASELAYER_APPID 0' "$xprop_writes" ||
+  fail_test "an unselected compositor gets startup focus" "$SPLASH_OUT"
+for focus in 'GAMESCOPECTRL_BASELAYER_APPID(CARDINAL) = 769' \
+             'GAMESCOPECTRL_BASELAYER_WINDOW(CARDINAL) = 12345'; do
+  : >"$xprop_writes"
+  DISPLAY=:test XPROP_WRITES="$xprop_writes" FOCUS_STATE="$focus" run_splash 1
+  [[ ! -s $xprop_writes ]] ||
+    fail_test "Steam's existing focus is not overwritten" "$(cat "$xprop_writes")"
+done
+pass "startup selects the splash only before Steam owns focus"
 
 # (b) Steam NEVER appears -- the deadline. This is the case that decides whether
 #     a cover bug is a message you miss or a Deck you cannot use.
@@ -2748,14 +2909,19 @@ SPLASH_OUT=$(HOME="$splash_home" VIEWER_MARK="$sfr_work/eighth.mark" \
     "rc=${SPLASH_RC}"$'\n'"$SPLASH_OUT"
 pass "an empty marker still draws -- the marker attributes, it does not gate"
 
-# --- the wording must be true on every boot --------------------------------
+# --- the cover IS the boot splash ------------------------------------------
 #
-# The p34 image said "Don't turn me off. Steam is unpacking. It does this
-# once, the first time you start. It takes a couple of minutes." -- correct on
-# the first boot, false on every later one. This draws at EVERY start, so no
-# first-boot-only words may ship on it. The operator owns the exact copy (as
-# they did the original); until they choose new words the requirement is
-# negative: nothing untrue on 99% of boots.
+# OPERATOR REQUIREMENT, 2026-09-20: the Omarchy boot splash stays on the panel
+# until Steam's UI shows. So the cover is the boot splash itself -- the
+# installed plymouth theme's own background colour and its own logo.png,
+# centred, at gamescope's size -- and NOT a message of ours. Anything it draws
+# that the boot splash does not is a visible change at exactly the handover it
+# exists to hide; that is what the p34/p35 "Starting Steam…" image was, and why
+# the copy was removed rather than reworded.
+#
+# The fixture theme below is how that is checked on a machine that is not a
+# Deck: the renderer is pointed at it through its third argument and the pixels
+# it produced are read back.
 #
 # 🔴 RENDERED TO A PATH WITH NO EXTENSION, ON PURPOSE. That is what the stage
 # does (it renders into a mktemp file and then `install`s it), and ImageMagick
@@ -2765,33 +2931,123 @@ pass "an empty marker still draws -- the marker attributes, it does not gate"
 # at all, quietly, because the stage's gate treats a failed render as "no
 # ImageMagick here". A test that is easier on the code than production is worse
 # than no test.
-splash_png="$sfr_work/message-no-extension"
-if bash -c 'source "$1"; render_steam_splash_image "$2"' _ "$REPO_ROOT/src/deck-session.sh" "$splash_png" 2>/dev/null && [[ -s $splash_png ]]; then
-  size=$(bash -c 'source "$1"; printf "%s" "$SPLASH_IMAGE_SIZE"' _ "$REPO_ROOT/src/deck-session.sh")
-  if command -v identify >/dev/null 2>&1 || command -v magick >/dev/null 2>&1; then
-    got=$( { command -v magick >/dev/null 2>&1 && magick identify -format '%wx%h' "$splash_png"; } || identify -format '%wx%h' "$splash_png" )
-    [[ $got == "$size" ]] ||
-      fail_test "the cover is drawn at gamescope's logical size" \
-        "got ${got}, expected ${size}. The panel is 800x1280 PORTRAIT and gamescope applies its own transform, so a portrait image here would be the one thing on the Deck rotated the wrong way."
-    pass "the cover renders at ${got} -- gamescope's landscape logical output, not the panel's portrait scanout"
-  fi
-else
-  note "ImageMagick is not on this machine, so the cover image was not rendered here (the stage warns and installs no cover in that case, which is today's behaviour)"
+splash_size=$(bash -c 'source "$1"; printf "%s" "$SPLASH_IMAGE_SIZE"' _ "$REPO_ROOT/src/deck-session.sh")
+
+# ImageMagick, resolved the way the renderer resolves it, so the test and
+# production cannot disagree about which binary they mean.
+splash_im=""
+if   command -v magick  >/dev/null 2>&1; then splash_im=magick
+elif command -v convert >/dev/null 2>&1; then splash_im=convert
 fi
 
-# The words themselves, checked on the source so they survive a machine with no
-# ImageMagick. Positive: it says what is true every time. Negative: no
-# first-boot-only words.
-img_body=$(bash -c 'source "$1"; declare -f render_steam_splash_image' _ "$REPO_ROOT/src/deck-session.sh")
-[[ $img_body == *"Starting Steam"* ]] ||
-  fail_test "the cover says what is true at every start" \
-    "missing 'Starting Steam'. Until the operator chooses new words, that is the message."
-for stale in "unpacking" "turn me off" "first time you start" "couple of minutes"; do
-  [[ $img_body != *"$stale"* ]] ||
-    fail_test "the every-boot cover carries no first-boot-only words" \
-      "found '${stale}' -- true once, false on every later boot, worse than the black it covers."
-done
-pass "the cover says \"Starting Steam…\" and nothing that is only true on the first boot"
+# The renderer, called the way the stage calls it: through a fresh bash, with
+# the same argument shape (an output path, and optionally a theme directory).
+splash_render() {   # splash_render <outfile> [theme-dir]
+  if bash -c 'source "$1"; render_steam_splash_image "$2" "" "$3"' \
+       _ "$REPO_ROOT/src/deck-session.sh" "$1" "${2:-}"; then
+    return 0
+  else
+    return $?
+  fi
+}
+
+# ImageMagick's own reading of a rendered cover. Through an 8-bit truecolour
+# copy on purpose: the renderer's PNG is palette/16-bit, and %[pixel:...] on
+# that prints percentages or 16-bit hex -- measured on the Deck, and the reason
+# an earlier check ("srgb(0.101,…)" -> 001A001B0026) "proved" that a black
+# cover was the theme's #1a1b26.
+splash_image_prop() {   # splash_image_prop <file> <identify -format>
+  local conv="$1.8-bit.png"
+  "$splash_im" "$1" -depth 8 -type TrueColor "PNG24:$conv" >/dev/null 2>&1 || return 1
+  "$splash_im" "$conv" -format "$2" info:
+}
+
+# A plymouth theme in miniature: the same file layout and the same two things
+# render_steam_splash_image reads out of it. Colours are deliberately NOT
+# Omarchy's, so a hardcoded background in the renderer cannot pass.
+splash_theme="$sfr_work/plymouth/omarchy"
+mkdir -p "$splash_theme"
+cat >"$splash_theme/omarchy.plymouth" <<EOF
+[Plymouth Theme]
+Name=Fixture
+ModuleName=script
+[script]
+ImageDir=$splash_theme
+ScriptFile=$splash_theme/omarchy.script
+EOF
+cat >"$splash_theme/omarchy.script" <<'FIXTURE-THEME'
+Window.SetBackgroundTopColor(0.8, 0.2, 0.4);
+Window.SetBackgroundBottomColor(0.8, 0.2, 0.4);
+logo.image = Image("logo.png");
+logo.sprite = Sprite(logo.image);
+logo.sprite.SetX(Window.GetWidth() / 2 - logo.image.GetWidth() / 2);
+logo.sprite.SetY(Window.GetHeight() / 2 - logo.image.GetHeight() / 2);
+FIXTURE-THEME
+
+if [[ -z $splash_im ]]; then
+  note "ImageMagick is not on this machine, so the cover image was not rendered here (the stage warns and installs no cover in that case, which is today's behaviour)"
+else
+  "$splash_im" -size 20x10 xc:'#ffff00' "$splash_theme/logo.png"
+  splash_out="$sfr_work/cover-fixture"
+  if splash_render "$splash_out" "$splash_theme"; then
+    got=$(splash_image_prop "$splash_out" '%wx%h')
+    [[ $got == "$splash_size" ]] ||
+      fail_test "the cover is drawn at gamescope's logical size" \
+        "got ${got}, expected ${splash_size}. The panel is 800x1280 PORTRAIT and gamescope applies its own transform, so a portrait image here would be the one thing on the Deck rotated the wrong way."
+    pass "the cover renders at ${got} -- gamescope's landscape logical output, not the panel's portrait scanout"
+
+    got=$(splash_image_prop "$splash_out" '%k')
+    [[ $got -eq 2 ]] ||
+      fail_test "the cover draws nothing but the theme's background and its mark" \
+        "the fixture theme is a flat #cc3366 background with one 20x10 yellow mark, so the cover must hold exactly 2 colours; it holds ${got}. More than two means something else was drawn on it -- copy, a wordmark, a spinner."
+    pass "🔴 the cover carries no artwork of ours: exactly two colours, the theme's background and its mark"
+
+    got=$(splash_image_prop "$splash_out" '%[pixel:p{0,0}]')
+    [[ $got == 'srgb(204,51,102)' ]] ||
+      fail_test "the background is the theme's own colour, converted from the floats its script writes" \
+        "got ${got} at 0,0. The fixture's script paints 0.8,0.2,0.4, which is #cc3366. ImageMagick does NOT read those floats correctly on its own -- it stores 26 in a 16-bit field, i.e. black -- so this is the awk conversion's only check."
+    pass "the cover's background is the theme's colour (0.8,0.2,0.4 -> #cc3366), not a constant of ours"
+
+    got=$(splash_image_prop "$splash_out" '%[pixel:p{640,400}]')
+    [[ $got == 'srgb(255,255,0)' ]] ||
+      fail_test "the mark is the theme's logo.png, centred at its own size" \
+        "got ${got} at the centre of the cover. The fixture's logo is a solid yellow 20x10 block, so the centre must be inside it."
+    pass "the cover centres the theme's mark -- the placement plymouth's own SetX/SetY arithmetic gives it"
+
+    # Three ways a boot splash can stop being readable, each of which must end in
+    # NO cover: a guessed image changes the panel at the handover, while the black
+    # window the stage falls back to is the behaviour we already have.
+    splash_script=$(cat "$splash_theme/omarchy.script")
+    splash_drift() {   # splash_drift <what> <outfile>
+      local what=$1 out=$2 rc=0
+      rm -f "$out"
+      if splash_render "$out" "$splash_theme"; then rc=0; else rc=$?; fi
+      if (( rc == 0 )) || [[ -e $out ]]; then
+        fail_test "no cover when ${what}" \
+          "the renderer returned ${rc} and left $(ls -l "$out" 2>/dev/null). The cover IS the boot splash: with nothing readable to copy, the stage must install nothing and name the file it wanted."
+      fi
+      pass "no cover when ${what}"
+    }
+    mv "$splash_theme/logo.png" "$sfr_work/mark-parked.png"
+    splash_drift "the theme ships no logo.png" "$sfr_work/drift-1"
+    mv "$sfr_work/mark-parked.png" "$splash_theme/logo.png"
+    printf 'logo.image = Image("logo.png");\n' >"$splash_theme/omarchy.script"
+    splash_drift "the theme's script states no background colour" "$sfr_work/drift-2"
+    printf 'Window.SetBackgroundTopColor(0.8, 0.2, 0.4);\n' >"$splash_theme/omarchy.script"
+    splash_drift "the theme never draws the logo it ships" "$sfr_work/drift-3"
+    printf '%s\n' "$splash_script" >"$splash_theme/omarchy.script"
+  else
+    fail_test "the cover renders from a fixture theme" \
+      "render_steam_splash_image failed against ${splash_theme}. Every machine would then install no cover -- reproduce with: bash -c 'source src/deck-session.sh; render_steam_splash_image /tmp/x \"\" ${splash_theme}'"
+  fi
+fi
+
+# The fixture state is dropped here rather than left for the next section: the
+# theme the renderer was pointed at lives under $sfr_work (removed next), and
+# none of these names is used again below. Unsetting a variable that was never
+# set is not an error, so this holds on the no-ImageMagick path too.
+unset splash_size splash_im splash_theme splash_out splash_script
+unset -f splash_render splash_image_prop splash_drift
 
 rm -rf "$sfr_work"
 

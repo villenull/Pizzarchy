@@ -3798,6 +3798,122 @@ check that proves something is ABSENT must also prove it was LOOKING.**
 
 ---
 
+### 5.45 🆕 THE GAMING MODE COVER IS NOW THE BOOT SPLASH ITSELF (2026-09-20, operator direction)
+
+**Operator requirement, given after p35 shipped:** the panel must keep showing the
+**existing Omarchy boot splash** until Steam's UI opens — not a message of ours. Two
+separate things were wrong with p35: the neutral fullscreen "Starting Steam…" panel was
+rejected as a design (the panel should not change appearance at all at the handover), and
+it was **invisible anyway** — p35-1 drew the cover without the focus bootstrap below, so
+what the operator actually saw was the black window and nothing else.
+
+**Why a drawn cover could be invisible at all** (measured on the Deck, reproduced in this
+probe): gamescope's Steam integration gives no window global focus until
+`GAMESCOPECTRL_BASELAYER_APPID` is set, so a running native viewer presents nothing. p35-2's
+bootstrap writes `0` only while **both** controls are unset, and the captured frame follows
+it.
+
+**What p36-1 does.** `stage-steam-first-run` now composes the cover from the machine's own
+plymouth theme, read at INSTALL time: the theme directory comes from
+`/etc/plymouth/plymouthd.conf` (`Theme=omarchy`),
+`Window.SetBackgroundTopColor/BottomColor` is parsed out of that theme's `omarchy.script`,
+and the theme's `logo.png` (800x188) is composited centred on a 1280x800 canvas — no copy is
+drawn anywhere on it. A theme whose artwork cannot be read makes the stage **skip the cover
+install** — it warns, says which file it wanted, and leaves the gaming-mode start showing
+today's black window; it does **not** remove a cover already installed on the machine (a
+guessed replacement would change the panel at the handover, which is the defect).
+ImageMagick does not read plymouth's 0-1 float colours correctly (`0.101` lands as 26 in a
+16-bit field, i.e. black), so the conversion is done in `awk` (`splash_plymouth_color8`).
+
+**Evidence, isolated** (nested `-e` gamescope in the Desktop session; no session switch, no
+reboot; `test/unit/test-deck-session.sh` 254/254): the deployed cover captured
+in-compositor with `gamescopectl screenshot` at 1280x800 — after inverting the nested
+window's 0.9 scale the **normalized mean absolute error against the deployed PNG is 0.0011
+(~0.11 % mean error)**, confined to the mark's antialiased edge; with
+`GAMESCOPECTRL_BASELAYER_APPID=769` pre-seeded the script logs
+`preserving the existing selection` and never writes; a real `steamwebhelper` (this Deck's
+Desktop Steam) takes the cover down ~3 s after it draws, and a controlled second viewer is
+presented afterwards with no cover pixels left.
+
+🔴 **The panel transition is STILL NOT verified as such.** A real Deck boot has since
+happened with these artefacts in place and the operator accepted that boot as a whole
+(§5.46) — but nobody reported on the handover itself, so the two open questions are
+unchanged: whether Steam writes its own focus selection before the cover appears, and the
+true `steamwebhelper` → first-painted-frame interval (the 2 s grace is sized from process
+timestamps only), are both still unmeasured. **No ISO was rebuilt for this section** — only
+the two splash artefacts (`/usr/local/share/deck-session/steam-first-boot.png`,
+`/usr/local/lib/deck-session/steam-first-boot-splash`) were replaced on the Deck.
+
+---
+
+### 5.46 🆕 AN INSTALLED STEAM CLIENT NO LONGER WAITS FOR WI-FI (2026-09-20, operator authority)
+
+**Operator authorisation:** *"let an already-installed Steam start while Wi-Fi connects"*.
+OpusBootLatency's read-only audit (artifact://1072) measured what the old behaviour cost: the
+`steam-wait-online` ExecStartPre spent **6–8 s on every online cold boot** waiting for a link
+that is not usable until monotonic 23.74 s, while the session is ready far earlier — that,
+and only that, is the operator's Wi-Fi on/off difference.
+
+**What changed.** `render_steam_wait_online` returns **before any nm-online call** when
+Steam's own state says a client is already installed. The predicate is Valve's, three facts,
+all required, all read out of the client root:
+`package/steam_client_*.installed` (Steam's per-channel install manifest) **and** an
+executable `steam.sh` — the file `/usr/lib/steam/bin_steam.sh`'s own `check_bootstrap`
+tests — **and** the client executable `steam.sh` itself launches
+(`$STEAMROOT/ubuntu12_32/steam`; `$STEAMROOT/steamrt64/steam` only when the beta opt-in left
+`.steam-enable-steamrt64-client` behind — all three read off the Deck's vendor scripts
+2026-09-20). No network call on that path, no marker of ours, no new fallback framework:
+anything missing, empty or non-executable simply does not return early, and the original
+**5+20 s bounded wait runs unchanged**, exit 0 on every path.
+
+**Accepted regression, named.** A mandatory Valve client update cannot be detected without
+the network, so an installed client may now start before it. Steam handles connectivity and
+any required update itself, and **may prompt or retry if the network is not ready** — this is
+not a guarantee that the update lands later, only that the decision is Steam's and not this
+script's. The **first run keeps the whole wait**, which is the run the wait exists for. This
+is the same exposure `docs/findings/R1-10.4.md` already records for offline login: without a
+network even a pre-populated client reaches only `LogonFailure No Connection`, so Gaming Mode
+was never usable offline and this does not widen that claim.
+
+**Proof.** The E2 section of `test/unit/test-deck-session.sh` now isolates **HOME and
+XDG_DATA_HOME** for every wait case — without that, a host with a real installed client (this
+project's own Deck) bypasses the nm-online mocks and the wait cases prove nothing. New cases
+are behavioural rather than wording pins: an installed client (via the `~/.steam/steam` data
+link, via the default data dir alone, behind a data link Steam itself would repair, and on
+the opt-in `steamrt64` client) makes **no nm-online call at all** and still leaves a record
+in the log; missing `steam.sh`, a non-executable `steam.sh`, no manifest, an **empty**
+manifest file (the check is size, not content: a non-empty but corrupt manifest is taken at
+its word, and no integrity check is claimed), a **missing client binary**, and a broken link
+with no client behind it all keep the full bounded wait.
+
+**Deployed 2026-09-20** (helper only, root 0755; the drop-in, the cover script and the cover
+image are untouched). Measured on the Deck the same minute, with the real Steam root:
+
+| run | duration | what it did |
+|---|---|---|
+| real `$HOME` (the fast path a real start now takes) | **8 ms** | no nm-online call at all; logged the manifest + client it found |
+| sandbox `HOME`/`XDG_DATA_HOME`, no client anywhere (a genuine first run) | 29 ms | nm-online ran; "connectivity confirmed after 0s" — the wait path, unchanged |
+| sandbox, manifest + `steam.sh` but **no client binary** | 29 ms | still the wait path — the incomplete-install case stays conservative |
+
+Wi-Fi state was not touched (`nmcli general status` = `full` before and after; every
+nm-online call is a read).
+
+✅ **A real Deck boot has now run it, and the operator accepted the result** (2026-09-20):
+with the new helper deployed (and the p36-1 splash artefacts of §5.45 already on the
+machine), Gaming Mode was booted on the test Deck and the operator's verdict was *"that's
+better"*. That is a **subjective acceptance of the whole boot, by eye** — it is the reason
+the change ships, and it is not a measurement.
+
+⚠️ **The saving itself is still not quantified, and nothing seamless is claimed.** The 6–8 s
+is what the *old* helper cost on an online cold boot (OpusBootLatency, artifact://1072); that
+accepted boot was not timed, no before/after boot trace was taken, and no second was
+attributed to any one change. Which of the two deployed changes the operator was reacting to
+is likewise not separated, so §5.45's open questions about the panel transition stay open.
+What is measured is the helper alone: single-digit milliseconds when a client is installed,
+and exactly the old bounded path when one is not. Nothing else in the boot chain changed.
+
+---
+
 ## 6. Blocked on human
 
 - 🆕 **P3.6 — bring the Deck to Omarchy 4.0.0 stable (operator-present).** Runbook
