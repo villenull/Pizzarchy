@@ -3986,6 +3986,37 @@ statement about third-party licences beyond "each under its own" — the repo's 
 project's code and nothing it redistributes. The §5.45 hand-over question stays open and is
 listed as a known issue rather than as fixed.
 
+### 5.49 🆕 POST-RELEASE REVIEW: CI GREEN AGAIN, SEVEN DEFECT CLASSES FIXED (2026-09-23)
+
+**Why:** a four-agent code review of the 4.0.4 tree found that CI had failed on every run
+since `4cffce3` (it died at shellcheck, so no unit suite ever ran in CI), plus real defects in
+shipped code and VM tooling silently broken by the rebase (`65ea804`). Fixed in one pass:
+
+| Area | Defect | Fix |
+|---|---|---|
+| `deck-session.sh` mapper unit render | backticks in comments inside an unquoted `<<EOF` ran as **commands, as root**, at render time | plain quotes |
+| Valve-repos refresh hook | nested unquoted heredoc expanded pacman's `$arch` under `set -u`: `arch: unbound variable`, nothing appended, so `omarchy refresh pacman` could re-swap gamescope | `printf` with the mirror literal; the regression test **executes** the rendered hook |
+| `stage-valve-repos` | skipped `stage_preconditions` entirely (no DMI gate, no SUDO) | `--skip-session-probes`: skips only the session probe |
+| `deck-input-mapper.py` | tty OSK crash (`mapper.osk` None) on first press; ENODEV rebind left held keys repeating or STEAM chorded; enumeration crashed on a vanished node | degrade cleanly; `release_held_keys`; `_try_open` |
+| `deck_osk_wayland.py` | buffered `readline` under a GLib fd watch stranded state lines, giving a stale overlay | `pump_stdin` with `os.read` |
+| `pizza ssh allow` | no-key page aborted **silently** and left a temp file; `chown … 2>/dev/null \|\| true` | reachable diagnostic; loud chown with read-back |
+| Limine timeout | patch 0040 changed only the template; the ESP copy is taken in phase 3, before the applier | `deck_rotation` writes `timeout: 2` into the ESP header block |
+| T2 strip | dropped `linux-t2-headers`, which archinstall requests unconditionally | strip `apple-bcm-firmware` only |
+| VM tooling | the substrate builder never moved the image to `$OUT`; the kernel-hook suite lost `log`/`fail`, its preflight and its probe's `ExecStart=` | restored; the probe-integrity scanner now guards the class |
+| CI | two suites mode 644; the lint job lacked the submodule; imagemagick, lua and desktop-file-utils assertions only printed notes | exec bits, `submodules: true`, deps; submodule skips are now failures |
+
+Also restored: the "stage-power-button is last baked" guard, the fake-sudo `RESOLVED_LOG`
+(the sandbox invariant was reading an empty file), and a positive control on the bare-gamescope
+guard. `KNOWN-ISSUES.md` #2 is marked fixed; `CLAUDE.md` now carries the 4.0.4 pins.
+
+**Verified:** shellcheck 0.11.0 clean across the tree (was 19 findings); every unit suite
+passes locally; each new regression test was shown to fail on the pre-fix code. **Not
+verified on hardware:** the ESP timeout write, the mapper rebind path and the refresh hook
+need the next Deck install or `omarchy refresh pacman` to confirm.
+
+**Install-speed research, the same day:** `docs/findings/INSTALL-SPEED.md`, measured against
+the fresh 2026-09-23 Deck install (252 s total; 132 s of that is the Steam client download).
+
 ---
 
 ## 6. Blocked on human
