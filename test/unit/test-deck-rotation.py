@@ -333,6 +333,13 @@ check(
     dr.INTERFACE_ROTATION == 270,
     False,
 )
+check("🔴 the boot-menu timeout is 2 (operator request 2026-09-17, 5s -> 2s)", dr.BOOT_TIMEOUT, 2)
+check(
+    "…and specifically NOT 0, which would skip the menu a keyboard-less user "
+    "needs for the fallback entry",
+    dr.BOOT_TIMEOUT == 0,
+    False,
+)
 check("🔴 the console rotation is fbcon=rotate:1", dr.FBCON_ROTATE, 1)
 check("…and the token is spelled the way the kernel spells it", dr.FBCON_TOKEN, "fbcon=rotate:1")
 check_true(
@@ -427,8 +434,11 @@ check("the step reports configured", record["status"], "configured")
 check("…recording where it wrote", record["config"], "/boot/limine.conf")
 after = conf_path.read_text()
 check("interface_rotation is present exactly once, in the header", dr.read_rotation(after), ["90"])
+check("timeout: 2 is present exactly once, in the header", dr.read_boot_timeout(after), ["2"])
+check_true("…and the commented upstream default is gone, not duplicated", "#timeout:" not in after)
 check("🔴 …and the entry blocks are byte-identical", dr.entry_region(after), dr.entry_region(before))
 check("…which the record states as a fact, not an assumption", record["entries_preserved"], True)
+check("…and the record carries the timeout it wrote", record["boot_timeout"], 2)
 check_true(
     "the block carries the measurement that settled the value, for whoever reads "
     "this file on a Deck at 3am",
@@ -440,6 +450,10 @@ check_true(
     "not a global",
     after.index("interface_rotation") < after.index("/+Omarchy"),
 )
+check_true(
+    "…and the timeout sits there too — same reason, same boundary",
+    after.index("timeout: 2") < after.index("/+Omarchy"),
+)
 check_true("nothing was announced as a warning on the happy path", not record["warnings"])
 
 # Idempotent, which the SSH iterate-in-place loop requires (CLAUDE.md).
@@ -447,6 +461,7 @@ first = conf_path.read_text()
 record2, _ = quiet(dr.configure_limine_rotation, make_ctx(target))
 check("a second run is byte-identical", conf_path.read_text(), first)
 check("…and still reports configured", record2["status"], "configured")
+check("…and the timeout is still exactly one line after the re-run", dr.read_boot_timeout(conf_path.read_text()), ["2"])
 check_true(
     "…and says out loud that it replaced its own block rather than appending one",
     any("re-run" in w for w in record2["warnings"]),
@@ -457,6 +472,7 @@ target = make_target("write-no-entries")
 record, _ = quiet(dr.configure_limine_rotation, make_ctx(target))
 check("a config with no entries at all is handled", record["status"], "configured")
 check("…the rotation lands", dr.read_rotation((target / "boot/limine.conf").read_text()), ["90"])
+check("…and the timeout lands with it, folding the commented default in", dr.read_boot_timeout((target / "boot/limine.conf").read_text()), ["2"])
 check("…and the (empty) entry region is still preserved", record["entries_preserved"], True)
 
 target = make_target("write-absent", conf=None)
@@ -492,6 +508,32 @@ check_true(
     any("180 degrees wrong" in w for w in record["warnings"]),
 )
 check_true("…loudly, on the console the install log captures", "180 degrees wrong" in out)
+
+# The timeout twin of the 270 collision: a template carrying a LIVE timeout the
+# step does not own hands that value to the phase-3 copy, and it must be
+# replaced by exactly one `timeout: 2` -- loudly, not by leaving two globals
+# for Limine to arbitrate.
+target = make_target("template-timeout-5", conf=TEMPLATE.replace(
+    "#timeout: 3", "timeout: 5"
+) + ENTRIES)
+record, out = quiet(dr.configure_limine_rotation, make_ctx(target))
+check("a foreign live timeout still succeeds", record["status"], "configured")
+check("…and exactly one timeout: 2 is what ends up on disk", dr.read_boot_timeout((target / "boot/limine.conf").read_text()), ["2"])
+check_true(
+    "🔴 …but the pre-existing value is REPORTED, like a disagreeing rotation",
+    any("timeout: 5" in w for w in record["warnings"]),
+)
+
+# And the case T12's patched template actually produces: the phase-3 copy
+# already carries `timeout: 2`. That is ours, so it is folded in silently --
+# no warning, no duplicate.
+target = make_target("template-timeout-2", conf=TEMPLATE.replace(
+    "#timeout: 3", "timeout: 2"
+) + ENTRIES)
+record, _ = quiet(dr.configure_limine_rotation, make_ctx(target))
+check("our own timeout in the copy still succeeds", record["status"], "configured")
+check("…with exactly one timeout line", dr.read_boot_timeout((target / "boot/limine.conf").read_text()), ["2"])
+check_true("…and no timeout warning for a value that is already ours", not any("timeout" in w for w in record["warnings"]))
 
 target = make_target("marker-orphan", conf=TEMPLATE + dr.LIMINE_BEGIN + "\ninterface_rotation: 90\n" + ENTRIES)
 record, _ = quiet(dr.configure_limine_rotation, make_ctx(target))
@@ -593,6 +635,11 @@ check(
     dr.read_rotation(conf_path.read_text()),
     ["90"],
 )
+check(
+    "🔴 …and the timeout SURVIVES it too — header globals are limine-update's blind spot",
+    dr.read_boot_timeout(conf_path.read_text()),
+    ["2"],
+)
 check_true("…and the entries really did change", "#0000feed" in conf_path.read_text())
 check_true("…and the old UKI hash is gone", "#5f2b1c9a" not in conf_path.read_text())
 
@@ -611,6 +658,7 @@ check(
 # pre-refresh hook or a second install pass.
 record, _ = quiet(dr.configure_limine_rotation, make_ctx(target))
 check("…and re-running the step restores it", dr.read_rotation(conf_path.read_text()), ["90"])
+check("…and the timeout with it, from the same re-run", dr.read_boot_timeout(conf_path.read_text()), ["2"])
 check("…reporting configured", record["status"], "configured")
 
 # Event B, with the template T12 actually ships today.
@@ -715,6 +763,7 @@ with contextlib.redirect_stdout(buf):
 log_path = target / deck_configure.DECK_INSTALL_LOG_REL
 doc = json.loads(log_path.read_text())
 check("the menu rotation lands under 'limine_rotation'", doc["limine_rotation"]["status"], "configured")
+check("…and it records the boot timeout it wrote", doc["limine_rotation"]["boot_timeout"], 2)
 check("the console rotation lands under 'tty_rotation'", doc["tty_rotation"]["status"], "configured")
 check("…neither clobbering another step's key", doc["wifi"]["status"], "skipped")
 check("…and the log stays 0644", mode_of(log_path), "0644")

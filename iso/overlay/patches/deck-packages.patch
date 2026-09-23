@@ -371,25 +371,29 @@ index db8daa2..c0e085f 100755
      grep -hv '^#\|^$' /builder/archinstall.packages
      # Always include the selected Omarchy packages so the target install can
      # find the runtime and companion packages in the offline mirror.
-@@ -213,6 +544,99 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+@@ -213,6 +544,98 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
    )
  fi
  
-+# Upstream 4.0.4 lists hardware-availability packages (T2 Mac firmware and
-+# kernels among them) that its own third-party repo no longer carries, and the
-+# offline mirror's explicit-target download fails on the first missing name.
-+# Same class as the broadcom-wl rename above: an availability list newer than
-+# its repo. T2 hardware is out of scope for this ISO (no Deck has a T2 chip;
-+# deck-form.sh routes every Deck to linux-omarchy before the T2 probe), so
-+# drop the uninstallable names from the DOWNLOAD list only. They stay in the
-+# shipped omarchy-other.packages the installer reads, so a T2 Mac pointed at
-+# this ISO still sees its firmware lines -- pacstrap resolves them only if
-+# that hardware path runs, which Deck installs never take.
++# Upstream 4.0.4 lists a hardware-availability package (T2 Mac firmware) that
++# its own third-party repo no longer carries under that name
++# (apple-bcm-firmware was renamed apple-bcm-firmware-fetcher upstream), and
++# the offline mirror's explicit-target download fails on the first missing
++# name. Same class as the broadcom-wl rename above: an availability list newer
++# than its repo. Strip ONLY that one unresolvable name from the DOWNLOAD list.
++# It stays in the shipped omarchy-other.packages the build still copies, so
++# the on-ISO list is unchanged -- pacstrap resolves it only if that hardware
++# path runs, which Deck installs never take (deck-form.sh routes every Deck to
++# linux-omarchy before the T2 probe). linux-t2-headers, apple-t2-audio-config
++# and t2fanrd stay: arch_install_system requests `{kernel}-headers` for every
++# configured kernel (phases_impl.py:275), and detect_kernel answers linux-t2
++# on a T2 Mac, so stripping them breaks that path at pacstrap with 'target
++# not found'.
 +mapfile -t all_packages < <(
-+  printf '%s\n' "${all_packages[@]}" | grep -Fxv -e apple-bcm-firmware -e apple-t2-audio-config -e t2fanrd -e linux-t2 -e linux-t2-headers || true
++  printf '%s\n' "${all_packages[@]}" | grep -Fxv -e apple-bcm-firmware || true
 +)
 +if ((${#all_packages[@]} == 0)); then
-+  echo "ERROR: stripping the uninstallable T2 availability names emptied the offline" >&2
++  echo "ERROR: stripping the uninstallable T2 availability name emptied the offline" >&2
 +  echo "       mirror target list." >&2
 +  exit 1
 +fi
@@ -397,14 +401,9 @@ index db8daa2..c0e085f 100755
 +# The live ISO boots whichever kernel arch_packages names above, and that
 +# kernel's package must reach the offline mirror the live pacstrap resolves
 +# against -- mkarchiso installs packages.x86_64 out of the mirror, not the
-+# network. Upstream's arch-mact2 repo currently serves linux-t2 (7.2.6) but no
-+# longer carries the T2 availability names stripped above, so only the live
-+# kernel itself is carried (one package, hardware-gated to T2 Macs at install
-+# time everywhere else).
-+_t2kern=linux-t2
-+if ! printf '%s\n' "${all_packages[@]}" | grep -Fxq "$_t2kern"; then
-+  all_packages+=("$_t2kern")
-+fi
++# network. Upstream's arch-mact2 repo serves linux-t2 (the live kernel), so it
++# stays in the download list above; only the renamed firmware name is carried
++# nowhere.
 +# CONSUMER 3 of deck_local_packages (T5-fork-plan.md §3 seam S4): the same
 +# treatment, but UNCONDITIONAL -- unlike upstream's three, ours are always
 +# locally built and exist in no online repository at all. They reach

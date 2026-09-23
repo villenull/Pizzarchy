@@ -166,6 +166,34 @@ INTERFACE_ROTATION = 90
 VALID_INTERFACE_ROTATIONS = (0, 90, 180, 270)
 ROTATION_KEY = "interface_rotation"
 
+# Operator, from the panel, 2026-09-17: the Limine boot menu waits 5 seconds
+# before booting the default entry; 2 is enough. The packaged template ships
+# `#timeout: 3` COMMENTED OUT, so the effective value comes from Limine's own
+# default (5s on this build) -- not from anyone's decision.
+#
+# `timeout: 2` (not `timeout: 0`): 0 skips the menu entirely, which strands a
+# user who needs the fallback entry or snapshots with no way to reach them on
+# a device with no keyboard to hold. 2 keeps the menu reachable and boots
+# unattended fast. Decimal values are accepted per CONFIG.md; integers keep
+# the write exact.
+#
+# 🔴 WHY THIS LIVES NEXT TO THE ROTATION, AND NOT ONLY IN T12's TEMPLATE
+# PATCH. Upstream's `_write_limine_defaults` copies the template to the ESP
+# during `arch_install_system` -- phase 3, long before this phase (READ:
+# `phases_impl.py`, the `shutil.copy2` ending that function) -- and the T12
+# applier that patches the template runs LAST in this very registry, AFTER
+# that copy was taken. So the copy on the ESP carries whatever the template
+# said at phase 3, and nothing else installs the timeout there. That is this
+# step's line, in the same marker-delimited header block as the rotation.
+# `finalize_limine_boot` then runs only `limine-update`, which regenerates
+# the entry blocks and leaves header globals alone -- which is why this write
+# survives it. What it does NOT survive is `omarchy refresh limine`, which
+# moves the file aside and copies the template over it; that is exactly why
+# T12's 0040 patch keeps the value in the template as well. The two mechanisms
+# cover two different destruction events, and neither covers both.
+BOOT_TIMEOUT = 2
+TIMEOUT_KEY = "timeout"
+
 # `fbcon=rotate:1`, measured present in /proc/cmdline and in every entry of the
 # Deck's limine.conf. fbcon/rotate takes 0-3 (quarter-turns counter-clockwise).
 FBCON_ROTATE = 1
@@ -325,12 +353,18 @@ def resolve_limine_conf(target) -> tuple[Path, str]:
 # ---------------------------------------------------------------------------
 
 
-def render_limine_block(rotation: int = INTERFACE_ROTATION) -> list[str]:
+def render_limine_block(rotation: int = INTERFACE_ROTATION, boot_timeout: int = BOOT_TIMEOUT) -> list[str]:
     """The marker-delimited header block, as lines.
 
     The comment is not decoration. The next person to read this file is doing it
     on a Deck at 3am with no repository to hand, and the one thing they must not
     do is "correct" 90 to match the desktop's 3.
+
+    The same block carries `timeout: 2` (operator request 2026-09-17): the ESP
+    copy is taken from the template in phase 3, before T12's applier patches
+    the template, so the template patch alone never reaches a fresh install.
+    `timeout: 0` would skip the menu entirely and strand a keyboard-less user
+    who needs the fallback entry; it is never written here.
     """
     return [
         LIMINE_BEGIN,
@@ -344,6 +378,7 @@ def render_limine_block(rotation: int = INTERFACE_ROTATION) -> list[str]:
         "# This affects the boot menu, editor and console only; it does not touch",
         "# the booted OS. Everything outside these two markers is preserved.",
         f"{ROTATION_KEY}: {rotation}",
+        f"{TIMEOUT_KEY}: {boot_timeout}",
         LIMINE_END,
     ]
 
@@ -364,7 +399,9 @@ def split_header(lines: list[str]) -> int:
     return len(lines)
 
 
-def patch_limine_header(raw: str, rotation: int = INTERFACE_ROTATION) -> tuple[str, list[str]]:
+def patch_limine_header(
+    raw: str, rotation: int = INTERFACE_ROTATION, boot_timeout: int = BOOT_TIMEOUT
+) -> tuple[str, list[str]]:
     """``(new text, warnings)``. Pure, so the destruction test needs no ESP.
 
     Rules, in order:
@@ -378,6 +415,14 @@ def patch_limine_header(raw: str, rotation: int = INTERFACE_ROTATION) -> tuple[s
        packaged template surfaces. If T12's patch ever writes a different value
        into the template, the ESP copy taken in phase 3 carries it, and this is
        the line that says so out loud instead of leaving two writers fighting.
+    4. Any ``timeout:`` (or commented ``#timeout:``) in the header OUTSIDE our
+       block is removed and -- for a live value that is not ours -- **reported**.
+       The ESP copy taken in phase 3 carries the template's commented
+       ``#timeout: 3`` verbatim (or T12's patched ``timeout: 2`` when the
+       applier has already run over it), and either would sit beside our own
+       line as a second, competing global. Limine's behaviour on a duplicated
+       key is not something this project has measured, so exactly one may
+       remain.
     """
     warnings: list[str] = []
     lines = raw.splitlines()
@@ -409,6 +454,23 @@ def patch_limine_header(raw: str, rotation: int = INTERFACE_ROTATION) -> tuple[s
                     "two is 180 degrees wrong"
                 )
             continue
+        # `timeout:` and `#timeout:` alike: both compete with the line our own
+        # block carries, so both are folded into it. A commented default is
+        # absorbed silently -- it was never a live value -- while a live one
+        # that is not ours is reported, the same way a disagreeing rotation is.
+        timeout_match = re.match(rf"^\s*#?\s*{TIMEOUT_KEY}\s*:\s*(\S*)", line)
+        if timeout_match:
+            commented = line.lstrip().startswith("#")
+            found = timeout_match.group(1)
+            if not commented and found != str(boot_timeout):
+                warnings.append(
+                    f"the config on the ESP already carried '{TIMEOUT_KEY}: "
+                    f"{sanitize_text(found)}', not {boot_timeout}. It was a copy of "
+                    "/usr/share/omarchy/default/limine/limine.conf taken in phase 3, so a value "
+                    "here that is not ours means the PACKAGED TEMPLATE disagrees with this step "
+                    "-- and the template is what wins after 'omarchy refresh limine'"
+                )
+            continue
         kept.append(line)
 
     if skipping:
@@ -417,7 +479,7 @@ def patch_limine_header(raw: str, rotation: int = INTERFACE_ROTATION) -> tuple[s
             "where the old block ended -- this is the boot chain"
         )
 
-    out = kept + render_limine_block(rotation) + entries
+    out = kept + render_limine_block(rotation, boot_timeout) + entries
     text = "\n".join(out).rstrip("\n") + "\n"
     if saw_block:
         warnings.append("replaced an existing omarchy-deck rotation block (re-run)")
@@ -437,6 +499,28 @@ def read_rotation(raw: str) -> list[str]:
     found: list[str] = []
     for line in header:
         match = re.match(rf"^\s*{ROTATION_KEY}\s*:\s*(\S*)", line)
+        if match:
+            found.append(match.group(1))
+    return found
+
+
+def read_boot_timeout(raw: str) -> list[str]:
+    """Every live ``timeout:`` value in the HEADER, in order.
+
+    Header only, like ``read_rotation``: a value inside an entry block is not
+    a global and Limine would not apply it. Commented ``#timeout:`` lines are
+    upstream's shipped default, never a live value, so they are not counted --
+    but the writer removes them anyway, because a commented twin beside our
+    own line is the shape patch 0040's own post-conditions already forbid in
+    the template.
+    """
+    lines = raw.splitlines()
+    header = lines[: split_header(lines)]
+    found: list[str] = []
+    for line in header:
+        if line.lstrip().startswith("#"):
+            continue
+        match = re.match(rf"^\s*{TIMEOUT_KEY}\s*:\s*(\S*)", line)
         if match:
             found.append(match.group(1))
     return found
@@ -503,10 +587,11 @@ def write_atomically(path: Path, text: str, mode: int | None) -> None:
 
 
 def configure_limine_rotation(ctx) -> dict:
-    """Write and verify ``interface_rotation`` on the ESP; return the record."""
+    """Write and verify ``interface_rotation`` and ``timeout`` on the ESP; return the record."""
     record: dict = {
         "status": None,
         "rotation": INTERFACE_ROTATION,
+        "boot_timeout": BOOT_TIMEOUT,
         "esp_path": None,
         "config": None,
         "entries_preserved": None,
@@ -554,6 +639,14 @@ def configure_limine_rotation(ctx) -> dict:
                 "something this project has measured, so it is asserted against rather than "
                 "reasoned about"
             )
+        timeouts = read_boot_timeout(after_raw)
+        if timeouts != [str(BOOT_TIMEOUT)]:
+            raise DeckRotationError(
+                f"{record['config']} reads back {TIMEOUT_KEY} as {timeouts!r}, expected exactly "
+                f"['{BOOT_TIMEOUT}']. Limine's behaviour on a duplicated global is not "
+                "something this project has measured, so it is asserted against rather than "
+                "reasoned about"
+            )
         after = entry_region(after_raw)
         record["entries_preserved"] = after == before
         assert_entries_preserved(before, after, record["config"])
@@ -567,9 +660,9 @@ def configure_limine_rotation(ctx) -> dict:
 
     record["status"] = "configured"
     info(
-        f"Deck Limine rotation: {ROTATION_KEY}: {INTERFACE_ROTATION} in {record['config']} "
-        "(entry blocks byte-identical). Survives limine-update; NOT 'omarchy refresh limine', "
-        "which the packaged template covers"
+        f"Deck Limine rotation: {ROTATION_KEY}: {INTERFACE_ROTATION}, {TIMEOUT_KEY}: {BOOT_TIMEOUT} "
+        f"in {record['config']} (entry blocks byte-identical). Survives limine-update; NOT "
+        "'omarchy refresh limine', which the packaged template covers"
     )
     for warning in warnings:
         error(f"Deck Limine rotation: {warning}")
