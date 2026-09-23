@@ -393,7 +393,27 @@ pass "fact 2f: deck-session.sh's Valve sections carry SigLevel = Never"
 # The repair must stay repo-qualified: a bare `pacman -S gamescope` in
 # stage_valve_repos resolves by repo order to Arch's build -- reinstalling the
 # very defect the repair exists to fix.
-! grep -qE 'pacman -S[^/]* gamescope' <(bash -c 'source "$1"; declare -f stage_valve_repos' _ "$SESSION_SH") ||
+#
+# The negative grep below passes vacuously on an empty scrape (a renamed
+# function yields no body, and no body contains no bare name), so the
+# extraction gets a positive control first: the body must exist, and must name
+# the constant the repair installs through.
+valve_repair_body=$(bash -c 'source "$1"; declare -f stage_valve_repos' _ "$SESSION_SH")
+require_extract "the gamescope repair body (session side)" \
+  "${SESSION_SH}: stage_valve_repos() { ... }" 5 "$valve_repair_body"
+[[ $valve_repair_body == *GAMESCOPE_VALVE_SPEC* ]] ||
+  fail "FACT 2 DIVERGED (third copy): the session layer's gamescope repair" \
+    "stage_valve_repos no longer references GAMESCOPE_VALVE_SPEC -- the install it performs is not visibly the repo-qualified one."
+# ...and the constant's VALUE must itself be repo-qualified (`repo/name`): a
+# bare `gamescope` value would pass both checks above and still resolve by
+# repo order to Arch's build.
+gamescope_spec=$(sed -nE 's/^readonly GAMESCOPE_VALVE_SPEC=(.*)$/\1/p' "$SESSION_SH")
+require_extract "the gamescope spec constant (session side)" \
+  "${SESSION_SH}: readonly GAMESCOPE_VALVE_SPEC=..." 1 "$gamescope_spec"
+[[ $gamescope_spec == */* ]] ||
+  fail "FACT 2 DIVERGED (third copy): the session layer's gamescope repair" \
+    "GAMESCOPE_VALVE_SPEC is '${gamescope_spec}', a bare name -- it must be repo/name or pacman resolves it by repo order to Arch's bare compositor."
+! grep -qE 'pacman -S[^/]* gamescope' <<<"$valve_repair_body" ||
   fail "FACT 2 DIVERGED (third copy): the session layer's gamescope repair" \
     "stage_valve_repos installs a bare gamescope name, which resolves by repo order to Arch's bare compositor."
 pass "fact 2f: stage_valve_repos installs only the repo-qualified gamescope build"

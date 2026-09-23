@@ -713,13 +713,10 @@ count "all ${#pkgbuild_dirs[@]} recipe directories (${pkgbuild_dirs[*]}) have a 
 # ===========================================================================
 
 if [[ ! -e "$ISO_ROOT/upstream/.git" ]]; then
-  printf 'skip - iso/upstream is not checked out here, so the following did NOT run:\n'
-  printf 'skip -   * wiring point 1 (built into the offline mirror)\n'
-  printf 'skip -   * wiring point 2 (stripped from the online pacman -Syw)\n'
-  printf 'skip -   * wiring point 3 (added back to the prune keep-set)\n'
-  printf 'skip -   * wiring point 4 (excluded from deck-nvidia-dry-run.sh)\n'
-  printf 'skip -   * the single-source-of-truth property, and bash -n on the patched builder\n'
-  printf 'skip - (.github/workflows/ci.yml has no submodules: key; test-iso-build.sh skips for the same reason)\n'
+  # Required, not optional: both CI jobs check the submodule out, and the four
+  # wiring points below are this suite's whole reason to exist.
+  fail "iso/upstream is checked out, so the four wiring points can be verified against the patched builder" \
+    "Run: git submodule update --init iso/upstream"
 else
   shopt -s nullglob
   overlay_patches=("$ISO_ROOT"/overlay/patches/*.patch)

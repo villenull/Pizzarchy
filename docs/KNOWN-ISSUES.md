@@ -73,6 +73,14 @@ escape hatch that needs a keyboard is not an escape hatch — and a boot loop
 into a broken Gaming Mode is exactly the unrecoverable class of failure this
 project treats as the worst kind.
 
+**Status: ✅ fixed 2026-08-17.** `stage-boot-default-gaming` is in `BAKE_STAGES`
+(src/deck-session.sh's own comment on the list says "IN, as of 2026-08-17"), so
+a normal install runs it and a reboot lands in Gaming Mode; the re-assert's
+give-up bound answers the safety half the keyboard-only escape hatch could not.
+test/unit/test-deck-session-bake.sh pins it ("stage-boot-default-gaming IS
+baked"). The history above stays: it records why the stage was opt-in, and why
+putting it in INSTALL_STAGES would have fixed nothing shipped.
+
 ---
 
 ### 3. Gaming Mode shows a black screen for ~10 s after the Omarchy logo

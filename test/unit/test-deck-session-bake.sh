@@ -741,6 +741,13 @@ printf '%s\n' "${baked[@]}" | grep -qx stage-mask-wait-online ||
     "without it the installed Deck waits on network-online.target before it reaches a session -- by timeout on a Deck with no Wi-Fi"
 pass "stage-mask-wait-online is baked, so no installed Deck waits on the network to reach a session"
 
+# It runs LAST, and after everything that could fail. The one stage that
+# rewires a hardware button should not go first on a machine whose other
+# stages have not yet had their chance to report.
+[[ ${baked[-1]} == stage-power-button ]] ||
+  fail_test "stage-power-button is the last baked stage" "got '${baked[-1]}'; ${baked[*]}"
+pass "and it runs last, after every other stage has had its chance to fail"
+
 # stage-osk-kb-layout is reachable by hand as well, since it is now a stage.
 mapfile -t offered < <(bash "$SESSION_SH" list-stages)
 printf '%s\n' "${offered[@]}" | grep -qx stage-osk-kb-layout ||

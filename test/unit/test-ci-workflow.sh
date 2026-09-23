@@ -162,22 +162,23 @@ iso_timeout=$(sed -n 's/^job\.iso-build\.timeout-minutes=//p' "$FACTS")
 pass "the ISO build runs on tags or on request only, with an explicit ${iso_timeout}-minute timeout"
 
 # ---------------------------------------------------------------------------
-# 3. The submodule split, which is a real coupling in both directions.
+# 3. The submodule, which is a real coupling in both directions.
 #
 # iso/bin/build refuses to build unless iso/upstream is a clean checkout
 # exactly at iso/UPSTREAM's pin, so the build job MUST fetch it. The lint job
-# deliberately does not -- two unit suites skip submodule-dependent assertions
-# there and say so in their skip lines. Both halves are asserted, because
-# either drifting silently makes a suite's skip message a lie.
+# fetches it too: more than ten suites hard-fail without it (FileNotFoundError
+# on orchestrator/ui.py and friends), so a lint run without it would pass by
+# never exercising them. Both halves are asserted, because either drifting
+# silently makes a suite's failure-or-skip behaviour a lie.
 # ---------------------------------------------------------------------------
 
 grep -q '^job\.iso-build\.with\[actions/checkout@v4\]\.submodules=True$\|^job\.iso-build\.with\[actions/checkout@v4\]\.submodules=true$' "$FACTS" ||
   fail "the ISO build job checks out iso/upstream" \
     "iso/bin/build verifies the submodule is exactly at iso/UPSTREAM and refuses otherwise, so 'submodules: true' is load-bearing here. Facts: $(grep 'iso-build.with' "$FACTS" || true)"
-! grep -q '^job\.lint-and-unit-test\.with\[actions/checkout@v4\]\.submodules=' "$FACTS" ||
-  fail "the lint job still does NOT fetch submodules" \
-    "test/unit/test-iso-build.sh and test/unit/test-omarchy-deck-package.sh both explain their skipped assertions by citing this. If it changed on purpose, change those skip messages in the same commit."
-pass "submodules are fetched for the build job and deliberately not for the lint job"
+grep -q '^job\.lint-and-unit-test\.with\[actions/checkout@v4\]\.submodules=True$\|^job\.lint-and-unit-test\.with\[actions/checkout@v4\]\.submodules=true$' "$FACTS" ||
+  fail "the lint job checks out iso/upstream too" \
+    "more than ten suites hard-fail without it, including the Python suites that raise FileNotFoundError on orchestrator/ui.py. Facts: $(grep 'lint-and-unit-test.with' "$FACTS" || true)"
+pass "submodules are fetched for both jobs, so no suite passes by skipping what it came to check"
 
 # ---------------------------------------------------------------------------
 # 4. Every path the job names exists.
@@ -226,7 +227,7 @@ pass "the job builds into an explicit absolute scratch root outside the checkout
 if [[ -f "$REPO_ROOT/iso/PKGS" ]]; then
   grep -q 'OMARCHY_DECK_PKGS_SRC' "$work/iso-build-runs.txt" &&
     fail "with iso/PKGS present the job need not set OMARCHY_DECK_PKGS_SRC" \
-      "bin/build clones omacom-io/omarchy-pkgs at the pin itself; an override here would silently un-pin the third input"
+      "bin/build clones omacom/omarchy-pkgs at the pin itself; an override here would silently un-pin the third input"
   pass "iso/PKGS pins the PKGBUILDs, so the job correctly leaves OMARCHY_DECK_PKGS_SRC unset"
 else
   grep -q 'OMARCHY_DECK_PKGS_SRC' "$work/iso-build-runs.txt" ||

@@ -1114,19 +1114,12 @@ pass "guard 6.5b catches a passwordless grant shipped INSIDE a mirror package an
 # ---------------------------------------------------------------------------
 # 18. The real repo's iso/ skeleton matches docs/tasks/T5-fork-plan.md §1.
 #
-# The submodule pin check is conditional: the lint-and-unit-test job in
-# .github/workflows/ci.yml -- the one that runs this suite -- does not fetch
-# submodules (no `submodules:` key on its actions/checkout), so iso/upstream is
-# an empty directory there. Skip that one sub-assertion when the submodule
-# isn't populated rather than failing on an environment precondition, but say
-# so out loud rather than passing quietly.
-#
-# ⚠️ T5g's iso-build job DOES set `submodules: true` -- it has to, because
-# bin/build refuses a submodule that is not exactly at the pin. So this is now
-# a per-job property rather than a property of the file, and
-# test/unit/test-ci-workflow.sh asserts BOTH halves: that the build job fetches
-# it and that the lint job still does not. If the lint job ever starts
-# fetching, this skip becomes a lie and that suite goes red first.
+# The submodule is REQUIRED. Both jobs in .github/workflows/ci.yml check it
+# out (`submodules: true`), and test/unit/test-ci-workflow.sh asserts that for
+# both. This used to skip when iso/upstream was empty, because the lint job did
+# not fetch it; that skip turned "the overlay patches still apply against the
+# pin" into a check that never ran in CI. A missing checkout is now a failure
+# that names the one command that fixes it.
 # ---------------------------------------------------------------------------
 
 ISO_ROOT="$REPO_ROOT/iso"
@@ -1280,8 +1273,7 @@ done
 pass "no patch is simultaneously staged in src/iso-patches/ and promoted into iso/overlay/patches/ (${#staged_patches[@]} staged, ${#overlay_patches[@]} promoted)"
 
 # D. Every promoted patch applies to the pinned upstream, and the result still
-#    parses. Conditional on the submodule for the same reason as the pin check
-#    below -- and reported out loud rather than skipped quietly.
+#    parses. Needs the submodule (see §18's note): a missing checkout fails.
 if [[ -e "$ISO_ROOT/upstream/.git" ]]; then
   (( ${#overlay_patches[@]} > 0 )) ||
     fail "there are no overlay patches to apply" \
@@ -1460,7 +1452,8 @@ extracted:
 $extracted"
   pass "the [omarchy] stanza build-iso.sh copies into the container is still exactly one repo"
 else
-  printf 'skip - iso/upstream is not checked out here, so the overlay patches could not be applied against the pin (see the note below)\n'
+  fail "iso/upstream is checked out, so the overlay patches can be applied against the pin" \
+    "Run: git submodule update --init iso/upstream"
 fi
 
 if [[ -e "$ISO_ROOT/upstream/.git" ]]; then
@@ -1471,7 +1464,8 @@ if [[ -e "$ISO_ROOT/upstream/.git" ]]; then
   [[ -z $real_dirty ]] || fail "iso/upstream has no local modifications" "$real_dirty"
   pass "the real iso/upstream submodule is checked out clean, exactly at the UPSTREAM pin"
 else
-  printf 'skip - iso/upstream is not checked out in this environment (the lint-and-unit-test job in .github/workflows/ci.yml deliberately has no submodules: key; the iso-build job does) -- the fixture-based tests above cover bin/build'"'"'s pin-verification logic regardless\n'
+  fail "iso/upstream is checked out, so its pin and cleanliness can be verified" \
+    "Run: git submodule update --init iso/upstream"
 fi
 
 # ---------------------------------------------------------------------------

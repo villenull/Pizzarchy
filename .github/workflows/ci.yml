@@ -60,7 +60,7 @@
 #     ~7 GB. The 40 minutes this takes on the dev machine is a floor, not an
 #     estimate; the job cap here is deliberately generous.
 #   * NETWORK. mirror.omarchy.org, pkgs.omarchy.org, Valve's repos, github.com
-#     for two full clones (basecamp/omarchy and omacom-io/omarchy-pkgs — their
+#     for two full clones (omacom/omarchy and omacom/omarchy-pkgs — their
 #     PKGBUILDs' pkgver() counts commits, so no shallow clone).
 #
 # If it turns out a hosted runner cannot do this, the fix is a self-hosted
@@ -107,6 +107,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        # More than ten suites hard-fail without iso/upstream (the Python
+        # suites raise FileNotFoundError on orchestrator/ui.py), so a lint run
+        # without it would pass by never exercising them.
+        # test/unit/test-ci-workflow.sh asserts both jobs fetch it.
+        with:
+          submodules: true
 
       - name: Install dependencies
         run: |
@@ -117,7 +123,20 @@ jobs:
           # sudoers drop-in would reach the ISO (PROGRESS.md §5.17), so a run
           # that quietly skipped it would be the check passing for the wrong
           # reason. Keep this dependency; do not turn the test into a skip.
-          sudo apt-get install -y parted dosfstools mtools btrfs-progs jq openssl qemu-utils python3-evdev libarchive-tools
+          # imagemagick provides convert (test/unit/test-deck-session.sh ~2947
+          # probes magick, then convert). The suite renders the Steam splash
+          # cover through it and notes-and-skips without it, which would leave
+          # the cover path unexercised in CI; same rule here.
+          # desktop-file-utils provides desktop-file-validate
+          # (test-deck-session-stages.sh ~1423). The suite asserts the installed
+          # entry with it and notes-and-skips without it, which would leave the
+          # installed entry unvalidated in CI; same rule here.
+          # lua5.4 provides luac (via update-alternatives' /usr/bin/luac
+          # symlink to luac5.4). test-deck-session-stages.sh ~1862/2527 refuses
+          # unparseable Lua only when the bare `luac` name is on PATH and
+          # notes-and-skips otherwise, which would leave the Lua gate
+          # unexercised in CI; same rule here.
+          sudo apt-get install -y parted dosfstools mtools btrfs-progs jq openssl qemu-utils python3-evdev libarchive-tools imagemagick desktop-file-utils lua5.4
 
       # ⚠️ shellcheck is PINNED, and apt's is deliberately not used.
       #
@@ -211,11 +230,9 @@ jobs:
       OMARCHY_DECK_ISO_BUILD_DIR: /mnt/omarchy-deck-iso-build
       ISO_BUILD_LOG: iso-build.log
     steps:
-      # submodules: true, unlike the lint job above. iso/bin/build verifies
+      # submodules: true, like the lint job above. iso/bin/build verifies
       # iso/upstream is a clean checkout exactly at iso/UPSTREAM's pin and
       # refuses to build otherwise, so the submodule is not optional here.
-      # (The lint job deliberately does NOT fetch it: two unit suites skip
-      # their submodule-dependent assertions there and say so out loud.)
       - uses: actions/checkout@v4
         with:
           submodules: true
@@ -273,7 +290,7 @@ jobs:
       # No OMARCHY_ISO_REF / OMARCHY_MIRROR here on purpose: bin/build pins both
       # itself (guard 6.1) and REFUSES to run if the environment disagrees.
       # No OMARCHY_DECK_PKGS_SRC either: iso/PKGS exists, so bin/build clones
-      # omacom-io/omarchy-pkgs at that pin. If iso/PKGS is ever deleted this job
+      # omacom/omarchy-pkgs at that pin. If iso/PKGS is ever deleted this job
       # must start setting it, and test/unit/test-ci-workflow.sh asserts that
       # coupling rather than leaving it to be discovered here.
       - name: Build ISO

@@ -2024,6 +2024,10 @@ _wait_dropin_src=$(sed -n '/^stage_steam_first_run()/,/^}/p' "$REPO_ROOT/src/dec
 ! grep -qE '^(After|Wants|Requires)=.*network' <<<"$_wait_dropin_src" ||
   fail_test "stage-steam-first-run adds no network ordering to steam-launcher" \
     "the wait is an ExecStartPre= after the session paints; an ordering would gate the session on the network it is racing"
+# shellcheck disable=SC2016  # the single quotes are intentional: this is a
+# grep pattern that must match the LITERAL text `ExecStartPre=${...}` in the
+# stage source, not the expanded path. Expanding it would check the rendered
+# value instead of the source line that renders it.
 grep -qF 'ExecStartPre=${STEAM_WAIT_ONLINE_BIN}' <<<"$_wait_dropin_src" ||
   fail_test "the Steam wait is still an ExecStartPre=" \
     "the drop-in must carry exactly 'ExecStartPre=${STEAM_WAIT_ONLINE_BIN}' -- the exit-0 bounded wait, not an ordering"
@@ -2056,6 +2060,10 @@ pass "the helper is bounded at ${BOOT_DEFAULT_MAX_FAILS} consecutive boots, from
 # leaves Session=gamescope on disk from an earlier boot -- the machine stays in
 # exactly the loop the rule just diagnosed, and every assertion about counters
 # and stamps still passes.
+# shellcheck disable=SC2016  # the single quotes are intentional: this is a
+# grep pattern that must match the LITERAL text `"$select_bin"` in the rendered
+# helper, not the expanded path. Expanding it would defeat the guard -- the
+# bug it closes is a helper that writes any other word there.
 grep -qF -- '"$select_bin" desktop --no-restart' "$boot_helper" ||
   fail_test "the give-up branch actively selects the desktop" \
     "declining to write 'gamescope' is not enough: the default on disk is ALREADY gamescope, so a helper that just returns leaves the Deck looping into the session it gave up on. File:"$'\n'"$(cat "$boot_helper")"

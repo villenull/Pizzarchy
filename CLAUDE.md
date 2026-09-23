@@ -35,15 +35,13 @@ partly superseded**; read the banner at its top before trusting any section.
 
 - **Limine only.** No GRUB, no systemd-boot paths. Deliberate, after real
   breakage with systemd-boot's UKI conventions (`docs/PLAN.md` §6.3).
-- **Target Omarchy 4.0, not 3.x.** The test Deck runs
-  `omarchy-dev 4.0.0.r1744.gf002044-1` — exactly `iso/RUNTIME`'s pin
-  (`basecamp/omarchy@f0020448ca87`; `gf002044` is that commit), so target and
-  test asset agree. Read off the device 2026-08-15 after it was **reinstalled
-  from our own stable ISO** (session 28). Previously this line said
-  `r1617.g6d7826d-1` / version file `4.0.0.alpha`, read 2026-08-12 — true of the
-  *old* install, stale the moment the Deck was rebuilt. A "the Deck runs 3.8.4"
-  claim also lived here for sessions after `docs/PROGRESS.md` had corrected it;
-  don't reintroduce either.
+- **Target Omarchy 4.0, not 3.x.** Current pins since the 4.0.4 rebase
+  (65ea804): `iso/RUNTIME` = `omacom/omarchy@c668141e9c42`, `iso/UPSTREAM` =
+  `omacom/omarchy-iso@7cfb7111a068`, `iso/PKGS` =
+  `omacom/omarchy-pkgs@5fe236736607`. What the test Deck itself runs after
+  the rebase is not recorded — don't claim target and test asset agree, and
+  don't reintroduce the old `r1744.gf002044` / `basecamp` pins or a
+  "the Deck runs 3.8.4" claim.
 - **No keyboard or terminal for a standard install.** Every screen in
   `docs/PLAN.md` §6.1a must be reachable by Deck buttons/trackpads alone. This
   now includes typing a Wi-Fi password.
@@ -94,9 +92,11 @@ hard-won facts in `docs/PROGRESS.md` §7 — read that, not §8.** Several were
 corrected by later measurement, so trust §7 over memory and re-check before
 building on any recorded value.
 
-1. `linux-neptune.sh` silently no-ops via `curl | bash` (missing
+1. ~~`linux-neptune.sh` silently no-ops via `curl | bash` (missing
    `common-script.sh`) — fixed in `src/omarchy-deck-kernel.sh`; use that, not
-   upstream's script.
+   upstream's script.~~ — **retired 2026-09-17 (65ea804).** Upstream 4.0.4
+   ships its own kernel (`linux-omarchy 7.2.5-3`) and installs it by default;
+   the Neptune stack retired with it. Historical record only.
 2. No Limine detection upstream — also fixed there.
 3. ~~Shipped mkinitcpio preset points at a wrong `/efi/...` UKI path~~ —
    **obsolete.** Valve's kernel packages ship no preset at all; Omarchy
