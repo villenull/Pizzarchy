@@ -166,6 +166,21 @@ SMP=${VM_SMP:-$DEFAULT_SMP}
 RUN_TIMEOUT=${VM_RUN_TIMEOUT_SEC:-3600}
 KERNEL_PKG=${VM_KERNEL_PKG:-linux-omarchy}
 
+log() { printf '[vm-kernel-hook] %s\n' "$*" >&2; }
+fail() { log "FAIL: $*"; exit 1; }
+
+[[ -f $REPO_ROOT/src/omarchy-deck-kernel.sh ]] || fail "omarchy-deck-kernel.sh not found next to this script"
+
+for tool in qemu-system-x86_64 qemu-img mcopy sfdisk base64; do
+  command -v "$tool" >/dev/null || fail "$tool not found"
+done
+
+if [[ ! -f $BASE_DISK ]]; then
+  log "substrate image not found at $BASE_DISK -- building it"
+  IMG_KERNEL_PKG=$KERNEL_PKG "$REPO_ROOT/test/images/vm-neptune-image.sh" "$BASE_DISK" ||
+    fail "could not build the substrate image"
+fi
+
 find_ovmf() {
   local c
   for c in "$@"; do
@@ -313,10 +328,15 @@ snap() {
     conf_present=1
     conf_lines=$(LC_ALL=C command grep -ac '' /boot/limine.conf 2>/dev/null || echo 0)
   fi
-  refs=$(LC_ALL=C command grep -acE "^[[:space:]]*path:.*/EFI/Linux/omarchy_${KP}\.efi(#|[[:space:]]|$)" /boot/limine.conf 2>/dev/null || true)
-  [[ -f $STALE_UKI ]] && stale_present=1
   stale_refs=$(LC_ALL=C command grep -acE "^[[:space:]]*path:.*/EFI/Linux/omarchy_${STALE_KP}\.efi(#|[[:space:]]|$)" /boot/limine.conf 2>/dev/null || true)
   nept=$(find /boot/EFI/Linux -maxdepth 1 -name '*linux-omarchy*.efi' 2>/dev/null | wc -l)
+  emit "${tag}.uki_present=${present}"
+  emit "${tag}.uki_sha=${sha}"
+  # OBSERVATION, not an assertion -- see the mtime note at the top of the file.
+  emit "${tag}.uki_mtime=${mtime}"
+  emit "${tag}.entry_refs=${refs}"
+  emit "${tag}.stale_present=${stale_present}"
+  emit "${tag}.stale_refs=${stale_refs}"
   emit "${tag}.omarchy_ukis=${nept}"
   emit "${tag}.limine_conf_present=${conf_present}"
   emit "${tag}.limine_conf_lines=${conf_lines}"
@@ -460,9 +480,9 @@ Before=graphical.target
 
 [Service]
 Type=oneshot
-Environment=VM_KERNEL_PKG=${KERNEL_PKG}
 ExecStartPre=/usr/bin/cp /boot/omarchy-deck-hook-probe.sh /root/omarchy-deck-hook-probe.sh
 ExecStartPre=/usr/bin/cp /boot/omarchy-deck-kernel.sh /root/omarchy-deck-kernel.sh
+ExecStart=/usr/bin/bash /root/omarchy-deck-hook-probe.sh
 TimeoutStartSec=0
 RemainAfterExit=yes
 StandardOutput=journal+console

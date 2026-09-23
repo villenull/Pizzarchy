@@ -527,4 +527,8 @@ if [[ -f $REPO_ROOT/test/lib/vm-disk-image.sh ]] && command -v mdir >/dev/null 2
     fail "the produced image's ESP has no omarchy_${KERNEL_PKG}.efi (got: ${listing})"
   log "verified from the host: ESP contains omarchy_${KERNEL_PKG}.efi"
 fi
+# Place the artifact at the advertised path: every VM suite defaults
+# BASE_DISK to $OUT, so leaving disk.raw in $WORK reads as a good build
+# followed by a missing image and a misleading `cp` failure downstream.
+mv "$WORK/disk.raw" "$OUT" || fail "could not move the image to $OUT"
 log "done: $OUT ($(du -h --apparent-size "$OUT" | cut -f1) apparent, $(du -h "$OUT" | cut -f1) on disk)"

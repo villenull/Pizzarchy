@@ -105,7 +105,12 @@ trap 'rm -rf "$work"' EXIT
 # expanded by the outer shell, so they are not standalone programs and `$vars`
 # in them would parse as nothing in particular.
 payload::openers() {
+  # Full-line comments are not code: a `<<'DELIM'` mentioned inside one (as
+  # prose about a past bug) is not a heredoc and must not be scanned,
+  # extracted, or classified. A real opener is part of a command and can
+  # never start with `#`, so this cannot hide a real payload.
   LC_ALL=C command awk '
+    /^[[:space:]]*#/ { next }
     match($0, /<<-?\047[A-Za-z_][A-Za-z0-9_]*\047/) {
       d = substr($0, RSTART, RLENGTH)
       sub(/^<<-?\047/, "", d)
@@ -127,6 +132,27 @@ payload::extract() {
   local file=$1 delim=$2 want=$3
   LC_ALL=C command awk -v d="$delim" -v want="$want" '
     !grab && match($0, "<<-?\047" d "\047") {
+      n++
+      if (n == want) { grab = 1; dash = (substr($0, RSTART + 2, 1) == "-") }
+      next
+    }
+    grab {
+      t = $0
+      if (dash) sub(/^\t+/, "", t)
+      if (t == d) exit
+      print
+    }
+  ' "$file"
+}
+# payload::extract_unquoted <file> <delimiter> <nth> -- same as
+# payload::extract, but for UNQUOTED heredocs (`<<PROBE_HEAD`), which the
+# opener scan deliberately skips: their bodies are host-expanded, so they are
+# not standalone programs. Only used to rebuild a split guest script together
+# with its quoted continuation -- never classified on its own.
+payload::extract_unquoted() {
+  local file=$1 delim=$2 want=$3
+  LC_ALL=C command awk -v d="$delim" -v want="$want" '
+    !grab && match($0, "<<-?" d "(;|[[:space:]]|$)") {
       n++
       if (n == want) { grab = 1; dash = (substr($0, RSTART + 2, 1) == "-") }
       next
@@ -326,6 +352,24 @@ not_a_program=(
   "vm-iso-probe-feasibility.sh|UD|cloud-init user-data: YAML data read by cloud-init, not an executable payload"
 )
 
+# ⚠️ A PAYLOAD APPENDED TO A HEADER IS NOT A PROGRAM, AND NEITHER IS A WORD
+# INSIDE A COMMENT. Two suites assemble their guest script in pieces: an
+# UNQUOTED header heredoc bakes host values in (`<<PROBE_HEAD`), then a quoted
+# `<<'PROBE'` continuation appends the body -- and one comment quotes the word
+# `<<'PROBE'` while explaining a past bug. Neither is standalone bash: the
+# continuation starts mid-script (no shebang, reads as a fragment) and the
+# comment is not code at all. Both are declared per-file because a bare
+# delimiter entry would also excuse a REAL standalone `<<'PROBE'` payload in
+# the same file going unclassified -- the exact hole this scanner exists to
+# close.
+#   entry: <basename>|<delimiter>|<nth opener of that delimiter in the file>
+continued_payload=(
+  # nth counts QUOTED `<<'DELIM'` openers only -- the unquoted `<<PROBE_HEAD`
+  # header the continuation extends is invisible to the opener scan, so the
+  # `cat >>... <<'PROBE'` continuation is occurrence 1, not 2.
+  "vm-install-controller-test.sh|PROBE|1"
+)
+
 bash_payloads=0
 python_payloads=0
 unknown_payloads=()
@@ -333,7 +377,25 @@ for f in "${subjects[@]}"; do
   name=${f##*/}
   while IFS='|' read -r lineno delim nth opener; do
     [[ -n ${delim:-} ]] || continue
-    body=$(payload::extract "$f" "$delim" "$nth")
+    # A quoted continuation appended to an unquoted header is one script in
+    # two heredocs: prepend the header body so the fragment parses as the
+    # guest will run it. Matched per file AND per occurrence, so a new
+    # standalone payload under the same delimiter is still classified alone.
+    continued=0
+    for c in ${continued_payload[@]+"${continued_payload[@]}"}; do
+      [[ $c == "$name|$delim|$nth" ]] && continued=1
+    done
+    if (( continued )); then
+      # The header is an UNQUOTED `<<PROBE_HEAD` heredoc, which the quoted-only
+      # opener scan deliberately ignores -- extract it by name instead. Its
+      # body ends before the continuation starts, so class plus parse below
+      # see the concatenation the guest actually runs.
+      prev_body=$(payload::extract_unquoted "$f" "${delim}_HEAD" 1)
+      body="$prev_body
+$(payload::extract "$f" "$delim" "$nth")"
+    else
+      body=$(payload::extract "$f" "$delim" "$nth")
+    fi
     if [[ -z $body ]]; then
       fail "$name:$lineno: the <<'$delim' payload extracts to something" \
         "it was found by the opener scan and then extracted to nothing -- the two halves of this scanner disagree, and this payload is being checked by neither"
@@ -587,6 +649,156 @@ for suite in "${suites[@]}"; do
       "it can log FAILED and still return 0 to whatever ran it"
   fi
 done
+# ---------------------------------------------------------------------------
+# SECTION E -- host harnesses define what they call; probe units run something
+# ---------------------------------------------------------------------------
+#
+# The 4.0.4 rebase (65ea804) deleted vm-kernel-hook-test.sh's `log()`/`fail()`
+# definitions while leaving 15 `log` and 11 `fail` call sites behind, and
+# dropped its probe unit's `ExecStart=` while keeping `Type=oneshot`. Both
+# ship green: shellcheck 0.11.0 does not flag calls to undefined functions,
+# and `bash -n` cannot tell an empty oneshot from a working one. So this
+# section checks both statically -- host-side calls resolve, guest-side
+# oneshots run something -- with a positive and a negative control each, the
+# same contract every other section in this file keeps.
+printf '# --- E. helpers resolve, oneshot units run ---\n'
+
+# suite_has_helper <file> <helper> -- true if the file defines it (`name() {`)
+# or sources a file that does. The sourced files are enumerated, not globbed:
+# a glob over test/lib would let a helper defined anywhere excuse a suite that
+# sources nothing.
+suite_has_helper() {
+  local f=$1 helper=$2 src
+  LC_ALL=C command grep -qaE "^[[:space:]]*${helper}\(\)" "$f" && return 0
+  while IFS= read -r src; do
+    src=${src#*\"}
+    src=${src%%\"*}
+    case $src in
+      *test/lib/*.sh)
+        LC_ALL=C command grep -qaE "^[[:space:]]*(function[[:space:]]+)?${helper}\(\)" \
+          "$REPO_ROOT/${src#*"$REPO_ROOT"/}" 2>/dev/null && return 0
+        ;;
+    esac
+  done < <(LC_ALL=C command grep -aE '^[[:space:]]*(source|\.)[[:space:]]+"' "$f" 2>/dev/null)
+  return 1
+}
+
+# Host-side calls live OUTSIDE quoted heredocs only: inside one, `fail` may be
+# a guest function, a report key (`fail.strip_lines_after`), or prose. Strip
+# the heredoc bodies first, then look for bare `log`/`fail` command words; a
+# full-line comment can never be a call, and `check`/`check_min` log through
+# their own path.
+suite_calls_helper() {
+  local f=$1 helper=$2
+  LC_ALL=C command awk -v helper="$helper" '
+    /^[[:space:]]*#/ { next }
+    /<<-?\047[A-Za-z_][A-Za-z0-9_]*\047/ {
+      d = $0; sub(/.*<<-?\047/, "", d); sub(/\047.*/, "", d)
+      if (!grab) { grab = 1; want = d; next }
+    }
+    grab { if ($0 == want) grab = 0; next }
+    $0 ~ "(^|[;|&{(]|[[:space:]])" helper "([[:space:]]|;|$)"
+  ' "$f" | LC_ALL=C command grep -qa .
+}
+
+cat >"$work/ctl-helper-good.sh" <<'EOF'
+#!/usr/bin/env bash
+log() { printf '%s\n' "$*"; }
+fail() { log "FAIL: $*"; exit 1; }
+log "hi"
+[[ -f /etc/hostname ]] || fail "no hostname"
+EOF
+cat >"$work/ctl-helper-bad.sh" <<'EOF'
+#!/usr/bin/env bash
+log "hi"
+[[ -f /etc/hostname ]] || fail "no hostname"
+EOF
+if suite_calls_helper "$work/ctl-helper-good.sh" log &&
+   suite_has_helper "$work/ctl-helper-good.sh" log; then
+  pass "control (negative): a suite that defines and calls log is accepted"
+else
+  fail "control (negative): a suite that defines and calls log is accepted" \
+    "the helper matcher is broken; every verdict below is meaningless"
+fi
+if suite_calls_helper "$work/ctl-helper-bad.sh" fail &&
+   ! suite_has_helper "$work/ctl-helper-bad.sh" fail; then
+  pass "control (positive): a suite calling an undefined fail IS caught"
+else
+  fail "control (positive): a suite calling an undefined fail IS caught" \
+    "the matcher accepts anything and this whole section is decoration"
+fi
+
+for suite in "${suites[@]}"; do
+  name=${suite##*/}
+  for helper in log fail; do
+    if suite_calls_helper "$suite" "$helper"; then
+      if suite_has_helper "$suite" "$helper"; then
+        pass "$name: calls to '$helper' resolve to a definition"
+      else
+        fail "$name: calls to '$helper' resolve to a definition" \
+          "it calls '$helper' outside any guest payload but never defines or sources it -- under 'set -uo pipefail' without '-e' that is a 'command not found' the run sails past"
+      fi
+    else
+      pass "$name: calls no host-side '$helper' (nothing to resolve)"
+    fi
+  done
+done
+
+# A Type=oneshot unit with no ExecStart=/ExecStop=/SuccessAction= is refused
+# by systemd ("Service has no ExecStart=... Refusing."), so the probe never
+# runs and the suite reports an empty run. Match rendered unit bodies only:
+# the scanner reads the same `unit_text="...Type=oneshot...ExecStart=..."`
+# assignment the suite ships to the guest, not stray words in comments.
+unit_runs_something() {
+  local f=$1 block
+  # The assignment spans lines: it opens with `unit_text="[Unit]` and closes
+  # with a line that is just `"`. Match that literally -- the old end pattern
+  # also matched the assignment's own interior lines and cut the block short.
+  block=$(LC_ALL=C command awk '/^unit_text="/,/^"$/ { print }' "$f" 2>/dev/null)
+  [[ -z $block ]] && block=$(cat "$f" 2>/dev/null)
+  LC_ALL=C command grep -qa 'Type=oneshot' <<<"$block" || return 0
+  # ExecStartPre= alone does not run the probe: anchor on the line start so
+  # the longer name cannot satisfy this.
+  LC_ALL=C command grep -qaE '^[[:space:]]*ExecStart=|^[[:space:]]*ExecStop=|^[[:space:]]*SuccessAction=' <<<"$block"
+}
+
+unit_text_good='unit_text="[Unit]
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /root/probe.sh
+"'
+unit_text_bad='unit_text="[Unit]
+[Service]
+Type=oneshot
+ExecStartPre=/usr/bin/cp /boot/probe.sh /root/probe.sh
+"'
+if unit_runs_something <(printf '%s\n' "$unit_text_good"); then
+  pass "control (negative): a oneshot unit with ExecStart= is accepted"
+else
+  fail "control (negative): a oneshot unit with ExecStart= is accepted" \
+    "the unit matcher is broken; every verdict below is meaningless"
+fi
+if ! unit_runs_something <(printf '%s\n' "$unit_text_bad"); then
+  pass "control (positive): a oneshot unit with only ExecStartPre= IS caught"
+else
+  fail "control (positive): a oneshot unit with only ExecStartPre= IS caught" \
+    "the matcher accepts anything and this whole section is decoration"
+fi
+
+for suite in "${suites[@]}"; do
+  name=${suite##*/}
+  if LC_ALL=C command grep -qa 'Type=oneshot' "$suite"; then
+    if unit_runs_something "$suite"; then
+      pass "$name: its Type=oneshot probe unit has ExecStart= (or equivalent)"
+    else
+      fail "$name: its Type=oneshot probe unit has ExecStart= (or equivalent)" \
+        "systemd refuses a oneshot with no ExecStart=/ExecStop=/SuccessAction= -- the probe never runs and the suite can only report an empty run"
+    fi
+  else
+    pass "$name: ships no Type=oneshot probe unit (nothing to check)"
+  fi
+done
+
 
 # ---------------------------------------------------------------------------
 # SECTION D -- the anti-vacuity facts are wired at BOTH ends
