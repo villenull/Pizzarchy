@@ -3567,7 +3567,7 @@ EOF
       fail "could not create $(dirname "$FIRST_BOOT_VERIFY_WANTS")"
     $SUDO ln -sf "$FIRST_BOOT_VERIFY_UNIT" "$FIRST_BOOT_VERIFY_WANTS" ||
       fail "could not enable ${FIRST_BOOT_VERIFY_NAME}"
-    [[ -L $FIRST_BOOT_VERIFY_WANTS ]] ||
+    $SUDO test -L "$FIRST_BOOT_VERIFY_WANTS" ||
       fail "wrote ${FIRST_BOOT_VERIFY_WANTS} but it is not a symlink on re-read, so the verification would never run and nothing would say so"
   else
     $SUDO systemctl enable "$FIRST_BOOT_VERIFY_NAME" >/dev/null 2>&1 ||
@@ -4709,8 +4709,12 @@ stage_mask_wait_online() {
     for unit in "${WAIT_ONLINE_MASK_NM}" "${WAIT_ONLINE_MASK_NETWORKD}"; do
       $SUDO ln -sf /dev/null "/etc/systemd/system/${unit}" ||
         fail "could not mask ${unit} -- the symlink is what the next boot reads"
-      [[ -L /etc/systemd/system/${unit} ]] ||
-        fail "wrote /etc/systemd/system/${unit} but it is not a symlink on re-read, so ${unit} is not masked and nothing would say so"
+      # Read back through $SUDO like the write, never the bare path: a bare
+      # `[[ -L ]]` reads the machine running the stage rather than the target
+      # the write went to. In the unit suite that was the dev box's own masks,
+      # so the check passed wherever the developer had masked these units.
+      [[ $($SUDO readlink -- "/etc/systemd/system/${unit}") == /dev/null ]] ||
+        fail "wrote /etc/systemd/system/${unit} but it does not resolve to /dev/null on re-read, so ${unit} is not masked and nothing would say so"
     done
     log "verified (file content): /etc/systemd/system/${WAIT_ONLINE_MASK_NM} and /etc/systemd/system/${WAIT_ONLINE_MASK_NETWORKD} both resolve to /dev/null"
     defer "whether systemd reports both wait-online units as masked cannot be checked at install time -- 'systemctl is-enabled' needs the target's manager, which has never booted. Both masks ARE installed as /dev/null symlinks and were read back. Confirm on the installed machine with: systemctl is-enabled ${WAIT_ONLINE_MASK_NM} ${WAIT_ONLINE_MASK_NETWORKD}"
@@ -5204,9 +5208,9 @@ EOF
   # project keeps being bitten by. Off a Deck this is left alone: on a running
   # system the next line's claim is already covered by the manager itself.
   if in_chroot; then
-    [[ -L $MAPPER_GLOBAL_WANTS ]] ||
+    $SUDO test -L "$MAPPER_GLOBAL_WANTS" ||
       fail "'systemctl --global enable' exited 0 but ${MAPPER_GLOBAL_WANTS} is not a symlink, so the mapper is installed and NOT enabled -- it would never start, and nothing would say so. That is the silent failure this project exists to remove."
-    log "verified: ${MAPPER_GLOBAL_WANTS} -> $(readlink -- "$MAPPER_GLOBAL_WANTS")"
+    log "verified: ${MAPPER_GLOBAL_WANTS} -> $($SUDO readlink -- "$MAPPER_GLOBAL_WANTS")"
   fi
 
   # 🔴 THE RENDERER CHECK RUNS *AFTER* THE UNIT IS INSTALLED AND ENABLED, AND

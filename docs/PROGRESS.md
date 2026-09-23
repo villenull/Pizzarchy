@@ -4009,6 +4009,18 @@ Also restored: the "stage-power-button is last baked" guard, the fake-sudo `RESO
 (the sandbox invariant was reading an empty file), and a positive control on the bare-gamescope
 guard. `KNOWN-ISSUES.md` #2 is marked fixed; `CLAUDE.md` now carries the 4.0.4 pins.
 
+**What running the suites in CI exposed.** Because the job had died at shellcheck, three
+classes of "passes only on the dev box" had built up. (1) Two Python suites chowned fixtures to
+a hardcoded uid 1000 (the developer's; the runner is 1001). (2) Ubuntu 24.04's AppArmor gives
+unprivileged user namespaces no capabilities (the restriction is now lifted on the runner, not
+skipped). (3) 🔴 **Three chroot-branch read-backs in `deck-session.sh` read the bare host path
+instead of going through `$SUDO`**: `stage-mask-wait-online`, the first-boot verify `.wants`
+link and the mapper's global `.wants` link. In a real arch-chroot that path *is* the target, so
+installs were right, but in the unit suite the check read **the dev box's own masks** (both
+wait-online units are masked there since 2026-09-16), so it passed without testing anything.
+All three now read back through `$SUDO`. A mutation (the mask pointed at `/dev/zero`) now fails
+on the dev box too.
+
 **Verified:** shellcheck 0.11.0 clean across the tree (was 19 findings); every unit suite
 passes locally; each new regression test was shown to fail on the pre-fix code. **Not
 verified on hardware:** the ESP timeout write, the mapper rebind path and the refresh hook
