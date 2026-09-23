@@ -137,6 +137,13 @@ jobs:
           # notes-and-skips otherwise, which would leave the Lua gate
           # unexercised in CI; same rule here.
           sudo apt-get install -y parted dosfstools mtools btrfs-progs jq openssl qemu-utils python3-evdev libarchive-tools imagemagick desktop-file-utils lua5.4
+          # Ubuntu 24.04 lets unprivileged processes create a user namespace
+          # but, by AppArmor policy, gives it no capabilities, so the namespace
+          # test in test/unit/test-deck-steam-desktop.py dies writing
+          # /proc/self/setgroups. The Deck (Arch) has no such restriction, and
+          # that suite's real assertion is the point: lift it here rather
+          # than teach the test to skip.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       # ⚠️ shellcheck is PINNED, and apt's is deliberately not used.
       #

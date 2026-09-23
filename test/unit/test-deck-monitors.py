@@ -309,7 +309,7 @@ def make_target(
     *,
     username: str = "deck",
     home: str = "/home/deck",
-    uid: int = 1000,
+    uid: int = TEST_UID,
     seed: str | None = SHIPPED,
     skel: str | None = SHIPPED,
     user_file: str | None = SHIPPED,
