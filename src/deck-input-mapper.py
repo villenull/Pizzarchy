@@ -2042,6 +2042,51 @@ class Mapper:
         self.pad_click_down = False
         return [(POINTER_CLICK_KEY, 0)]
 
+    def release_held_keys(self, now: float) -> list[tuple[int, int]]:
+        """Hand back every held direction and chord key, and forget the holds.
+
+        🔴 FOR THE RELEASES LOST IN THE RE-ENUMERATION GAP: a pad that vanishes
+        mid-hold never sends the releases, and evdev reports only changes, so
+        the replacement pad never mentions those controls again. Left in place,
+        a held direction keeps auto-repeating every REPEAT_INTERVAL for the rest
+        of the session (its deadline sits in `next_deadline`, so select() keeps
+        waking for it), and a held STEAM turns every face button into a chord
+        until the user happens to tap STEAM again. main() calls this on the
+        ENODEV path, beside `release_pointer_click` / `stop_brightness` /
+        `stop_workspace`, and emits what comes back before it re-binds.
+
+        Reuses `_release_stick_axis` for the brightness axis -- the same hazard
+        the STEAM press answers -- and transitions every other hat axis to
+        neutral the same way, so no `active_key` survives with a live repeat
+        deadline. A STEAM hold with no release in sight is not a tap, so
+        `mode_held` goes without queueing the menu. Idempotent: with nothing
+        held this emits nothing.
+        """
+        out: list[tuple[int, int]] = []
+        # The d-pad's held set first: it feeds `_effective_direction`, so the
+        # transitions below must not see a direction whose button is gone.
+        self.dpad_held.clear()
+        # 🔴 THE SAME HAZARD THE STEAM PRESS ANSWERS, on the same axis. Push
+        # the stick up, press STEAM, lose the node: without this KEY_UP repeats
+        # for ever. See `_release_stick_axis`.
+        out.extend(self._release_stick_axis(now))
+        for hat_axis, state in self.hats.items():
+            if hat_axis == STICK_AXES[BRIGHTNESS_STICK_AXIS]:
+                continue
+            state.stick_dir = 0
+            out.extend(self._hat_transition(hat_axis, 0, now))
+        # Face-button presses that really went down before STEAM was grabbed --
+        # the same pairing `chord_keys_down` answers inside `translate`.
+        for code in sorted(self.chord_keys_down):
+            out.append((BUTTON_MAP[code], 0))
+        self.chord_keys_down.clear()
+        # `mode_held` as well as `mode_chorded`: a hold whose release will never
+        # arrive (the node is gone) is not a tap the user made -- the same rule
+        # the STEAM release in `translate` applies.
+        self.mode_held = False
+        self.mode_chorded = False
+        return out
+
     def _consume_osk_request(
             self, strokes: list[tuple[int, int]]) -> list[tuple[int, int]]:
         """Turn a renderer-owned OSK request into a queued action, once.
@@ -4345,6 +4390,28 @@ STEAM_RESCAN_INTERVAL = 5.0
 NO_PAD_GRACE_SECONDS = 30.0
 
 
+def _try_open(opener, path):
+    """Open one enumerated node, or None if it vanished while being listed.
+
+    `list_devices()` is a glob over /dev/input/event*, so a node can disappear
+    between the listing and the open -- hid-steam unregistering the pad the
+    moment Steam opens is exactly that race, and this wait loop exists for it.
+    A vanished node is therefore the expected case, skipped loudly; anything
+    else (PermissionError and the rest) keeps the existing loud behaviour.
+    """
+    try:
+        return opener(path)
+    except FileNotFoundError as exc:
+        print(f"deck-input-mapper: {path} vanished during enumeration ({exc}); "
+              "skipping it", file=sys.stderr, flush=True)
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ENODEV:
+            print(f"deck-input-mapper: {path} vanished during enumeration ({exc}); "
+                  "skipping it", file=sys.stderr, flush=True)
+            return None
+        raise
+
 def pick_device(selector: str | None, lizard=None, enumerate_devices=None,
                 sleep=time.sleep, clock=time.monotonic) -> InputDevice:
     """Find the pad, WAITING (not exiting) while Steam owns the controller.
@@ -4384,7 +4451,8 @@ def pick_device(selector: str | None, lizard=None, enumerate_devices=None,
     lizard = set_lizard_mode if lizard is None else lizard
     if enumerate_devices is None:
         def enumerate_devices():
-            return [InputDevice(p) for p in list_devices()]
+            opened = [_try_open(InputDevice, p) for p in list_devices()]
+            return [dev for dev in opened if dev is not None]
 
     if selector and selector.startswith("/dev/"):
         # An explicitly named node. The caller asserted this is the pad, so
@@ -4555,8 +4623,13 @@ def main() -> None:
                  "navigation only, or name a backend (dbus, tty, layer)")
 
     if args.list:
+        # The same race as pick_device's enumeration: a node listed a moment
+        # ago may already be gone. Skip only that, loudly; anything else (a
+        # PermissionError, say) keeps the existing loud behaviour.
         for path in list_devices():
-            dev = InputDevice(path)
+            dev = _try_open(InputDevice, path)
+            if dev is None:
+                continue
             tag = " [gamepad]" if looks_like_gamepad(dev) else ""
             print(f"{path}  {dev.name}{tag}")
         return
@@ -4746,6 +4819,14 @@ def main() -> None:
             print("deck-input-mapper: --osk-backend=tty needs both OSK modules; "
                   "the keyboard is DISABLED, navigation still works",
                   file=sys.stderr, flush=True)
+            # 🔴 AND NOTHING IS DRAWN HERE, exactly as the layer branch clears
+            # `osk_drawn_here` when ITS modules are missing. Without this the
+            # batch tail reads `mapper.osk.closed` on a `mapper.osk` that was
+            # never created, and the first pad batch kills the only input path
+            # -- the crash the "DISABLED, navigation still works" line above
+            # just promised would not happen. Degraded means degraded: toggles
+            # stay no-ops, the bind reports NOT ready, navigation keeps working.
+            osk_drawn_here = False
             osk_tty = None
         else:
             try:
@@ -4754,6 +4835,7 @@ def main() -> None:
                 print(f"deck-input-mapper: cannot draw on {args.osk_tty} ({exc}); "
                       "the keyboard is DISABLED, navigation still works",
                       file=sys.stderr, flush=True)
+                osk_drawn_here = False
                 osk_tty = None
         if osk_tty is not None:
             pad_abs = dict(pad.capabilities().get(e.EV_ABS, []))
@@ -5436,6 +5518,17 @@ def main() -> None:
                     # replacement, swallowing the user's first flick after the
                     # recovery. See `stop_workspace`.
                     mapper.stop_workspace()
+                    # 🔴 AND EVERY HELD DIRECTION AND CHORD KEY, for the same
+                    # reason and with the session-long ending: a release lost in
+                    # the re-enumeration gap leaves an arrow key auto-repeating
+                    # every REPEAT_INTERVAL for ever (its deadline sits in
+                    # `next_deadline`, so select() keeps waking for it) or every
+                    # face button silently acting as a chord until the user taps
+                    # STEAM. Emitted here, beside `release_pointer_click`, so no
+                    # key stays down on uinput across the rebind. See
+                    # `release_held_keys`.
+                    for key, value in mapper.release_held_keys(now):
+                        emit(key, value)
                     # 🔴 AND HAND THE FIRMWARE BACK, BEFORE ANYTHING SLOW.
                     # (docs/findings/P39 Defect 2, fix point 3.) The node
                     # vanishing IS the "user opened Steam" path, and from this

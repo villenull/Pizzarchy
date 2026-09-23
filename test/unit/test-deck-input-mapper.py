@@ -6750,6 +6750,206 @@ check("a hung sudo is cut off at the timeout rather than freezing the mapper",
       (_ok, _time.monotonic() - _started < 3.0), (False, True))
 m._lizard_last_said = None
 
+# --- InputReview findings 1, 2 and 4: the degrade and rebind gaps ------------
+#
+# Each block below fails on the pre-fix code and passes after. All three are
+# behavioural -- they drive Mapper emissions or a real main() run, never the
+# source text.
+
+
+class ScriptPad(LivePad):
+    """A LivePad that replays scripted pad batches, then ends the run.
+
+    LivePad.read() raises KeyboardInterrupt at once, so the suite never reached
+    the batch tail -- which is why the degraded-tty crash went unseen. Each
+    entry here is one pad.read() batch; when the script runs out the run ends
+    the same way LivePad's does.
+    """
+
+    def __init__(self, batches):
+        super().__init__()
+        self._batches = list(batches)
+
+    def read(self):
+        if not self._batches:
+            raise KeyboardInterrupt
+        return list(self._batches.pop(0))
+
+
+class _Ev:
+    """The three fields main()'s loop reads off an evdev event."""
+
+    def __init__(self, type, code, value):
+        self.type, self.code, self.value = type, code, value
+
+
+def run_degraded_main(batches):
+    """A real main() run against an UNOPENABLE tty. Returns (exc, stderr, events).
+
+    argv is the installer's own -- --osk-backend=tty --osk-start-shown, exactly
+    as deck-form.sh spawns it -- with --osk-tty at a directory, the cheapest
+    honest stand-in for every way the tty keyboard fails to come up. `exc` is
+    whatever escaped main(), or None; `events` is what would have reached the
+    kernel.
+    """
+    pad = ScriptPad(batches)
+    pad.wake()  # one byte is enough: the fake read never consumes it, so the
+                # fd stays ready and every pass reaches read() again
+    box = {}
+
+    class _Rec(FakeUInput):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.events = []
+            box["ui"] = self
+
+        def write(self, type, code, value):
+            self.events.append((code, value))
+
+        def syn(self):
+            pass
+
+    saved = (sys.argv, m.pick_device, m.UInput, m.set_lizard_mode)
+    sys.argv = ["deck-input-mapper",
+                f"--osk-tty={REPO_ROOT / 'test' / 'unit'}",
+                "--osk-backend=tty", "--osk-start-shown"]
+    # ⚠️ `**kwargs`: main() hands pick_device its lizard invoker now.
+    m.pick_device = lambda selector, **kwargs: pad
+    m.UInput = _Rec
+    # 🔴 STUBBED, AND NOT OPTIONALLY -- see run_main above: without this the
+    # suite shells out to sudo on whatever machine it runs on.
+    m.set_lizard_mode = lambda want, **kwargs: True
+    err, exc = io.StringIO(), None
+    try:
+        with contextlib.redirect_stderr(err):
+            try:
+                m.main()
+            except BaseException as caught:  # noqa: BLE001 -- the crash IS the assertion
+                exc = caught
+    finally:
+        sys.argv, m.pick_device, m.UInput, m.set_lizard_mode = saved
+        pad.close()
+    return exc, err.getvalue(), box.get("ui") and box["ui"].events
+
+
+_deg_nav = [_Ev(e.EV_KEY, e.BTN_SOUTH, 1), _Ev(e.EV_KEY, e.BTN_SOUTH, 0)]
+_deg_toggle = [_Ev(e.EV_KEY, e.BTN_MODE, 1), _Ev(e.EV_KEY, e.BTN_NORTH, 1),
+               _Ev(e.EV_KEY, e.BTN_NORTH, 0), _Ev(e.EV_KEY, e.BTN_MODE, 0)]
+_deg_exc, _deg_err, _deg_events = run_degraded_main([_deg_nav, _deg_toggle, _deg_nav])
+check("a tty backend with an unopenable tty survives pad batches (no crash)",
+      _deg_exc, None)
+check("...and navigation keys still reach uinput",
+      (_deg_events is not None and (e.KEY_ENTER, 1) in _deg_events
+       and (e.KEY_ENTER, 0) in _deg_events), True)
+check("...without ever reporting ready",
+      (m.BOUND_MARKER in _deg_err, "NOT reporting ready" in _deg_err), (False, True))
+
+# --- finding 2: a release lost in the re-enumeration gap must not stick ------
+_rb = fresh()
+_t0 = 200.0
+check("d-pad UP press holds KEY_UP",
+      _rb.translate(e.EV_KEY, e.BTN_DPAD_UP, 1, _t0), [(e.KEY_UP, 1)])
+check("X press holds Backspace",
+      _rb.translate(e.EV_KEY, e.BTN_NORTH, 1, _t0), [(e.KEY_BACKSPACE, 1)])
+check("STEAM press parks the hold without emitting",
+      _rb.translate(e.EV_KEY, e.BTN_MODE, 1, _t0), [])
+# Guard, not wiring: without the method nothing below can run, and an uncaught
+# AttributeError here would abort the suite before the enumeration test below.
+check("Mapper releases held keys on rebind (the ENODEV gap)",
+      hasattr(_rb, "release_held_keys"), True)
+if hasattr(_rb, "release_held_keys"):
+    _handed = _rb.release_held_keys(_t0 + 1.0)
+    check("the rebind hands back every held synthetic key",
+          sorted(_handed), sorted([(e.KEY_UP, 0), (e.KEY_BACKSPACE, 0)]))
+    check("...and nothing auto-repeats afterwards",
+          _rb.due_repeats(_t0 + 10.0), [])
+    check("...with no deadline left arming select()", _rb.next_deadline(), None)
+    check("...and the release is idempotent",
+          _rb.release_held_keys(_t0 + 11.0), [])
+    check("a STEAM release never seen is not a tap",
+          (_rb.translate(e.EV_KEY, e.BTN_MODE, 0, _t0 + 12.0),
+           list(_rb.pending_actions)), ([], []))
+    check("a fresh d-pad press after the rebind starts clean",
+          _rb.translate(e.EV_KEY, e.BTN_DPAD_DOWN, 1, _t0 + 13.0), [(e.KEY_DOWN, 1)])
+    check("face buttons act unchorded after the rebind",
+          _rb.translate(e.EV_KEY, e.BTN_SOUTH, 1, _t0 + 14.0), [(e.KEY_ENTER, 1)])
+
+# --- finding 4: a node vanishing mid-enumeration must not kill the wait ------
+import errno as _pick_errno  # noqa: E402 -- block-local, like the others above
+
+
+def _vanishing(kind):
+    """An InputDevice stand-in whose first node is already gone."""
+    def opener(path):
+        if path == "/dev/input/event9":
+            if kind == "gone":
+                raise FileNotFoundError(_pick_errno.ENOENT, "No such file", path)
+            raise OSError(_pick_errno.ENODEV, "No such device", path)
+        return FakePad("Steam Deck", path=path)
+    return opener
+
+
+_c_saved = (m.list_devices, m.InputDevice, sys.argv)
+try:
+    for _c_kind in ("gone", "enodev"):
+        m.list_devices = lambda: ["/dev/input/event9", "/dev/input/event10"]
+        m.InputDevice = _vanishing(_c_kind)
+        _c_lizard = []
+        _c_dev = None
+        try:
+            _c_dev = m.pick_device(
+                None, lizard=lambda w: _c_lizard.append(w) or True,
+                sleep=lambda s: (_ for _ in ()).throw(_Stop()),
+                clock=lambda: 0.0)
+        except _Stop:
+            pass
+        except BaseException as _c_caught:  # noqa: BLE001 -- pre-fix this IS the crash
+            _c_dev = _c_caught
+        check(f"enumeration skips a vanished node ({_c_kind}) and still finds "
+              "the pad",
+              getattr(_c_dev, "path", None)
+              if not isinstance(_c_dev, BaseException)
+              else f"raised {type(_c_dev).__name__}: {_c_dev}",
+              "/dev/input/event10")
+        check("...and the bind still disarms the fallback", _c_lizard, ["off"])
+    m.list_devices = lambda: ["/dev/input/event9"]
+
+    def _refusing(path):
+        raise PermissionError(_pick_errno.EACCES, "Permission denied", path)
+
+    m.InputDevice = _refusing
+    check("a node that refuses permission still fails LOUDLY, never skipped",
+          isinstance(raised(lambda: m.pick_device(
+              None, lizard=lambda w: True,
+              sleep=lambda s: (_ for _ in ()).throw(_Stop()),
+              clock=lambda: 0.0)), PermissionError), True)
+    # The --list path opens the same nodes, so it needs the same tolerance.
+    # main() reads the module-global list_devices/InputDevice, so drive a FRESH
+    # module copy here -- the same loader the suite header uses -- and leave
+    # this suite's own module object (and its careful pick_device patching)
+    # untouched. Pre-fix this raises FileNotFoundError out of --list.
+    import importlib.util as _c_il  # noqa: E402 -- block-local, like the others
+    _c_spec = _c_il.spec_from_file_location(
+        "probe_list_mapper", REPO_ROOT / "src" / "deck-input-mapper.py")
+    _c_mod = _c_il.module_from_spec(_c_spec)
+    sys.modules["probe_list_mapper"] = _c_mod
+    _c_spec.loader.exec_module(_c_mod)
+    _c_mod.list_devices = lambda: ["/dev/input/event9", "/dev/input/event10"]
+    _c_mod.InputDevice = _vanishing("gone")
+    _c_saved_argv = sys.argv
+    sys.argv = ["deck-input-mapper", "--list"]
+    _c_out, _c_err, _c_exc = io.StringIO(), io.StringIO(), None
+    with contextlib.redirect_stdout(_c_out), contextlib.redirect_stderr(_c_err):
+        try:
+            _c_mod.main()
+        except BaseException as _c_caught:  # noqa: BLE001 -- the crash IS the assertion
+            _c_exc = _c_caught
+    sys.argv = _c_saved_argv
+    check("--list skips a vanished node instead of crashing", _c_exc, None)
+    check("...and still lists the pad that survived",
+          "/dev/input/event10" in _c_out.getvalue(), True)
+finally:
+    m.list_devices, m.InputDevice, sys.argv = _c_saved
 
 print(f"\n{'PASS' if FAILURES == 0 else 'FAILED'} — {FAILURES} failure(s)")
 sys.exit(1 if FAILURES else 0)

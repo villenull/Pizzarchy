@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import os
 import pathlib
 import sys
 
@@ -570,6 +571,70 @@ check("...and nothing at all when nothing is complete",
       wl.split_lines(b"pre"), ([], b"pre"))
 check("...and a corrupt byte costs one line, not the reader",
       wl.split_lines(b"pre\xffss 1 2\n")[0][0].startswith("pre"), True)
+
+# --- the stdin pump: one wakeup drains the whole burst -----------------------
+#
+# `on_stdin` used to call `sys.stdin.readline()` on the very fd its GLib watch
+# fires on. `sys.stdin` is block-buffered, so one `readline()` swallowed every
+# pending line into Python's buffer and returned only the first; the pipe was
+# then empty, the level-triggered watch never fired again, and the overlay kept
+# drawing the FIRST frame of a burst until some unrelated write arrived. The
+# mapper writes one state line per pad batch (up to 250 Hz), so multi-line
+# bursts are the norm, not a corner. `pump_stdin` reads the fd unbuffered and
+# applies every complete line in order -- as the mapper's own `AutoShow.pump`
+# and `osk_layer_pump` already do -- keeps the unterminated tail for the next
+# wakeup, and quits on EOF exactly as the old code did.
+_LINE1 = "state letters off 0.1000 0.1000 0.1000 0.1000 off up up\n"
+_LINE2 = "state letters once 0.9000 0.2000 0.3000 0.4000 off down up\n"
+_LINE3 = "state letters locked 0.7000 0.6000 0.5000 0.4000 on up down\n"
+_r, _w = os.pipe()
+os.write(_w, (_LINE1 + _LINE2).encode() + _LINE3.encode()[:20])
+_pkb, _pcur = osk.OnScreenKeyboard(), osk.Cursors()
+_ppending, _pdrew, _pdone = wl.pump_stdin(_r, b"", _pkb, _pcur)
+check("a burst applies through the LAST complete line, not the first",
+      (_pkb.shift, _pcur.position("left"), _pcur.position("right"),
+       _pkb.touched),
+      ("once", (0.9, 0.2), (0.3, 0.4), {"left": True, "right": False}))
+check("...and reports a redraw with no quit",
+      (_pdrew, _pdone), (True, False))
+check("...holding the split tail for the next wakeup",
+      _ppending, _LINE3.encode()[:20])
+os.write(_w, _LINE3.encode()[20:])
+_ppending, _pdrew, _pdone = wl.pump_stdin(_r, _ppending, _pkb, _pcur)
+check("...and the completed partial line applies on the next dispatch",
+      (_pkb.shift, _pkb.caps, _pcur.position("left"),
+       _pcur.position("right"), _pkb.touched, _ppending, _pdrew, _pdone),
+      ("locked", True, (0.7, 0.6), (0.5, 0.4),
+       {"left": False, "right": True}, b"", True, False))
+os.close(_w)   # EOF: the mapper closed the pipe, the overlay's exit signal
+_ppending, _pdrew, _pdone = wl.pump_stdin(_r, _ppending, _pkb, _pcur)
+check("EOF quits with no redraw, as the old code did",
+      (_pdrew, _pdone), (False, True))
+os.close(_r)
+_er, _ew = os.pipe()
+os.set_blocking(_er, False)
+_epending, _edrew, _edone = wl.pump_stdin(
+    _er, b"", osk.OnScreenKeyboard(), osk.Cursors())
+check("a spurious wakeup on an empty non-blocking fd is neither a draw nor "
+      "a quit", (_epending, _edrew, _edone), (b"", False, False))
+os.close(_er)
+os.close(_ew)
+_qr, _qw = os.pipe()
+os.write(_qw, (_LINE2 + "quit\n").encode())
+os.close(_qw)
+_qkb, _qcur = osk.OnScreenKeyboard(), osk.Cursors()
+_, _qdrew, _qdone = wl.pump_stdin(_qr, b"", _qkb, _qcur)
+check("a quit anywhere in the burst still quits, after applying what came "
+      "before it", (_qkb.shift, _qdrew, _qdone), ("once", True, True))
+os.close(_qr)
+_br, _bw = os.pipe()
+os.write(_bw, ("bogus\n" + _LINE2).encode())
+os.close(_bw)
+_bkb, _bcur = osk.OnScreenKeyboard(), osk.Cursors()
+_, _bdrew, _bdone = wl.pump_stdin(_br, b"", _bkb, _bcur)
+check("a malformed line in a burst costs that line, not the burst",
+      (_bkb.shift, _bdrew, _bdone), ("once", True, False))
+os.close(_br)
 
 # --- the GTK wiring, which no unit test can enter ----------------------------
 #

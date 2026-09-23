@@ -378,6 +378,61 @@ def split_lines(buffer: bytes) -> tuple[list[str], bytes]:
     return ([chunk.decode("utf-8", "replace") for chunk in text], rest)
 
 
+def pump_stdin(fd: int, pending: bytes, keyboard: osk.OnScreenKeyboard,
+               cursors: osk.Cursors) -> tuple[bytes, bool, bool]:
+    """Drain one stdin wakeup: every complete state line, in order.
+
+    Returns `(pending, drew, done)`: the new unterminated remainder for the
+    next wakeup, whether a state line applied (the caller redraws), and
+    whether the peer is gone (the caller quits).
+
+    ⚠️ UNBUFFERED, ON PURPOSE. This used to be `sys.stdin.readline()` under a
+    `GLib.unix_fd_add` watch on the same fd. `sys.stdin` is a block-buffered
+    `TextIOWrapper`, so one `readline()` pulled every pending line into
+    Python's buffer and returned only the first; the fd watch is
+    level-triggered and the kernel pipe was then empty, so the stranded lines
+    never dispatched and the overlay kept drawing a stale frame -- the last
+    cursor position of a burst, an armed-modifier highlight, a pad-touch badge
+    -- until the next unrelated write. One `os.read` per wakeup leaves nothing
+    in user space: whatever is still in the kernel pipe re-fires the watch.
+    Both line-reader pumps on the mapper side do it this way (`AutoShow.pump`,
+    `osk_layer_pump`).
+
+    EVERY line applies, in order, rather than last-wins like `AutoShow.pump`:
+    state lines are whole snapshots, so that ends exactly on the last one, and
+    a `quit` anywhere in the burst still quits. A line that does not parse
+    costs that line, never the reader.
+    """
+    try:
+        chunk = os.read(fd, 4096)
+    except (BlockingIOError, InterruptedError):
+        # A spurious wakeup on a non-blocking fd, or a signal between the poll
+        # and the read: nothing arrived, and the watch fires again when
+        # something does. Not an error, and never a quit.
+        return (pending, False, False)
+    except OSError as exc:
+        # The pipe itself failed, not merely empty. Loud -- stderr is this
+        # process's human channel, stdout carries press lines -- and final:
+        # the caller quits, the mapper sees the EOF and falls back.
+        print(f"deck-osk-wayland: stdin unreadable ({exc}); quitting",
+              file=sys.stderr, flush=True)
+        return (pending, False, True)
+    if not chunk:
+        # EOF: the mapper closed the pipe -- `osk_layer_stop` closes stdin to
+        # signal exactly this. We are done.
+        return (pending, False, True)
+    lines, pending = split_lines(pending + chunk)
+    drew = False
+    for line in lines:
+        if line.strip() == "quit":
+            return (pending, drew, True)
+        state = osk.parse_state_line(line)
+        if state is not None:
+            osk.apply_state(keyboard, cursors, state)
+            drew = True
+    return (pending, drew, False)
+
+
 # --- appearance ---------------------------------------------------------------
 #
 # ⛔ NOT VALVE'S ARTWORK. Every value below is a NUMBER READ OFF A SCREENSHOT
@@ -950,18 +1005,21 @@ def main() -> int:
             area.queue_draw()
             return
 
-        def on_stdin(_fd, condition):
-            line = sys.stdin.readline()
-            if not line:              # the mapper closed the pipe: we are done
-                app.quit()
-                return GLib.SOURCE_REMOVE
-            if line.strip() == "quit":
-                app.quit()
-                return GLib.SOURCE_REMOVE
-            state = osk.parse_state_line(line)
-            if state is not None:
-                osk.apply_state(keyboard, cursors, state)
+        # The mapper writes one state line per pad batch, so several are
+        # routinely pending in one wakeup. `pump_stdin` drains them all with
+        # an unbuffered read; the remainder it hands back is fed to the next
+        # wakeup unchanged.
+        stdin_pending = b""
+
+        def on_stdin(fd, _condition):
+            nonlocal stdin_pending
+            stdin_pending, drew, done = pump_stdin(fd, stdin_pending,
+                                                   keyboard, cursors)
+            if drew:
                 area.queue_draw()
+            if done:
+                app.quit()
+                return GLib.SOURCE_REMOVE
             return GLib.SOURCE_CONTINUE
 
         GLib.unix_fd_add_full(GLib.PRIORITY_DEFAULT, sys.stdin.fileno(),
