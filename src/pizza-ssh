@@ -921,8 +921,16 @@ cmd_allow() {
   # A public key is one line starting with a known type. Anything else is a
   # proxy error page, an HTML directory listing, or a typo -- and appending
   # it would silently break nothing while installing nothing.
-  local fetched
-  fetched=$(grep -E '^(ssh-(ed25519|rsa|ecdsa|dss)|ecdsa-sha2-nistp[0-9]+|sk-ssh-ed25519)[[:space:]]+[A-Za-z0-9+/=]+' -o "$tmp" | head -1)
+  # The guarded grep keeps `set -e`/`pipefail` from aborting on the no-match
+  # exit before the diagnostic and cleanup below can run; the exit captured
+  # separately still tells "no key" (grep 1) from a read error (grep 2),
+  # which stays loud instead of reading as "no key found".
+  local fetched grep_rc=0
+  grep -E '^(ssh-(ed25519|rsa|ecdsa|dss)|ecdsa-sha2-nistp[0-9]+|sk-ssh-ed25519)[[:space:]]+[A-Za-z0-9+/=]+' -o "$tmp" >"$tmp.key" || grep_rc=$?
+  (( grep_rc == 0 || grep_rc == 1 )) || { rm -f -- "$tmp" "$tmp.key"; die "could not search $tmp for a public key (grep exited $grep_rc)" \
+    "The download may be unreadable; try fetching the URL again."; }
+  fetched=$(head -1 -- "$tmp.key")
+  rm -f -- "$tmp.key"
   if [[ -z $fetched ]]; then
     rm -f -- "$tmp"
     die "fetched $url but found no public key in it" \
@@ -936,34 +944,54 @@ cmd_allow() {
     printf '%s\n' "$fetched" >>"$akfile" || { rm -f -- "$tmp"; die "could not append to $akfile"; }
     rm -f -- "$tmp"
   fi
-  chown -R "$owner": "$sshdir" 2>/dev/null || true
+  # Running under sudo must not leave root-owned files in the user's .ssh,
+  # and a chown that reports success but changes nothing must not pass
+  # either: read the ownership back and fail loudly if it is wrong. No chown
+  # is needed when nothing runs as root -- the invoking user already owns
+  # everything just created -- so keep that path working by skipping it.
+  if (( EUID == 0 )) || [[ -n ${SUDO_USER:-} ]]; then
+    if ! chown -R -- "$owner": "$sshdir"; then
+      rm -f -- "$tmp"
+      die "could not give $sshdir back to $owner" \
+        "The key was appended, but $sshdir is not owned by $owner." \
+        "Fix it with:  sudo chown -R $owner: $sshdir"
+    fi
+    local actual
+    actual=$(stat -c %U -- "$sshdir" 2>/dev/null) || actual=
+    if [[ $actual != "$owner" ]]; then
+      rm -f -- "$tmp"
+      die "could not give $sshdir back to $owner" \
+        "chown reported success but $sshdir is owned by '${actual:-unknown}'." \
+        "Fix it with:  sudo chown -R $owner: $sshdir"
+    fi
+  fi
   local count
   count=$(authorized_key_count "$akfile")
   say "key installed: ${count} key(s) in ${akfile}."
   say "Connect from the other machine with:  ssh ${user}@$(detect_link >/dev/null 2>&1 && printf '%s' "$LINK_ADDR" || printf '<this device>')"
 }
 
- usage() {
-   cat <<'EOF'
- pizza ssh — turn SSH on for support, restricted to this network only.
- 
-   pizza ssh          turn it on: enable sshd, open the port to this subnet
-                      only, and print exactly how to connect
+usage() {
+  cat <<'EOF'
+pizza ssh — turn SSH on for support, restricted to this network only.
+
+  pizza ssh          turn it on: enable sshd, open the port to this subnet
+                     only, and print exactly how to connect
   pizza ssh allow <url>
                      fetch a public key over the LAN and install it, so
                      nobody types a key string on this keyboard
-   pizza ssh off      turn it off: stop sshd, disable it, remove the rule
-   pizza ssh status   is it on, what address, is a key installed, is the port
-                      open — four distinct answers, never conflated
- 
- SSH is OFF by default and is never enabled by the installer. Turn it on
- deliberately when you need to get a file off this device, and turn it off
- again afterwards.
+  pizza ssh off      turn it off: stop sshd, disable it, remove the rule
+  pizza ssh status   is it on, what address, is a key installed, is the port
+                     open — four distinct answers, never conflated
+
+SSH is OFF by default and is never enabled by the installer. Turn it on
+deliberately when you need to get a file off this device, and turn it off
+again afterwards.
 EOF
- }
- 
- main() {
-   local cmd=${1:-on}
+}
+
+main() {
+  local cmd=${1:-on}
   if [[ $cmd == allow ]]; then
     [[ $# == 2 ]] || { printf 'pizza ssh: usage: pizza ssh allow <url>\n\n' >&2; usage >&2; exit "$EX_USAGE"; }
     cmd_allow "$2"

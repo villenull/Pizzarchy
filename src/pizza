@@ -110,7 +110,7 @@ main() {
   local target
   target=$(resolve_subcommand "$name") || {
     printf '[%s] ERROR: no subcommand '"'"'%s'"'"' -- looked for an executable named %s-%s ' "$PROG" "$name" "$PROG" "$name" >&2
-    printf 'beside %s and on $PATH, and found neither.\n' "$(script_dir)/${PROG}" >&2
+    printf "beside %s and on \$PATH, and found neither.\n" "$(script_dir)/${PROG}" >&2
     printf '\n' >&2
     usage >&2
     exit 2

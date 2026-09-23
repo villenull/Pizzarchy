@@ -420,8 +420,13 @@ noninteractive=$(PATH="$stub_bin:$PATH" bash --noprofile --norc -c "$greeting_bl
 pass "the installed greeting block prints nothing at all in a non-interactive shell"
 
 # The positive direction, so "silent" is not passing because the block is inert.
+# NOTE: the installed greeting calls bare `fastfetch`, which resolves its
+# config from $XDG_CONFIG_HOME -- the same variable the sandbox relocates.
+# The child shell must inherit the sandbox value or the stub falls back to
+# the HOST config (or its builtin logo on a machine with none), and the
+# assertion would depend on host state instead of the installed bytes.
 printf '%s\n' "$greeting_block" >"$work/greeting.bash"
-interactive=$(PATH="$stub_bin:$PATH" bash --noprofile --norc -i \
+interactive=$(PATH="$stub_bin:$PATH" XDG_CONFIG_HOME="$work/home/cfg" bash --noprofile --norc -i \
   -c "source '$work/greeting.bash'" </dev/null 2>&1 || true)
 grep -qF 'MODULES' <<<"$interactive" ||
   fail_test "the greeting block DOES run fastfetch in an interactive shell" \

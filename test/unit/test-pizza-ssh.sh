@@ -67,7 +67,7 @@ base_bin="$work/base-bin"
 mkdir -p "$base_bin"
 # bash and env are here because the stubs are themselves `#!/usr/bin/env bash`
 # scripts: with a sanitised PATH they have to be able to find their own shell.
-for util in bash env awk sed grep sort cut cat getent head tr mv rm mkdir chmod mktemp curl chown touch; do
+for util in bash env awk sed grep sort cut cat getent head tr mv rm mkdir chmod mktemp curl chown touch stat; do
   real=$(command -v "$util") || fail "the host provides $util (needed to run the script under test)"
   ln -sf "$real" "$base_bin/$util"
 done
@@ -712,7 +712,7 @@ pass "'allow' fetches a key over the LAN and installs it"
 
 rc=0; out=$(run_in "$d" allow http://192.168.100.14:8000/deck-key.pub 2>&1) || rc=$?
 (( rc == 0 )) || fail "'allow' twice succeeds (idempotent)" "rc=$rc: $out"
-n=$(grep -c 'IFakekeyfortestsonly0123456789' "$d/home/tester/.ssh/authorized_keys")
+n=$(grep -c 'IFakekeyfortestsonly0123456789' "$d/home/tester/.ssh/authorized_keys" || true)
 (( n == 1 )) || fail "'allow' twice installs the key exactly once" "found $n copies"
 pass "'allow' is idempotent: the same key twice installs once"
 
@@ -721,8 +721,37 @@ stub_curl "$d"
 printf '<html><body>directory listing</body></html>\n' >"$d/state/allow-keys/index.html"
 rc=0; out=$(run_in "$d" allow http://192.168.100.14:8000/index.html 2>&1) || rc=$?
 (( rc != 0 )) || fail "'allow' refuses a non-key response" "rc=$rc"
+grep -qi 'found no public key' <<<"$out" ||
+  fail "'allow' says it found no public key (the silent abort also exits non-zero)" "$out"
+shopt -s nullglob
+leftover=( "$d/home/tester/.ssh"/.allow.* )
+shopt -u nullglob
+(( ${#leftover[@]} == 0 )) ||
+  fail "'allow' cleans up its staged download when the page holds no key" "${leftover[*]}"
 pass "'allow' refuses a fetched page with no public key in it (proxy page, typo)"
 
+# A chown that fails must be loud, not printed over with 'key installed'.
+# Faked with a PATH shim (the script reaches chown through PATH, and the
+# scenario PATH starts with $dir/bin), while SUDO_USER pretends the run came
+# through sudo so the chown path is taken. stat still reads back the real
+# (wrong-for-the-shim) owner, so either the loud die or the ownership
+# readback must fire -- what must not happen is a success report.
+d=$(full_scenario allow-chown-fails)
+stub_curl "$d"
+printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakekeyfortestsonly0123456789@test\n' >"$d/state/allow-keys/deck-key.pub"
+cat >"$d/bin/chown" <<'CHOWNEOF'
+#!/usr/bin/env bash
+printf 'chown: operation not permitted\n' >&2
+exit 1
+CHOWNEOF
+chmod +x "$d/bin/chown"
+rc=0; out=$(SUDO_USER=tester PATH="$d/bin:$base_bin" HOME=/nonexistent/deliberately bash "$SCRIPT" allow http://192.168.100.14:8000/deck-key.pub 2>&1) || rc=$?
+(( rc != 0 )) || fail "'allow' fails loudly when chown fails" "rc=$rc: $out"
+grep -qiE 'could not give|not owned' <<<"$out" ||
+  fail "'allow' names the ownership failure instead of reporting success" "$out"
+grep -qi 'key installed' <<<"$out" &&
+  fail "'allow' must not report 'key installed' when chown failed" "$out"
+pass "'allow' fails loudly when the ownership fix fails (no false success)"
 d=$(full_scenario allow-unreachable)
 stub_curl "$d"
 rc=0; out=$(run_in "$d" allow http://192.168.100.14:8000/missing.pub 2>&1) || rc=$?
