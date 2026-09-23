@@ -369,6 +369,14 @@ for a in "$@"; do
   fi
   argv+=("$a")
 done
+# RESOLVED_LOG is the sandbox invariant's evidence: fake-sudo's argv AFTER path
+# rewriting, one line per invocation. The tee emulation below exits before
+# `exec`, so without this line tee appends -- the heaviest privileged writer in
+# this suite -- would be invisible to the §16 check and the invariant could
+# never fail. /dev/null targets are exempt below: `ln -sfn /dev/null <unit>` is
+# how systemd masks a unit, and /dev/null is a device, not a destination --
+# logging it would fail every mask case on a path the Deck really uses.
+printf '%s\n' "${argv[*]}" >>"$RESOLVED_LOG"
 # `tee -a <file>` with stdin: fake-sudo must perform the append itself, because
 # exec'ing the real tee would write the developer's filesystem. Only -a mode is
 # emulated; anything else refuses loudly.
@@ -1087,6 +1095,7 @@ for missing in systemctl install findmnt; do
   # also a second wall -- it carries no sudo, so even if the tool gate were
   # deleted the stage could not escalate from here.
   rm -f "$bare_bin/$missing"
+  # shellcheck disable=SC2030  # PATH is set for the subshell only on purpose: the whole point is what the tool gate sees with a bare PATH.
   ( PATH="$bare_bin"; stage_preconditions ) \
     >"$work/stage.out" 2>"$work/stage.err" || rc=$?
   cp "$stub_bin/systemctl" "$bare_bin/$missing"; chmod +x "$bare_bin/$missing"
@@ -3150,6 +3159,7 @@ pass "skel's copy parses and carries the same row"
 runtime_src=${OMARCHY_DECK_RUNTIME_SRC:-$HOME/.cache/omarchy-deck/iso-build/runtime-src}
 menu_model="$runtime_src/shell/plugins/menu/MenuModel.js"
 if command -v node >/dev/null 2>&1 && [[ -f $menu_model ]]; then
+  # shellcheck disable=SC2016  # single-quoted JavaScript: "$" there is JS/Node syntax (process.argv, string concat), never shell expansion.
   node -e '
     const fs = require("fs");
     const M = require(process.argv[1]);
@@ -3732,6 +3742,7 @@ bdg_rc=0
 bdg_boot() {        # bdg_boot <boot-id> [argv...]
   printf '%s\n' "$1" >"$bdg_bootid"; shift
   bdg_rc=0
+  # shellcheck disable=SC2031  # PATH is set for this one helper invocation only: the sandbox's stub bin must shadow the real tools exactly here.
   PATH="$bdg_bin:$PATH" "$bdg_helper" "$@" \
     >"$work/bdg.out" 2>"$work/bdg.err" || bdg_rc=$?
 }
@@ -3876,6 +3887,7 @@ bdg_reset
 printf 'attempted=boot-1\nfails=1\n' >"$bdg_state"
 : >"$bdg_bootid"
 bdg_rc=0
+# shellcheck disable=SC2031  # PATH is set for this one helper invocation only: the sandbox's stub bin must shadow the real tools exactly here.
 PATH="$bdg_bin:$PATH" "$bdg_helper" >"$work/bdg.out" 2>"$work/bdg.err" || bdg_rc=$?
 [[ $bdg_rc -ne 0 ]] ||
   fail_test "an unreadable boot id is a loud refusal" "the helper exited 0"
@@ -3939,6 +3951,80 @@ bash -n "$FAKE_HOME/${VALVE_HOOK_REL}" ||
   fail_test "the installed refresh hook is valid bash" "a hook that does not parse breaks every future refresh"
 pass "the installed refresh hook parses"
 
+# --- the hook, EXECUTED: the shape bash -n cannot check ----------------------
+# The 2026-09 defect this pins: render_valve_hook emitted the pacman.conf block
+# through a nested unquoted heredoc, so the HOOK's shell expanded pacman's own
+# $repo/$arch placeholders. $arch is unbound under the hook's `set -euo
+# pipefail`, so the hook died with `arch: unbound variable` and appended
+# nothing -- and `omarchy refresh pacman` then resolved bare `gamescope` to
+# Arch's build, deleting Gaming Mode's session file. Parsing is not execution:
+# the old hook passed `bash -n` too. So this runs the installed hook against a
+# temp pacman.conf with a fake `sudo` on PATH (tee, not privilege) and asserts
+# the appended Server lines are byte-identical to VALVE_MIRROR, each repo
+# exactly once, idempotent on re-run, exit 0.
+hook_work="$work/valve-hook-run"
+mkdir -p "$hook_work/bin" "$hook_work/root/etc"
+printf '[options]\nHoldPkg = pacman glibc\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n\n[extra]\nInclude = /etc/pacman.d/mirrorlist\n' >"$hook_work/root/etc/pacman.conf"
+hook_conf="$hook_work/root/etc/pacman.conf"
+sed "s|^CONF=/etc/pacman.conf$|CONF=${hook_conf}|" "$FAKE_HOME/${VALVE_HOOK_REL}" >"$hook_work/hook.sh" ||
+  fail_test "the installed hook points its CONF at /etc/pacman.conf" "cannot stage it against a temp pacman.conf"
+# A fake `sudo` on PATH, tee without privilege: the hook runs
+# `sudo tee -a "$CONF"`, so this shim checks the shape and execs the real tee
+# against the temp file. Refuses anything else loudly -- a hook that shells out
+# to anything but `tee -a` is not the hook this pins.
+cat >"$hook_work/bin/sudo" <<'SUDO_SHIM'
+#!/usr/bin/env bash
+[[ $1 == tee ]] || { printf 'hook sudo shim: expected tee, got: %s\n' "$*" >&2; exit 99; }
+shift
+exec tee "$@"
+SUDO_SHIM
+chmod +x "$hook_work/bin/sudo"
+# shellcheck disable=SC2031  # PATH is set for this one hook invocation only: the hook shells out to `sudo`, which must resolve to the hook-local tee shim, not real privilege.
+PATH="$hook_work/bin:$stub_bin:$PATH" bash "$hook_work/hook.sh" >"$hook_work/hook.out" 2>"$hook_work/hook.err" ||
+  fail_test "the installed refresh hook runs to completion" "exit $?: $(cat "$hook_work/hook.err")"
+pass "the installed refresh hook exits 0 against a temp pacman.conf"
+[[ ! -s $hook_work/hook.err ]] ||
+  fail_test "the hook run is silent on stderr" "$(cat "$hook_work/hook.err")"
+pass "the hook run writes nothing to stderr -- no 'unbound variable', no 'command not found'"
+for repo in "${VALVE_REPOS[@]}"; do
+  [[ $(grep -c "^\[${repo}\]$" "$hook_conf") -eq 1 ]] ||
+    fail_test "the hook appends exactly one [${repo}] section" "$(cat "$hook_conf")"
+done
+pass "the hook appends each Valve repo section exactly once"
+for repo in "${VALVE_REPOS[@]}"; do
+  grep -qxF "Server = ${VALVE_MIRROR}" "$hook_conf" ||
+    fail_test "the hook's Server line is byte-identical to VALVE_MIRROR" "expected exactly: Server = ${VALVE_MIRROR}"$'\n'"got:"$'\n'"$(grep '^Server' "$hook_conf")"
+done
+pass "every appended Server line is byte-identical to VALVE_MIRROR -- pacman's \$repo/\$arch placeholders reach pacman.conf verbatim"
+cp "$hook_conf" "$hook_work/once.conf"
+# shellcheck disable=SC2031  # PATH is set for this one hook invocation only: same hook-local shadowing as the first run.
+PATH="$hook_work/bin:$stub_bin:$PATH" bash "$hook_work/hook.sh" >"$hook_work/hook2.out" 2>"$hook_work/hook2.err" ||
+  fail_test "a second hook run succeeds" "exit $?: $(cat "$hook_work/hook2.err")"
+cmp -s "$hook_work/once.conf" "$hook_conf" ||
+  fail_test "a second hook run appends nothing" "$(diff "$hook_work/once.conf" "$hook_conf")"
+pass "a second hook run is idempotent -- present sections are left alone, not duplicated"
+unset HOOK_ROOT
+# --- the repair keeps its hardware gate: non-Deck DMI refuses ----------------
+# run_stage used to skip stage_preconditions entirely for stage-valve-repos, so
+# the DMI refusal and SUDO setup never ran for the repair. Now run_stage routes
+# the repair through stage_preconditions --skip-session-probes, which keeps the
+# gate and the SUDO setup and skips only the session-file probe the repair
+# exists to fix. Unlike the power-button model check (which reads DMI through
+# $SUDO, redirectable into the fake root), this gate reads the HOST's
+# /sys/class/dmi/id/* with no seam -- so the behavioural half runs
+# run_stage_body directly, and this dev machine (not a Deck) IS the non-Deck
+# hardware: refusal here is the gate firing, not the laptop leaking in.
+run_stage_body stage_preconditions --skip-session-probes
+ok_failed "preconditions with session probes skipped still refuse on non-Deck DMI"
+ok_in_err "not Steam Deck hardware" "the refusal is the hardware gate, not the session probe"
+pass "the repair's precondition path keeps the DMI hardware refusal -- only the session-file probe is skipped"
+[[ $(declare -f run_stage) == *'stage_preconditions --skip-session-probes'* ]] ||
+  fail_test "run_stage keeps the hardware gate for the repair stage" "run_stage does not call stage_preconditions for stage-valve-repos -- the DMI refusal and SUDO setup are skipped with it"
+pass "run_stage routes stage-valve-repos through stage_preconditions (session probes skipped) -- the DMI refusal and SUDO setup are not skipped"
+# shellcheck disable=SC2016  # a grep PATTERN matching the literal text $stage != stage-valve-repos in run_stage's own source, not this shell's $stage.
+[[ $(declare -f run_stage) != *'$stage != stage-valve-repos'* ]] ||
+  fail_test "the old blanket exception is gone" "run_stage still skips stage_preconditions entirely for stage-valve-repos"
+pass "the old blanket exception is gone -- no path skips stage_preconditions entirely for the repair"
 # --- idempotent: repos already present --------------------------------------
 run_stage_body stage_valve_repos
 ok_rc 0 "a second run succeeds -- present sections are left alone, not duplicated"
@@ -4471,19 +4557,25 @@ pass "a mask gets its own verdict rather than passing as ours -- the negative co
 pizza_seam_body=$(declare -f verify_pizza)
 [[ -n $pizza_seam_body ]] ||
   fail_test "verify_pizza exists in deck-session.sh" "without the seam this suite would execute the real /usr/local/bin/pizza"
+# shellcheck disable=SC2016  # a grep PATTERN matching a literal ${1:?} in the function's own text; expanding it would search for this shell's $1.
 grep -q '\${1:?' <<<"$pizza_seam_body" ||
   fail_test "verify_pizza takes the dispatcher to run as \$1" "no '\${1:?...}' in its body"
+# shellcheck disable=SC2016  # a grep PATTERN matching the literal text ${2:?} in the function's own source; expanding it would search for this shell's $2.
 grep -q '\${2:?' <<<"$pizza_seam_body" ||
   fail_test "verify_pizza takes the art to validate as \$2" "no '\${2:?...}' in its body"
+# shellcheck disable=SC2016  # a grep PATTERN matching the literal text "$PIZZA_BIN_DIR"/"$PIZZA_SHARE_DIR" in the function's own source, not this shell's values.
 ! grep -qE '"\$PIZZA_(BIN_DIR|SHARE_DIR)"' <<<"$pizza_seam_body" ||
   fail_test "verify_pizza never names the absolute constants" "it would execute them regardless of its arguments:"$'\n'"${pizza_seam_body}"
 pass "verify_pizza takes both paths from arguments and names neither absolute constant"
 
 pizza_stage_body=$(declare -f stage_pizza)
+# shellcheck disable=SC2016  # a grep PATTERN matching the literal text ${1:-$PIZZA_BIN_DIR} in the stage's own source; expanding it would read this shell's $1.
 grep -q '\${1:-\$PIZZA_BIN_DIR}' <<<"$pizza_stage_body" ||
   fail_test "stage_pizza takes its bin directory from \$1" "otherwise the suite cannot keep it out of the real /usr/local/bin"
+# shellcheck disable=SC2016  # a grep PATTERN matching the literal text ${2:-$PIZZA_SHARE_DIR} in the stage's own source; expanding it would read this shell's $2.
 grep -q '\${2:-\$PIZZA_SHARE_DIR}' <<<"$pizza_stage_body" ||
   fail_test "stage_pizza takes its share directory from \$2" "otherwise the suite cannot keep it out of the real /usr/local/share"
+# shellcheck disable=SC2016  # a grep PATTERN matching the literal text ${3:-} in the stage's own source; expanding it would read this shell's $3.
 grep -q '\${3:-}' <<<"$pizza_stage_body" ||
   fail_test "stage_pizza takes its source directory from \$3" "fake-sudo rewrites source paths outside its sandbox, so without this the stage cannot be run here at all"
 pass "stage_pizza takes both destinations and its source from arguments, defaulting to the constants"
@@ -4617,6 +4709,7 @@ pass "stage_onboard_audio_name resolves the desktop user's home from passwd rath
 audio_verify_body=$(declare -f verify_onboard_audio_name)
 [[ -n $audio_verify_body ]] ||
   fail_test "verify_onboard_audio_name exists in deck-session.sh" "without the seam this suite would inspect the real session's PipeWire"
+# shellcheck disable=SC2016  # a grep PATTERN matching the literal text ${3:-} in the verifier's own source; expanding it would read this shell's $3.
 grep -q '\${3:-' <<<"$audio_verify_body" ||
   fail_test "verify_onboard_audio_name takes the runtime directory as \$3" \
     "with /run/user/<uid> baked in it would read whichever PipeWire the caller's machine happens to be running"
@@ -4793,14 +4886,28 @@ pass "stage-mask-wait-online resolves to stage_mask_wait_online(), the name run_
 #
 # Everything above is only trustworthy if none of it touched the real system.
 # fake-sudo logs the argv it actually executed, after rewriting; every absolute
-# path in that log must be inside $work.
+# path in that log must be inside $work. /dev/null is the one deliberate
+# exception: `ln -sfn /dev/null <unit>` is how systemd masks a unit, and
+# /dev/null is a device, not a destination -- the shim passes it through
+# verbatim (see its comment), so the invariant exempts exactly that path.
 
 [[ ! -s $breach ]] ||
   fail_test "fake-sudo refused nothing during this run" "breaches:"$'\n'"$(cat "$breach")"
 pass "fake-sudo never had to refuse a path -- every absolute destination rewrote cleanly"
 
-escaped=$(awk -v w="$work/" '{for (i = 1; i <= NF; i++)
-  if (substr($i, 1, 1) == "/" && index($i, w) != 1) print $i}' "$resolved" | sort -u)
+# Positive control, run BEFORE the verdict: plant one out-of-sandbox path and
+# prove the awk sees it. Without this the invariant could read an empty file
+# and pass vacuously -- which is exactly the shape it had when RESOLVED_LOG
+# logging was missing. Uses $breach (checked above, so known-empty) as scratch:
+# nothing about the verdict below depends on it.
+probe_file="$work/escape-probe.txt"
+printf '%s\n' "/etc/OUT-OF-SANDBOX-PROBE" >"$probe_file"
+probe_hit=$(awk -v w="$work/" '{for (i = 1; i <= NF; i++) if ($i != "/dev/null" && substr($i, 1, 1) == "/" && index($i, w) != 1) print $i}' "$probe_file" | sort -u)
+[[ $probe_hit == "/etc/OUT-OF-SANDBOX-PROBE" ]] ||
+  fail_test "the sandbox-escape check can see an out-of-sandbox path" "the awk that guards RESOLVED_LOG missed a planted /etc/OUT-OF-SANDBOX-PROBE -- a real escape would pass unseen"
+rm -f "$probe_file"
+pass "the sandbox-escape check fires on a planted out-of-sandbox path -- the invariant below is not vacuous"
+escaped=$(awk -v w="$work/" '{for (i = 1; i <= NF; i++) if ($i != "/dev/null" && substr($i, 1, 1) == "/" && index($i, w) != 1) print $i}' "$resolved" | sort -u)
 [[ -z $escaped ]] ||
   fail_test "every path the stages wrote to is inside the temp work directory" \
     "these resolved outside ${work}:"$'\n'"${escaped}"

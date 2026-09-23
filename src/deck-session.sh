@@ -244,6 +244,7 @@ readonly SELECT_BIN=/usr/local/bin/deck-session-select
 # adds a version freeze on top. Rejected.
 readonly -a VALVE_REPOS=(jupiter-staging holo-staging)
 # $repo/$arch are pacman's own variables and must reach pacman.conf unexpanded.
+# shellcheck disable=SC2016  # intentional single quotes: $repo/$arch are pacman's own variables, expanded on the Deck, not here.
 readonly VALVE_MIRROR='https://steamdeck-packages.steamos.cloud/archlinux-mirror/$repo/os/$arch'
 # The one repo-qualified package name in this file. A bare `pacman -S gamescope`
 # resolves by repo order to Arch's bare compositor, which ships no SteamOS
@@ -2061,7 +2062,14 @@ INTERACTIVE=1
 
 # ---------------------------------------------------------------------------
 
-stage_preconditions() {
+stage_preconditions() {   # stage_preconditions [--skip-session-probes]
+  # --skip-session-probes keeps everything except the Gaming Mode session
+  # probes: stage-valve-repos exists to repair the absence those probes refuse
+  # on (no session file after an update swapped Valve's gamescope for Arch's --
+  # Deck-verified 2026-09-17), so gating the repair on them is a deadlock. The
+  # SUDO setup and the DMI hardware gate still apply to the repair.
+  local skip_session_probes=0
+  if [[ ${1:-} == --skip-session-probes ]]; then skip_session_probes=1; fi
   local tool
   for tool in systemctl install findmnt; do
     command -v "$tool" >/dev/null 2>&1 ||
@@ -2139,7 +2147,11 @@ stage_preconditions() {
 
   # The Gaming Mode session must already exist -- we do not build one.
   # Checked by *file*, not by package, so a differently-packaged gamescope
-  # still satisfies it.
+  # still satisfies it. Skipped under --skip-session-probes: see the function
+  # header. Everything above this block (tools, SUDO, hardware, SDDM) still runs.
+  if [[ $skip_session_probes -eq 1 ]]; then
+    log "gaming session: probe skipped for the repair stage (it restores the session file itself)"
+  else
   local found="" d
   for d in /usr/share/wayland-sessions /usr/local/share/wayland-sessions; do
     [[ -f "$d/${GAMING_SESSION}.desktop" ]] && { found="$d/${GAMING_SESSION}.desktop"; break; }
@@ -2173,7 +2185,7 @@ stage_preconditions() {
   [[ -n $DESKTOP_SESSION ]] ||
     fail "found no desktop session (.desktop for omarchy/hyprland-uwsm/hyprland) in any wayland-sessions directory"
   log "desktop session: ${DESKTOP_SESSION}"
-
+  fi
   # DeckShift is deliberately not supported alongside this. Both install a
   # steamos-session-select and both write an SDDM drop-in; whichever ran last
   # wins, which is not a state anyone can reason about. Warn rather than fail
@@ -2477,12 +2489,11 @@ set -euo pipefail
 CONF=/etc/pacman.conf
 for repo in ${VALVE_REPOS[*]}; do
   grep -qE "^\[\${repo}\]" "\$CONF" && continue
-  sudo tee -a "\$CONF" >/dev/null <<BLOCK
-
-[\${repo}]
-Server = ${VALVE_MIRROR}
-SigLevel = Never
-BLOCK
+  # printf, like the stage's own append: the Server line must reach pacman.conf
+  # with \$repo/\$arch verbatim (pacman's own variables), so a nested heredoc is
+  # the wrong shape here -- the hook runs under set -euo pipefail and an
+  # unquoted heredoc would expand the unbound \$arch and die before tee runs.
+  printf '\n[%s]\nServer = %s\nSigLevel = Never\n' "\$repo" '${VALVE_MIRROR}' | sudo tee -a "\$CONF" >/dev/null
 done
 EOF
 }
@@ -4227,7 +4238,7 @@ if [[ -z \${GAMESCOPE_WAYLAND_DISPLAY:-} ]]; then
   waited=0
   # 10 polls per second for SPLASH_ENV_WAIT_SECONDS (5 s): integer arithmetic
   # only, so no fractional sleep counting and no bc.
-  while [[ -z \${GAMESCOPE_WAYLAND_DISPLAY:-} && \$waited -lt $(( ${SPLASH_ENV_WAIT_SECONDS} * 10 )) ]]; do
+  while [[ -z \${GAMESCOPE_WAYLAND_DISPLAY:-} && \$waited -lt $(( SPLASH_ENV_WAIT_SECONDS * 10 )) ]]; do
     env_file="\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}/gamescope-environment"
     if [[ -r \$env_file ]]; then
       env_val="\$(grep -E '^GAMESCOPE_WAYLAND_DISPLAY=' "\$env_file" 2>/dev/null | tail -n 1 | cut -d= -f2-)"
@@ -5133,12 +5144,12 @@ StartLimitIntervalSec=60
 Type=simple
 # ⚠️ --grab is LOAD-BEARING, and only safe because of [Install] above.
 #
-# Without it Hyprland reads the same evdev node we do: `hyprctl devices` lists
-# BOTH `deck-input-mapper-virtual-keyboard-1` (ours) and
-# `valve-software-steam-controller` (the raw pad) as mice. So with the OSK up,
+# Without it Hyprland reads the same evdev node we do: 'hyprctl devices' lists
+# BOTH 'deck-input-mapper-virtual-keyboard-1' (ours) and
+# 'valve-software-steam-controller' (the raw pad) as mice. So with the OSK up,
 # the right pad drove the key cursor AND the system pointer at the same time --
 # the pointer wandering across whatever sat behind the keyboard. The suppression
-# at deck-input-mapper.py's pointer branch (`not mapper.osk_active`) was already
+# at deck-input-mapper.py's pointer branch ('not mapper.osk_active') was already
 # correct and already working; it just cannot gate a device it does not own.
 #
 # This never showed before P37 because stage-input-mapper was broken, so the
@@ -9432,12 +9443,16 @@ run_stage() {
   local fn=${stage//-/_}
   declare -F "$fn" >/dev/null || usage_error "unknown stage '${stage}'"
   # Every stage needs the probes; they install nothing and write nothing.
-  # EXCEPT the repair stage: stage-valve-repos exists precisely to fix the
-  # absence stage_preconditions refuses to run without (no Gaming Mode session
-  # file after an update swapped Valve's gamescope for Arch's -- Deck-verified
-  # 2026-09-17). Gating the repair on the probe it repairs is a deadlock, so
-  # it runs on the hardware gate alone.
-  if [[ $stage != stage-preconditions && $stage != stage-valve-repos ]]; then
+  # EXCEPT the repair stage's session probes: stage-valve-repos exists precisely
+  # to fix the absence stage_preconditions refuses to run without (no Gaming Mode
+  # session file after an update swapped Valve's gamescope for Arch's --
+  # Deck-verified 2026-09-17). Gating the repair on the probe it repairs is a
+  # deadlock, so it keeps the tools, SUDO, hardware and SDDM probes and skips
+  # only the Gaming Mode session probes -- hardware refusal and SUDO setup
+  # still apply to this stage.
+  if [[ $stage == stage-valve-repos ]]; then
+    stage_preconditions --skip-session-probes
+  elif [[ $stage != stage-preconditions ]]; then
     stage_preconditions
   fi
   "$fn"
