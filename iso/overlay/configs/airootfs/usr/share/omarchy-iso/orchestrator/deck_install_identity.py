@@ -522,8 +522,21 @@ def apply_preinstalls_choice(target, final_home: str, preinstalls: bool) -> dict
                 marker.unlink()
             record["status"] = "installed"
         else:
-            marker.parent.mkdir(parents=True, exist_ok=True)
+            # Written as root from outside the target, into the user's home:
+            # every directory created on the way and the marker itself get
+            # the home's owner, because the runtime's Install > Preinstalls
+            # runs AS the user and removes this file when it restores them.
+            owner = home.stat()
+            missing = []
+            parent = marker.parent
+            while parent != home and not parent.exists():
+                missing.append(parent)
+                parent = parent.parent
+            for directory in reversed(missing):
+                directory.mkdir()
+                os.lchown(directory, owner.st_uid, owner.st_gid)
             marker.touch()
+            os.lchown(marker, owner.st_uid, owner.st_gid)
             record["status"] = "opt-in-left"
     except OSError as exc:
         record["status"] = "failed"

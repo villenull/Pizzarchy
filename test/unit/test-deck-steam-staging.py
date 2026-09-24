@@ -478,6 +478,35 @@ record = dsb.late_steam(target, STAGING, FINAL_HOME, "deck", make_ctx(target))
 check("skel: new file re-seeded", (target / FINAL_HOME.lstrip("/") / ".config/new-file").is_file(),
       True)
 check_in("skel: ... and recorded", "/.config/new-file", " ".join(record["reseeded"]))
+
+# 🔴 Everything the re-seed creates must belong to the home's owner. It runs
+# as root from outside the target; root-owned ~/.config made
+# omarchy-provision-user (which runs AS the user) fail in QEMU. Unprivileged,
+# files this test creates are ours whatever the code does, so observe the
+# ownership calls instead.
+target = make_target("late-skel-owner")
+build_fixture_tree(target / STAGING.lstrip("/"))
+(target / "etc/skel/.config/sub").mkdir(parents=True, exist_ok=True)
+(target / "etc/skel/.config/sub/deep-file").write_text("x\n")
+owned: dict = {}
+real_lchown = os.lchown
+
+
+def _spy_lchown(path, uid, gid):
+    owned[str(path)] = (uid, gid)
+    return real_lchown(path, uid, gid)
+
+
+dsb.os.lchown = _spy_lchown
+try:
+    record = dsb.late_steam(target, STAGING, FINAL_HOME, "deck", make_ctx(target))
+finally:
+    dsb.os.lchown = real_lchown
+final_dir = target / FINAL_HOME.lstrip("/")
+home_owner = (final_dir.stat().st_uid, final_dir.stat().st_gid)
+for rel in (".config/sub", ".config/sub/deep-file"):
+    check(f"skel-owner: re-seeded {rel} handed to the home's owner",
+          owned.get(str(final_dir / rel)), home_owner)
 # 🔴 No recursive chown of the client tree Valve wrote: the uid is fixed at
 # 1000 from the start, so the rename carries ownership. (The seed legitimately
 # chowns the registry.vdf IT writes; that is the seed's own write, not a walk

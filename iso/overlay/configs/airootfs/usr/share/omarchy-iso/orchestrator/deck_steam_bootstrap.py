@@ -2166,14 +2166,30 @@ def _reseed_skel(target, final_on_target: Path, warnings: list[str]) -> list[str
 
     useradd -M copies nothing, so everything the image's account-creation
     path would have copied has to be carried over -- except Steam's own
-    files, which win by being there first. Returns the target-absolute
-    paths copied."""
+    files, which win by being there first. Every entry this creates is given
+    the home's owner (lchown, so links too): this runs as root from outside
+    the target, and a root-owned ~/.config made omarchy-provision-user, which
+    runs AS the user, fail in QEMU ("cannot create directory
+    '~/.config/gtk-3.0': Permission denied"). Only entries created here are
+    touched -- never Valve's tree. Returns the target-absolute paths copied."""
     copied: list[str] = []
     skel = Path(target) / "etc/skel"
     try:
+        owner = final_on_target.stat()
         entries = list(skel.rglob("*"))
     except OSError:
         return copied
+    uid, gid = owner.st_uid, owner.st_gid
+
+    def make_parents(path: Path) -> None:
+        missing = []
+        while path != final_on_target and not path.exists():
+            missing.append(path)
+            path = path.parent
+        for directory in reversed(missing):
+            directory.mkdir()
+            os.lchown(directory, uid, gid)
+
     for src in sorted(entries):
         try:
             rel = src.relative_to(skel)
@@ -2183,15 +2199,17 @@ def _reseed_skel(target, final_on_target: Path, warnings: list[str]) -> list[str
         try:
             if dst.exists() or dst.is_symlink():
                 continue
+            make_parents(dst.parent)
             if src.is_symlink():
-                dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.symlink_to(os.readlink(src))
+                os.lchown(dst, uid, gid)
                 copied.append("/" + str(rel))
             elif src.is_dir():
-                dst.mkdir(parents=True, exist_ok=True)
+                dst.mkdir()
+                os.lchown(dst, uid, gid)
             elif src.is_file():
-                dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes(src.read_bytes())
+                os.lchown(dst, uid, gid)
                 try:
                     os.chmod(dst, src.stat().st_mode & 0o7777)
                 except OSError:

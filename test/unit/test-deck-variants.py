@@ -786,9 +786,23 @@ check_raises(
 
 home = t4 / "home/deck"
 home.mkdir(parents=True, exist_ok=True)
-identity.apply_preinstalls_choice(t4, "/home/deck", False)
+_owned: dict = {}
+_real_lchown = os.lchown
+identity.os.lchown = lambda p, u, g: (_owned.__setitem__(str(p), (u, g)), _real_lchown(p, u, g))[1]
+try:
+    identity.apply_preinstalls_choice(t4, "/home/deck", False)
+finally:
+    identity.os.lchown = _real_lchown
 marker = home / ".local/state/omarchy/preinstalls-removed"
 check("preinstalls=no leaves the opt-in marker in the final home", marker.is_file(), True)
+# Written as root on a real install: the user's own Install > Preinstalls
+# must be able to remove it, so it and every directory made for it are the
+# home owner's (observed through the calls -- unprivileged, we own them anyway).
+_home_owner = (home.stat().st_uid, home.stat().st_gid)
+check("…the marker and the directories made for it are handed to the home's owner",
+      {k: v for k, v in _owned.items() if k.startswith(str(home))},
+      {str(home / ".local"): _home_owner, str(home / ".local/state"): _home_owner,
+       str(home / ".local/state/omarchy"): _home_owner, str(marker): _home_owner})
 home2 = t4 / "home/deck2"
 home2.mkdir(parents=True, exist_ok=True)
 identity.apply_preinstalls_choice(t4, "/home/deck2", True)
