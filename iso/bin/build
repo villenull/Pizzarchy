@@ -146,7 +146,47 @@ set -euo pipefail
 
 BUILD_PROG=iso-build
 build_log()  { printf '[%s] %s\n' "$BUILD_PROG" "$*"; }
-build_fail() { printf '[%s] ERROR: %s\n' "$BUILD_PROG" "$*" >&2; exit 1; }
+# BUILD_REPORTED=1 once this script has already said it is dying (build_fail's
+# ERROR line, or a signal trap's FATAL line): the EXIT trap below must not add
+# a second, vaguer line for the same death.
+BUILD_REPORTED=0
+build_fail() { BUILD_REPORTED=1; printf '[%s] ERROR: %s\n' "$BUILD_PROG" "$*" >&2; exit 1; }
+
+# Loud death: `set -e` exits print nothing by themselves (and BASH_COMMAND is
+# the closest thing to a location). Any silent handoff failure -- notably the
+# `docker run` return below, or a docker CLI that dies by signal with no
+# message -- now names its status instead of vanishing (build-v3: the log
+# ended at `[timing] mkarchiso end` with nothing after it). build_fail sets
+# BUILD_REPORTED first, so a diagnosed refusal never grows a second FATAL.
+build_exit_trap() {
+  local rc=$1
+  # `if` conditions are exempt from `set -e`; a bare `(( ... )) && return`
+  # chain here would exit the trap itself on the falsy branch and both skip
+  # the FATAL and clobber the status.
+  if (( rc != 0 )) && (( ! BUILD_REPORTED )); then
+    printf '[%s] FATAL: exiting with status %s at: %s\n' "$BUILD_PROG" "$rc" "$BASH_COMMAND" >&2
+  fi
+  return "$rc"
+}
+trap 'build_exit_trap "$?"' EXIT
+
+# Signals: an EXIT trap does NOT fire when bash itself dies from an uncaught
+# fatal signal -- measured on bash 5.3 (/tmp/loudbuild repro): SIGTERM to the
+# process group while a foreground child runs kills this script with zero
+# output and the EXIT trap never runs. That is the v3/v4 build-death shape
+# (an outside hand SIGTERMed the v3 container mid-run; a supervisor SIGTERM to
+# the host-side group at the docker->guard handoff fits every byte of the
+# evidence). So TERM/INT/HUP die loudly too, with the signal's name and the
+# conventional 128+n status. BUILD_REPORTED keeps the EXIT trap quiet after.
+build_signal_trap() {
+  local sig=$1 code=$2
+  BUILD_REPORTED=1
+  printf '[%s] FATAL: caught SIG%s, aborting\n' "$BUILD_PROG" "$sig" >&2
+  exit "$code"
+}
+trap 'build_signal_trap TERM 143' TERM
+trap 'build_signal_trap INT 130' INT
+trap 'build_signal_trap HUP 129' HUP
 
 ISO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 REPO_ROOT=$(cd -- "$ISO_ROOT/.." && pwd)
@@ -1681,7 +1721,15 @@ DOCKER_ARGS=(
 )
 
 build_log "starting docker build (this downloads hundreds of packages; can take a long time on first run)..."
-docker run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /build-iso.sh
+# Report the container's exit LOUDLY: under `set -e` a bare failing
+# `docker run` exits this script with no line anywhere (build-v3: the log
+# ended at `[timing] mkarchiso end`, container exit 0, nothing after). A CLI
+# that dies by signal (137/143) prints nothing either -- the status below is
+# the only record.
+docker_status=0
+docker run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /build-iso.sh || docker_status=$?
+(( docker_status == 0 )) ||
+  build_fail "docker build container did not exit 0 (status $docker_status) after mkarchiso; see the container output above"
 
 # ---------------------------------------------------------------------------
 # 8. Locate the result. Naming happens further down, AFTER guard 6.4b -- a
@@ -1696,7 +1744,14 @@ shopt -u nullglob
 
 # Newest first; mkarchiso writes exactly one per run, but be explicit rather
 # than assume. find -printf avoids ls's non-alphanumeric-filename footguns.
-latest_iso=$(find "${built_isos[@]}" -maxdepth 0 -printf '%T@ %p\n' | sort -rn | head -n1 | cut -d' ' -f2-)
+# No `head` in the pipeline: with enough files `sort` blocks on a 64 KiB pipe
+# while `head -n1` has already exited, takes SIGPIPE (141), and `set -e`
+# kills the build silently (reproduced 15/15 with 3000 files in /tmp).
+# mapfile cannot SIGPIPE -- the consumer always drains the producer.
+mapfile -t sorted_isos < <(find "${built_isos[@]}" -maxdepth 0 -printf '%T@ %p\n' | sort -rn)
+(( ${#sorted_isos[@]} > 0 )) ||
+  build_fail "docker build reported success but no .iso appeared in $RELEASE_DIR"
+latest_iso=${sorted_isos[0]#* }
 
 # ---------------------------------------------------------------------------
 # Guard 6.4b -- the same coupling, re-asked of the artifact that will ship.

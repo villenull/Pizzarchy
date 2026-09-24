@@ -44,6 +44,13 @@ work without waiting for further instruction.**
 >    wiped PC. Recreate the key and re-authorise it on the Deck (or reinstall it, which is the
 >    next step anyway). The Internet Archive CLI config (`~/.config/ia.ini`) was also local.
 >
+> 6. Long builds/VM runs launched from an agent must be fully detached:
+>    `setsid nohup <cmd> >log 2>&1 < /dev/null &` — plain `nohup …&` stays in the agent's
+>    process group, so a tool-timeout SIGTERM takes the build with it (the v3/v4 post-mkarchiso
+>    silent deaths; `setsid` survives the same SIGTERM, measured). Capture the status with
+>    `|| rc=$?` and always print the `[iso-build] WRAPPER_EXIT=` line — under `set -e`, even
+>    `; rc=$?` still skips the echo.
+>
 > **Open decision for the operator:** `steamdeck-dsp` (Valve's speaker tuning) is
 > `Proprietary` with no licence text and is on every image, including the published ones.
 > `docs/findings/P16-redistribution-and-trademark.md` flagged it as the blocker for hosting

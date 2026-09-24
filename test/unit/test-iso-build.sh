@@ -2869,4 +2869,150 @@ grep -q '\.packages' "$real_dry_run" ||
     "the exclusion in guard 6.8 exists for exactly this read; if it is gone, say so in the guard rather than leaving a rule nothing needs"
 pass "the real repo carries ${#real_deck_lists[@]} deck package list(s) (${real_deck_lists[*]}) and the checker whose read guard 6.8 refuses to count"
 
+# ===========================================================================
+# 26. The build dies LOUDLY (build-v3/v4 post-mkarchiso deaths).
+#
+# build-v3's first attempt ended at `[timing] mkarchiso end` with no guard
+# output, no ERROR, and no WRAPPER_EXIT -- and v4's first attempt died the
+# same way. Two mechanisms, both proven by reproduction rather than inferred:
+# a bare failing `docker run` under `set -euo pipefail` exits with zero
+# output by construction (E1 in the builddeath report), and an uncaught fatal
+# signal never even runs an EXIT trap (measured on bash 5.3: SIGTERM to the
+# process group while a foreground child runs kills the script silently --
+# /tmp/loudbuild repro for the full transcript). An external SIGTERM to the
+# v3 container mid-run is on the docker-daemon record, so a supervisor SIGTERM
+# to the host-side group at the docker->guard handoff fits every byte of the
+# evidence. What is asserted here:
+#   a. a `docker` stub exiting 1 names the status in an ERROR line;
+#   b. a `docker` stub dying by signal (143) does the same;
+#   c. the newest-ISO selection survives 3000 dummy .iso files and picks the
+#      newest (the old `find|sort|head|cut` pipeline died 141, silently, 15/15
+#      with 3000 files -- E4b);
+#   d. SIGTERM to the build's process group while docker runs prints a FATAL
+#      naming the signal and exits 143.
+# ===========================================================================
+
+# --- 26a. a docker exiting 1 is loud ---------------------------------------
+
+FAIL1_DOCKER_PATH="$work/fail1-docker-bin"
+mkdir -p "$FAIL1_DOCKER_PATH"
+ln -s "$NO_DOCKER_PATH"/* "$FAIL1_DOCKER_PATH/" 2>/dev/null || true
+cat >"$FAIL1_DOCKER_PATH/docker" <<'EOF'
+#!/usr/bin/env bash
+echo "fixture failing-docker ran" >&2
+exit 1
+EOF
+chmod +x "$FAIL1_DOCKER_PATH/docker"
+
+f73="$work/f73"
+make_fixture "$f73"
+BUILD_PATH="$FAIL1_DOCKER_PATH" run_build "$f73"
+[[ $BUILD_STATUS -eq 1 ]] || fail "a docker exiting 1 must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"docker build container did not exit 0"* ]] ||
+  fail "the failure names the docker exit" "$BUILD_OUT"
+[[ $BUILD_OUT == *"status 1"* ]] || fail "the failure carries the status" "$BUILD_OUT"
+[[ $BUILD_OUT != *"guard 6.4b"* ]] ||
+  fail "a dead container must stop the build before guard 6.4b" "$BUILD_OUT"
+pass "a docker exiting 1 fails LOUDLY, naming the status (build-v3's silence, fixed)"
+
+# --- 26b. a docker dying by signal (143) is loud too -----------------------
+
+FAIL143_DOCKER_PATH="$work/fail143-docker-bin"
+mkdir -p "$FAIL143_DOCKER_PATH"
+ln -s "$NO_DOCKER_PATH"/* "$FAIL143_DOCKER_PATH/" 2>/dev/null || true
+cat >"$FAIL143_DOCKER_PATH/docker" <<'EOF'
+#!/usr/bin/env bash
+kill -TERM $$
+sleep 5
+exit 143
+EOF
+chmod +x "$FAIL143_DOCKER_PATH/docker"
+
+f74="$work/f74"
+make_fixture "$f74"
+BUILD_PATH="$FAIL143_DOCKER_PATH" run_build "$f74"
+[[ $BUILD_STATUS -eq 1 ]] || fail "a docker dying by signal must fail the build" "status=$BUILD_STATUS $BUILD_OUT"
+[[ $BUILD_OUT == *"docker build container did not exit 0"* ]] ||
+  fail "the failure names the docker exit" "$BUILD_OUT"
+[[ $BUILD_OUT == *"status 143"* ]] || fail "the failure carries the signal status" "$BUILD_OUT"
+pass "a docker dying by signal fails LOUDLY with status 143 (a CLI killed with no message is E1's twin)"
+
+# --- 26c. newest-ISO selection over 3000 files picks the newest ------------
+
+f75="$work/f75"
+make_fixture "$f75"
+scratch75="$work/scratch-75"
+mirror75="$scratch75/offline-mirror-cache/mirror/offline"
+make_fake_package "$mirror75" omarchy "4.0.4-1" \
+  omarchy-setup-system omarchy-provision-user
+make_fake_package "$mirror75" omarchy-settings "4.0.4-1" \
+  omarchy-upload-log
+# 3000 stale dummies, all older than the fresh ISO the docker stub is about
+# to write -- including one with a space in the name, because the
+# `${sorted_isos[0]#* }` cut-equivalent must survive those too. 3000 keeps
+# `sort`'s output (~360 KiB) well above the 64 KiB pipe buffer the old
+# `head -n1` pipeline SIGPIPEd against.
+mkdir -p "$scratch75/release"
+i75=0
+while (( i75 < 3000 )); do
+  i75=$(( i75 + 1 ))
+  : >"$scratch75/release/stale-$i75.iso"
+done
+touch -d '2020-01-01 00:00:00' "$scratch75/release"/stale-*.iso
+: >"$scratch75/release/stale with space.iso"
+touch -d '2020-01-01 00:00:00' "$scratch75/release/stale with space.iso"
+BUILD_PATH="$STUB_DOCKER_PATH" run_build "$f75" \
+  "OMARCHY_DECK_ISO_BUILD_DIR=$scratch75" \
+  "DOCKER_STUB_ARGS=$work/docker-args-75" \
+  "DOCKER_STUB_RELEASE=$scratch75/release"
+[[ $BUILD_STATUS -eq 0 ]] || fail "newest-ISO selection over 3000 files must succeed" "status=$BUILD_STATUS $BUILD_OUT"
+# Extracted, then compared with == (exact equality, no glob): embedding
+# $scratch75 inside a [[ == ]] *pattern* proved unreliable in this
+# environment (identical bytes matching on one run and not the next), while
+# extraction-plus-equality -- the same shape section 24 uses for the real
+# repo's final ISO path -- is stable. The point under test is which file the
+# build picked, not the matcher.
+final75_iso=$(printf '%s\n' "$BUILD_OUT" | sed -n 's/^\[iso-build\] build complete: //p')
+[[ $final75_iso == "$scratch75/release/omarchy-2026.08.11-x86_64-quattro.iso" ]] ||
+  fail "the build picks the newest ISO (the stub's fresh artifact), not a stale dummy" "got: '$final75_iso' $BUILD_OUT"
+pass "newest-ISO selection survives 3000 dummy .iso files and picks the newest (E4b's 141, fixed)"
+
+# --- 26d. SIGTERM to the build's group while docker runs is loud -----------
+
+SLEEP_DOCKER_PATH="$work/sleep-docker-bin"
+mkdir -p "$SLEEP_DOCKER_PATH"
+ln -s "$NO_DOCKER_PATH"/* "$SLEEP_DOCKER_PATH/" 2>/dev/null || true
+cat >"$SLEEP_DOCKER_PATH/docker" <<'EOF'
+#!/usr/bin/env bash
+sleep 60
+EOF
+chmod +x "$SLEEP_DOCKER_PATH/docker"
+
+f76="$work/f76"
+make_fixture "$f76"
+siglog="$work/sigterm-76.log"
+# A new session/group (setsid), so the group SIGTERM below hits only the
+# build and its stub -- never this suite. This is the v3/v4 death shape: an
+# outside hand signaling the whole host-side group at the docker handoff.
+setsid env -i PATH="$SLEEP_DOCKER_PATH" HOME="$work/home" \
+  "OMARCHY_DECK_RUNTIME_SRC=$f76/runtime-src" \
+  "OMARCHY_DECK_PKGS_SRC=$f76/pkgs-src" \
+  "$f76/iso/bin/build" >"$siglog" 2>&1 &
+siglauncher=$!
+for _ in $(seq 1 150); do
+  grep -q "starting docker build" "$siglog" 2>/dev/null && break
+  sleep 0.2
+done
+grep -q "starting docker build" "$siglog" ||
+  fail "the SIGTERM fixture never reached the docker step" "$(cat "$siglog")"
+sigpgid=$(ps -o pgid= -p "$siglauncher" | tr -d ' ')
+[[ -n $sigpgid ]] || fail "could not read the fixture build's process group"
+kill -TERM -- "-$sigpgid"
+sigstatus=0
+wait "$siglauncher" 2>/dev/null || sigstatus=$?
+[[ $sigstatus -eq 143 ]] || fail "a SIGTERMed build exits 143" "status=$sigstatus $(cat "$siglog")"
+grep -q "FATAL: caught SIGTERM" "$siglog" ||
+  fail "a SIGTERMed build names the signal" "$(cat "$siglog")"
+pass "SIGTERM to the build's process group while docker runs dies LOUDLY (FATAL SIGTERM, exit 143)"
+
 printf '\nall iso-build tests passed\n'
