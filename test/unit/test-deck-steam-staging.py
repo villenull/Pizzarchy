@@ -507,6 +507,12 @@ home_owner = (final_dir.stat().st_uid, final_dir.stat().st_gid)
 for rel in (".config/sub", ".config/sub/deep-file"):
     check(f"skel-owner: re-seeded {rel} handed to the home's owner",
           owned.get(str(final_dir / rel)), home_owner)
+# Links the relocation rewrites keep the owner of the link they replace (the
+# user's bootstrap wrote them). Observed through the call: unprivileged, the
+# test owns every file whatever the code does.
+relinked = {k: v for k, v in owned.items() if os.path.islink(k)}
+check_true("skel-owner: the relocation retargeted links and handed them back",
+           len(relinked) > 0 and all(v == home_owner for v in relinked.values()))
 # 🔴 No recursive chown of the client tree Valve wrote: the uid is fixed at
 # 1000 from the start, so the rename carries ownership. (The seed legitimately
 # chowns the registry.vdf IT writes; that is the seed's own write, not a walk

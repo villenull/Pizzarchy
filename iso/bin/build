@@ -495,12 +495,32 @@ if [[ -d $DECK_PKGBUILD_STAGING_DIR ]]; then
     DECK_SESSION_OSK[deck_session_osk_i]=$deck_session_osk_val
   done
   deck_session_files+=("${DECK_SESSION_OSK[@]}")
+  # stage-pizza reads its dispatcher, subcommands and art from beside the
+  # script too, and it is in the gaming bake the opt-in runs (not in the
+  # desktop bake). Same constants step 5c(ii) scrapes; art flat, beside it,
+  # the second entry of PIZZA_ART_SEARCH_DIRS. Missing once: the in-place
+  # Gaming opt-in died at stage-pizza in QEMU.
+  deck_session_pizza=$(sed -n 's/^readonly PIZZA_DISPATCHER_NAME=\(.*\)$/\1/p' "$REPO_ROOT/src/deck-session.sh" | tr -d "\"'" | head -1)
+  [[ -n $deck_session_pizza ]] ||
+    build_fail "cannot stage the package session payload: no 'readonly PIZZA_DISPATCHER_NAME=<file>' in src/deck-session.sh."
+  deck_session_pizza_line=$(grep -m1 '^readonly -a PIZZA_SUBCOMMANDS=(' "$REPO_ROOT/src/deck-session.sh") ||
+    build_fail "cannot stage the package session payload: no 'readonly -a PIZZA_SUBCOMMANDS=(' array in src/deck-session.sh."
+  read -r -a DECK_SESSION_PIZZA_SUBS <<<"$(printf '%s' "$deck_session_pizza_line" | sed 's/^readonly -a PIZZA_SUBCOMMANDS=(//; s/).*$//' | tr -d "\"'")"
+  (( ${#DECK_SESSION_PIZZA_SUBS[@]} > 0 )) ||
+    build_fail "cannot stage the package session payload: PIZZA_SUBCOMMANDS=( is empty in src/deck-session.sh."
+  deck_session_files+=("$deck_session_pizza" "${DECK_SESSION_PIZZA_SUBS[@]}")
+  for deck_session_art in "$REPO_ROOT"/src/pizza-art/*.txt; do
+    [[ -f $deck_session_art ]] ||
+      build_fail "cannot stage the package session payload: no art in src/pizza-art/."
+    deck_session_files+=("pizza-art/${deck_session_art##*/}")
+  done
   for deck_session_file in "${deck_session_files[@]}"; do
     [[ -f "$REPO_ROOT/src/$deck_session_file" ]] ||
       build_fail "cannot stage the package session payload: no src/$deck_session_file."
-    cp -a "$REPO_ROOT/src/$deck_session_file" "$DECK_PKGBUILD_STAGING_DIR/$deck_session_file" ||
+    # Flat in the recipe dir: makepkg resolves source=() entries by basename.
+    cp -a "$REPO_ROOT/src/$deck_session_file" "$DECK_PKGBUILD_STAGING_DIR/${deck_session_file##*/}" ||
       build_fail "could not stage src/$deck_session_file into the pkgbuild dir."
-    cmp -s "$REPO_ROOT/src/$deck_session_file" "$DECK_PKGBUILD_STAGING_DIR/$deck_session_file" ||
+    cmp -s "$REPO_ROOT/src/$deck_session_file" "$DECK_PKGBUILD_STAGING_DIR/${deck_session_file##*/}" ||
       build_fail "staged $deck_session_file differs from src/$deck_session_file immediately after copy."
   done
   build_log "staged the package session payload: ${deck_session_files[*]} (byte-identical to src/)"

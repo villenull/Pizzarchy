@@ -368,9 +368,19 @@ for m in "${osk_raw[@]}"; do
   [[ -n $m ]] || fail "unresolvable OSK module entry in src/deck-session.sh"
   staged+=("$m")
 done
+# stage-pizza's files (in the gaming bake the opt-in runs): dispatcher,
+# subcommands, and every art file flat beside the script.
+pizza_name=$(sed -n 's/^readonly PIZZA_DISPATCHER_NAME=\(.*\)$/\1/p' "$SESSION_SRC" | tr -d "\"'" | head -1)
+[[ -n $pizza_name ]] || fail "cannot derive PIZZA_DISPATCHER_NAME from src/deck-session.sh"
+pizza_line=$(grep -m1 '^readonly -a PIZZA_SUBCOMMANDS=(' "$SESSION_SRC") || fail "no PIZZA_SUBCOMMANDS=( array in src/deck-session.sh"
+read -r -a pizza_subs <<<"$(printf '%s' "$pizza_line" | sed 's/^readonly -a PIZZA_SUBCOMMANDS=(//; s/).*$//' | tr -d "\"'")"
+staged+=("$pizza_name" "${pizza_subs[@]}")
+for art in "$REPO_ROOT"/src/pizza-art/*.txt; do
+  staged+=("pizza-art/${art##*/}")
+done
 for f in "${staged[@]}"; do
   [[ -f $REPO_ROOT/src/$f ]] || fail "canonical src/$f missing -- cannot stage the session payload"
-  cp "$REPO_ROOT/src/$f" "$pkg_src/$f"
+  cp "$REPO_ROOT/src/$f" "$pkg_src/${f##*/}"
 done
 count "test staged the session payload from canonical src/ (${staged[*]})"
 # The pre-existing payload the function also installs.
@@ -403,10 +413,10 @@ count "package() really installs an executable action and the launcher (executed
 # over the DERIVED set: every file deck-session.sh resolves beside itself must
 # be installed beside the packaged copy, or a stage dies on a live system.
 for f in "${staged[@]}"; do
-  [[ -f $pkg_dst/usr/share/omarchy-deck/$f ]] \
-    || fail "package() does not install $f beside deck-session.sh"
-  cmp -s "$REPO_ROOT/src/$f" "$pkg_dst/usr/share/omarchy-deck/$f" \
-    || fail "installed $f differs from src/$f"
+  [[ -f $pkg_dst/usr/share/omarchy-deck/${f##*/} ]] \
+    || fail "package() does not install ${f##*/} beside deck-session.sh"
+  cmp -s "$REPO_ROOT/src/$f" "$pkg_dst/usr/share/omarchy-deck/${f##*/}" \
+    || fail "installed ${f##*/} differs from src/$f"
 done
 count "the installed session payload is byte-identical to src/ (${#staged[@]} files, executed)"
 

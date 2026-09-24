@@ -157,6 +157,13 @@ source=('README'
   'deck_osk_layout.py'
   'deck_osk_tty.py'
   'deck_osk_wayland.py'
+  'pizza'
+  'pizza-pizza'
+  'pizza-ssh'
+  'pizza.txt'
+  'pizza-alt-bold.txt'
+  'pizza-alt-gradient.txt'
+  'pizza-alt-slab.txt'
   '0010-lock-blank-timer-20s.patch'
   '0010-lock-blank-timer-20s.meta'
   '0020-limine-interface-rotation.patch'
@@ -165,7 +172,7 @@ source=('README'
   '0030-screensaver-font-fits-panel.meta'
   '0040-limine-boot-timeout.patch'
   '0040-limine-boot-timeout.meta')
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 # The one place the patch payload's destination is written down. The applier's
 # own DEFAULT_PATCH_DIR is /usr/share/omarchy-deck/patches and deck_patches.py's
@@ -284,6 +291,16 @@ package() {
     "$pkgdir/usr/share/omarchy-deck/deck_osk_tty.py"
   install -Dm644 "$srcdir/deck_osk_wayland.py" \
     "$pkgdir/usr/share/omarchy-deck/deck_osk_wayland.py"
+  # stage-pizza (in the gaming bake the opt-in runs) reads the dispatcher,
+  # its subcommands and the art from beside the script; art flat, the second
+  # entry of PIZZA_ART_SEARCH_DIRS. The stage installs them with its own modes.
+  local pizza_file
+  for pizza_file in pizza pizza-pizza pizza-ssh; do
+    install -Dm755 "$srcdir/$pizza_file" "$pkgdir/usr/share/omarchy-deck/$pizza_file"
+  done
+  for pizza_file in pizza.txt pizza-alt-bold.txt pizza-alt-gradient.txt pizza-alt-slab.txt; do
+    install -Dm644 "$srcdir/$pizza_file" "$pkgdir/usr/share/omarchy-deck/$pizza_file"
+  done
   # Both halves of every patch: the .patch and its .meta. A patch without its
   # .meta is not "one post-condition short", it is `bad_meta` and a non-zero
   # exit -- the applier refuses to apply a patch that declares no target and no

@@ -2051,6 +2051,17 @@ def early_steam_fetch_only(
     )
 
 
+def _retarget_link(path, target: str) -> None:
+    """Replace the symlink at ``path`` with one to ``target``, keeping the
+    replaced link's owner. This runs as root; a bare unlink+symlink handed
+    Valve's links (written by the user-owned bootstrap) to root -- 25 of them
+    in a QEMU Gaming=Yes home, against root_owned_under's invariant."""
+    st = os.lstat(path)
+    os.unlink(path)
+    os.symlink(target, path)
+    os.lchown(path, st.st_uid, st.st_gid)
+
+
 def _relocate_tree(
     final_on_target: Path, staging_home: str, final_home: str
 ) -> tuple[list[str], list[str], str | None]:
@@ -2088,8 +2099,7 @@ def _relocate_tree(
                     continue
                 if old not in tgt:
                     continue
-                os.unlink(path)
-                os.symlink(tgt.replace(old, new), path)
+                _retarget_link(path, tgt.replace(old, new))
                 repaired.append("/" + os.path.relpath(path, base))
             except OSError:
                 continue
@@ -2110,8 +2120,7 @@ def _relocate_tree(
             if link.is_symlink():
                 tgt = os.readlink(link)
                 if old in tgt:
-                    os.unlink(link)
-                    os.symlink(tgt.replace(old, new), link)
+                    _retarget_link(link, tgt.replace(old, new))
                     repaired.append(f"/{name} (repaired)")
         except OSError:
             continue

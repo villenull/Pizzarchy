@@ -81,7 +81,8 @@ ISO_ROOT="$REPO_ROOT/iso"
 # section 2b proves the two are the same set, byte for byte.
 T12_SRC="$REPO_ROOT/src/omarchy-deck-patches"
 APPLIER_SRC="$T12_SRC/omarchy-deck-apply-patches"
-SESSION_PAYLOAD_FILES=(deck-session.sh deck-input-mapper.py deck-steam-desktop.py deck_osk_layout.py deck_osk_tty.py deck_osk_wayland.py)
+SESSION_PAYLOAD_FILES=(deck-session.sh deck-input-mapper.py deck-steam-desktop.py deck_osk_layout.py deck_osk_tty.py deck_osk_wayland.py
+  pizza pizza-pizza pizza-ssh pizza.txt pizza-alt-bold.txt pizza-alt-gradient.txt pizza-alt-slab.txt)
 C6_PACKAGE_FILES=(omarchy-deck-enable-gaming omarchy-deck-enable-gaming.desktop
   omarchy-deck-greeter.qml omarchy-deck-greeter.metadata.desktop)
 DECK_PATCHES_PY="$ISO_ROOT/overlay/configs/airootfs/usr/share/omarchy-iso/orchestrator/deck_patches.py"
@@ -463,9 +464,13 @@ mkdir -p "$pkg_src" "$pkg_dst"
 for src_entry in $(field source); do
   if [[ -f "$PKG_DIR/$src_entry" ]]; then
     cp "$PKG_DIR/$src_entry" "$pkg_src/$src_entry"
-  elif [[ -f "$REPO_ROOT/src/$src_entry" ]] &&
-       [[ " ${SESSION_PAYLOAD_FILES[*]} " == *" $src_entry "* ]]; then
-    cp "$REPO_ROOT/src/$src_entry" "$pkg_src/$src_entry"
+  elif [[ " ${SESSION_PAYLOAD_FILES[*]} " == *" $src_entry "* ]] &&
+       { [[ -f "$REPO_ROOT/src/$src_entry" ]] || [[ -f "$REPO_ROOT/src/pizza-art/$src_entry" ]]; }; then
+    if [[ -f "$REPO_ROOT/src/$src_entry" ]]; then
+      cp "$REPO_ROOT/src/$src_entry" "$pkg_src/$src_entry"
+    else
+      cp "$REPO_ROOT/src/pizza-art/$src_entry" "$pkg_src/$src_entry"
+    fi
   else
     fail "source=('$src_entry') is supplied by the recipe or canonical session staging" \
       "makepkg cannot see a missing source; only the listed session payload may be generated from src/."
@@ -475,7 +480,7 @@ builder_text=$(<"$ISO_ROOT/bin/build")
 # shellcheck disable=SC2016 # literal build-script expressions, not expanded here
 [[ $builder_text == *'DECK_PKGBUILD_STAGING_DIR='* &&
    $builder_text == *'deck_session_files+=("${DECK_SESSION_OSK[@]}")'* &&
-   $builder_text == *'cp -a "$REPO_ROOT/src/$deck_session_file" "$DECK_PKGBUILD_STAGING_DIR/$deck_session_file"'* ]] ||
+   $builder_text == *'cp -a "$REPO_ROOT/src/$deck_session_file" "$DECK_PKGBUILD_STAGING_DIR/${deck_session_file##*/}"'* ]] ||
   fail "iso/bin/build stages canonical session sources into the scratch PKGBUILD before Docker"
 [[ -n $(field source) ]] || fail "the PKGBUILD declares its payload in source=()" \
   "Reaching into \$startdir instead would not be checked by makepkg at all."
@@ -611,7 +616,9 @@ count "package() installs exactly ${#expected_list[@]} enumerated paths: T12 sea
    -x "$pkg_dst/usr/share/omarchy-deck/deck-session.sh" ]] ||
   fail "C6 opt-in and installed session script are executable"
 for f in "${SESSION_PAYLOAD_FILES[@]}"; do
-  cmp -s "$REPO_ROOT/src/$f" "$pkg_dst/usr/share/omarchy-deck/$f" ||
+  canonical="$REPO_ROOT/src/$f"
+  [[ -f $canonical ]] || canonical="$REPO_ROOT/src/pizza-art/$f"
+  cmp -s "$canonical" "$pkg_dst/usr/share/omarchy-deck/$f" ||
     fail "the installed session asset $f matches canonical src/ byte-for-byte"
 done
 count "installed C6 script runs canonical, byte-identical session assets"
