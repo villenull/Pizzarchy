@@ -608,7 +608,9 @@ if (( REBOOT_CHECK == 1 )) && (( status == 0 )); then
   cp "$OVMF_VARS_TEMPLATE" "$rb_vars"
   # shellcheck disable=SC2054  # the commas are qemu's own -device syntax, one arg
   if [[ $TARGET_KIND == sd ]]; then
-    RB_TARGET_ARGS=(-device sdhci-pci -device sd-card,drive=tgt,bootindex=0)
+    # QEMU's sd-card has no bootindex property; it is the only disk in this
+    # boot, and OVMF's default order boots it (verified: reaches login).
+    RB_TARGET_ARGS=(-device sdhci-pci -device sd-card,drive=tgt)
   else
     RB_TARGET_ARGS=(-device nvme,drive=tgt,serial=VMFASTTARGET,bootindex=0)
   fi

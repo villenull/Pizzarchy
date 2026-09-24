@@ -12,20 +12,23 @@ work without waiting for further instruction.**
 > `docs/findings/FAST-INSTALL-RESULTS.md`. **Next step is hardware** (§6's first item). It
 > wipes the Deck, so ask the operator first.
 >
-> **The ISO** is the GitHub prerelease `v2026.09.24-fast-install`. GitHub caps release assets
-> at 2 GiB, so it is in four parts:
+> **The ISO** is the GitHub prerelease `v2026.09.24-fast-install-v2` (supersedes
+> `v2026.09.24-fast-install`), and is also on the operator's Ventoy stick. GitHub caps release
+> assets at 2 GiB, so it is in four parts:
 >
 > ```bash
-> gh release download v2026.09.24-fast-install -R villenull/Pizzarchy
-> cat pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-x86_64.iso.part? > pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-x86_64.iso
-> sha256sum -c SHA256SUMS --ignore-missing   # expect 8835528647421697f786e4b70ff9af7813c834520d80c9e2bfc56389911f94e1
+> gh release download v2026.09.24-fast-install-v2 -R villenull/Pizzarchy
+> cat pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-v2-x86_64.iso.part? > pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-v2-x86_64.iso
+> sha256sum -c SHA256SUMS --ignore-missing   # expect 29dc4a725ebcd44d0b3b5a600695d9e809a7db2e780dbff636e9e3f3a0aac6c5
 > ```
 >
 > **The dev PC was wiped after this session.** Nothing below lives outside git any more.
 > To rebuild the environment on a fresh Arch/Omarchy machine:
 >
 > 1. `git clone --recurse-submodules https://github.com/villenull/Pizzarchy` (the
->    `iso/upstream` submodule is required).
+>    `iso/upstream` submodule is required). Set the commit author
+>    (`git config --global user.name/user.email`); after a restart this machine had none.
+>    Docker must be enabled (`sudo systemctl enable --now docker`), or builds fail.
 > 2. Host packages: `docker qemu-system-x86 qemu-img edk2-ovmf socat jq tesseract
 >    tesseract-data-eng imagemagick udisks2 dosfstools mtools shellcheck github-cli
 >    libarchive python`. `mtools` was missing here and had been run from a hand-extracted copy

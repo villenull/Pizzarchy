@@ -9,6 +9,35 @@ measured 82 MB/s. Not exercised: the physical controller, Wi-Fi radio, panel, ga
 rendering, audio, and the real form (cidata answers the form; `form-delay-seconds` simulates
 how long a human takes). A physical install wipes the Deck and needs the operator.
 
+## v2 — the operator's flow, microSD target, name/email (same day, later)
+
+**Current ISO.** Supersedes the "Final ISO" below as the one to install.
+
+| | |
+|---|---|
+| File | `pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-v2-x86_64.iso` |
+| Size / sha256 | 6,867,582,976 B · `29dc4a725ebcd44d0b3b5a600695d9e809a7db2e780dbff636e9e3f3a0aac6c5` |
+| Source | commit `71b44cd` (later commits: `test/vm/` harness and docs only) |
+| Where | GitHub prerelease `v2026.09.24-fast-install-v2` (four `.partN` + `SHA256SUMS`); operator's Ventoy stick, verified by `dd iflag=direct` readback |
+
+Flow, in order: welcome + wipe warning → **choose the drive** (built-in NVMe and the microSD
+card; USB and the boot medium never listed) → background install starts on it → pre-installs
+Yes/No → **Install Steam?** Yes/No → Wi-Fi **only if Steam = Yes** → **Steam download screen**
+(bar, MB done/total, rate, time left; failure menu: try again / continue without Steam /
+reboot / power off) → username, password, **full name, email** (Enter skips), hostname,
+timezone → summary → confirm.
+
+QEMU on this ISO: No/No, Yes/No, No/Yes and Yes/Yes on NVMe all PASS with reboot to login; the
+in-place Enable Gaming Mode PASS; **No/No on the microSD card** installs, passes every on-disk
+check, and boots to login. Name and email land in `~/.config/git/config` (git writes the XDG
+file when that directory exists; an earlier check looked for `~/.gitconfig` and was wrong).
+The SD install took ~15 min in QEMU: that is QEMU's emulated SD controller, not a measurement
+of the Deck's card reader, which is unmeasured.
+
+**Not exercised anywhere yet:** the new screens themselves (drive picker, Steam download
+screen) run only in unit tests, because QEMU installs answer the form from cidata. They need
+the Deck.
+
 ## Final ISO
 
 | | |

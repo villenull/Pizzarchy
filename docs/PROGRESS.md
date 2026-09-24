@@ -4049,7 +4049,18 @@ measurements and the 15 defects QEMU found: **`docs/findings/FAST-INSTALL-RESULT
 | Gaming later | `/usr/bin/omarchy-deck-enable-gaming` (app launcher "Enable Gaming Mode"), online, no wipe, switches autologin only once ready |
 | CI | green on every push since the uid fix |
 
-⚠️ **Not on hardware.** No physical Deck install of this ISO has happened. See §6.
+**v2, same day (current):** the operator's flow — welcome → choose drive (NVMe **or microSD**)
+→ pre-installs → Install Steam? → Wi-Fi only for Steam → Steam download screen (bar, rate,
+time left) → Omarchy prompts incl. **full name/email** → summary. ISO
+`pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-v2-x86_64.iso`, sha256
+`29dc4a725ebcd44d0b3b5a600695d9e809a7db2e780dbff636e9e3f3a0aac6c5`, prerelease
+`v2026.09.24-fast-install-v2`, on the operator's USB stick (readback-verified). QEMU: four NVMe
+variants + opt-in + No/No on microSD all PASS to login; name/email in `~/.config/git/config`.
+Details: `docs/findings/FAST-INSTALL-RESULTS.md` § v2.
+
+⚠️ **Not on hardware.** No physical Deck install of either ISO has happened, and the new drive
+picker and Steam download screen have run only in unit tests (QEMU answers the form from
+cidata). See §6.
 
 
 ---
