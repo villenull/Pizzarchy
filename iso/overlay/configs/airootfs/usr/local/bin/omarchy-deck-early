@@ -65,7 +65,7 @@ cmd_status() {
 # deck_early_require_oled -- the WIPE gate, mirroring the form's own
 # deck_form_is_oled_deck: product_name==Galileo AND sys_vendor contains
 # Valve, exact on the product. A Jupiter (unverified LCD), a generic laptop
-# NVMe, or unreadable DMI refuses loudly before anything is erased. Paths
+# disk, or unreadable DMI refuses loudly before anything is erased. Paths
 # and the lsblk binary are overridable so tests fake every branch. There is
 # deliberately NO bypass: the QEMU harness fakes Galileo/Valve in SMBIOS,
 deck_early_require_oled() {
@@ -77,15 +77,16 @@ deck_early_require_oled() {
   if [[ $product == Galileo && $vendor == *Valve* ]]; then
     return 0
   fi
-  echo "$DECK_EARLY_PROG: refusing to wipe on unverified hardware (product='${product:-unreadable}', vendor='${vendor:-unreadable}'): OLED Steam Deck (Galileo/Valve) with built-in NVMe only" >&2
+  echo "$DECK_EARLY_PROG: refusing to wipe on unverified hardware (product='${product:-unreadable}', vendor='${vendor:-unreadable}'): OLED Steam Deck (Galileo/Valve) with internal SSD or microSD only" >&2
   return 2
 }
 
-# deck_early_require_nvme_disk -- the disk half of the wipe gate: the named
-# disk must be a non-removable NVMe disk and must not be the live boot
-# source. Same rule as deck_form_disk_list (TYPE==disk, RM==0, TRAN==nvme,
-# minus boot medium), enforced here so the CLI cannot bypass it.
-deck_early_require_nvme_disk() {
+# deck_early_require_target_disk -- the disk half of the wipe gate: the named
+# disk must be the built-in NVMe (TYPE==disk, RM==0, TRAN==nvme) or the
+# Deck's microSD card (NAME ^/dev/mmcblk[0-9]+$, TYPE==disk), and must not be
+# the live boot source. Same rule as deck_form_disk_list, enforced here so
+# the CLI cannot bypass it. USB is never a target.
+deck_early_require_target_disk() {
   local disk=$1
   local lsblk_bin=${DECK_EARLY_LSBLK_BIN:-$DECK_EARLY_LSBLK_BIN_DEFAULT}
   local base=${disk#/dev/}
@@ -97,8 +98,13 @@ deck_early_require_nvme_disk() {
   fi
   local _discard="" type="" rm="" tran=""
   read -r _discard type rm tran <<<"$row"
-  if [[ $type != disk || $rm != 0 || $tran != nvme ]]; then
-    echo "$DECK_EARLY_PROG: refusing '$disk': not a built-in NVMe disk (TYPE=$type RM=$rm TRAN=$tran; SD/USB never targets)" >&2
+  if [[ $disk =~ ^/dev/mmcblk[0-9]+$ ]]; then
+    if [[ $type != disk ]]; then
+      echo "$DECK_EARLY_PROG: refusing '$disk': not a microSD whole disk (TYPE=$type; USB never a target)" >&2
+      return 2
+    fi
+  elif [[ $type != disk || $rm != 0 || $tran != nvme ]]; then
+    echo "$DECK_EARLY_PROG: refusing '$disk': not an internal SSD or microSD card (TYPE=$type RM=$rm TRAN=$tran; USB never a target)" >&2
     return 2
   fi
   local boot_source boot_disk
@@ -114,6 +120,12 @@ deck_early_require_nvme_disk() {
   return 0
 }
 
+# deck_early_require_nvme_disk -- RETIRED NAME, kept as a wrapper: the gate
+# now means "internal SSD or microSD" (2026-09-24). Callers must move to
+# deck_early_require_target_disk; this keeps any out-of-tree caller loud
+# rather than silently unguarded.
+deck_early_require_nvme_disk() { deck_early_require_target_disk "$@"; }
+
 
 cmd_network_ready() {
   mkdir -p "$(dirname "$DECK_EARLY_NETWORK_FILE")"
@@ -124,18 +136,18 @@ cmd_network_ready() {
 cmd_start() {
   local disk=${1:-}
   [[ -n $disk ]] || usage
-  # Built-in NVMe only: microSD (mmc) and USB sticks (usb) are never
-  # targets, and a /dev/sd*/vd* name can be a USB enclosure or a VM disk.
-  # The form's own resolver (deck_form_disk_list: TYPE==disk, RM==0,
-  # TRAN==nvme, minus the boot medium) offers only NVMe; the CLI enforces
-  # the same so calling it directly cannot bypass the wipe gate.
+  # Internal SSD or microSD only: USB sticks (usb/sd*) are never targets,
+  # and a /dev/vd* name is a VM disk. The form's own resolver
+  # (deck_form_disk_list: NVMe TYPE==disk RM==0 TRAN==nvme, or microSD
+  # /dev/mmcblkN, minus the boot medium) offers only those; the CLI
+  # enforces the same so calling it directly cannot bypass the wipe gate.
   case $disk in
-    /dev/nvme[0-9]n[0-9]) ;;
-    *) echo "$DECK_EARLY_PROG: refusing non-NVMe device '$disk' (built-in NVMe only; SD/USB never targets)" >&2; exit 2 ;;
+    /dev/nvme[0-9]n[0-9]|/dev/mmcblk[0-9]) ;;
+    *) echo "$DECK_EARLY_PROG: refusing '$disk' (internal SSD or microSD only; USB never a target)" >&2; exit 2 ;;
   esac
   [[ -b $disk ]] || { echo "$DECK_EARLY_PROG: no such block device '$disk'" >&2; exit 2; }
   deck_early_require_oled
-  deck_early_require_nvme_disk "$disk"
+  deck_early_require_target_disk "$disk"
   mkdir -p "$DECK_EARLY_STATE_DIR"
   if [[ -f $DECK_EARLY_DISK_FILE ]]; then
     local prior
@@ -189,7 +201,7 @@ cmd_worker() {
   # irreversible wipe gate here rather than trusting that `start` ran first.
   if [[ $(cat "$DECK_EARLY_DISK_FILE" 2>/dev/null || true) != "$disk" ]] ||
      ! deck_early_require_oled ||
-     ! deck_early_require_nvme_disk "$disk"; then
+     ! deck_early_require_target_disk "$disk"; then
     printf 'failed\n' >"$DECK_EARLY_STATUS_FILE"
     printf 'early worker refused unverified disk %s; see stderr\n' "$disk" >"$DECK_EARLY_ERROR_FILE"
     return 2

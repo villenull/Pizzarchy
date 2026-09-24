@@ -15,9 +15,11 @@
 #
 # Usage: ./vm-fast-install-test.sh <iso-path> [work-dir]
 #
-# Env vars (all optional):
-#   VM_DISK_SIZE_GB         default 20 (NVMe target, raw sparse file)
-#   VM_MEM_MB               default 8192 (8 GiB; the Deck has 16 -- raise with
+#   VM_DISK_SIZE_GB         default 20 (target, raw sparse file)
+#   VM_TARGET               default nvme. nvme = NVMe target (guest
+#                           /dev/nvme0n1, the Deck's internal SSD); sd = SD
+#                           card target (guest /dev/mmcblk0 via sdhci-pci +
+#                           sd-card, the Deck's microSD slot).
 #                           VM_MEM_MB=16384 if image staging ever needs more)
 #   VM_SMP                  default min(nproc,4)
 #   VM_INSTALL_TIMEOUT_SEC  default 1800 (30 min)
@@ -113,13 +115,14 @@ PASSWORD=${VM_PASSWORD:-tester123}
 FORM_DELAY=${VM_FORM_DELAY_SEC:-90}
 PREINSTALLS=${VM_PREINSTALLS:-no}
 GAMING=${VM_GAMING:-no}
+TARGET_KIND=${VM_TARGET:-nvme}
 NET_CHECK=${VM_GAMING_NET_CHECK:-1}
 THROTTLE_BPS=${VM_THROTTLE_BPS_READ:-82000000}
 EXPECT_STAGES=${VM_EXPECT_STAGES_TIMING:-1}
 REBOOT_CHECK=${VM_FAST_REBOOT_CHECK:-0}
-
 log() { printf '[vm-fast-install-test] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
+case $TARGET_KIND in nvme|sd) ;; *) { log "FAIL: VM_TARGET must be nvme or sd, got '$TARGET_KIND'"; exit 2; } ;; esac
 
 # shellcheck disable=SC2054  # the commas are qemu's own -netdev syntax, one arg (same idiom as vm-install-controller-test.sh)
 case $PREINSTALLS in yes|no) ;; *) { log "FAIL: VM_PREINSTALLS must be yes or no, got '$PREINSTALLS'"; exit 2; } ;; esac
@@ -209,16 +212,23 @@ serial_log="$WORK/serial.log"
 
 disk_bytes=$((DISK_SIZE_GB * 1024 * 1024 * 1024))
 
-# Raw sparse target (truncate, no qemu-img dependency): the NVMe device the
-# guest installs to. NVMe naming (/dev/nvme0n1) matches the Deck's own
-# production target, so the cidata device must use it too.
-log "creating ${DISK_SIZE_GB}G sparse NVMe target (guest device /dev/nvme0n1)"
+# Target kind (VM_TARGET=nvme|sd, default nvme). nvme attaches an NVMe
+# device (guest /dev/nvme0n1, the Deck's internal SSD); sd attaches an SD
+# card (guest /dev/mmcblk0 via sdhci-pci + sd-card, the Deck's microSD
+# slot). The cidata device must match the guest path under test.
+if [[ $TARGET_KIND == sd ]]; then
+  GUEST_DEVICE=/dev/mmcblk0
+else
+  GUEST_DEVICE=/dev/nvme0n1
+fi
+
+log "creating ${DISK_SIZE_GB}G sparse ${TARGET_KIND} target (guest device $GUEST_DEVICE)"
 truncate -s "${DISK_SIZE_GB}G" "$target_raw"
 
 cp "$OVMF_VARS_TEMPLATE" "$ovmf_vars"
 
-log "rendering cidata autoinstall config (hostname=$HOSTNAME_ user=$USERNAME full_name=$FULL_NAME email=$EMAIL preinstalls=$PREINSTALLS gaming=$GAMING)"
-cidata::render_config /dev/nvme0n1 "$disk_bytes" "$HOSTNAME_" "$config_json"
+log "rendering cidata autoinstall config (hostname=$HOSTNAME_ user=$USERNAME full_name=$FULL_NAME email=$EMAIL preinstalls=$PREINSTALLS gaming=$GAMING target=$GUEST_DEVICE)"
+cidata::render_config "$GUEST_DEVICE" "$disk_bytes" "$HOSTNAME_" "$config_json"
 # vm-cidata.sh renders the Deck kernel (linux-omarchy) in both config fields
 # itself; the offline mirror carries no stock linux-headers, so selecting
 # anything else fails pacstrap with "target not found: linux-headers".
@@ -301,7 +311,14 @@ if (( THROTTLE_BPS > 0 )); then
   throttle_opt=",throttling.bps-read=${THROTTLE_BPS}"
 fi
 
-log "booting ISO as throttled usb-storage behind xhci (timeout ${INSTALL_TIMEOUT}s)"
+# shellcheck disable=SC2054  # the commas are qemu's own -device syntax, one arg (same idiom as the NET_ARGS lines above)
+if [[ $TARGET_KIND == sd ]]; then
+  TARGET_ARGS=(-device sdhci-pci -device sd-card,drive=tgt)
+else
+  TARGET_ARGS=(-device nvme,drive=tgt,serial=VMFASTTARGET)
+fi
+
+log "booting ISO as throttled usb-storage behind xhci (timeout ${INSTALL_TIMEOUT}s, target ${TARGET_KIND} ${GUEST_DEVICE})"
 qemu-system-x86_64 \
   "${ACCEL_ARGS[@]}" \
   -smp "$SMP" -m "$MEM_MB" \
@@ -313,7 +330,7 @@ qemu-system-x86_64 \
   -drive "if=none,id=stick,format=raw,readonly=on,cache=none,aio=native,file=${ISO}${throttle_opt}" \
   -device usb-storage,bus=xhci.0,drive=stick,bootindex=0 \
   -drive if=none,id=tgt,format=raw,file="$target_raw" \
-  -device nvme,drive=tgt,serial=VMFASTTARGET \
+  "${TARGET_ARGS[@]}" \
   -drive file="$cidata_img",format=raw,if=none,id=cidata0 \
   -device virtio-blk-pci,drive=cidata0 \
   "${NET_ARGS[@]}" \
@@ -587,6 +604,12 @@ if (( REBOOT_CHECK == 1 )) && (( status == 0 )); then
   rb_pidfile="$WORK/qemu-reboot.pid"
   rb_serial="$WORK/reboot-serial.log"
   cp "$OVMF_VARS_TEMPLATE" "$rb_vars"
+  # shellcheck disable=SC2054  # the commas are qemu's own -device syntax, one arg
+  if [[ $TARGET_KIND == sd ]]; then
+    RB_TARGET_ARGS=(-device sdhci-pci -device sd-card,drive=tgt,bootindex=0)
+  else
+    RB_TARGET_ARGS=(-device nvme,drive=tgt,serial=VMFASTTARGET,bootindex=0)
+  fi
   qemu-system-x86_64 \
     "${ACCEL_ARGS[@]}" \
     -smp "$SMP" -m "$MEM_MB" \
@@ -595,7 +618,7 @@ if (( REBOOT_CHECK == 1 )) && (( status == 0 )); then
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,file="$rb_vars" \
     -drive if=none,id=tgt,format=raw,file="$target_raw" \
-    -device nvme,drive=tgt,serial=VMFASTTARGET,bootindex=0 \
+    "${RB_TARGET_ARGS[@]}" \
     "${NET_ARGS[@]}" \
     -display none -vga std \
     -qmp "unix:${WORK}/qmp-reboot.sock,server,nowait" \

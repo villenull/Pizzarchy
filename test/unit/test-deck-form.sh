@@ -651,22 +651,25 @@ pass "text_prompt does not clobber a pre-existing EXIT trap; it warns and skips 
 echo "--- S0 (deck_form_s0_text / greeter) ------------------------------------"
 
 s0=$(deck_form_s0_text)
-# Four-variant S0 (operator requirement, 2026-09-24): the BIG proceed
-# question, the immediate-wipe warning naming the built-in drive, the SD
-# card promise, and the no-working-system consequence.
+# 2026-09-24 flow: welcome + choose-drive-next wording, SSD/microSD targets,
+# USB never a target, and the no-working-system consequence.
+LC_ALL=C grep -qF "Welcome to Omarchy" <<<"$s0" ||
+  fail "S0 text must welcome to Omarchy" "$s0"
 LC_ALL=C grep -qF "THIS WILL INSTALL OMARCHY ON YOUR STEAM DECK. PROCEED?" <<<"$s0" ||
   fail "S0 text must contain the BIG proceed question" "$s0"
-LC_ALL=C grep -qF "wipes the built-in drive immediately" <<<"$s0" ||
-  fail "S0 text must say A wipes the built-in drive immediately" "$s0"
-LC_ALL=C grep -qF "no later disk confirmation" <<<"$s0" ||
-  fail "S0 text must say there is no later disk confirmation" "$s0"
-LC_ALL=C grep -qF "SD card is never touched" <<<"$s0" ||
-  fail "S0 text must promise the SD card is never touched" "$s0"
+LC_ALL=C grep -qF "chooses the install drive next" <<<"$s0" ||
+  fail "S0 text must say A chooses the install drive next" "$s0"
+LC_ALL=C grep -qF "chosen drive is wiped immediately" <<<"$s0" ||
+  fail "S0 text must say the chosen drive is wiped immediately" "$s0"
+LC_ALL=C grep -qF "internal SSD or the microSD card" <<<"$s0" ||
+  fail "S0 text must name the internal SSD and the microSD card as targets" "$s0"
+LC_ALL=C grep -qF "USB drives are never targets" <<<"$s0" ||
+  fail "S0 text must say USB drives are never targets" "$s0"
 LC_ALL=C grep -qF "no working system until an install finishes" <<<"$s0" ||
-  fail "S0 text must say stopping after A leaves no working system" "$s0"
+  fail "S0 text must say stopping after choosing leaves no working system" "$s0"
 LC_ALL=C grep -qF "Press A to install, B to cancel" <<<"$s0" ||
   fail "S0 text must name BOTH keys (A installs, B cancels)" "$s0"
-pass "deck_form_s0_text contains the BIG question, the wipe warning, the SD promise, and the A/B prompt"
+pass "deck_form_s0_text contains the welcome, the BIG question, the wipe warning, the SSD/microSD targets, and the A/B prompt"
 
 # FAST-INSTALL C4 row budget: S0 grew two lines (the warning that consent
 # moved here). The console is 50 rows x 160 columns (measured, asserted again
@@ -751,7 +754,9 @@ exit 0
 EOF
 chmod +x "$work/bin-fakeearly/omarchy-deck-early"
 : >"$work/s0-early.log"
-printf 'No\nNo\n' >"$work/s0-choose.q"
+# Drive screen queue: the listed "device | label" row (label from the fake
+# lsblk SIZE below), then preinstalls No + gaming No.
+printf '/dev/nvme0n1 | Internal SSD (NVMe) 512G (512G)\nNo\nNo\n' >"$work/s0-choose.q"
 rm -rf "$work/s0-choices"
 out=$(STTY_MARKER="$work/stty.marker" PATH="$work/bin:$work/bin-fakegum:$PATH" \
       DECK_S0_TTY="$work/fake-tty-input" \
@@ -773,8 +778,8 @@ out=$(STTY_MARKER="$work/stty.marker" PATH="$work/bin:$work/bin-fakegum:$PATH" \
   fail "greeter must call 'stty sane' -- losing it silently kills every gum prompt after S0 (T4-screen-spec.md §4 S0)"
 LC_ALL=C grep -qF "THIS WILL INSTALL OMARCHY" <<<"$out" ||
   fail "greeter's own output must include the S0 BIG question, not just stty side effects"
-LC_ALL=C grep -qF "no later disk confirmation" <<<"$out" ||
-  fail "greeter's own output must include the S0-A warning, not just the old disclosure" "$out"
+LC_ALL=C grep -qF "chosen drive is wiped immediately" <<<"$out" ||
+  fail "greeter's own output must include the chosen-drive wipe warning" "$out"
 pass "greeter calls 'stty sane' and prints the S0 disclosure text"
 
 # Four-variant flow: this greeter run answers preinstalls No + gaming No
@@ -791,18 +796,21 @@ pass "greeter calls 'stty sane' and prints the S0 disclosure text"
   fail "greeter must write choices/locked last (Stages gates on it)"
 pass "greeter with No/No skips Wi-Fi and locks no/no choices"
 
-# FAST-INSTALL C4: S0-A must have started the early stage on the one disk.
+# The drive screen starts the early stage on the selection (tested above via
+# greeter); the unit tests below drive the screen + the start separately.
 LC_ALL=C grep -qxF "start /dev/nvme0n1" "$work/s0-early.log" ||
-  fail "greeter must call 'omarchy-deck-early start /dev/nvme0n1' at S0-A -- consent moved to S0, so A starts the background install" "$(cat "$work/s0-early.log" 2>/dev/null)"
+  fail "greeter must call 'omarchy-deck-early start /dev/nvme0n1' on the selected drive" "$(cat "$work/s0-early.log" 2>/dev/null)"
 
-# FAST-INSTALL C4 negative controls: zero or two+ eligible disks must reach
-# the existing dead end BEFORE anything is erased, and must never call
-# `early start`. The real dead-end screen loops forever, so it is stubbed
-# with a logging stand-in (the same technique the disk_form zero-disk case
-# below uses); `abort` is already the non-fatal test stub at the top.
+echo "--- drive selection: one disk, two disks, zero, B-back --------------------"
+
+# Zero eligible: the drive screen dead-ends BEFORE anything is erased. The
+# real dead-end screen loops forever, so it is stubbed with a logging
+# stand-in; `abort` is already the non-fatal test stub at the top. The real
+# definition is stashed first and eval-restored after (re-sourcing the file
+# under test would re-run its readonly constants under set -e and abort).
+deck_dead_end_saved=$(declare -f deck_form_disk_dead_end)
 : >"$work/s0-early-zero.log"
 deck_form_disk_dead_end() { printf 'DEAD_END_CALLED\n' >>"$work/s0-deadend.log"; return 0; }
-: >"$work/s0-deadend.log"
 cat >"$work/bin-fakeearly/lsblk-zero" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM,TRAN" ]]; then
@@ -815,99 +823,122 @@ chmod +x "$work/bin-fakeearly/lsblk-zero"
 unset disk 2>/dev/null || true
 set +e
 DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-zero" DECK_TEST_ROOT_DISK="" \
-DECK_DMI_PRODUCT="$work/dmi-oled/product_name" \
-DECK_DMI_VENDOR="$work/dmi-oled/sys_vendor" \
-DECK_EARLY_BIN="$work/bin-fakeearly/omarchy-deck-early" \
-DECK_EARLY_LOG="$work/s0-early-zero.log" \
-  deck_form_start_early_install >/dev/null 2>&1
-early_rc=$?
+  PATH="$work/bin-fakegum:$PATH" \
+  deck_form_drive_screen drive_zero >/dev/null 2>&1
+drive_rc=$?
 set -e
-[[ $early_rc -ne 0 ]] ||
-  fail "with ZERO eligible disks the S0-A start must fail, not return 0"
+[[ $drive_rc -ne 0 ]] ||
+  fail "with ZERO eligible disks the drive screen must fail, not return 0"
 LC_ALL=C grep -qF "DEAD_END_CALLED" "$work/s0-deadend.log" ||
-  fail "with ZERO eligible disks the S0-A start must show the existing dead end BEFORE anything is erased"
-[[ ! -s "$work/s0-early-zero.log" ]] ||
-  fail "with ZERO eligible disks 'early start' must NEVER be called" "$(cat "$work/s0-early-zero.log")"
-[[ -z ${disk:-} ]] || fail "with ZERO eligible disks 'disk' must stay unset" "got: $disk"
-pass "S0-A with zero disks dead-ends and never calls early start"
+  fail "with ZERO eligible disks the drive screen must show the existing dead end BEFORE anything is erased"
+pass "drive screen with zero disks dead-ends and never calls early start"
 
-: >"$work/s0-early-two.log"
-: >"$work/s0-deadend.log"
-cat >"$work/bin-fakeearly/lsblk-two" <<'EOF'
+# One disk: the screen still draws (no autoselect) and returns the entry.
+cat >"$work/bin-fakeearly/lsblk-one-row" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM,TRAN" ]]; then
-  printf '/dev/nvme0n1 disk 0 nvme\n/dev/nvme1n1 disk 0 nvme\n'
+  printf '/dev/nvme0n1 disk 0 nvme\n'
   exit 0
 fi
-exit 0
+field=$3
+case "$field" in
+  SIZE) echo "512G" ;;
+  *) : ;;
+esac
 EOF
-chmod +x "$work/bin-fakeearly/lsblk-two"
+chmod +x "$work/bin-fakeearly/lsblk-one-row"
+printf '/dev/nvme0n1 | Internal SSD (NVMe) 512G (512G)\n' >"$work/drive-one.q"
+: >"$work/drive-one-gum.log"
+drive_one=""
+DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-one-row" DECK_TEST_ROOT_DISK="" \
+FAKE_GUM_CHOOSE_QUEUE="$work/drive-one.q" FAKE_GUM_LOG="$work/drive-one-gum.log" \
+PATH="$work/bin-fakegum:$PATH" \
+  deck_form_drive_screen drive_one ||
+  fail "drive screen with one disk must succeed"
+[[ $drive_one == /dev/nvme0n1 ]] || fail "drive screen must return the single entry" "got: $drive_one"
+LC_ALL=C grep -qF "choose" "$work/drive-one-gum.log" ||
+  fail "drive screen must DRAW the chooser even with one entry -- the user sees what will be wiped" "$(cat "$work/drive-one-gum.log")"
+pass "drive screen with one disk shows the screen and returns the entry (no autoselect)"
+
+# Two disks (NVMe + microSD): the user must choose; the queue picks the SD.
+cat >"$work/bin-fakeearly/lsblk-both" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM,TRAN" ]]; then
+  printf '/dev/nvme0n1 disk 0 nvme\n/dev/mmcblk0 disk 1 mmc\n'
+  exit 0
+fi
+field=$3
+case "$field" in
+  SIZE) echo "512G" ;;
+  *) : ;;
+esac
+EOF
+chmod +x "$work/bin-fakeearly/lsblk-both"
+printf '/dev/mmcblk0 | microSD card 512G (512G)\n' >"$work/drive-two.q"
+: >"$work/drive-two-gum.log"
+drive_two=""
+DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-both" DECK_TEST_ROOT_DISK="" \
+FAKE_GUM_CHOOSE_QUEUE="$work/drive-two.q" FAKE_GUM_LOG="$work/drive-two-gum.log" \
+PATH="$work/bin-fakegum:$PATH" \
+  deck_form_drive_screen drive_two ||
+  fail "drive screen with two disks must succeed"
+[[ $drive_two == /dev/mmcblk0 ]] || fail "drive screen must honour the user's choice" "got: $drive_two"
+LC_ALL=C grep -qF "choose" "$work/drive-two-gum.log" ||
+  fail "drive screen must invoke the picker with two disks" "$(cat "$work/drive-two-gum.log")"
+pass "drive screen with NVMe + microSD requires the user's choice and honours it"
+
+# B/Esc on the drive screen answers back (the greeter redraws welcome).
+printf '<CANCEL>\n' >"$work/drive-back.q"
+drive_back="unset"
+DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-one-row" DECK_TEST_ROOT_DISK="" \
+FAKE_GUM_CHOOSE_QUEUE="$work/drive-back.q" FAKE_GUM_LOG="$work/drive-one-gum.log" \
+PATH="$work/bin-fakegum:$PATH" \
+  deck_form_drive_screen drive_back ||
+  fail "B on the drive screen must return (back), not fail"
+[[ $drive_back == back ]] || fail "B on the drive screen must answer back" "got: $drive_back"
+pass "B on the drive screen goes back to the welcome screen"
+
+# Boot-medium SD excluded: NVMe + booted-SD lists only the NVMe.
+printf '/dev/nvme0n1 | Internal SSD (NVMe) 512G (512G)\n' >"$work/drive-bootsd.q"
+drive_bootsd=""
+DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-both" DECK_TEST_ROOT_DISK="/dev/mmcblk0" \
+FAKE_GUM_CHOOSE_QUEUE="$work/drive-bootsd.q" FAKE_GUM_LOG="$work/drive-two-gum.log" \
+PATH="$work/bin-fakegum:$PATH" \
+  deck_form_drive_screen drive_bootsd ||
+  fail "boot-medium SD must be excluded, leaving the NVMe"
+[[ $drive_bootsd == /dev/nvme0n1 ]] || fail "boot-medium SD must not be listed" "got: $drive_bootsd"
+pass "an SD card that is the boot medium is excluded from the drive list"
+
+# Early start takes the SELECTED disk (NVMe and SD both start).
+: >"$work/s0-early-sel-nvme.log"
 unset disk 2>/dev/null || true
-set +e
-DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-two" DECK_TEST_ROOT_DISK="" \
 DECK_DMI_PRODUCT="$work/dmi-oled/product_name" \
 DECK_DMI_VENDOR="$work/dmi-oled/sys_vendor" \
 DECK_EARLY_BIN="$work/bin-fakeearly/omarchy-deck-early" \
-DECK_EARLY_LOG="$work/s0-early-two.log" \
-  deck_form_start_early_install >/dev/null 2>&1
-early_rc=$?
-set -e
-[[ $early_rc -ne 0 ]] ||
-  fail "with TWO eligible disks the S0-A start must fail, not guess one to erase"
-LC_ALL=C grep -qF "DEAD_END_CALLED" "$work/s0-deadend.log" ||
-  fail "with TWO eligible disks the S0-A start must show the dead end instead of guessing"
-[[ ! -s "$work/s0-early-two.log" ]] ||
-  fail "with TWO eligible disks 'early start' must NEVER be called" "$(cat "$work/s0-early-two.log")"
-[[ -z ${disk:-} ]] || fail "with TWO eligible disks 'disk' must stay unset" "got: $disk"
-pass "S0-A with two NVMe disks dead-ends and never calls early start"
-
-# NVMe + microSD (RM=0!) resolves to the single NVMe: the card is never a
-# target even though the old RM-only rule would have kept it.
-cat >"$work/bin-fakeearly/lsblk-sd" <<'EOF'
-#!/usr/bin/env bash
-if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM,TRAN" ]]; then
-  printf '/dev/nvme0n1 disk 0 nvme\n/dev/mmcblk0 disk 0\n'
-  exit 0
-fi
-exit 0
-EOF
-chmod +x "$work/bin-fakeearly/lsblk-sd"
-: >"$work/s0-early-sd.log"
+DECK_EARLY_LOG="$work/s0-early-sel-nvme.log" \
+  deck_form_start_early_install /dev/nvme0n1 >/dev/null 2>&1 ||
+  fail "early start must accept the selected NVMe"
+[[ $disk == /dev/nvme0n1 ]] || fail "'disk' must be the selected NVMe" "got: ${disk:-unset}"
+LC_ALL=C grep -qxF "start /dev/nvme0n1" "$work/s0-early-sel-nvme.log" ||
+  fail "early start must be called with the selected NVMe" "$(cat "$work/s0-early-sel-nvme.log")"
+: >"$work/s0-early-sel-sd.log"
 unset disk 2>/dev/null || true
-DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-sd" DECK_TEST_ROOT_DISK="" \
 DECK_DMI_PRODUCT="$work/dmi-oled/product_name" \
 DECK_DMI_VENDOR="$work/dmi-oled/sys_vendor" \
 DECK_EARLY_BIN="$work/bin-fakeearly/omarchy-deck-early" \
-DECK_EARLY_LOG="$work/s0-early-sd.log" \
-  deck_form_start_early_install >/dev/null 2>&1 ||
-  fail "NVMe + microSD must resolve to the single NVMe, not dead-end"
-[[ $disk == /dev/nvme0n1 ]] || fail "microSD must never be the target" "got: ${disk:-unset}"
-LC_ALL=C grep -qxF "start /dev/nvme0n1" "$work/s0-early-sd.log" ||
-  fail "early start must name the NVMe, never the card" "$(cat "$work/s0-early-sd.log")"
-pass "S0-A with NVMe + microSD installs to the NVMe; the card is never touched"
+DECK_EARLY_LOG="$work/s0-early-sel-sd.log" \
+  deck_form_start_early_install /dev/mmcblk0 >/dev/null 2>&1 ||
+  fail "early start must accept the selected microSD"
+[[ $disk == /dev/mmcblk0 ]] || fail "'disk' must be the selected microSD" "got: ${disk:-unset}"
+pass "early start receives the selected disk (NVMe and microSD both start)"
 
-# NVMe + USB stick (RM=1 anyway) likewise resolves to the NVMe.
-cat >"$work/bin-fakeearly/lsblk-usb" <<'EOF'
-#!/usr/bin/env bash
-if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM,TRAN" ]]; then
-  printf '/dev/nvme0n1 disk 0 nvme\n/dev/sda disk 1 usb\n'
-  exit 0
-fi
-exit 0
-EOF
-chmod +x "$work/bin-fakeearly/lsblk-usb"
-: >"$work/s0-early-usb.log"
-unset disk 2>/dev/null || true
-DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-usb" DECK_TEST_ROOT_DISK="" \
-DECK_DMI_PRODUCT="$work/dmi-oled/product_name" \
-DECK_DMI_VENDOR="$work/dmi-oled/sys_vendor" \
-DECK_EARLY_BIN="$work/bin-fakeearly/omarchy-deck-early" \
-DECK_EARLY_LOG="$work/s0-early-usb.log" \
-  deck_form_start_early_install >/dev/null 2>&1 ||
-  fail "NVMe + USB must resolve to the single NVMe, not dead-end"
-[[ $disk == /dev/nvme0n1 ]] || fail "USB must never be the target" "got: ${disk:-unset}"
-pass "S0-A with NVMe + USB installs to the NVMe; USB is never touched"
-unset -f deck_form_disk_dead_end
+# Restore the real dead-end screen: later failures must reach the real
+# screen, not silently pass through the logging stub above. Saved before
+# stubbing would need the stub defined earlier; instead re-define from the
+# file under test is impossible (readonly constants block re-source under
+# set -e), so restore via the saved definition stashed before the stub.
+eval "$deck_dead_end_saved"
+unset deck_dead_end_saved
 
 # FAST-INSTALL C4 loud start: a failing early binary aborts, never "continues".
 cat >"$work/bin-fakeearly/early-fail" <<'EOF'
@@ -924,7 +955,7 @@ export DECK_EARLY_BIN="$work/bin-fakeearly/early-fail"
 export DECK_EARLY_LOG="$work/s0-early-fail.log"
 export DECK_DMI_PRODUCT="$work/dmi-oled/product_name"
 export DECK_DMI_VENDOR="$work/dmi-oled/sys_vendor"
-deck_form_start_early_install >"$work/s0-early-fail.out" 2>&1
+deck_form_start_early_install /dev/nvme0n1 >"$work/s0-early-fail.out" 2>&1
 early_rc=$?
 export -n DECK_LSBLK_BIN DECK_TEST_ROOT_DISK DECK_EARLY_BIN DECK_EARLY_LOG DECK_DMI_PRODUCT DECK_DMI_VENDOR
 set -e
@@ -944,16 +975,14 @@ DECK_DMI_PRODUCT="$work/dmi-oled/product_name" \
 DECK_DMI_VENDOR="$work/dmi-oled/sys_vendor" \
 DECK_EARLY_BIN="$work/bin-fakeearly/omarchy-deck-early" \
 DECK_EARLY_LOG="$work/s0-early-one.log" \
-  deck_form_start_early_install >/dev/null 2>&1 ||
+  deck_form_start_early_install /dev/nvme0n1 >/dev/null 2>&1 ||
   fail "with one eligible disk the S0-A start must succeed"
 [[ $disk == /dev/nvme0n1 ]] || fail "'disk' must be the single eligible disk" "got: ${disk:-unset}"
 LC_ALL=C grep -qxF "start /dev/nvme0n1" "$work/s0-early-one.log" ||
   fail "'early start' must be called with exactly that disk" "$(cat "$work/s0-early-one.log")"
-pass "S0-A with one disk sets 'disk' and calls early start with it"
-echo "--- S0-A OLED wipe gate: Jupiter, generic NVMe, SD-only, unreadable DMI ---"
-
-# Own dead-end stub (the earlier S0-A stub was unset after the two-disk
-# test; the real screen loops forever). Same logging stand-in technique.
+pass "start with a selected disk sets 'disk' and calls early start with it"
+echo "--- OLED wipe gate: Jupiter, generic laptop, empty selection, unreadable DMI ---"
+# Own dead-end stub (the real screen loops forever). Same logging stand-in.
 deck_form_disk_dead_end() { printf 'DEAD_END_CALLED\n' >>"$work/s0-deadend.log"; return 0; }
 
 # The wipe gate runs BEFORE disk probing: on non-OLED hardware `early
@@ -966,16 +995,15 @@ printf 'ThinkPad X1\n' >"$work/dmi-generic-fake/product_name"
 printf 'LENOVO\n' >"$work/dmi-generic-fake/sys_vendor"
 : >"$work/s0-deadend.log"
 
-# 1. Jupiter (unverified LCD) + perfect single NVMe: REFUSE.
+# 1. Jupiter (unverified LCD): REFUSE.
 : >"$work/s0-early-jupiter.log"
 unset disk 2>/dev/null || true
 set +e
-DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk" DECK_TEST_ROOT_DISK="" \
 DECK_DMI_PRODUCT="$work/dmi-jupiter-fake/product_name" \
 DECK_DMI_VENDOR="$work/dmi-jupiter-fake/sys_vendor" \
 DECK_EARLY_BIN="$work/bin-fakeearly/omarchy-deck-early" \
 DECK_EARLY_LOG="$work/s0-early-jupiter.log" \
-  deck_form_start_early_install >/dev/null 2>&1
+  deck_form_start_early_install /dev/nvme0n1 >/dev/null 2>&1
 jupiter_rc=$?
 set -e
 [[ $jupiter_rc -ne 0 ]] || fail "Jupiter (unverified LCD) must REFUSE the wipe, not start it"
@@ -984,66 +1012,54 @@ LC_ALL=C grep -qF "DEAD_END_CALLED" "$work/s0-deadend.log" ||
 [[ ! -s "$work/s0-early-jupiter.log" ]] ||
   fail "Jupiter: 'early start' must NEVER be invoked" "$(cat "$work/s0-early-jupiter.log")"
 [[ -z ${disk:-} ]] || fail "Jupiter: 'disk' must stay unset" "got: $disk"
-pass "S0-A on Jupiter (LCD, unverified) refuses before invoking early"
+pass "start on Jupiter (LCD, unverified) refuses before invoking early"
 
-# 2. Generic laptop NVMe (perfect disk, wrong DMI): REFUSE.
+# 2. Generic laptop disk (wrong DMI): REFUSE.
 : >"$work/s0-deadend.log"
 : >"$work/s0-early-generic.log"
 unset disk 2>/dev/null || true
 set +e
-DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk" DECK_TEST_ROOT_DISK="" \
 DECK_DMI_PRODUCT="$work/dmi-generic-fake/product_name" \
 DECK_DMI_VENDOR="$work/dmi-generic-fake/sys_vendor" \
 DECK_EARLY_BIN="$work/bin-fakeearly/omarchy-deck-early" \
 DECK_EARLY_LOG="$work/s0-early-generic.log" \
-  deck_form_start_early_install >/dev/null 2>&1
+  deck_form_start_early_install /dev/nvme0n1 >/dev/null 2>&1
 generic_rc=$?
 set -e
-[[ $generic_rc -ne 0 ]] || fail "a generic laptop NVMe must REFUSE the wipe"
+[[ $generic_rc -ne 0 ]] || fail "a generic laptop disk must REFUSE the wipe"
 [[ ! -s "$work/s0-early-generic.log" ]] ||
   fail "generic laptop: 'early start' must NEVER be invoked" "$(cat "$work/s0-early-generic.log")"
 [[ -z ${disk:-} ]] || fail "generic laptop: 'disk' must stay unset" "got: $disk"
-pass "S0-A on a generic laptop NVMe refuses before invoking early"
+pass "start on a generic laptop disk refuses before invoking early"
 
-# 3. SD-only (no NVMe at all, OLED DMI): REFUSE via the disk rule.
+# 3. Empty selection (no disk chosen): REFUSE, never guess.
 : >"$work/s0-deadend.log"
-cat >"$work/bin-fakeearly/lsblk-sdonly" <<'EOF'
-#!/usr/bin/env bash
-if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM,TRAN" ]]; then
-  printf '/dev/mmcblk0 disk 0\n'
-  exit 0
-fi
-exit 0
-EOF
-chmod +x "$work/bin-fakeearly/lsblk-sdonly"
-: >"$work/s0-early-sdonly.log"
+: >"$work/s0-early-empty.log"
 unset disk 2>/dev/null || true
 set +e
-DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-sdonly" DECK_TEST_ROOT_DISK="" \
 DECK_DMI_PRODUCT="$work/dmi-oled/product_name" \
 DECK_DMI_VENDOR="$work/dmi-oled/sys_vendor" \
 DECK_EARLY_BIN="$work/bin-fakeearly/omarchy-deck-early" \
-DECK_EARLY_LOG="$work/s0-early-sdonly.log" \
+DECK_EARLY_LOG="$work/s0-early-empty.log" \
   deck_form_start_early_install >/dev/null 2>&1
-sdonly_rc=$?
+empty_rc=$?
 set -e
-[[ $sdonly_rc -ne 0 ]] || fail "SD-only (no NVMe) must REFUSE the wipe"
-[[ ! -s "$work/s0-early-sdonly.log" ]] ||
-  fail "SD-only: 'early start' must NEVER be invoked" "$(cat "$work/s0-early-sdonly.log")"
-[[ -z ${disk:-} ]] || fail "SD-only: 'disk' must stay unset" "got: $disk"
-pass "S0-A with SD-only storage refuses; the card is never a wipe target"
+[[ $empty_rc -ne 0 ]] || fail "an empty disk selection must REFUSE the wipe"
+[[ ! -s "$work/s0-early-empty.log" ]] ||
+  fail "empty selection: 'early start' must NEVER be invoked" "$(cat "$work/s0-early-empty.log")"
+[[ -z ${disk:-} ]] || fail "empty selection: 'disk' must stay unset" "got: $disk"
+pass "start with no disk selected refuses; nothing is guessed"
 
 # 4. Unreadable DMI (absent sysfs): REFUSE, loudly (says why).
 : >"$work/s0-deadend.log"
 : >"$work/s0-early-nodmi.log"
 unset disk 2>/dev/null || true
 set +e
-nodmi_out=$(DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk" DECK_TEST_ROOT_DISK="" \
-DECK_DMI_PRODUCT="$work/does-not-exist/product_name" \
+nodmi_out=$(DECK_DMI_PRODUCT="$work/dmi-oled/product_name" \
 DECK_DMI_VENDOR="$work/does-not-exist/sys_vendor" \
 DECK_EARLY_BIN="$work/bin-fakeearly/omarchy-deck-early" \
 DECK_EARLY_LOG="$work/s0-early-nodmi.log" \
-  deck_form_start_early_install 2>&1)
+  deck_form_start_early_install /dev/nvme0n1 2>&1)
 nodmi_rc=$?
 set -e
 [[ $nodmi_rc -ne 0 ]] || fail "unreadable DMI must REFUSE the wipe, never guess OLED"
@@ -1051,7 +1067,7 @@ LC_ALL=C grep -qF "not a verified OLED Deck" <<<"$nodmi_out" ||
   fail "DMI refusal must SAY the machine is not verified (fail loudly)" "$nodmi_out"
 [[ ! -s "$work/s0-early-nodmi.log" ]] ||
   fail "unreadable DMI: 'early start' must NEVER be invoked" "$(cat "$work/s0-early-nodmi.log")"
-pass "S0-A with unreadable DMI refuses loudly before invoking early"
+pass "start with unreadable DMI refuses loudly before invoking early"
 
 # 5. Predicate unit pins: OLED yes, Jupiter/generic/empty no.
 DECK_DMI_PRODUCT="$work/dmi-oled/product_name" \
@@ -1308,13 +1324,19 @@ pass "deck_form_text_prompt pins the console font before the body runs, at the p
 : >"$work/greeter-tty"
 deck_form_wifi_screen_saved=$(declare -f deck_form_wifi_screen)
 deck_form_wifi_screen() { return 0; }
+deck_form_steam_progress_screen_saved=$(declare -f deck_form_steam_progress_screen)
+deck_form_steam_progress_screen() { return 0; }
+deck_form_drive_screen_saved=$(declare -f deck_form_drive_screen)
+deck_form_drive_screen() { printf -v "$1" '%s' "/dev/nvme0n1"; return 0; }
 deck_form_start_early_install_saved=$(declare -f deck_form_start_early_install)
 deck_form_start_early_install() { disk=/dev/nvme0n1; return 0; }
 DECK_S0_TTY="$work/greeter-tty" DECK_FORM_TTY_OVERRIDE=/dev/tty1 \
   FAKE_SETFONT_LOG="$work/sf.log" PATH="$FONT_PATH" \
   greeter >/dev/null 2>&1 || true
 eval "$deck_form_start_early_install_saved"
+eval "$deck_form_drive_screen_saved"
 eval "$deck_form_wifi_screen_saved"
+eval "$deck_form_steam_progress_screen_saved"
 [[ $(cat "$work/sf.log") == "$DECK_CONSOLE_FONT" ]] ||
   fail "greeter must pin the console font -- S0 and S1 run before any text prompt, and they are unreadable at 8x16 too" "got: '$(cat "$work/sf.log")'"
 pass "greeter pins the console font, so S0 and S1 are drawn at the bigger size as well"
@@ -3422,30 +3444,36 @@ cat >"$work/lsblk.disks" <<'EOF'
 /dev/nvme1n1 disk 0 nvme
 /dev/sda disk 1 usb
 /dev/mmcblk0 disk 0
+/dev/mmcblk0 disk 1 mmc
 /dev/loop0 loop 0
 EOF
 
 got=$(deck_form_disk_list "$work/lsblk.disks") || fail "disk_list must succeed when eligible disks exist"
 LC_ALL=C grep -qxF "/dev/nvme0n1" <<<"$got" || fail "a built-in NVMe disk must be kept" "$got"
-LC_ALL=C grep -qxF "/dev/nvme1n1" <<<"$got" || fail "a second NVMe disk must be kept (ambiguity is resolved by count, not by filtering)" "$got"
+LC_ALL=C grep -qxF "/dev/nvme1n1" <<<"$got" || fail "a second NVMe disk must be kept (ambiguity is resolved by choice, not by filtering)" "$got"
+LC_ALL=C grep -qxF "/dev/mmcblk0" <<<"$got" || fail "a microSD card must be kept as an explicit target (RM/TRAN-independent)" "$got"
 if LC_ALL=C grep -qxF "/dev/sda" <<<"$got"; then
   fail "a USB disk (TRAN=usb) must be excluded even when eligible by RM alone"
-fi
-if LC_ALL=C grep -qxF "/dev/mmcblk0" <<<"$got"; then
-  fail "a microSD card (no TRAN=nvme) must be excluded even with RM=0 -- the card is never touched"
 fi
 if LC_ALL=C grep -qxF "/dev/loop0" <<<"$got"; then
   fail "a non-disk TYPE (loop) must be excluded"
 fi
-pass "disk_list keeps NVMe only; USB, microSD and non-disk types are excluded"
+pass "disk_list keeps NVMe + microSD; USB and non-disk types are excluded"
 
-got=$(deck_form_disk_list "$work/lsblk.disks" "/dev/nvme0n1") || fail "disk_list must still succeed with one disk excluded and one remaining"
-[[ $got == /dev/nvme1n1 ]] || fail "the boot/install medium must be excluded by exact NAME match" "got: $got"
+got=$(deck_form_disk_list "$work/lsblk.disks" "/dev/nvme0n1") || fail "disk_list must still succeed with one disk excluded and others remaining"
+LC_ALL=C grep -qxF "/dev/mmcblk0" <<<"$got" || fail "excluding one NVMe must leave the NVMe + SD" "$got"
 pass "disk_list excludes the boot/install medium by exact device-name match"
+
+# An SD card that IS the boot medium (ISO booted from microSD) is excluded.
+got=$(deck_form_disk_list "$work/lsblk.disks" "/dev/mmcblk0") || fail "disk_list must still succeed with the SD excluded and NVMe remaining"
+if LC_ALL=C grep -qxF "/dev/mmcblk0" <<<"$got"; then
+  fail "the boot-medium SD must be excluded, or the ISO would offer to wipe itself"
+fi
+LC_ALL=C grep -qxF "/dev/nvme0n1" <<<"$got" || fail "excluding the SD must leave the NVMe" "$got"
+pass "a microSD card that is the boot medium is excluded"
 
 cat >"$work/lsblk.none.disks" <<'EOF'
 /dev/sda disk 1 usb
-/dev/mmcblk1 disk 0
 EOF
 out=$(deck_form_disk_list "$work/lsblk.none.disks" 2>&1) && fail "disk_list must return nonzero when nothing is eligible"
 LC_ALL=C grep -qF "no eligible install disk" <<<"$out" || fail "disk_list must SAY why it found nothing, not go silent" "got: $out"
@@ -3483,8 +3511,8 @@ EOF
 chmod +x "$work/bin-fakelsblk/lsblk"
 
 got=$(DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" deck_form_disk_label /dev/nvme0n1)
-[[ $got == "Sandisk SND512G (512G)" ]] || fail "disk_label must combine vendor+model+size" "got: $got"
-pass "disk_label combines vendor, model and size"
+[[ $got == "Internal SSD (NVMe) Sandisk SND512G (512G)" ]] || fail "disk_label must combine kind+vendor+model+size" "got: $got"
+pass "disk_label combines kind, vendor, model and size"
 
 cat >"$work/bin-fakelsblk/lsblk" <<'EOF'
 #!/usr/bin/env bash
@@ -3495,7 +3523,7 @@ case "$field" in
 esac
 EOF
 got=$(DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" deck_form_disk_label /dev/sda)
-[[ $got == "/dev/sda (256G)" ]] || fail "disk_label must fall back to the bare device path when lsblk has no vendor/model" "got: $got"
+[[ $got == "Internal SSD (NVMe) /dev/sda (256G)" ]] || fail "disk_label must fall back to the bare device path when lsblk has no vendor/model" "got: $got"
 pass "disk_label falls back to the device path when vendor/model are both empty"
 
 # ⚠️ MUTATION-FOUND GAP, closed: the two cases above (vendor+model both
@@ -3514,8 +3542,8 @@ case "$field" in
 esac
 EOF
 got=$(DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" deck_form_disk_label /dev/mmcblk0)
-[[ $got == "eMMC-Card (64G)" ]] || fail "disk_label must use MODEL when VENDOR is empty" "got: $got"
-pass "disk_label uses the model alone when vendor is empty"
+[[ $got == "microSD card eMMC-Card (64G)" ]] || fail "disk_label must prefix the SD kind and use MODEL when VENDOR is empty" "got: $got"
+pass "disk_label prefixes microSD and uses the model alone when vendor is empty"
 
 cat >"$work/bin-fakelsblk/lsblk" <<'EOF'
 #!/usr/bin/env bash
@@ -3527,7 +3555,7 @@ case "$field" in
 esac
 EOF
 got=$(DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" deck_form_disk_label /dev/nvme1n1)
-[[ $got == "Acme (1T)" ]] || fail "disk_label must use VENDOR when MODEL is empty" "got: $got"
+[[ $got == "Internal SSD (NVMe) Acme (1T)" ]] || fail "disk_label must use VENDOR when MODEL is empty" "got: $got"
 pass "disk_label uses the vendor alone when model is empty"
 
 echo "--- S4 is gone: confirm_disk_overwrite never draws, always succeeds ----"
@@ -3650,7 +3678,7 @@ unset disk 2>/dev/null || true
 DECK_TEST_ROOT_DISK="" \
 DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" \
 FAKE_GUM_LOG="$work/gum.log" \
-FAKE_GUM_CHOOSE_OUTPUT="/dev/nvme1n1" \
+FAKE_GUM_CHOOSE_OUTPUT="/dev/nvme1n1 (512G) - 512G" \
 PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
   disk_form
 [[ $disk == /dev/nvme1n1 ]] || fail "disk_form must set 'disk' to whatever the (faked) picker returned" "got: ${disk:-unset}"
@@ -3988,8 +4016,10 @@ LC_ALL=C grep -qF "Can be installed later from the Omarchy desktop" "$work/game-
 DECK_TEST_SAY_LOG="$work/game-yes-say.log" FAKE_GUM_CHOOSE_QUEUE="$work/yn-game-yes.q" FAKE_GUM_LOG="$work/yn.log" PATH="$work/bin-fakegum:$PATH" deck_form_gaming_screen game_tmp >/dev/null 2>&1 || fail "gaming screen must complete on Yes"
 LC_ALL=C grep -qF "Requires Internet" "$work/game-yes-say.log" ||
   fail "gaming Yes must say Requires Internet" "$(cat "$work/game-yes-say.log")"
+LC_ALL=C grep -qF "Install Steam?" "$work/game-yes-say.log" ||
+  fail "the Steam question must be titled 'Install Steam?'" "$(cat "$work/game-yes-say.log")"
 eval "$say_saved"; unset say_saved
-pass "both No lines promise desktop-later; gaming Yes says Requires Internet"
+pass "both No lines promise desktop-later; Steam Yes says Requires Internet under the 'Install Steam?' title"
 
 # Four combos: run_choice_screens with queued answers, assert files + lock.
 mk_choice_q() { printf '%s\n%s\n' "$1" "$2" >"$work/choice-$1-$2.q"; }
@@ -4020,6 +4050,7 @@ pass "four combos lock the right yes/no files + locked marker, globals mirror fi
 printf 'Yes\n<CANCEL>\nNo\nNo\n' >"$work/choice-back.q"
 rm -rf "$work/choice-backdir"
 unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
+cancel_saved=$(declare -f deck_form_s0_cancel_menu)
 deck_form_s0_cancel_menu() { printf 'CANCEL_MENU\n' >>"$work/choice-back.log"; return 0; }
 : >"$work/choice-back.log"
 set +e
@@ -4033,7 +4064,7 @@ set -e
 [[ $back_rc -eq 0 ]] || fail "gaming B-back then re-answer must still complete" "rc=$back_rc"
 [[ $(cat "$work/choice-backdir/preinstalls") == no ]] || fail "re-asked preinstalls must hold the NEW answer"
 [[ $(cat "$work/choice-backdir/gaming") == no ]] || fail "gaming must hold the new answer"
-unset -f deck_form_s0_cancel_menu
+eval "$cancel_saved"; unset cancel_saved
 pass "gaming B goes back to preinstalls; re-answers lock the new values"
 echo "--- Wi-Fi gaming gate: list back row, B-to-gaming reversal ------------------"
 
@@ -4058,9 +4089,9 @@ pass "gaming gate adds the back row above Rescan; plain lists unchanged; B still
 
 # Reversal: gaming file flipped to no + stale marker cleared, wifi screen
 # returns the back signal. Stub wifi_screen to emulate B-on-list (sets the
-# signal, returns 1) with a STALE marker present.
 printf 'yes\n' >"$work/rev-gaming-file"
 printf 'stale\n' >"$work/rev-marker"
+wifi_saved=$(declare -f deck_form_wifi_screen)
 deck_form_wifi_screen() { DECK_WIFI_WANT_GAMING_BACK=yes; return 1; }
 rm -rf "$work/rev-choices"
 export DECK_CHOICES_DIR="$work/rev-choices"
@@ -4071,13 +4102,229 @@ DECK_GAMING=yes deck_form_wifi_screen_gaming || fail "reversal must return 0 (de
   fail "Wi-Fi B must flip choices/gaming to no" "$(cat "$work/rev-choices/gaming")"
 [[ ! -e "$work/rev-marker" ]] ||
   fail "reversal must clear the stale network-ready marker so the worker never installs gaming pkgs after opt-out"
-[[ $DECK_GAMING == no ]] || fail "DECK_GAMING global must flip to no" "got: $DECK_GAMING"
 export -n DECK_CHOICES_DIR DECK_NETWORK_READY_FILE
-unset -f deck_form_wifi_screen
+eval "$wifi_saved"; unset wifi_saved
 pass "Gaming yes→no via Wi-Fi B rewrites gaming=no and clears the stale marker"
+echo "--- Wi-Fi shown only for Steam=yes -------------------------------------------"
 
+# Steam=no: greeter must never invoke the Wi-Fi or Steam screens. Stub both
+# followers with logging markers; the queue answers drive row + No + No.
+gate_wifi_saved=$(declare -f deck_form_wifi_screen_gaming)
+gate_steam_saved=$(declare -f deck_form_steam_progress_screen)
+deck_form_wifi_screen_gaming() { printf 'WIFI_RAN\n' >>"$work/wifi-gate.log"; return 0; }
+deck_form_steam_progress_screen() { printf 'STEAM_SCREEN_RAN\n' >>"$work/wifi-gate.log"; return 0; }
+: >"$work/wifi-gate.log"
+printf '/dev/nvme0n1 | Internal SSD (NVMe) 512G (512G)\nNo\nNo\n' >"$work/wifi-gate-no.q"
+rm -rf "$work/wifi-gate-choices"
+printf '\n' >"$work/fake-tty-no"
+STTY_MARKER="$work/stty-no.marker" PATH="$work/bin:$work/bin-fakegum:$PATH" \
+  DECK_S0_TTY="$work/fake-tty-no" \
+  DECK_NET_SYSFS="$work/net-empty" \
+  DECK_IP_BIN=/bin/false \
+  DECK_NET_STATE_DIR="$work/wifi-gate-state-no" \
+  DECK_TEST_SAY_LOG="$work/wifi-gate-say-no.log" \
+  DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk" \
+  DECK_TEST_ROOT_DISK="" \
+  DECK_EARLY_BIN="$work/bin-fakeearly/omarchy-deck-early" \
+  DECK_EARLY_LOG="$work/wifi-gate-early-no.log" \
+  DECK_DMI_PRODUCT="$work/dmi-oled/product_name" \
+  DECK_DMI_VENDOR="$work/dmi-oled/sys_vendor" \
+  DECK_CHOICES_DIR="$work/wifi-gate-choices" \
+  FAKE_GUM_CHOOSE_QUEUE="$work/wifi-gate-no.q" \
+  FAKE_GUM_LOG="$work/wifi-gate-gum-no.log" \
+  greeter >/dev/null 2>&1 ||
+  fail "greeter with Steam=no must complete"
+if LC_ALL=C grep -qF "WIFI_RAN" "$work/wifi-gate.log"; then
+  fail "Steam=no must NEVER run the Wi-Fi screen" "$(cat "$work/wifi-gate.log")"
+fi
+if LC_ALL=C grep -qF "STEAM_SCREEN_RAN" "$work/wifi-gate.log"; then
+  fail "Steam=no must NEVER run the Steam progress screen" "$(cat "$work/wifi-gate.log")"
+fi
+# Steam=yes: both followers run (stubs return 0 immediately).
+: >"$work/wifi-gate.log"
+printf '/dev/nvme0n1 | Internal SSD (NVMe) 512G (512G)\nNo\nYes\n' >"$work/wifi-gate-yes.q"
+rm -rf "$work/wifi-gate-choices"
+printf '\n' >"$work/fake-tty-yes"
+STTY_MARKER="$work/stty-yes.marker" PATH="$work/bin:$work/bin-fakegum:$PATH" \
+  DECK_S0_TTY="$work/fake-tty-yes" \
+  DECK_NET_SYSFS="$work/net-empty" \
+  DECK_IP_BIN=/bin/false \
+  DECK_NET_STATE_DIR="$work/wifi-gate-state-yes" \
+  DECK_TEST_SAY_LOG="$work/wifi-gate-say-yes.log" \
+  DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk" \
+  DECK_TEST_ROOT_DISK="" \
+  DECK_EARLY_BIN="$work/bin-fakeearly/omarchy-deck-early" \
+  DECK_EARLY_LOG="$work/wifi-gate-early-yes.log" \
+  DECK_DMI_PRODUCT="$work/dmi-oled/product_name" \
+  DECK_DMI_VENDOR="$work/dmi-oled/sys_vendor" \
+  DECK_CHOICES_DIR="$work/wifi-gate-choices" \
+  FAKE_GUM_CHOOSE_QUEUE="$work/wifi-gate-yes.q" \
+  FAKE_GUM_LOG="$work/wifi-gate-gum-yes.log" \
+  greeter >/dev/null 2>&1 ||
+  fail "greeter with Steam=yes must complete"
+LC_ALL=C grep -qF "WIFI_RAN" "$work/wifi-gate.log" ||
+  fail "Steam=yes MUST run the Wi-Fi screen" "$(cat "$work/wifi-gate.log")"
+LC_ALL=C grep -qF "STEAM_SCREEN_RAN" "$work/wifi-gate.log" ||
+  fail "Steam=yes MUST run the Steam progress screen after Wi-Fi" "$(cat "$work/wifi-gate.log")"
+eval "$gate_wifi_saved"; unset gate_wifi_saved
+eval "$gate_steam_saved"; unset gate_steam_saved
 
-echo "--- S5 deck_final_summary: the exact name patch P1 hunk 2 calls --------------"
+echo "--- Steam progress math: percent/rate/ETA/unparseable ------------------------"
+
+# Valve's line with commas, the exact shape the orchestrator forwards.
+parsed=$(deck_form_parse_steam_progress "downloading Steam's client update: 72,551 of 502,420 KB (14%)") ||
+  fail "parse must read Valve's 'X of Y KB' line with commas"
+[[ $parsed == "72551 502420" ]] || fail "parse must strip commas to KB integers" "got: $parsed"
+parsed=$(deck_form_parse_steam_progress "Downloading update (72,551 of 502,420 KB)...") ||
+  fail "parse must read Valve's raw 'Downloading update (X of Y KB)' line too"
+[[ $parsed == "72551 502420" ]] || fail "raw Valve line must parse identically" "got: $parsed"
+parsed=$(deck_form_parse_steam_progress "Steam client bootstrap: downloading Steam's client update: 72,551 of 502,420 KB (14%) (72s of 600s)") ||
+  fail "parse must read the emitted progress line with its seconds suffix"
+[[ $parsed == "72551 502420" ]] || fail "suffixed line must parse identically" "got: $parsed"
+if deck_form_parse_steam_progress "Verifying installation..." >/dev/null 2>&1; then
+  fail "a phase line with no numbers must NOT parse"
+fi
+if deck_form_parse_steam_progress "" >/dev/null 2>&1; then
+  fail "an empty line must NOT parse"
+fi
+pass "progress parser reads Valve's lines (raw + forwarded + suffixed) and refuses phase/empty lines"
+
+[[ $(deck_form_steam_percent 72551 502420) == 14 ]] || fail "percent of 72551/502420 must be 14" "got: $(deck_form_steam_percent 72551 502420)"
+[[ $(deck_form_steam_percent 502420 502420) == 100 ]] || fail "a full download must read 100"
+[[ $(deck_form_steam_percent 600000 502420) == 100 ]] || fail "an over-full counter must clamp to 100"
+if deck_form_steam_percent 1 0 >/dev/null 2>&1; then
+  fail "zero total must be indeterminate, not a divide-by-zero"
+fi
+pass "percent math: 14 for the Valve fixture, 100 at full, clamped over-full, indeterminate on zero total"
+
+[[ $(deck_form_steam_rate 0 1000 10240 1010) == "1.00" ]] || fail "10240 KB in 10 s must read 1.00 MB/s" "got: $(deck_form_steam_rate 0 1000 10240 1010)"
+if deck_form_steam_rate 0 1000 10240 1000 >/dev/null 2>&1; then
+  fail "zero elapsed must be indeterminate, never a divide-by-zero"
+fi
+[[ $(deck_form_steam_rate 5000 1000 1000 1010) == "0.00" ]] || fail "a backwards counter must read 0.00, not negative"
+pass "rate math: 1.00 MB/s for the fixture, indeterminate on zero elapsed, 0.00 on backwards counters"
+
+[[ $(deck_form_steam_eta 51200 1.00) == 50 ]] || fail "51200 KB at 1 MB/s must be 50 s" "got: $(deck_form_steam_eta 51200 1.00)"
+if deck_form_steam_eta 51200 0 >/dev/null 2>&1; then
+  fail "zero rate must be indeterminate, not an infinite ETA"
+fi
+[[ $(deck_form_format_eta 50) == "00:50" ]] || fail "50 s must format as 00:50" "got: $(deck_form_format_eta 50)"
+[[ $(deck_form_format_eta 3723) == "62:03" ]] || fail "hours must fold into minutes" "got: $(deck_form_format_eta 3723)"
+[[ $(deck_form_format_mb 72551) == "70.8 MB" ]] || fail "72551 KB must format as 70.8 MB" "got: $(deck_form_format_mb 72551)"
+pass "ETA math + formatting: 50 s for the fixture, indeterminate on zero rate, MM:SS with hours folded"
+
+[[ $(deck_form_steam_bar 14 20) == "[##------------------]" ]] || fail "14% of 20 must fill 2" "got: $(deck_form_steam_bar 14 20)"
+[[ $(deck_form_steam_bar "" 20) == "[????????????????????]" ]] || fail "empty percent must draw the indeterminate bar"
+text=$(deck_form_steam_progress_text running "downloading Steam's client update: 72,551 of 502,420 KB (14%)")
+LC_ALL=C grep -qF "14%" <<<"$text" || fail "progress text must carry the percent" "$text"
+LC_ALL=C grep -qF "70.8 MB" <<<"$text" || fail "progress text must carry downloaded MB" "$text"
+text=$(deck_form_steam_progress_text running "Verifying installation...")
+[[ $text == "Verifying installation..." ]] || fail "unparseable lines must show verbatim (indeterminate)" "got: $text"
+pass "bar + text: determinate bar, indeterminate bar, parsed text, verbatim fallback"
+
+echo "--- Steam progress screen: exits on done, failure menu on failed ------------"
+
+mkdir -p "$work/steam-done"
+printf 'done\n' >"$work/steam-done/status"
+: >"$work/steam-done/progress"
+: >"$work/steam-done-gum.log"
+# Hermetic PATH: the fake gum dir FIRST so the real /usr/bin/gum can never
+# answer a chooser here (a real gum choose with no tty blocks forever, and
+# under timeout -k the suite dies with no per-case attribution).
+DECK_GAMING=yes \
+DECK_STEAM_STATUS_FILE="$work/steam-done/status" \
+DECK_STEAM_PROGRESS_FILE="$work/steam-done/progress" \
+FAKE_GUM_LOG="$work/steam-done-gum.log" \
+PATH="$work/bin-fakegum:$PATH" \
+  deck_form_steam_progress_screen ||
+  fail "progress screen must exit 0 when steam status is done"
+if LC_ALL=C grep -qF "choose" "$work/steam-done-gum.log"; then
+  fail "a done Steam must not draw the failure menu" "$(cat "$work/steam-done-gum.log")"
+fi
+printf 'skipped\n' >"$work/steam-done/status"
+DECK_GAMING=yes \
+DECK_STEAM_STATUS_FILE="$work/steam-done/status" \
+DECK_STEAM_PROGRESS_FILE="$work/steam-done/progress" \
+FAKE_GUM_LOG="$work/steam-done-gum.log" \
+PATH="$work/bin-fakegum:$PATH" \
+  deck_form_steam_progress_screen ||
+  fail "progress screen must proceed on steam skipped, never wait"
+pass "progress screen exits on done/skipped without drawing the failure menu"
+
+items=$(deck_form_steam_failure_items)
+LC_ALL=C grep -qF "Try again" <<<"$items" || fail "failure menu must offer Try again"
+LC_ALL=C grep -qF "Continue without Steam" <<<"$items" || fail "failure menu must offer Continue without Steam"
+if LC_ALL=C grep -qiF "shell" <<<"$items"; then
+  fail "failure menu must never offer a shell" "$items"
+fi
+[[ $(deck_form_steam_failure_action_for "Try again") == retry ]] || fail "Try again must map to retry"
+[[ $(deck_form_steam_failure_action_for "Continue without Steam") == without-steam ]] || fail "Continue must map to without-steam"
+[[ $(deck_form_steam_failure_action_for "") == redraw ]] || fail "cancel must redraw, never guess"
+[[ $(deck_form_steam_failure_action_for "Reboot") == reboot ]] || fail "Reboot must map to reboot"
+deck_form_steam_may_drop_gaming running failed || fail "mid-download failure must still allow continue-without-Steam"
+if deck_form_steam_may_drop_gaming "done" failed; then
+  fail "early done must FORBID continue-without-Steam (un-asking contradicts installed bytes)"
+fi
+if deck_form_steam_may_drop_gaming running "done"; then
+  fail "steam done must FORBID continue-without-Steam"
+fi
+pass "failure menu never offers a shell; actions map; the drop-gaming gate forbids un-asking finished work"
+
+mkdir -p "$work/steam-failonce"
+printf 'failed\n' >"$work/steam-failonce/status"
+printf 'no route to valve\n' >"$work/steam-failonce/error"
+printf 'Downloading update (10 of 100 KB)...\n' >"$work/steam-failonce/progress"
+printf 'Try again\n' >"$work/steam-failonce.q"
+: >"$work/steam-failonce-gum.log"
+: >"$work/steam-failonce-say.log"
+( sleep 2; printf 'done\n' >"$work/steam-failonce/status" ) &
+flipper=$!
+pass "failure menu never offers a shell; actions map; the drop-gaming gate forbids un-asking finished work"
+
+# Failed status reaches the menu (not a hang) and Continue without Steam
+# flips gaming to no deterministically: early=running, steam=failed, the
+# queued answer is Continue without Steam. No background jobs, no timing.
+mkdir -p "$work/steam-failmenu"
+printf 'failed\n' >"$work/steam-failmenu/status"
+printf 'no route to valve\n' >"$work/steam-failmenu/error"
+printf 'Downloading update (10 of 100 KB)...\n' >"$work/steam-failmenu/progress"
+printf 'running\n' >"$work/steam-failmenu/early-status"
+cat >"$work/steam-failmenu/early" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  status) cat "$DECK_EARLY_STATUS_FILE" ;;
+esac
+exit 0
+EOF
+chmod +x "$work/steam-failmenu/early"
+printf 'Continue without Steam\n' >"$work/steam-failmenu.q"
+: >"$work/steam-failmenu-gum.log"
+: >"$work/steam-failmenu-say.log"
+rm -rf "$work/steam-failmenu-choices"
+mkdir -p "$work/steam-failmenu-choices"
+printf 'yes\n' >"$work/steam-failmenu-choices/gaming"
+printf 'stale\n' >"$work/steam-failmenu-marker"
+DECK_GAMING=yes \
+DECK_CHOICES_DIR="$work/steam-failmenu-choices" \
+DECK_NETWORK_READY_FILE="$work/steam-failmenu-marker" \
+DECK_EARLY_BIN="$work/steam-failmenu/early" \
+DECK_EARLY_STATUS_FILE="$work/steam-failmenu/early-status" \
+DECK_STEAM_STATUS_FILE="$work/steam-failmenu/status" \
+DECK_STEAM_ERROR_FILE="$work/steam-failmenu/error" \
+DECK_STEAM_PROGRESS_FILE="$work/steam-failmenu/progress" \
+DECK_TEST_SAY_LOG="$work/steam-failmenu-say.log" \
+FAKE_GUM_CHOOSE_QUEUE="$work/steam-failmenu.q" \
+FAKE_GUM_LOG="$work/steam-failmenu-gum.log" \
+PATH="$work/bin-fakegum:$PATH" \
+  deck_form_steam_progress_screen ||
+  fail "progress screen must return 0 after Continue without Steam"
+LC_ALL=C grep -qF "choose" "$work/steam-failmenu-gum.log" ||
+  fail "a failed Steam must DRAW the failure menu, never hang silently" "$(cat "$work/steam-failmenu-gum.log")"
+LC_ALL=C grep -qF "The Steam download failed" "$work/steam-failmenu-say.log" ||
+  fail "a failed Steam must SAY the download failed" "$(cat "$work/steam-failmenu-say.log")"
+[[ $(cat "$work/steam-failmenu-choices/gaming") == no ]] ||
+  fail "Continue without Steam must flip choices/gaming to no" "$(cat "$work/steam-failmenu-choices/gaming")"
+pass "progress screen offers the failure menu on failed and Continue without Steam flips to desktop-only"
 
 declare -f deck_final_summary >/dev/null ||
   fail "deck_final_summary must be defined -- it is the exact new name T4-screen-spec.md §1.2 patch P1 hunk 2 calls directly"

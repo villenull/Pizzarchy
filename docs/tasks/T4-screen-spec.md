@@ -449,46 +449,64 @@ failure states · verified by**. Verification tiers follow
 `docs/tasks/T5-fork-plan.md` §5's convention: **[U]** unit (seconds, no VM) ·
 **[V]** QEMU, against the real ISO · **[H]** hardware, T6 release gate.
 
-### S0 — Welcome and disclosure (four-variant flow)
+### S0 — Welcome and disclosure + drive selection (2026-09-24 flow)
 
 - **Purpose.** One frame that says the machine is about to be installed, asks
-  the BIG proceed question, and warns that A wipes the built-in drive
-  immediately (SD card never touched). §6.1a item 3's "agreements" screen,
-  merged into the greeter upstream already draws so it costs no screen.
+  the BIG proceed question, and warns that choosing a drive wipes it
+  immediately (internal SSD or microSD; USB never a target). §6.1a item 3's
+  "agreements" screen, merged into the greeter upstream already draws so it
+  costs no screen.
 - **On the console.** Upstream's centred Omarchy logo and tagline **(READ:
-  `greeter`)**, with the hint line replaced by (four-variant rewrite,
-  2026-09-24 — consent, wipe scope and A/B answers all live here):
-  *"THIS WILL INSTALL OMARCHY ON YOUR STEAM DECK. PROCEED?"* /
-  *"Pressing A wipes the built-in drive immediately; there is no later disk
-  confirmation."* / *"The SD card is never touched."* /
-  *"Stopping after A leaves no working system until an install finishes."* /
+  `greeter`)**, with the hint line replaced by (2026-09-24 rewrite — welcome,
+  wipe scope and A/B answers all live here):
+  *"Welcome to Omarchy. THIS WILL INSTALL OMARCHY ON YOUR STEAM DECK.
+  PROCEED?"* /
+  *"Pressing A chooses the install drive next; the chosen drive is wiped
+  immediately."* /
+  *"Install to the internal SSD or the microSD card. USB drives are never
+  targets."* /
+  *"Stopping after choosing leaves no working system until an install
+  finishes."* /
   *"It includes proprietary firmware from AMD and Valve — graphics, Wi-Fi,
   Bluetooth, audio DSP. The Deck does not work without it."* (split in two
   only so no line wraps at the 121-column `say` budget) /
   *"Gaming Mode downloads Steam from Valve during setup; everything else is
   already on this USB stick."* Then **`Press A to install, B to cancel`**.
-- **After A: the early stage starts — OLED-gated.** S0-A first checks
-  `deck_form_is_oled_deck` (product_name==Galileo AND sys_vendor contains
+- **After A: the drive screen, then the early stage starts — OLED-gated.**
+  A lists the eligible targets (`deck_form_drive_screen`: built-in NVMe
+  `TYPE==disk RM==0 TRAN==nvme` AND the Deck's microSD reader
+  `NAME ^/dev/mmcblk[0-9]+$ TYPE==disk`, regardless of TRAN/RM; USB never;
+  the boot medium — including an SD card the ISO itself booted from — always
+  excluded via upstream's own `get_root_disk` walk). The screen ALWAYS draws,
+  even with exactly one entry, so the user sees what will be wiped; rows read
+  `Internal SSD (NVMe) <vendor+model> (<size>)` vs `microSD card (<size>)`.
+  B (Esc) returns to the welcome screen; zero eligible is the existing dead
+  end (Reboot / Power off, never a shell), never a guess. The chosen drive
+  starts the early stage immediately (`deck_form_start_early_install
+  "$disk"`, FAST-INSTALL C1) with the OLED gate first
+  (`deck_form_is_oled_deck`: product_name==Galileo AND sys_vendor contains
   Valve — the ONLY verified hardware; the kernel predicate stays broader
   because naming a kernel is reversible and wiping is not). A Jupiter
-  (unverified LCD), a generic laptop NVMe, or unreadable DMI is the dead
-  end with the reason said, BEFORE `early start` is ever invoked. Then it
-  resolves the single BUILT-IN NVMe (`deck_form_disk_list` keeps TRAN==nvme
-  only — never microSD/USB; zero or 2+ NVMe is the dead end, never a guess)
-  and runs `omarchy-deck-early start "$disk"` (FAST-INSTALL C1). A failed
-  start aborts loudly; nothing continues silently. B (Esc) is the safe
-  exit: nothing erased yet, Reboot / Power off menu, never a shell.
+  (unverified LCD), a generic laptop disk, an empty selection, or unreadable
+  DMI is the dead end with the reason said, BEFORE `early start` is ever
+  invoked. A failed start aborts loudly; nothing continues silently. B on S0
+  (Esc) is the safe exit: nothing erased yet, Reboot / Power off menu, never
+  a shell.
 - **Then the two choice screens** (D-pad `gum choose` Yes/No rows, default
   No): **Install Omarchy pre-installs?** (No: *"Can be installed later from
-  the Omarchy desktop."* — existing menu action) then **Install Steam Deck
-  Gaming Mode?** (Yes: *"(Requires Internet.)"*; No: *"Can be installed
-  later from the Omarchy desktop."* — C6 conversion script). B goes one
-  screen back (Gaming → preinstalls; preinstalls → power menu). Both
-  answered → `choices/{preinstalls,gaming}` + `choices/locked` written
-  atomically (Stages gates on `locked`); preinstalls is then not revisable.
-  Gaming=yes requires Internet: Wi-Fi runs, B on the list returns to the
-  Gaming choice (yes→no flip, stale marker cleared); Gaming=no skips Wi-Fi
-  entirely (Stages skips its network gate too — no marker needed).
+  the Omarchy desktop."* — existing menu action) then **Install Steam?**
+  (Yes: installs Steam, boots into Gaming Mode, *"(Requires Internet.)"*;
+  No: *"Can be installed later from the Omarchy desktop."* — C6 conversion
+  script). B goes one screen back (Steam → preinstalls; preinstalls → power
+  menu). Both answered → `choices/{preinstalls,gaming}` + `choices/locked`
+  written atomically (Stages gates on `locked`); preinstalls is then not
+  revisable. Steam=yes requires Internet: Wi-Fi runs (B on the list returns
+  to the Steam choice — yes→no flip, stale marker cleared), then the NEW
+  blocking Steam progress screen runs (bar + percent + MB + rate + ETA;
+  auto-proceeds on done; failure menu on failed — retry / continue-without-
+  Steam gated on unfinished work / reboot / power off, never a shell, never
+  a silent skip); Steam=no skips Wi-Fi AND the progress screen entirely
+  (Stages skips its network gate too — no marker needed).
 - **Controls.** A = install (Enter), B = cancel/back (Esc). Single-byte
   read; anything else loops, never guesses consent.
 - **Text entry.** None.

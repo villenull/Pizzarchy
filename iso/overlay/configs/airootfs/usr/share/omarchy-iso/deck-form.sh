@@ -707,11 +707,11 @@ deck_form_text_prompt() {
 # ===========================================================================
 
 readonly -a DECK_S0_LINES=(
-  "THIS WILL INSTALL OMARCHY ON YOUR STEAM DECK. PROCEED?"
+  "Welcome to Omarchy. THIS WILL INSTALL OMARCHY ON YOUR STEAM DECK. PROCEED?"
   ""
-  "Pressing A wipes the built-in drive immediately; there is no later disk confirmation."
-  "The SD card is never touched."
-  "Stopping after A leaves no working system until an install finishes."
+  "Pressing A chooses the install drive next; the chosen drive is wiped immediately."
+  "Install to the internal SSD or the microSD card. USB drives are never targets."
+  "Stopping after choosing leaves no working system until an install finishes."
   "It includes proprietary firmware from AMD and Valve -- graphics, Wi-Fi,"
   "Bluetooth, audio DSP. The Deck does not work without it."
   "Gaming Mode downloads Steam from Valve during setup; everything else is already on this USB stick."
@@ -793,46 +793,46 @@ deck_form_s0_cancel_menu() {
 # C1's live-ISO command name.
 readonly DECK_EARLY_BIN_DEFAULT=omarchy-deck-early
 readonly DECK_EARLY_ERROR_FILE_DEFAULT=/run/omarchy-deck/early/error
+readonly DECK_EARLY_PHASE_FILE_DEFAULT=/run/omarchy-deck/early/phase
 readonly DECK_STEAM_STATUS_FILE_DEFAULT=/run/omarchy-deck/steam/status
 readonly DECK_STEAM_ERROR_FILE_DEFAULT=/run/omarchy-deck/steam/error
+readonly DECK_STEAM_PROGRESS_FILE_DEFAULT=/run/omarchy-deck/steam/progress
+readonly DECK_STEAM_POLL_SECS=1
 
 deck_form_early_bin() { printf '%s\n' "${DECK_EARLY_BIN:-$DECK_EARLY_BIN_DEFAULT}"; }
 
-# deck_form_start_early_install -- S0-A. Verified-OLED + single-NVMe gate,
-# then sets the global `disk` (configurator's JSON writers read it) and
-# starts the early stage. Returns nonzero -- and aborts -- when the machine
-# is not a verified OLED Deck, when there is no single NVMe disk, or when
-# the start fails. Never returns 0 without the early stage running.
+# deck_form_start_early_install <disk> -- S0 flow's selected drive.
+# Verified-OLED gate, then sets the global `disk` (configurator's JSON
+# writers read it) and starts the early stage on the CHOSEN disk. Returns
+# nonzero -- and aborts -- when the machine is not a verified OLED Deck,
+# when the disk is empty, or when the start fails. Never returns 0 without
+# the early stage running. Eligibility is decided by the drive selection
+# screen before this is called; this keeps only the final safety gates.
 deck_form_start_early_install() {
-  local eligible sole early_bin product_msg vendor_msg
-  # OLED wipe gate FIRST -- before even listing disks. Kernel selection may
-  # accept Jupiter/generic Valve (harmless, reversible); the irreversible
-  # wipe may not. A Jupiter (unverified LCD), a generic laptop NVMe, or
-  # unreadable DMI reaches the dead end here, with the reason SAID, before
-  # anything is probed for erasure.
+  local chosen=${1:-} early_bin product_msg vendor_msg
+  # OLED wipe gate FIRST -- before anything is probed for erasure. Kernel
+  # selection may accept Jupiter/generic Valve (harmless, reversible); the
+  # irreversible wipe may not. A Jupiter (unverified LCD), a generic laptop
+  # NVMe, or unreadable DMI reaches the dead end here, with the reason SAID.
   if ! deck_form_is_oled_deck; then
     product_msg="unreadable"; vendor_msg="unreadable"
     [[ -r ${DECK_DMI_PRODUCT:-$DECK_DMI_PRODUCT_DEFAULT} ]] && product_msg=$(<"${DECK_DMI_PRODUCT:-$DECK_DMI_PRODUCT_DEFAULT}")
     [[ -r ${DECK_DMI_VENDOR:-$DECK_DMI_VENDOR_DEFAULT} ]] && vendor_msg=$(<"${DECK_DMI_VENDOR:-$DECK_DMI_VENDOR_DEFAULT}")
     deck_form_warn "not a verified OLED Deck (product='${product_msg}', vendor='${vendor_msg}') -- refusing to wipe"
     deck_form_disk_dead_end
-    abort "This installer wipes only a verified OLED Steam Deck (Galileo/Valve) with its built-in NVMe."
+    abort "This installer wipes only a verified OLED Steam Deck (Galileo/Valve) with its built-in NVMe or microSD card."
     return 1
   fi
-  if ! eligible=$(deck_form_eligible_disks); then
+  if [[ -z $chosen ]]; then
+    deck_form_warn "no install disk was selected -- refusing to guess which one to erase"
     deck_form_disk_dead_end
-    abort "No eligible install disk was found."
-    return 1
-  fi
-  if ! sole=$(deck_form_disk_autoselect "$eligible"); then
-    deck_form_warn "more than one eligible install disk -- refusing to guess which one to erase"
-    deck_form_disk_dead_end
-    abort "More than one eligible install disk was found."
+    abort "No install disk was selected."
     return 1
   fi
   # shellcheck disable=SC2034
-  disk=$sole
+  disk=$chosen
   early_bin=$(deck_form_early_bin)
+  say "Installing to $chosen -- this drive is being wiped now."
   if ! "$early_bin" start "$disk"; then
     deck_form_warn "'$early_bin start $disk' failed -- the background install never started, and nothing was erased by it"
     abort "The background install failed to start."
@@ -973,6 +973,107 @@ deck_form_steam_status_display() {
   return 0
 }
 
+# deck_form_steam_progress_line -- the last Valve progress/phase line written
+# by the orchestrator's write_steam_progress (e.g. "downloading Steam's
+# client update: 72,551 of 502,420 KB (14%)" or "Steam client bootstrap:
+# ... (72s of 600s)"). Empty when nothing reported yet -- not a failure.
+deck_form_steam_progress_line() {
+  local file=${DECK_STEAM_PROGRESS_FILE:-$DECK_STEAM_PROGRESS_FILE_DEFAULT}
+  local line=""
+  if [[ -r $file ]]; then
+    line=$(head -n 1 "$file" 2>/dev/null)
+  fi
+  printf '%s\n' "$line"
+  return 0
+}
+
+# deck_form_early_phase -- C1's free-text phase word ("Preparing install
+# target", "Installing Arch + Omarchy", ...). Empty when nothing yet.
+deck_form_early_phase() {
+  local file=${DECK_EARLY_PHASE_FILE:-$DECK_EARLY_PHASE_FILE_DEFAULT}
+  local val=""
+  if [[ -r $file ]]; then
+    val=$(head -n 1 "$file" 2>/dev/null)
+  fi
+  printf '%s\n' "$val"
+  return 0
+}
+
+# deck_form_parse_steam_progress <line> -- pure parser for Valve's numbers.
+# Prints "done total" in KB (commas stripped), or returns 1 when the line
+# carries no "X of Y KB" pair. Never crashes on unparseable input: the
+# caller shows an indeterminate display instead.
+deck_form_parse_steam_progress() {
+  local line=${1:-} have_kb total_kb rest
+  [[ $line =~ ([0-9][0-9,]*)" of "([0-9][0-9,]*" KB") ]] || return 1
+  have_kb=${BASH_REMATCH[1]//,/}
+  rest=${BASH_REMATCH[2]}
+  total_kb=${rest% KB}
+  total_kb=${total_kb//,/}
+  [[ $have_kb =~ ^[0-9]+$ && $total_kb =~ ^[0-9]+$ ]] || return 1
+  printf '%s %s\n' "$have_kb" "$total_kb"
+  return 0
+}
+
+# deck_form_steam_percent <done-kb> <total-kb> -- integer 0-100, clamped.
+# Zero total is indeterminate (prints empty, returns 1) rather than a crash.
+deck_form_steam_percent() {
+  local have_kb=${1:-} total_kb=${2:-} pct
+  [[ $have_kb =~ ^[0-9]+$ && $total_kb =~ ^[0-9]+$ ]] || return 1
+  (( total_kb > 0 )) || return 1
+  pct=$(( have_kb * 100 / total_kb ))
+  (( pct < 0 )) && pct=0
+  (( pct > 100 )) && pct=100
+  printf '%s\n' "$pct"
+  return 0
+}
+
+# deck_form_steam_rate <done0> <t0> <done1> <t1> -- MB/s with two decimals,
+# from successive KB readings and epoch seconds. Non-positive elapsed or
+# non-numeric input is indeterminate (prints empty, returns 1), never a
+# divide-by-zero. A backwards counter reads as 0.00, not negative.
+deck_form_steam_rate() {
+  local have0=${1:-} t0=${2:-} have1=${3:-} t1=${4:-}
+  local dt dkb
+  [[ $have0 =~ ^[0-9]+$ && $have1 =~ ^[0-9]+$ && $t0 =~ ^[0-9]+$ && $t1 =~ ^[0-9]+$ ]] || return 1
+  dt=$(( t1 - t0 ))
+  (( dt > 0 )) || return 1
+  dkb=$(( have1 - have0 ))
+  (( dkb < 0 )) && dkb=0
+  awk -v kb="$dkb" -v dt="$dt" 'BEGIN { printf "%.2f", kb / 1024 / dt }'
+  printf '\n'
+  return 0
+}
+
+# deck_form_steam_eta <remaining-kb> <rate-mb-s> -- seconds left, floored.
+# Empty/zero rate is indeterminate (returns 1): no ETA without motion.
+deck_form_steam_eta() {
+  local remaining=${1:-} rate=${2:-}
+  [[ $remaining =~ ^[0-9]+$ ]] || return 1
+  awk -v r="$remaining" -v rate="$rate" 'BEGIN { ok = (rate + 0 > 0); if (!ok) exit 1; printf "%d", (r / 1024) / rate }' || return 1
+  printf '\n'
+  return 0
+}
+
+# deck_form_format_eta <seconds> -- "MM:SS" (hours fold into minutes).
+deck_form_format_eta() {
+  local secs=${1:-}
+  [[ $secs =~ ^[0-9]+$ ]] || return 1
+  printf '%02d:%02d\n' $(( secs / 60 )) $(( secs % 60 ))
+  return 0
+}
+
+# deck_form_format_mb <kb> -- "1,234.5 MB" style from integer KB.
+deck_form_format_mb() {
+  local kb=${1:-} whole frac grouped
+  [[ $kb =~ ^[0-9]+$ ]] || return 1
+  whole=$(( kb / 1024 ))
+  frac=$(( (kb % 1024) * 10 / 1024 ))
+  grouped=$(printf '%s' "$whole" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')
+  printf '%s.%s MB\n' "$grouped" "$frac"
+  return 0
+}
+
 # ===========================================================================
 # FAST-INSTALL four variants -- the preinstalls/gaming choice screens
 # (docs/tasks/FAST-INSTALL.md C2/C5/C6). Read by Stages' early worker AFTER
@@ -980,16 +1081,17 @@ deck_form_steam_status_display() {
 # files appearing, so the screens below must never block the S0-A restore.
 # ===========================================================================
 #
-# SHAPE OF THE FLOW (Main, 2026-09-24): S0-A wipes FIRST, then preinstalls
-# Yes/No, then Gaming Yes/No, then (Gaming Yes only) Wi-Fi, then identity.
-# B goes one screen back: Gaming -> preinstalls, preinstalls -> safe exit
-# (nothing erased yet? NO -- S0-A already wiped. B on preinstalls reaches
-# the power menu, same as S0-B). After BOTH answers the files plus `locked`
+# SHAPE OF THE FLOW (2026-09-24): S0 welcome, drive selection (NVMe/microSD,
+# B back to welcome), early start on the SELECTED disk, preinstalls Yes/No,
+# Steam Yes/No, Wi-Fi iff Steam=yes, Steam progress iff Steam=yes, identity,
+# S5. B goes one screen back: Steam -> preinstalls, preinstalls -> welcome
+# (via the safe-exit power menu). After BOTH answers the files plus `locked`
 # are written atomically; preinstalls is then NOT revisable (the package
 # delta may already be installing). Wi-Fi B is the narrow exception: it
-# flips Gaming yes->no (rewriting `gaming`, clearing any stale network-ready)
+# flips Steam yes->no (rewriting `gaming`, clearing any stale network-ready)
 # before network-ready ever fired -- there is no path back to preinstalls
-# from Wi-Fi.
+# from Wi-Fi. The progress screen's failure menu may also flip Steam to no,
+# but only while the stage still allows it (see its own comment).
 #
 # DECK_CHOICES_DIR exists so the [U] suite and Stages' tests point this at a
 # temp dir instead of /run. Values are lowercase yes/no + trailing newline.
@@ -1104,12 +1206,14 @@ deck_form_preinstalls_screen() {
     no
 }
 
-# deck_form_gaming_screen <result-var> -- stores yes/no/back. Yes requires Internet;
-# No says it can be added later from the desktop (C6 conversion script).
+# deck_form_gaming_screen <result-var> -- the "Install Steam?" question.
+# Yes installs Steam / Gaming Mode and requires Internet; No says it can
+# be added later from the desktop (C6 conversion script). The stored value
+# stays `gaming` yes/no: Stages gates on it, so the name does not change.
 deck_form_gaming_screen() {
   deck_form_yesno_screen "$1" \
-    "Install Steam Deck Gaming Mode?" \
-    "Yes: boots into Steam Gaming Mode. (Requires Internet.)" \
+    "Install Steam?" \
+    "Yes: installs Steam and boots into Gaming Mode. (Requires Internet.)" \
     "No: desktop-only Omarchy. (Can be installed later from the Omarchy desktop.)" \
     no
 }
@@ -1178,11 +1282,10 @@ greeter() {
   deck_form_pin_console_font
   deck_form_s0_text
   deck_form_stty_sane "$tty"
-  # S0's A/B answer: A (Enter) wipes and starts the common restore NOW
-  # (first-A wipe, built-in NVMe only); B (Esc) is the safe exit -- nothing
-  # erased yet. A bare read that accepts anything as consent is how a typo
-  # becomes a wipe, so only these two bytes answer.
-  local s0_answer
+  # S0's A/B answer: A proceeds to drive selection; B (Esc) is the safe
+  # exit -- nothing erased yet. A bare read that accepts anything as
+  # consent is how a typo becomes a wipe, so only these two bytes answer.
+  local s0_answer drive_choice=""
   if ! s0_answer=$(deck_form_s0_wait_key "$tty"); then
     abort "Could not read the S0 answer -- refusing to guess consent."
     return 1
@@ -1192,19 +1295,42 @@ greeter() {
     abort "Install cancelled at the first screen."
     return 1
   fi
-  # FAST-INSTALL: the A press IS the erase consent (see the S0 text above).
-  # Built-in NVMe only -- never microSD/USB; ambiguous or missing is the
-  # dead end, never a guess. A failed start aborts before anything else.
-  deck_form_start_early_install || return 1
-  # The two choice screens (preinstalls, then Gaming), with B-back between
-  # them. Locked on completion: Stages gates on `choices/locked`.
+  # Drive selection (2026-09-24): NVMe and microSD are both eligible; USB
+  # never is, and the boot medium is always excluded. The screen always
+  # draws -- even with one entry -- so the user sees what will be wiped.
+  # B here returns to the welcome screen. Zero eligible is the dead end.
+  # The chosen drive starts the early stage immediately (no second
+  # confirmation); a failed start aborts before anything else.
+  while true; do
+    deck_form_drive_screen drive_choice || return 1
+    if [[ $drive_choice == back ]]; then
+      deck_form_s0_text
+      deck_form_stty_sane "$tty"
+      if ! s0_answer=$(deck_form_s0_wait_key "$tty"); then
+        abort "Could not read the S0 answer -- refusing to guess consent."
+        return 1
+      fi
+      if [[ $s0_answer == cancel ]]; then
+        deck_form_s0_cancel_menu
+        abort "Install cancelled at the first screen."
+        return 1
+      fi
+      drive_choice=""
+      continue
+    fi
+    break
+  done
+  deck_form_start_early_install "$drive_choice" || return 1
+  # The two choice screens (preinstalls, then Steam/Gaming), with B-back
+  # between them. Locked on completion: Stages gates on `choices/locked`.
   deck_form_run_choice_screens || return 1
-  # Wi-Fi ONLY when Gaming=yes (Stages skips its network gate entirely on
-  # gaming=no, so no marker is ever needed there). Gaming=yes with no
+  # Wi-Fi ONLY when Steam=yes (Stages skips its network gate entirely on
+  # steam=no, so no marker is ever needed there). Steam=yes with no
   # connection keeps the network screen until connected, or B returns to
-  # the Gaming choice (flipping to no, clearing any stale marker state).
+  # the Steam choice (flipping to no, clearing any stale marker state).
   if [[ ${DECK_GAMING:-no} == yes ]]; then
     deck_form_wifi_screen_gaming || return 1
+    deck_form_steam_progress_screen || return 1
   fi
 }
 deck_form_stty_sane() {
@@ -3012,6 +3138,178 @@ deck_form_gaming_opt_out_cleanup() {
   fi
   return 0
 }
+# deck_form_steam_progress_text <status> <line> -- one human line for the
+# progress screen: Valve's parsed numbers once downloading, the raw line
+# when unparseable (indeterminate, never a crash), else the early phase.
+deck_form_steam_progress_text() {
+  local status=${1:-} line=${2:-} parsed have_kb total_kb pct
+  local have_mb total_mb
+  if parsed=$(deck_form_parse_steam_progress "$line"); then
+    have_kb=${parsed%% *}; total_kb=${parsed##* }
+    pct=$(deck_form_steam_percent "$have_kb" "$total_kb") || pct=""
+    have_mb=$(deck_form_format_mb "$have_kb") || have_mb=""
+    total_mb=$(deck_form_format_mb "$total_kb") || total_mb=""
+    if [[ -n $pct && -n $have_mb && -n $total_mb ]]; then
+      printf 'Downloading Steam: %s%% (%s of %s)\n' "$pct" "$have_mb" "$total_mb"
+      return 0
+    fi
+  fi
+  if [[ -n $line ]]; then
+    printf '%s\n' "$line"
+    return 0
+  fi
+  local phase
+  phase=$(deck_form_early_phase)
+  if [[ -n $phase ]]; then
+    printf 'Preparing Steam: %s\n' "$phase"
+    return 0
+  fi
+  printf 'Preparing Steam download...\n'
+  return 0
+}
+
+# deck_form_steam_bar <percent> <width> -- "####-----" bar, pure/testable.
+# Empty/unparseable percent draws "?" marks (indeterminate), never a crash.
+deck_form_steam_bar() {
+  local pct=${1:-} width=${2:-20} filled i bar=""
+  if [[ ! $pct =~ ^[0-9]+$ ]]; then
+    for (( i = 0; i < width; i++ )); do bar="${bar}?"; done
+    printf '[%s]\n' "$bar"
+    return 0
+  fi
+  (( pct > 100 )) && pct=100
+  filled=$(( pct * width / 100 ))
+  for (( i = 0; i < filled; i++ )); do bar="${bar}#"; done
+  for (( i = filled; i < width; i++ )); do bar="${bar}-"; done
+  printf '[%s]\n' "$bar"
+  return 0
+}
+
+# deck_form_steam_failure_action_for <choice> -- failure menu decision:
+# retry (re-poll), continue without Steam (flip gaming to no -- only if the
+# stage still allows it, checked by the caller), reboot/poweroff.
+# Empty/unrecognised redraws, never guesses.
+deck_form_steam_failure_action_for() {
+  local choice=${1:-}
+  case $choice in
+    "Try again") printf 'retry\n' ;;
+    "Continue without Steam") printf 'without-steam\n' ;;
+    "Reboot") printf 'reboot\n' ;;
+    "Power off") printf 'poweroff\n' ;;
+    *) printf 'redraw\n' ;;
+  esac
+}
+
+# deck_form_steam_failure_items -- menu rows; split out so the suite asserts
+# the menu never offers a shell.
+deck_form_steam_failure_items() { printf '%s\n' "Try again" "Continue without Steam" "Reboot" "Power off"; }
+
+# deck_form_steam_may_drop_gaming <early-status> <steam-status> -- 0 iff
+# flipping gaming yes->no is still allowed: the early stage has not
+# finished (done) and Steam itself has not finished (done/installed). Once
+# either landed, un-asking contradicts installed bytes.
+deck_form_steam_may_drop_gaming() {
+  local early=${1:-} steam=${2:-}
+  [[ $early == "done" ]] && return 1
+  [[ $steam == "done" || $steam == installed ]] && return 1
+  return 0
+}
+
+# deck_form_steam_progress_screen -- the NEW blocking Steam download screen
+# (Steam=yes only). Polls steam/status + steam/progress and the early phase
+# about once a second: a bar with percent, downloaded/total MB, rate (MB/s
+# from successive readings) and ETA, plus the early phase before Steam
+# starts. Proceeds automatically on steam done/installed. Steam skipped is
+# NOT waited on (gaming was flipped to no upstream -- proceed). Steam
+# failed/incomplete shows the error with a menu: Try again (re-poll),
+# Continue without Steam (flip gaming to no ONLY if the stage still allows
+# it), or Reboot/Power off -- never a shell, never a silent skip. Early
+# failed aborts loudly with the early failure menu, same as S5.
+deck_form_steam_progress_screen() {
+  local status="" line="" early="" err action choice
+  local last_have="" last_t="" have_kb total_kb parsed now rate="" eta="" eta_text=""
+  local pct="" bar text
+  while true; do
+    if [[ ${DECK_GAMING:-no} != yes ]]; then
+      return 0
+    fi
+    status=$(deck_form_steam_status)
+    case $status in
+      "done"|installed)
+        return 0 ;;
+      skipped)
+        return 0 ;;
+      failed|incomplete)
+        err=$(deck_form_steam_error)
+        clear_logo
+        echo
+        say --foreground 1 "The Steam download failed."
+        [[ -n $err ]] && say --foreground 1 "$err"
+        say "Steam comes from Valve during setup; without it there is no Gaming Mode."
+        echo
+        choice=$(deck_form_steam_failure_items | gum choose --header "What next?") || choice=""
+        action=$(deck_form_steam_failure_action_for "$choice")
+        case $action in
+          retry) continue ;;
+          without-steam)
+            early=$(deck_form_early_status)
+            if deck_form_steam_may_drop_gaming "$early" "$status"; then
+              # shellcheck disable=SC2034
+              DECK_GAMING=no
+              deck_form_choice_write gaming no || return 1
+              deck_form_gaming_opt_out_cleanup || deck_form_warn "gaming opt-out cleanup reported an issue -- continuing desktop-only"
+              return 0
+            fi
+            say --foreground 3 "The install has already finished that part, so Steam can no longer be un-asked here."
+            continue ;;
+          reboot) systemctl reboot ;;
+          poweroff) systemctl poweroff ;;
+          *) continue ;;
+        esac
+        continue ;;
+    esac
+    early=$(deck_form_early_status)
+    if [[ $early == failed ]]; then
+      deck_form_early_failed_menu
+      abort "The background install failed."
+      return 1
+    fi
+    line=$(deck_form_steam_progress_line)
+    text=$(deck_form_steam_progress_text "$status" "$line")
+    pct=""
+    if parsed=$(deck_form_parse_steam_progress "$line"); then
+      have_kb=${parsed%% *}; total_kb=${parsed##* }
+      pct=$(deck_form_steam_percent "$have_kb" "$total_kb" 2>/dev/null) || pct=""
+      now=$(date +%s)
+      if [[ -n $last_have && -n $last_t && $have_kb =~ ^[0-9]+$ && $last_have =~ ^[0-9]+$ ]]; then
+        rate=$(deck_form_steam_rate "$last_have" "$last_t" "$have_kb" "$now" 2>/dev/null) || rate=""
+        if [[ -n $rate ]]; then
+          eta=$(deck_form_steam_eta "$(( total_kb - have_kb ))" "$rate" 2>/dev/null) || eta=""
+          [[ -n $eta ]] && eta_text=$(deck_form_format_eta "$eta" 2>/dev/null) || eta_text=""
+        fi
+      fi
+      last_have=$have_kb; last_t=$now
+    fi
+    bar=$(deck_form_steam_bar "$pct" 20)
+    clear_logo
+    echo
+    say "Downloading Steam from Valve..."
+    say "$bar"
+    say "$text"
+    if [[ -n $rate ]]; then
+      if [[ -n $eta_text ]]; then
+        say --foreground 8 "${rate} MB/s, about ${eta_text} left"
+      else
+        say --foreground 8 "${rate} MB/s"
+      fi
+    elif [[ -n $early && $early != "done" ]]; then
+      say --foreground 8 "Early install: $early"
+    fi
+    echo
+    sleep "${DECK_STEAM_POLL_SECS_OVERRIDE:-$DECK_STEAM_POLL_SECS}"
+  done
+}
+
 
 # can reach; a nonzero return means this function's OWN plumbing broke.
 deck_form_wifi_screen() {
@@ -3389,16 +3687,17 @@ omarchy_prompt_timezone() {
 
 # deck_form_disk_list <lsblk-fixture-file> [<exclude-device>]
 # lsblk-fixture-file: lines of "NAME TYPE RM TRAN" (matches
-# `lsblk -dpno NAME,TYPE,RM,TRAN`'s own column order). Keeps TYPE=="disk",
-# RM=="0" AND TRAN=="nvme" -- the built-in drive is NVMe on the verified
-# OLED Deck; microSD (mmc) and USB sticks (usb) are never targets even when
-# they report RM=0, and a USB NVMe enclosure must not be mistaken for the
-# internal drive either (TRAN distinguishes the bus, the name does not).
-# (Supersedes the old RM-only rule: the old rule deliberately kept internal
-# eMMC, but only OLED/NVMe is verified hardware now, and an eMMC-kept path
-# is how a Jupiter or a card reader would sneak in.) EXCLUDE-DEVICE (the
-# resolved boot/install medium, upstream's own `get_root_disk` walk) is
-# dropped by exact NAME match. An empty result is a REPORTED failure
+# `lsblk -dpno NAME,TYPE,RM,TRAN`'s own column order). Eligible targets are
+# the built-in NVMe (TYPE==disk, RM==0, TRAN==nvme) AND the Deck's microSD
+# reader (TYPE==disk, NAME ^/dev/mmcblk[0-9]+$). The SD match is by NAME,
+# not by TRAN/RM, on purpose: lsblk reports the reader's TRAN as empty or
+# "mmc" and RM as 0 or 1 depending on kernel/card, so neither field
+# identifies it robustly. USB (TRAN==usb, or a /dev/sd* name) is never a
+# target, and a USB NVMe enclosure must not be mistaken for the internal
+# drive either (TRAN distinguishes the bus for NVMe; the name does not).
+# EXCLUDE-DEVICE (the resolved boot/install medium, upstream's own
+# `get_root_disk` walk) is dropped by exact NAME match -- so an ISO booted
+# from microSD never lists that card. An empty result is a REPORTED failure
 # (return 1), never a silently empty list -- §4 S4's own verified-by row.
 deck_form_disk_list() {
   local file=$1 exclude=${2:-}
@@ -3406,27 +3705,37 @@ deck_form_disk_list() {
   while read -r name type rm tran; do
     [[ -n $name ]] || continue
     [[ $type == disk ]] || continue
-    [[ $rm == 0 ]] || continue
-    [[ $tran == nvme ]] || continue
+    if [[ $name =~ ^/dev/mmcblk[0-9]+$ ]]; then
+      : # microSD: eligible regardless of TRAN/RM (see above)
+    elif [[ $tran == nvme && $rm == 0 ]]; then
+      : # built-in NVMe
+    else
+      continue
+    fi
     [[ -n $exclude && $name == "$exclude" ]] && continue
     printf '%s\n' "$name"
     found=1
   done <"$file"
   if [[ $found -eq 0 ]]; then
-    deck_form_warn "no eligible install disk found in $file (no built-in NVMe: every candidate is removable, non-NVMe, or the boot medium)"
+    deck_form_warn "no eligible install disk found in $file (no built-in NVMe or microSD: every candidate is USB, removable non-SD, or the boot medium)"
     return 1
   fi
   return 0
 }
 
+# deck_form_disk_is_sd <device> -- 0 iff the device is the microSD reader
+# path (/dev/mmcblkN, whole disk). Shared by the label and the row text so
+# the two can never disagree about which drive is the card.
+deck_form_disk_is_sd() {
+  [[ ${1:-} =~ ^/dev/mmcblk[0-9]+$ ]]
+}
+
 # deck_form_disk_autoselect <newline-separated eligible devices>
-# §4 S4: "When exactly one eligible disk exists -- the expected Deck case --
-# the picker is skipped." Prints the device and succeeds when there is
-# EXACTLY one; fails (prints nothing) for zero or more than one, so the
-# caller knows a real picker is needed. A pure decision, split out
-# specifically so "skip the picker with one disk, show it with two" is
-# provable without a live lsblk/gum -- the same shape as
-# deck_form_failure_action_for.
+# RETIRED as a flow step (2026-09-24): with NVMe + microSD both eligible,
+# two drives is the NORMAL Deck case and the user must always choose -- no
+# autoselect, even with one entry (the screen shows what will be wiped).
+# Kept as a pure helper for tests: prints the device and succeeds when
+# there is EXACTLY one; fails (prints nothing) for zero or more than one.
 deck_form_disk_autoselect() {
   local list=$1 count
   count=$(printf '%s\n' "$list" | LC_ALL=C command grep -c .)
@@ -3438,17 +3747,22 @@ deck_form_disk_autoselect() {
 }
 
 # deck_form_disk_label <device>
-# "<vendor+model> (<size>)", falling back to the bare device path if lsblk
-# has nothing to say. Used both by the S4 confirm text and the S5 summary
-# row, so the two can never independently drift. DECK_LSBLK_BIN is
-# overridable so the [U] suite can point this at a fake `lsblk` instead of
-# needing a real block device on the test machine.
+# "Internal SSD (NVMe) <vendor+model> (<size>)" or "microSD card (<size>)";
+# falls back to the bare device path when lsblk has nothing to say. Used by
+# the drive screen rows and the S5 summary row, so the two can never
+# independently drift. DECK_LSBLK_BIN is overridable so the [U] suite can
+# point this at a fake `lsblk` instead of needing a real block device.
 deck_form_disk_label() {
   local device=$1 lsblk=${DECK_LSBLK_BIN:-lsblk}
-  local size vendor model label
+  local size vendor model label prefix=""
   size=$("$lsblk" -dno SIZE "$device" 2>/dev/null)
   vendor=$("$lsblk" -dno VENDOR "$device" 2>/dev/null | sed 's/ *$//')
   model=$("$lsblk" -dno MODEL "$device" 2>/dev/null | sed 's/ *$//')
+  if deck_form_disk_is_sd "$device"; then
+    prefix="microSD card"
+  else
+    prefix="Internal SSD (NVMe)"
+  fi
   if [[ -n $vendor && -n $model && $model != *"$vendor"* ]]; then
     label="$vendor $model"
   elif [[ -n $model ]]; then
@@ -3459,9 +3773,9 @@ deck_form_disk_label() {
     label=$device
   fi
   if [[ -n $size ]]; then
-    printf '%s (%s)\n' "$label" "$size"
+    printf '%s %s (%s)\n' "$prefix" "$label" "$size"
   else
-    printf '%s\n' "$label"
+    printf '%s %s\n' "$prefix" "$label"
   fi
 }
 
@@ -3521,11 +3835,10 @@ deck_form_disk_dead_end() {
   done
 }
 
-# deck_form_eligible_disks -- the resolver both disk_form and the S0-A
-# early start share (FAST-INSTALL C4: "`disk_form` stays as the resolver").
-# Built-in NVMe only (TRAN==nvme), boot-medium exclusion via upstream's own
-# get_root_disk walk. Fails loudly when there is no single NVMe. Never draws
-# anything: safe to call before any screen.
+# deck_form_eligible_disks -- the resolver the drive screen and the S0 flow
+# share. Built-in NVMe + microSD (see deck_form_disk_list), boot-medium
+# exclusion via upstream's own get_root_disk walk. Fails loudly when
+# nothing is eligible. Never draws anything: safe to call before any screen.
 deck_form_eligible_disks() {
   local boot_source exclude_disk lsblk_bin=${DECK_LSBLK_BIN:-lsblk}
   boot_source=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
@@ -3538,6 +3851,66 @@ deck_form_eligible_disks() {
   local rc=$?
   rm -f "$lsblk_tmp"
   return $rc
+}
+
+# deck_form_drive_row <device> -- one controller-navigable chooser row:
+# "device | label". The device path is the machine-readable half (row
+# parsing splits on the first " | "); the label is deck_form_disk_label.
+deck_form_drive_row() {
+  local device=$1 label
+  label=$(deck_form_disk_label "$device")
+  printf '%s | %s\n' "$device" "$label"
+}
+
+# deck_form_drive_device_for <chooser-row> -- the device half of a row, or
+# empty when the row is not one of ours. Empty/cancel redraws, never guesses.
+deck_form_drive_device_for() {
+  local row=${1:-}
+  [[ $row == "/dev/"*" | "* ]] || return 1
+  printf '%s\n' "${row%% | *}"
+  return 0
+}
+
+# deck_form_drive_screen <result-var> -- the NEW drive selection screen.
+# Lists every eligible target (NVMe and microSD) with its label, always --
+# even with exactly one entry, so the user sees what will be wiped. Stores
+# the chosen device, or "back" on B/Esc, in $result-var and returns 0.
+# Zero eligible is the existing dead end (never returns). Unrecognised rows
+# redraw, never guess at a wipe target.
+deck_form_drive_screen() {
+  local resultvar=$1 eligible device rows choice picked
+  if ! eligible=$(deck_form_eligible_disks); then
+    deck_form_disk_dead_end
+    abort "No eligible install disk was found."
+    return 1
+  fi
+  rows=""
+  while IFS= read -r device; do
+    [[ -n $device ]] || continue
+    rows="${rows}$(deck_form_drive_row "$device")"$'\n'
+  done <<<"$eligible"
+  [[ -n $rows ]] || {
+    deck_form_disk_dead_end
+    abort "No eligible install disk was found."
+    return 1
+  }
+  while true; do
+    clear_logo
+    echo
+    say "Where should Omarchy be installed?"
+    say --foreground 8 "The drive you choose is wiped immediately. B goes back."
+    choice=$(printf '%s' "$rows" | gum choose --header "Select install drive") || choice=""
+    if [[ -z $choice ]]; then
+      printf -v "$resultvar" '%s' "back"
+      return 0
+    fi
+    if picked=$(deck_form_drive_device_for "$choice"); then
+      if LC_ALL=C command grep -qxF "$picked" <<<"$eligible"; then
+        printf -v "$resultvar" '%s' "$picked"
+        return 0
+      fi
+    fi
+  done
 }
 
 # disk_form -- overrides upstream's own disk picker.
