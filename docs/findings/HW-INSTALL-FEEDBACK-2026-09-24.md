@@ -53,3 +53,25 @@ That was false once the wipe had begun.
 Wi-Fi from the live ISO (load-bearing, `CLAUDE.md`), the Steam download screen,
 name/email entry with the OSK, the summary, the Gaming=No greeter, first boot.
 All sit behind the blocker or behind Steam=Yes.
+
+## Second pass — v4 ISO on the Deck (same day)
+
+| # | Screen | Feedback |
+|---|---|---|
+| 7 | Summary / network note | With Install Steam? = **No**, don't show "No network was found": nothing on that path needs the network. Keep it only for Steam = Yes. |
+| 8 | Pre-reboot notice (`DECK_S5_REBOOT_LINES`) | With Steam = **No**, show only "When the install finishes the Deck reboots on its own." Drop the Steam/black-screen/Gaming Mode lines. Steam = Yes keeps the full block. |
+| 9 | Steam download screen, before the download starts | Bar draws as `[?????…]` while the size is unknown (base install still running). Looks broken; say "Waiting for the base install to finish" instead of a bar of `?`. |
+| 10 | Steam download screen | The whole screen flashes (clears and redraws) every ~3 s. Update the changing lines in place. |
+| 11 | Steam download screen | Speed is stuck at `0.00 MB/s` the entire download while MB done climbs (e.g. 203.9 of 484.7 MB). Find and fix the rate calculation (test with real progress numbers); show time left. |
+| 12 | Steam download screen | ~~Logo off-center~~ — not a bug: the logo is centred; the photo angle made it look shifted (operator). |
+| 13 | Flow design | **Decided (operator):** the Steam download screen keeps holding the form until the download finishes. No change. |
+
+✅ **Hardware milestone:** Wi-Fi from the live ISO works on the Deck OLED — joined with a controller-typed passphrase on the Wi-Fi screen and downloaded Steam from Valve (42%, 203.9/484.7 MB observed). First hardware confirmation of the `CLAUDE.md` "Wi-Fi must work in the live ISO" requirement.
+
+✅ **Operator-confirmed on hardware (v4):** account screens (username, password, full name, email) usable with the on-screen keyboard; the summary screen reads correctly; with a microSD card inserted the drive screen lists both drives and the wipe confirm names the chosen one. The full Steam=Yes form path (Wi-Fi → Steam download → keyboard layout) completed.
+| 14 | Welcome screen | Both lines ("This will install Omarchy on your Steam Deck." / "Press A to install, B to cancel") must start at the left edge of the Omarchy logo, like every other installer screen — not at column 0, not centred. (Likely cause: `deck_form_s0_text` prints with bare `printf`, while other screens use `say`, which applies the logo's left padding.) |
+| 15 | Wipe confirm | Prompt line becomes exactly `Press A to wipe and install NOW, B to go back` ("NOW" in caps on purpose). |
+| 16 | Keyboard layout, B | **Reverses item 6's read-only walk:** B on keyboard layout does NOTHING — no jump to the read-only pre-installs/Steam screens (remove that walk), and no visible full-screen redraw/flash either (in v2 B re-drew the whole screen; the operator wants B to be a true no-op). |
+| 16a | B map (operator, supersedes item 6's B rules) | Welcome: B = cancel menu. Drive list: B = Welcome. Wipe confirm: B = drive list. Pre-installs?: B = nothing. **Install Steam?: B = back to Install pre-installs?** (operator correction) **Wi-Fi list: B = back to Install Steam?** (same effect as its "Back" row). **Steam download: B = nothing** (no flash). **Keyboard layout: B = nothing** (read-only walk removed, no flash). Account screens and summary: unchanged. |
+| 17 | Wi-Fi → Install Steam? | Steam=Yes → Wi-Fi → B → Install Steam? again → choosing **No** must continue the install normally as Steam=No (keyboard layout next; the background install must drop Steam and never wait for network). Choosing Yes returns to Wi-Fi. Test the whole round trip, including that pre-installs can never be reopened once locked. |
+| 18 | Choice lock timing (orchestrator, to make 16a/17 safe) | Because B now moves freely between pre-installs ⇄ Install Steam? ⇄ Wi-Fi, the pre-installs + gaming answers are written and `locked` only when the user LEAVES that group: Steam=No answered, or Wi-Fi connected with Steam=Yes (network-ready). Before that nothing is committed, so any back-and-forth is safe. Once locked, nothing can reopen pre-installs. |
