@@ -84,16 +84,16 @@ Item numbers match the feedback file.
 | Install blocker | interactive install died on "cidata drive carries no 'preinstalls'" | ✅ in v5 (d76bab6) — **not yet verified on the Deck** |
 | 7 | Steam=No: no "No network was found" | ✅ in v5 |
 | 8 | Steam=No: reboot notice is one line | ✅ in v5 |
-| 9 | Steam download: waiting text instead of `[????]` | ⏳ agent `muse-v6code` |
-| 10 | Steam download: no full-screen flash | ⏳ `muse-v6code` |
-| 11 | Steam download: speed stuck at 0.00 MB/s; show time left | ⏳ `muse-v6code` |
+| 9 | Steam download: waiting text instead of `[????]` | ✅ code in 2716be0 (reviewed, tests green) — ships in v6 |
+| 10 | Steam download: no full-screen flash | ✅ code in 2716be0 (reviewed, tests green) — ships in v6 |
+| 11 | Steam download: speed stuck at 0.00 MB/s; show time left | ✅ code in 2716be0 (reviewed, tests green) — ships in v6 |
 | 12 | logo off-centre | ❌ not a bug (photo angle) |
 | 13 | download screen blocks the form | ✅ decided: keep blocking, no change |
-| 14 | welcome lines aligned to logo's left edge | ⏳ `muse-v6code` |
-| 15 | wipe confirm text `Press A to wipe and install NOW, B to go back` | ⏳ `muse-v6code` |
-| 16a | B map (see feedback file row 16a; B on Install Steam? = back to pre-installs) | ⏳ `muse-v6code` |
-| 17 | Steam Yes → Wi-Fi → B → Steam No continues as a no-Steam install | ⏳ `muse-v6code` |
-| 18 | choices locked only when leaving pre-installs/Steam/Wi-Fi group | ⏳ `muse-v6code` |
+| 14 | welcome lines aligned to logo's left edge | ✅ code in 2716be0 (reviewed, tests green) — ships in v6 |
+| 15 | wipe confirm text `Press A to wipe and install NOW, B to go back` | ✅ code in 2716be0 (reviewed, tests green) — ships in v6 |
+| 16a | B map (see feedback file row 16a; B on Install Steam? = back to pre-installs) | ✅ code in 2716be0 (reviewed, tests green) — ships in v6 |
+| 17 | Steam Yes → Wi-Fi → B → Steam No continues as a no-Steam install | ✅ code in 2716be0 (reviewed, tests green) — ships in v6 |
+| 18 | choices locked only when leaving pre-installs/Steam/Wi-Fi group | ✅ code in 2716be0 (reviewed, tests green) — ships in v6 |
 | — | operator's hardware checks on v4: Wi-Fi from ISO ✅, Steam download ✅, account screens ✅, summary ✅, microSD drive listing ✅ | recorded |
 
 ## 4. Next steps, in order
@@ -105,12 +105,12 @@ Item numbers match the feedback file.
    THEN delete every other `.iso` on the stick (operator approved deleting all old
    ones, including the 09-20 ISO), then
    `udisksctl unmount -b /dev/sdX1 && udisksctl power-off -b /dev/sdX`.
-2. **When `muse-v6code` finishes** (`~/.cache/…` or the scratchpad DONE file —
+2. ✅ DONE (2716be0 reviewed). Was: **When `muse-v6code` finishes** (`~/.cache/…` or the scratchpad DONE file —
    this one was launched before the path convention: its report is
    `/tmp/claude-1000/-home-villenull-Projects-Pizzarchy/73222426-a56c-4989-b96c-c00fcf5a26f0/scratchpad/report-muse-v6code.md`):
    review per §1.5, especially its finding on what B does on the account
    screens; update §3; commit + push.
-3. **Build v6 + QEMU** with a new brief modelled on
+3. ⏳ RUNNING (agent terminal `v6-build`, brief `agent-briefs/v6-build-qemu.md`, report/DONE in `~/.cache/omarchy-deck/agents/`). **Build v6 + QEMU** with a new brief modelled on
    `agent-briefs/v5-blocker-fix-build.md` §4 (name `…-v6-…`, dir
    `release-2026.09.24-v6`, no/no + no/yes in parallel, add `## v6` to
    FAST-INSTALL-RESULTS.md). Then step-1 routine to put v6 on the stick
