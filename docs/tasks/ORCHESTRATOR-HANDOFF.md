@@ -68,7 +68,8 @@ review what they return, commit and push, and keep this file current.
 | All operator feedback + decisions | `docs/findings/HW-INSTALL-FEEDBACK-2026-09-24.md` |
 | Build/QEMU results per ISO | `docs/findings/FAST-INSTALL-RESULTS.md` (## v3, v4, v5 …) |
 | ISOs | `~/.cache/omarchy-deck/release-2026.09.24-vN/…-vN-x86_64.iso` + `SHA256SUMS` |
-| Latest ISO | **v5**: `~/.cache/omarchy-deck/release-2026.09.24-v5/pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-v5-x86_64.iso`, sha256 `1cf7411e43162fb26c8a182a2bfb85b0e1f9fcc7c41427fbc5b0a4c688c06753`, QEMU no/no + no/yes PASS |
+| Previous ISO | v5: `~/.cache/omarchy-deck/release-2026.09.24-v5/pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-v5-x86_64.iso`, sha256 `1cf7411e43162fb26c8a182a2bfb85b0e1f9fcc7c41427fbc5b0a4c688c06753`, QEMU no/no + no/yes PASS |
+| Latest ISO | **v6** (on the stick: NO — pending operator plugging it in): `~/.cache/omarchy-deck/release-2026.09.24-v6/pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-v6-x86_64.iso`, sha256 `b94ea1188cbbc26f7e10961dc57d98578adf8a8083ad62c8ffcc20ffa1fd092b`, QEMU no/no + no/yes PASS (cee3b15) |
 | Build + QEMU brief template | `docs/tasks/agent-briefs/v5-blocker-fix-build.md` §4 |
 | Ventoy USB stick | label `Ventoy`, mounts at `/run/media/villenull/Ventoy` (exFAT, user-writable, no password) |
 
@@ -98,6 +99,8 @@ Item numbers match the feedback file.
 
 ## 4. Next steps, in order
 
+0. **NOW: put v6 on the stick** when the operator plugs it in (routine in step 1 below; delete v5 after the v6 copy verifies).
+
 1. ✅ DONE 2026-09-24 16:54 (v5 verified on stick, all older ISOs deleted). Routine for the next ISO — **ISO onto the USB stick** (as soon as the operator plugs it in; check
    `lsblk -o NAME,LABEL,MOUNTPOINTS | grep -i ventoy`): copy to
    `<name>.part`, `sync -f`, rename, `sync -f`, verify
@@ -110,7 +113,7 @@ Item numbers match the feedback file.
    `/tmp/claude-1000/-home-villenull-Projects-Pizzarchy/73222426-a56c-4989-b96c-c00fcf5a26f0/scratchpad/report-muse-v6code.md`):
    review per §1.5, especially its finding on what B does on the account
    screens; update §3; commit + push.
-3. ⏳ RUNNING (agent terminal `v6-build`, brief `agent-briefs/v6-build-qemu.md`, report/DONE in `~/.cache/omarchy-deck/agents/`). **Build v6 + QEMU** with a new brief modelled on
+3. ✅ DONE (v6 built + QEMU PASS, cee3b15). Was: RUNNING (agent terminal `v6-build`, brief `agent-briefs/v6-build-qemu.md`, report/DONE in `~/.cache/omarchy-deck/agents/`). **Build v6 + QEMU** with a new brief modelled on
    `agent-briefs/v5-blocker-fix-build.md` §4 (name `…-v6-…`, dir
    `release-2026.09.24-v6`, no/no + no/yes in parallel, add `## v6` to
    FAST-INSTALL-RESULTS.md). Then step-1 routine to put v6 on the stick
