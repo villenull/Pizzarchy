@@ -4270,17 +4270,6 @@ if deck_form_steam_may_drop_gaming running "done"; then
 fi
 pass "failure menu never offers a shell; actions map; the drop-gaming gate forbids un-asking finished work"
 
-mkdir -p "$work/steam-failonce"
-printf 'failed\n' >"$work/steam-failonce/status"
-printf 'no route to valve\n' >"$work/steam-failonce/error"
-printf 'Downloading update (10 of 100 KB)...\n' >"$work/steam-failonce/progress"
-printf 'Try again\n' >"$work/steam-failonce.q"
-: >"$work/steam-failonce-gum.log"
-: >"$work/steam-failonce-say.log"
-( sleep 2; printf 'done\n' >"$work/steam-failonce/status" ) &
-flipper=$!
-pass "failure menu never offers a shell; actions map; the drop-gaming gate forbids un-asking finished work"
-
 # Failed status reaches the menu (not a hang) and Continue without Steam
 # flips gaming to no deterministically: early=running, steam=failed, the
 # queued answer is Continue without Steam. No background jobs, no timing.

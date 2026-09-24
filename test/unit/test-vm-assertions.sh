@@ -128,8 +128,50 @@ assert::units_enabled "$systemd_dir" sshd.service ||
 pass "assert::units_enabled accepts a genuinely enabled unit"
 
 if assert::units_enabled "$systemd_dir" NetworkManager.service 2>/dev/null; then
-  fail "assert::units_enabled rejects a unit with no enabling symlink"
+  fail "assert::units_enabled rejects a unit that isn't actually enabled"
 fi
 pass "assert::units_enabled rejects a unit that isn't actually enabled"
+
+# --- git identity (pure-logic half, hand-built home fixtures) ---
+# `git config --global` writes $XDG_CONFIG_HOME/git/config when it exists
+# (Omarchy's skel ships one via omarchy-settings) and only falls back to
+# ~/.gitconfig otherwise, so either file carrying both values is a pass.
+
+id_xdg="$work/id-xdg"
+mkdir -p "$id_xdg/.config/git"
+printf '[user]\n\tname = Deck Tester\n\temail = deck@example.invalid\n' >"$id_xdg/.config/git/config"
+assert::git_identity "$id_xdg" "Deck Tester" "deck@example.invalid" ||
+  fail "assert::git_identity accepts identity in ~/.config/git/config (XDG path, no ~/.gitconfig)"
+pass "assert::git_identity accepts identity in ~/.config/git/config (XDG path, no ~/.gitconfig)"
+
+id_classic="$work/id-classic"
+mkdir -p "$id_classic"
+printf '[user]\n\tname = Deck Tester\n\temail = deck@example.invalid\n' >"$id_classic/.gitconfig"
+assert::git_identity "$id_classic" "Deck Tester" "deck@example.invalid" ||
+  fail "assert::git_identity accepts identity in ~/.gitconfig (no XDG file)"
+pass "assert::git_identity accepts identity in ~/.gitconfig (no XDG file)"
+
+id_neither="$work/id-neither"
+mkdir -p "$id_neither"
+if assert::git_identity "$id_neither" "Deck Tester" "deck@example.invalid" 2>/dev/null; then
+  fail "assert::git_identity rejects a home with neither identity file"
+fi
+pass "assert::git_identity rejects a home with neither identity file"
+
+id_wrong="$work/id-wrong"
+mkdir -p "$id_wrong/.config/git"
+printf '[user]\n\tname = Deck Tester\n\temail = somebody@else.invalid\n' >"$id_wrong/.config/git/config"
+if assert::git_identity "$id_wrong" "Deck Tester" "deck@example.invalid" 2>/dev/null; then
+  fail "assert::git_identity rejects a wrong email"
+fi
+pass "assert::git_identity rejects a wrong email"
+
+id_half="$work/id-half"
+mkdir -p "$id_half/.config/git"
+printf '[user]\n\tname = Deck Tester\n' >"$id_half/.config/git/config"
+if assert::git_identity "$id_half" "Deck Tester" "deck@example.invalid" 2>/dev/null; then
+  fail "assert::git_identity rejects name set but email empty"
+fi
+pass "assert::git_identity rejects name set but email empty"
 
 echo "all vm-assertions.sh tests passed"

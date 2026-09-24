@@ -651,27 +651,60 @@ failure states · verified by**. Verification tiers follow
 > input to build and test, and the password it produces is also the `sudo`
 > password. One keyboard, used everywhere.
 
-### S4 — Disk — REMOVED by FAST-INSTALL C4 (consent moved to S0)
+### S4 — Drive selection (2026-09-24 flow: NVMe + microSD, explicit choice)
 
-- **Purpose.** Was the destructive step. The erase-confirm screen is gone:
-  consent happens at S0-A, where the early stage starts erasing immediately.
-- **What remains.** `disk_form` stays as the disk *resolver* (shared with the
-  S0-A start: `deck_form_disk_list`/`deck_form_disk_autoselect`, boot-medium
-  exclusion, dead end when not exactly one disk). `confirm_disk_overwrite`
-  keeps overriding upstream's name but draws nothing and always returns 0, so
-  upstream's `select_installation` branch and the `until confirm_disk_overwrite`
-  loop cannot re-prompt for a disk that is already erasing;
-  `encrypt_installation` stays the unconditional constant `false`.
-- **Failure states.** No eligible disk (every candidate is removable or is the
-  boot medium) → a dead-end screen offering Reboot / Power off, never a shell
-  (reached at S0-A, before anything is erased).
+- **Purpose.** The destructive step, now an explicit choice: after S0-A the
+  screen lists every eligible target — the built-in NVMe AND the microSD
+  card — and the chosen drive starts the early stage immediately, with no
+  second confirmation. USB drives are never targets.
+- **On the console.** `Where should Omarchy be installed?` /
+  `The drive you choose is wiped immediately. B goes back.` then a `gum
+  choose` list (`Select install drive`). The screen ALWAYS draws, even with
+  exactly one entry, so the user sees what will be wiped. Rows read
+  `Internal SSD (NVMe) <vendor+model> (<size>)` for the built-in drive
+  (`deck_form_disk_label`) vs `microSD card (<size>)` for the card
+  (`deck_form_disk_is_sd`: `NAME ^/dev/mmcblk[0-9]+$`, whole disk).
+- **Controls.** D-pad/stick = move, A = select, B (Esc) = back to the
+  welcome screen (the greeter redraws S0 and re-asks A/B; nothing erased
+  yet). Unrecognised rows redraw, never guess at a wipe target.
+- **Text entry.** None.
+- **Eligibility.** `deck_form_disk_list` over `lsblk -dpno NAME,TYPE,RM,TRAN`:
+  built-in NVMe (`TYPE==disk`, `RM==0`, `TRAN==nvme`) AND the Deck's microSD
+  reader (`TYPE==disk`, `NAME ^/dev/mmcblk[0-9]+$`, regardless of TRAN/RM —
+  lsblk reports the reader's TRAN as empty or `mmc` and RM as 0 or 1
+  depending on kernel/card, so neither field identifies it). USB
+  (`TRAN==usb`, or a `/dev/sd*` name) is never eligible, and a USB NVMe
+  enclosure must not be mistaken for the internal drive (TRAN distinguishes
+  the bus; the name does not). The boot medium — including an SD card the
+  ISO itself booted from — is always excluded via upstream's own
+  `get_root_disk` walk (`deck_form_eligible_disks`).
+- **Failure states.** Zero eligible (every candidate is USB, removable
+  non-SD, or the boot medium) → the existing dead-end screen offering Reboot
+  / Power off, never a shell, reached BEFORE anything is erased. The chosen
+  drive then passes the OLED wipe gate (`deck_form_is_oled_deck`:
+  product_name==Galileo AND sys_vendor contains Valve) inside
+  `deck_form_start_early_install`: Jupiter (unverified LCD), a generic
+  laptop disk, an empty selection, or unreadable DMI is the dead end with
+  the reason said, BEFORE `early start` is ever invoked. A failed start
+  aborts loudly; nothing continues silently.
+- **What remains of the old S4.** `disk_form` stays as the disk *resolver*
+  for upstream's own later flow (shared `deck_form_disk_list`/`deck_form_disk_autoselect`,
+  boot-medium exclusion, dead end when nothing is eligible).
+  `confirm_disk_overwrite` keeps overriding upstream's name but draws nothing
+  and always returns 0, so upstream's `select_installation` branch and the
+  `until confirm_disk_overwrite` loop cannot re-prompt for a disk that is
+  already erasing; `encrypt_installation` stays the unconditional constant
+  `false`.
 - **Verified by.**
-  - **[U]** the eligibility filter over `lsblk` fixtures: the install medium is
-    excluded (upstream's `get_root_disk` walk), removable devices are excluded by
-    `RM`, an NVMe internal is kept, an eMMC internal is kept, and an empty result
-    is an error rather than an empty list.
-  - **[U]** S0-A with one disk calls `early start` with it; with zero or two
-    disks it dead-ends and never calls `early start`; a failed start aborts.
+  - **[U]** the eligibility filter over `lsblk` fixtures: NVMe kept, microSD
+    kept regardless of TRAN/RM, USB and non-disk TYPEs excluded, the boot
+    medium (NVMe or SD) excluded by exact device-name match, and an empty
+    result is an error rather than an empty list.
+  - **[U]** the drive screen draws the chooser with zero/one/two eligible
+    disks (never autoselects — even one entry is shown), honours the chosen
+    row, answers `back` on B/Esc, and dead-ends on zero eligible; early start
+    receives the SELECTED disk (NVMe and microSD both start); a failed start
+    aborts.
   - **[U]** `confirm_disk_overwrite` draws no prompt and always returns 0.
   - **[V]** the artefact: `.disk_config.device_modifications[0].device` is the
     intended disk and `.wipe` is `true`; `.disk_config` carries **no**

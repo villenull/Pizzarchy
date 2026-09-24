@@ -34,6 +34,7 @@ readonly DECK_EARLY_UNIT=omarchy-deck-early.service
 readonly DECK_EARLY_DMI_PRODUCT_DEFAULT=/sys/class/dmi/id/product_name
 readonly DECK_EARLY_DMI_VENDOR_DEFAULT=/sys/class/dmi/id/sys_vendor
 readonly DECK_EARLY_LSBLK_BIN_DEFAULT=lsblk
+readonly DECK_EARLY_FINDMNT_BIN_DEFAULT=findmnt
 
 
 usage() {
@@ -108,9 +109,10 @@ deck_early_require_target_disk() {
     return 2
   fi
   local boot_source boot_disk
-  boot_source=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
+  local findmnt_bin=${DECK_EARLY_FINDMNT_BIN:-$DECK_EARLY_FINDMNT_BIN_DEFAULT}
+  boot_source=$("$findmnt_bin" -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
   if [[ -n $boot_source ]]; then
-    boot_disk=$(lsblk -no PKNAME "$boot_source" 2>/dev/null || true)
+    boot_disk=$("$lsblk_bin" -no PKNAME "$boot_source" 2>/dev/null || true)
     [[ -n $boot_disk ]] || boot_disk=$boot_source
     if [[ $disk == "$boot_disk" || $disk == "$boot_source" || $base == "${boot_disk#/dev/}" ]]; then
       echo "$DECK_EARLY_PROG: refusing '$disk': it is the live boot medium, not the install target" >&2
@@ -119,13 +121,6 @@ deck_early_require_target_disk() {
   fi
   return 0
 }
-
-# deck_early_require_nvme_disk -- RETIRED NAME, kept as a wrapper: the gate
-# now means "internal SSD or microSD" (2026-09-24). Callers must move to
-# deck_early_require_target_disk; this keeps any out-of-tree caller loud
-# rather than silently unguarded.
-deck_early_require_nvme_disk() { deck_early_require_target_disk "$@"; }
-
 
 cmd_network_ready() {
   mkdir -p "$(dirname "$DECK_EARLY_NETWORK_FILE")"

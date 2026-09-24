@@ -183,3 +183,32 @@ assert::units_enabled() {
   done
   return 0
 }
+
+# assert::git_identity <home-dir> <expected-name> <expected-email>
+# Pure check: the installed user's git identity carries BOTH exact values.
+# Reads with `git config --file` (git's own parsing, not grep), checking
+# $home/.config/git/config first, then $home/.gitconfig. Either file
+# yielding both values passes: `git config --global` writes
+# $XDG_CONFIG_HOME/git/config when it exists (Omarchy's skel ships one via
+# omarchy-settings) and only falls back to ~/.gitconfig otherwise, so a
+# correct install may never create ~/.gitconfig at all. On failure, prints
+# which files existed and what they contained, and returns 1.
+assert::git_identity() {
+  local home=$1 want_name=$2 want_email=$3
+  local -a candidates=("$home/.config/git/config" "$home/.gitconfig")
+  local f got_name got_email detail=""
+  for f in "${candidates[@]}"; do
+    if [[ -f $f ]]; then
+      got_name=$(git config --file "$f" user.name 2>/dev/null || true)
+      got_email=$(git config --file "$f" user.email 2>/dev/null || true)
+      if [[ $got_name == "$want_name" && $got_email == "$want_email" ]]; then
+        return 0
+      fi
+      detail+="present: $f (name='${got_name:-<unset>}' email='${got_email:-<unset>}'); "
+    else
+      detail+="missing: $f; "
+    fi
+  done
+  echo "assert::git_identity: no identity file under $home carries name='$want_name' email='$want_email' -- $detail" >&2
+  return 1
+}

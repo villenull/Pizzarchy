@@ -762,7 +762,7 @@ deck_form_s0_wait_key() {
 # pattern: never a shell). Never returns on a real machine; under the suite's
 # stubs it returns so the caller can be asserted.
 deck_form_s0_cancel_menu() {
-  local choice action
+  local choice action systemctl_bin=${DECK_SYSTEMCTL_BIN:-systemctl}
   while true; do
     clear_logo
     echo
@@ -771,8 +771,8 @@ deck_form_s0_cancel_menu() {
     choice=$(deck_form_disk_dead_end_items | gum choose --header "What next?") || choice=""
     action=$(deck_form_disk_dead_end_action_for "$choice")
     case $action in
-      reboot)   systemctl reboot ;;
-      poweroff) systemctl poweroff ;;
+      reboot)   "$systemctl_bin" reboot ;;
+      poweroff) "$systemctl_bin" poweroff ;;
       *)        : ;;
     esac
   done
@@ -3227,6 +3227,7 @@ deck_form_steam_may_drop_gaming() {
 # failed aborts loudly with the early failure menu, same as S5.
 deck_form_steam_progress_screen() {
   local status="" line="" early="" err action choice
+  local systemctl_bin=${DECK_SYSTEMCTL_BIN:-systemctl}
   local last_have="" last_t="" have_kb total_kb parsed now rate="" eta="" eta_text=""
   local pct="" bar text
   while true; do
@@ -3262,8 +3263,8 @@ deck_form_steam_progress_screen() {
             fi
             say --foreground 3 "The install has already finished that part, so Steam can no longer be un-asked here."
             continue ;;
-          reboot) systemctl reboot ;;
-          poweroff) systemctl poweroff ;;
+          reboot) "$systemctl_bin" reboot ;;
+          poweroff) "$systemctl_bin" poweroff ;;
           *) continue ;;
         esac
         continue ;;
@@ -3306,6 +3307,10 @@ deck_form_steam_progress_screen() {
       say --foreground 8 "Early install: $early"
     fi
     echo
+    # Bounded by the stage, not by this file: every iteration re-reads
+    # steam/status (done/skipped/failed all return above) and the early
+    # state (failed aborts above), so the loop ends when the download or
+    # the install does. The sleep honours DECK_STEAM_POLL_SECS_OVERRIDE so
     sleep "${DECK_STEAM_POLL_SECS_OVERRIDE:-$DECK_STEAM_POLL_SECS}"
   done
 }
@@ -3818,7 +3823,7 @@ deck_form_disk_dead_end_action_for() {
 # shell; if systemctl itself fails, the loop simply redraws rather than
 # guessing at anything else to do.
 deck_form_disk_dead_end() {
-  local choice action
+  local choice action systemctl_bin=${DECK_SYSTEMCTL_BIN:-systemctl}
   while true; do
     clear_logo
     echo
@@ -3828,8 +3833,8 @@ deck_form_disk_dead_end() {
     choice=$(deck_form_disk_dead_end_items | gum choose --header "What next?") || choice=""
     action=$(deck_form_disk_dead_end_action_for "$choice")
     case $action in
-      reboot)   systemctl reboot ;;
-      poweroff) systemctl poweroff ;;
+      reboot)   "$systemctl_bin" reboot ;;
+      poweroff) "$systemctl_bin" poweroff ;;
       *)        : ;;
     esac
   done
@@ -4134,7 +4139,7 @@ deck_form_summary_rows() {
 # (Reboot / Power off, never a shell -- the existing dead-end pattern)
 # instead of Install: there is nothing to wait for and no LATE to run.
 deck_form_early_failed_menu() {
-  local choice action err
+  local choice action err systemctl_bin=${DECK_SYSTEMCTL_BIN:-systemctl}
   err=$(deck_form_early_error)
   while true; do
     clear_logo
@@ -4146,8 +4151,8 @@ deck_form_early_failed_menu() {
     choice=$(deck_form_disk_dead_end_items | gum choose --header "What next?") || choice=""
     action=$(deck_form_disk_dead_end_action_for "$choice")
     case $action in
-      reboot)   systemctl reboot ;;
-      poweroff) systemctl poweroff ;;
+      reboot)   "$systemctl_bin" reboot ;;
+      poweroff) "$systemctl_bin" poweroff ;;
       *)        : ;;
     esac
   done

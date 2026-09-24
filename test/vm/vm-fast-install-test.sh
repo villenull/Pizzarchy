@@ -544,18 +544,20 @@ if (( timing_needed )); then
         (( marker_found == 1 )) || { log "FAIL: preinstalls=no but no ~/.local/state/omarchy/preinstalls-removed marker in any installed home"; status=1; }
       fi
       # Identity (used for git): cidata's user_full_name.txt /
-      # user_email_address.txt must reach the installed user's ~/.gitconfig
+      # user_email_address.txt must reach the installed user's git identity
       # via the late stage (install/user/git.sh runs `git config --global`
-      # as the installed user, so HOME there is @home/$USERNAME).
-      gitconfig="$mount_point/@home/$USERNAME/.gitconfig"
-      if [[ ! -f $gitconfig ]]; then
-        log "FAIL: $USERNAME has no ~/.gitconfig on the target (expected name/email from cidata)"
-        status=1
+      # as the installed user, so HOME there is @home/$USERNAME). Either
+      # ~/.config/git/config or ~/.gitconfig counts: `git config --global`
+      # writes the XDG file when it exists (Omarchy's skel ships one via
+      # omarchy-settings), so a correct install may never create
+      # ~/.gitconfig at all.
+      git_home="$mount_point/@home/$USERNAME"
+      git_detail=""
+      if git_detail=$(assert::git_identity "$git_home" "$FULL_NAME" "$EMAIL" 2>&1); then
+        log "git identity carries name='$FULL_NAME' email='$EMAIL'"
       else
-        LC_ALL=C command grep -aqF "name = $FULL_NAME" "$gitconfig" ||
-          { log "FAIL: ~/.gitconfig lacks 'name = $FULL_NAME'"; status=1; }
-        LC_ALL=C command grep -aqF "email = $EMAIL" "$gitconfig" ||
-          { log "FAIL: ~/.gitconfig lacks 'email = $EMAIL'"; status=1; }
+        log "FAIL: $USERNAME has no git identity for name/email from cidata: $git_detail"
+        status=1
       fi
       log "variant assertions done (preinstalls=$PREINSTALLS gaming=$GAMING)"
     else
