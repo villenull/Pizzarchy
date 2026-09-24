@@ -351,7 +351,7 @@ index 931beda..3d3d1bb 100755
  # The configurator's setup form comes from the runtime this ISO bundles, so the
  # installer and the first-boot setup that finishes a deferred install can never
  # disagree. A runtime predating the split ships no such file, which would leave
-@@ -195,12 +519,46 @@ if [[ ! -f $setup_form ]]; then
+@@ -195,12 +519,52 @@ if [[ ! -f $setup_form ]]; then
  fi
  cp "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"
  
@@ -395,6 +395,12 @@ index 931beda..3d3d1bb 100755
 +    # entries here may be repo-qualified (jupiter-staging/gamescope), and that
 +    # aborts the single-repo offline resolve both this build and pacstrap do.
 +    grep -hv '^#\|^$' "$deck_list_dir/deck-mirror.packages"
++    # FAST-INSTALL.md C2: the Gaming-only set is installed OFFLINE by the
++    # early stage, so every entry must be in the mirror (QEMU: "target not
++    # found: lib32-vulkan-radeon"). Names deck-mirror.packages already carries
++    # repo-qualified (jupiter-staging/gamescope) are skipped, so a bare entry
++    # never pulls Arch's build of the same package in beside Valve's.
++    grep -hv '^#\|^$' "$deck_list_dir/deck-gaming.packages" | grep -Fxv -f <(grep -hv '^#\|^$' "$deck_list_dir/deck-mirror.packages" | sed 's|.*/||')
      grep -hv '^#\|^$' /builder/archinstall.packages
      # The root image is pacstrapped from the pruned mirror, so its packages
      # must be in the keep-set even when nothing in the lists depends on them.
