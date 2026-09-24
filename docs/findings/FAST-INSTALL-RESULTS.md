@@ -9,6 +9,53 @@ measured 82 MB/s. Not exercised: the physical controller, Wi-Fi radio, panel, ga
 rendering, audio, and the real form (cidata answers the form; `form-delay-seconds` simulates
 how long a human takes). A physical install wipes the Deck and needs the operator.
 
+## v3 — the hardware-blocker fix, odd-sized NVMe regression check (same day, evening)
+
+**Current ISO.** Supersedes v2 as the one to install.
+
+| | |
+|---|---|
+| File | `pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-v3-x86_64.iso` |
+| Size / sha256 | 6,868,631,552 B · `2de394918ff73507a5bf54d210aeae65086bf4beceaaf44c33e37202cc8ca725` |
+| Source | commit `60cf667` (branch `hw-feedback-1`; note: `4315c95` landed mid-build and is NOT in this ISO) |
+| Where | `~/.cache/omarchy-deck/release-2026.09.24-v3/` (ISO + `SHA256SUMS`, verified); build log `~/.cache/omarchy-deck/build-v3b.log` |
+| Build | `iso/bin/build` against scratch `~/.cache/omarchy-deck/iso-build-fast-variants`, all guards green (`6.1`, `6.3`, `6.4a`, `6.4b`, `6.5a`, `6.5b`, `6.6`, `6.7`, `6.8`), exit 0 |
+| Pins | unchanged: `omacom/omarchy@c668141e9c42` · `omacom/omarchy-iso@7cfb7111a068` · `omacom/omarchy-pkgs@5fe236736607` |
+
+What changed since v2 (`docs/findings/HW-INSTALL-FEEDBACK-2026-09-24.md`): the
+blocker — `deck_early_layout` rounds the disk down to a whole MiB before sizing
+root, as upstream's `configurator` does, so archinstall 4.4 no longer fails with
+"Partition is misaligned" on the Deck's not-a-whole-MiB NVMe. Plus the operator's
+screen feedback: welcome cut to two lines with the logo on top, drive-screen
+warning in the question's colour, a wipe confirmation (A wipes, B back to the
+list, pending input drained first), `disk_form` reuses the chosen drive instead
+of a second picker, the failure screen prints the early-log tail, pre-installs /
+Install Steam? default to Yes, B on pre-installs no longer claims "the drive was
+not touched" after the wipe, and B from keyboard layout walks the Deck answers
+back read-only.
+
+QEMU on this ISO (`test/vm/vm-fast-install-test.sh`, `VM_FAST_REBOOT_CHECK=1`,
+form delay 90 s throughout). The NVMe target is deliberately NOT a whole MiB any
+more — the harness adds a 1237-sector tail (`60cf667`), so these runs are the
+regression check for the hardware blocker: every NVMe target below is
+21,475,469,824 bytes (20 GiB + 633,344; mod 1 MiB = 633,344), and none of the
+four install logs nor their serial logs mentions "misalign" once.
+
+| pre-installs / Gaming | target | network | early stage | post-confirm (A) | of which waiting for early | reboot check | result | wall |
+|---|---|---|---|---|---|---|---|---|
+| no / no | NVMe (odd) | none | 28 s | 5 s | 0 s | login after 25 s | PASS | ~6 min |
+| no / yes | NVMe (odd) | user | 92 s | 11 s | 5 s | login after 35 s | PASS | ~4 min |
+| yes / yes | NVMe (odd) | user | 107 s | 26 s | 20 s | login after 35 s | PASS | ~4 min |
+| no / no | microSD | none | 845 s | 788 s | 754 s | login after 60 s | PASS | ~18 min |
+| in-place opt-in on the no/no NVMe disk | — | user | — | action 50 s, exit 0 | — | — | PASS (`test/vm/vm-enable-gaming-test.sh`) | ~3 min |
+
+Reading it: the late work still lands in seconds on NVMe in every variant
+(5–26 s post-confirm). The microSD run's 788 s is QEMU's emulated SD controller,
+not the Deck's card reader — same caveat as v2. The failure screen's early-log
+tail, the wipe confirm, and the drive picker run only in unit tests here (QEMU
+answers the form from cidata); they need the Deck, as does everything behind the
+old blocker (Wi-Fi, Steam download screen, OSK name/email entry, first boot).
+
 ## v2 — the operator's flow, microSD target, name/email (same day, later)
 
 **Current ISO.** Supersedes the "Final ISO" below as the one to install.
