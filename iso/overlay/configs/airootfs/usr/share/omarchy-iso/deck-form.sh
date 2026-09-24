@@ -4310,6 +4310,23 @@ readonly DECK_SUMMARY_BOOT="Gaming Mode"
 # on S7 is a one-line addition to deck-dashboard.sh's `render_finish`, which
 # already carries a custom line, and it is reported rather than done because
 # this file's owner does not own that file.
+# deck_form_gaming_answer -- the Install Steam? answer for display gates:
+# the DECK_GAMING global first (it mirrors the locked choice file), the
+# persisted file second. Prints yes, no, or unset. Unset (a path that never
+# answered the choice screens) stays its own value: callers treat unknown as
+# the warning side, never as a guessed no.
+deck_form_gaming_answer() {
+  local val=${DECK_GAMING:-}
+  if [[ -z $val ]]; then
+    val=$(deck_form_choice_read gaming)
+  fi
+  if [[ $val != yes && $val != no ]]; then
+    val="unset"
+  fi
+  printf '%s\n' "$val"
+  return 0
+}
+
 readonly -a DECK_S5_REBOOT_LINES=(
   "When the install finishes the Deck reboots on its own."
   "The first boot then takes about a minute while Steam finishes installing itself."
@@ -4319,7 +4336,14 @@ readonly -a DECK_S5_REBOOT_LINES=(
 
 # Split out for the same reason as deck_form_s0_text: asserted on the
 # function's own output, not on a screenshot.
+# HW 2026-09-24 item 8: with Install Steam?=No this prints ONLY the reboot
+# line -- nothing else on that path mentions Steam, a black screen, or
+# Gaming Mode. Yes (or unknown) keeps the full block unchanged.
 deck_form_reboot_notice_text() {
+  if [[ $(deck_form_gaming_answer) == no ]]; then
+    printf '%s\n' "${DECK_S5_REBOOT_LINES[0]}"
+    return 0
+  fi
   local line
   for line in "${DECK_S5_REBOOT_LINES[@]}"; do printf '%s\n' "$line"; done
 }
@@ -4484,7 +4508,10 @@ deck_final_summary() {
     # before the install. An unset verdict means S1 never ran (this screen is
     # reachable on its own from `user_step`'s recap loop), and the safe
     # reading of "we do not know" is the warning, not the reassurance.
-    if [[ -z ${DECK_WIFI_SSID:-} ]]; then
+    # HW 2026-09-24 item 7: with Install Steam?=No the whole note is
+    # skipped -- nothing on that path needs the network. Yes (or unknown)
+    # keeps it exactly as is.
+    if [[ -z ${DECK_WIFI_SSID:-} && $(deck_form_gaming_answer) != no ]]; then
       local net_verdict=${DECK_NET_VERDICT:-$DECK_NET_VERDICT_DEFAULT}
       say --foreground 3 "$(deck_form_offline_headline "$net_verdict")"
       [[ $net_verdict == online ]] || deck_form_wifi_offline_notice

@@ -1,11 +1,25 @@
 diff --git a/configs/airootfs/root/.automated_script.sh b/configs/airootfs/root/.automated_script.sh
-index 22b68fe..eb39faf 100644
+index 16904f8..b3a0151 100644
 --- a/configs/airootfs/root/.automated_script.sh
 +++ b/configs/airootfs/root/.automated_script.sh
-@@ -123,6 +123,55 @@ else
+@@ -97,10 +97,73 @@
+ if /usr/local/bin/omarchy-cidata-load; then
+   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
+   export OMARCHY_UI_INTERACTIVE=no
++  # FAST-INSTALL C5/C6 (Deck slice): record that the cidata branch was taken.
++  # The block below must run ONLY here. It used to gate on
++  # /root/user_configuration.json existing, but the interactive
++  # configurator's own write_user_files writes that file too -- so on a real
++  # interactive install the cidata-only block ran, found no /root/preinstalls,
++  # and aborted the install (2026-09-24 hardware feedback). A variable set in
++  # the branch itself cannot be faked by the other path writing the same file.
++  deck_cidata_taken=yes
+ else
++  deck_cidata_taken=no
    ./configurator
  fi
  
++# BEGIN deck-cidata-early-block
 +# FAST-INSTALL C5/C6 (Deck slice): after a cidata load, install the
 +# unattended choice files and start the early stage, then simulate the form.
 +# Filenames match the harness contract and the form's live files exactly:
@@ -15,7 +29,10 @@ index 22b68fe..eb39faf 100644
 +# from boot); gaming=no stays fully offline. The late stage runs through the
 +# dashboard below, exactly as the interactive path. Missing/invalid choice
 +# files abort loudly -- installing an unanswered variant is never a default.
-+if [[ ${OMARCHY_DECK_CIDATA_EARLY:-} != 0 ]] && [[ -f /root/user_configuration.json ]]; then
++# Gated on deck_cidata_taken (set in the branch above), NOT on the JSON's
++# presence: the interactive path writes user_configuration.json itself and
++# owns choices/ already, so this block must do nothing there.
++if [[ ${OMARCHY_DECK_CIDATA_EARLY:-} != 0 ]] && [[ ${deck_cidata_taken:-no} == yes ]] && [[ -f /root/user_configuration.json ]]; then
 +  deck_early_disk=$(jq -r '.disk_config.device_modifications[0].device // empty' /root/user_configuration.json 2>/dev/null || true)
 +  if [[ -n $deck_early_disk && -x /usr/local/bin/omarchy-deck-early ]]; then
 +    mkdir -p /run/omarchy-deck/choices
@@ -54,6 +71,7 @@ index 22b68fe..eb39faf 100644
 +    fi
 +  fi
 +fi
++# END deck-cidata-early-block
 +
  # Deferred-provisioning installs skip the celebration/reboot prompt and reboot on
  # their own — the owner completes setup at first boot. Signalled by the config's

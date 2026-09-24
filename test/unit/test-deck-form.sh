@@ -4949,6 +4949,92 @@ for log in "$work/s5-say.log" "$work/s5-say2.log" "$work/s5-say3.log"; do
 done
 pass "L2: the pre-reboot warning is on the last screen deck-form.sh owns, on every path through it"
 
+echo "--- HW 2026-09-24 item 7: S5's network note only matters for Steam=Yes -"
+# With Install Steam? = No nothing on that path needs the network, so the
+# "No network was found" note must never show. With Yes it stays exactly as
+# is. Unknown (unset, no locked answer) keeps the note: the warning, not the
+# reassurance, is the safe reading of "we do not know".
+
+s5_steam_case() {
+  local gaming=$1 log=$2
+  : >"$log"
+  unset DECK_WIFI_SSID 2>/dev/null || true
+  unset DECK_NET_VERDICT 2>/dev/null || true
+  if [[ $gaming == unset ]]; then
+    unset DECK_GAMING 2>/dev/null || true
+    export DECK_CHOICES_DIR="$work/s5-choices-empty"
+    rm -rf "$DECK_CHOICES_DIR"
+  else
+    # shellcheck disable=SC2034
+    DECK_GAMING=$gaming
+    unset DECK_CHOICES_DIR 2>/dev/null || true
+  fi
+  printf 'done\n' >"$work/s5-early/status-word"
+  export FAKE_GUM_CONFIRM_RC=0
+  export DECK_TEST_SAY_LOG="$log"
+  export DECK_EARLY_BIN="$work/s5-early/early" DECK_EARLY_STATUS_FILE="$work/s5-early/status-word"
+  export DECK_EARLY_ERROR_FILE="$work/s5-early/early-error"
+  export DECK_STEAM_STATUS_FILE="$work/s5-early/steam-status"
+  export DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk"
+  export PATH_SAVEDX="$PATH"
+  export PATH="$work/bin-fakegum:$PATH"
+  deck_final_summary >/dev/null
+  export -n FAKE_GUM_CONFIRM_RC DECK_TEST_SAY_LOG DECK_EARLY_BIN DECK_EARLY_STATUS_FILE DECK_EARLY_ERROR_FILE DECK_STEAM_STATUS_FILE DECK_LSBLK_BIN
+  PATH="$PATH_SAVEDX"; export PATH; unset PATH_SAVEDX
+  unset DECK_GAMING 2>/dev/null || true
+  unset DECK_CHOICES_DIR 2>/dev/null || true
+}
+
+s5_steam_case no "$work/s5-steam-no.log"
+LC_ALL=C grep -qF "No network was found" "$work/s5-steam-no.log" &&
+  fail "S5 with Install Steam?=No must NEVER show the 'No network was found' note -- nothing on that path needs the network" "$(cat "$work/s5-steam-no.log")"
+LC_ALL=C grep -qF "with no network it is NOT installed" "$work/s5-steam-no.log" &&
+  fail "S5 with Install Steam?=No must not show the offline consequence either" "$(cat "$work/s5-steam-no.log")"
+pass "S5 with Install Steam?=No never shows the network note"
+
+s5_steam_case yes "$work/s5-steam-yes.log"
+LC_ALL=C grep -qF "No network was found" "$work/s5-steam-yes.log" ||
+  fail "S5 with Install Steam?=Yes must keep the network note exactly as is" "$(cat "$work/s5-steam-yes.log")"
+pass "S5 with Install Steam?=Yes keeps the network note"
+
+s5_steam_case unset "$work/s5-steam-unset.log"
+LC_ALL=C grep -qF "No network was found" "$work/s5-steam-unset.log" ||
+  fail "S5 with no Steam answer must keep the note -- unknown reads as the warning, not the reassurance"
+pass "S5 with no Steam answer keeps the note (safe default)"
+
+echo "--- HW 2026-09-24 item 8: pre-reboot notice shrinks for Steam=No -------"
+# With Steam=No only "When the install finishes the Deck reboots on its
+# own." With Steam=Yes (or unknown) the full block is unchanged.
+
+# shellcheck disable=SC2034
+DECK_GAMING=no
+short=$(deck_form_reboot_notice_text)
+unset DECK_GAMING 2>/dev/null || true
+[[ $short == "When the install finishes the Deck reboots on its own." ]] ||
+  fail "Steam=No reboot notice must be ONLY the reboot line" "$short"
+pass "Steam=No reboot notice is only the reboot line"
+
+# shellcheck disable=SC2034
+DECK_GAMING=yes
+full=$(deck_form_reboot_notice_text)
+unset DECK_GAMING 2>/dev/null || true
+[[ $full == *"Don't turn me off"* && $full == *"Gaming Mode"* ]] ||
+  fail "Steam=Yes reboot notice must keep the full block" "$full"
+[[ $(printf '%s\n' "$full" | wc -l) -eq ${#DECK_S5_REBOOT_LINES[@]} ]] ||
+  fail "Steam=Yes reboot notice must carry every DECK_S5_REBOOT_LINES line"
+pass "Steam=Yes reboot notice keeps the full block"
+
+unset_text=$(deck_form_reboot_notice_text)
+[[ $unset_text == *"Don't turn me off"* ]] ||
+  fail "unset Steam answer must keep the full reboot notice -- unknown reads as the warning"
+pass "unset Steam answer keeps the full reboot notice (safe default)"
+
+LC_ALL=C grep -qF "When the install finishes the Deck reboots on its own." "$work/s5-steam-no.log" ||
+  fail "S5 with Install Steam?=No must still carry the reboot line" "$(cat "$work/s5-steam-no.log")"
+LC_ALL=C grep -qF "Don't turn me off" "$work/s5-steam-no.log" &&
+  fail "S5 with Install Steam?=No must drop the Steam/black-screen/Gaming Mode lines" "$(cat "$work/s5-steam-no.log")"
+pass "S5 renders the short reboot notice for Steam=No and the full one for Steam=Yes"
+
 # ===========================================================================
 # S6: the kernel -- linux-omarchy ONLY, and the ordering that makes it work
 # ===========================================================================
