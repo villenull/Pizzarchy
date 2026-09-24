@@ -663,6 +663,22 @@ if LC_ALL=C grep -qF "wiped" <<<"$s0"; then
 fi
 pass "deck_form_s0_text is the install line plus the A/B prompt (2026-09-24 rewrite)"
 
+# HW 2026-09-24 item 14: both lines start at the logo's left edge, like every
+# other screen. deck_form_s0_text prefixes ${PADDING_LEFT_SPACES:-} (the same
+# width say/gum pads with, set by clear_logo's measure_terminal) instead of
+# printing bare. Unset means no padding (the exact-output assertion above);
+# set means every line starts with it.
+PADDING_LEFT_SPACES="   "
+s0_padded=$(deck_form_s0_text)
+unset PADDING_LEFT_SPACES
+while IFS= read -r s0_pline; do
+  [[ $s0_pline == "   "* ]] ||
+    fail "S0 lines must start at the logo's left edge (PADDING_LEFT_SPACES prefix), like every other screen" "got: $s0_pline"
+done <<<"$s0_padded"
+[[ $(printf '%s\n' "$s0_padded" | LC_ALL=C command grep -c .) -eq 2 ]] ||
+  fail "padded S0 must still be exactly 2 lines" "$s0_padded"
+pass "deck_form_s0_text pads both lines to the logo's left edge when PADDING_LEFT_SPACES is set (item 14)"
+
 # S0 draws the big Omarchy logo the same way every other screen does
 # (clear_logo then echo) before the text -- and every re-draw of S0 goes
 # through the same helper, so the two can never drift.
@@ -1023,7 +1039,7 @@ LC_ALL=C grep -qF "Are you sure? This will wipe" "$work/confirm-a-say.log" ||
   fail "the confirm must ask 'Are you sure? This will wipe ...'" "$(cat "$work/confirm-a-say.log")"
 LC_ALL=C grep -qF "Internal SSD (NVMe)" "$work/confirm-a-say.log" ||
   fail "the confirm must name the picked drive with its disk label" "$(cat "$work/confirm-a-say.log")"
-LC_ALL=C grep -qF "Press A to wipe and install, B to go back" "$work/confirm-a-say.log" ||
+LC_ALL=C grep -qF "Press A to wipe and install NOW, B to go back" "$work/confirm-a-say.log" ||
   fail "the confirm must name BOTH keys with their consequences" "$(cat "$work/confirm-a-say.log")"
 pass "A on the wipe confirm answers proceed with the drive's label"
 
@@ -1678,15 +1694,17 @@ pass "greeter pins the console font, so S0 and S1 are drawn at the bigger size a
 
 # --- the rest of upstream's loop, kept rather than quietly dropped ---------
 #
-# ⚠️ ISOLATED FROM THE LOCKED CHOICES. Earlier greeter runs in this suite
-# set DECK_PREINSTALLS/DECK_GAMING globally, and B (reask) with answers
-# present now walks the read-only screens (gum) instead of re-asking the
-# picker. These tests prove the OLD branch -- no answers, straight re-ask
-# (the dry-run shape) -- so they clear both sources of answers first.
-# Without that, the re-ask below would reach for a real gum and hang.
+# ⚠️ ISOLATED FROM ANY CHOICE STATE. 16a removed the read-only walk: B on
+# the keyboard screen is a bare picker re-ask whether or not locked answers
+# exist, so these tests only clear the globals to prove the dry-run shape
+# (greeter never ran) behaves identically to the locked shape -- one code
+# path, not two.
 
 printf 'us:10\nlatam:0\n' >"$work/kb.queue"
 : >"$work/lk.log"
+: >"$work/kb-clear.log"
+kb_clear_saved=$(declare -f clear_logo)
+clear_logo() { printf 'CLEAR\n' >>"$work/kb-clear.log"; }
 keyboard=
 unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
 mkdir -p "$work/kb-nochoices"
@@ -1694,11 +1712,19 @@ FAKE_KB_QUEUE="$work/kb.queue" DECK_FORM_TTY_OVERRIDE=/dev/tty1 \
 DECK_CHOICES_DIR="$work/kb-nochoices" \
 FAKE_LOADKEYS_LOG="$work/lk.log" PATH="$KEYS_PATH" keyboard_form true ||
   fail "Esc (OMARCHY_FORM_BACK) must re-ask the picker, then accept the second answer"
+eval "$kb_clear_saved"; unset kb_clear_saved
 [[ $keyboard == latam ]] ||
   fail "the SECOND pick must be the one that survives the re-ask loop" "keyboard='$keyboard'"
 [[ ! -s "$work/kb.queue" ]] ||
   fail "the picker must have been called twice (the queue should be drained)" "$(cat "$work/kb.queue")"
 pass "keyboard_form re-asks on Esc and keeps the answer from the successful pass (no locked answers)"
+
+# 16a: B on the keyboard layout is a no-op with NO visible redraw -- the
+# chrome above drew exactly once across Esc + accept (the picker itself
+# repaints only its own widget; the full-screen clear is what flashed).
+[[ $(LC_ALL=C command grep -c CLEAR "$work/kb-clear.log") -eq 1 ]] ||
+  fail "keyboard B must not redraw the chrome -- one clear for Esc-then-accept, not two" "$(cat "$work/kb-clear.log")"
+pass "keyboard B re-invokes the picker with no chrome redraw (true no-op)"
 
 printf 'us:11\n' >"$work/kb.queue"
 : >"$work/lk.log"
@@ -2911,6 +2937,10 @@ printf '%s' "${DECK_WIFI_SSID:-}" >"${DECK_TEST_SSID_OUT:-/dev/null}"
 # back to "offline". Dumping it from the real process is what proves it
 # survives; asserting it inside deck-form.sh's own call would not.
 printf '%s' "${DECK_NET_VERDICT:-}" >"${DECK_TEST_VERDICT_OUT:-/dev/null}"
+# 🔴 AND THE GAMING-BACK SIGNAL (16a): B on the Wi-Fi list in the gate must
+# reach the group as DECK_WIFI_WANT_GAMING_BACK=yes with a nonzero return.
+# Same subshell-crossing reason: it dies with this process unless dumped.
+printf '%s' "${DECK_WIFI_WANT_GAMING_BACK:-}" >"${DECK_TEST_BACK_OUT:-/dev/null}"
 exit $rc
 BOOT
 
@@ -3332,6 +3362,38 @@ LC_ALL=C grep -qF "CHOOSE-QUEUE-EXHAUSTED" "$work/s1-cancel/gum.log" &&
 [[ $(LC_ALL=C command grep -c 'header Networks' "$work/s1-cancel/gum.log") -eq 4 ]] ||
   fail "two cancels and a rescan must each redraw the LIST (4 list draws in total)" "$(cat "$work/s1-cancel/gum.log")"
 pass "B/Esc on the network list REDRAWS (never acts, and never falls into Stop), and Rescan redraws too"
+
+# --- 16a: B on the Wi-Fi list IN THE GATE goes back to Install Steam? ---
+# Same screen, same B, but DECK_WIFI_GAMING_GATE=1 (every production visit
+# runs through the gate wrapper): one list draw, then the gaming-back
+# signal with a nonzero return -- the Back row's effect, not a redraw.
+rm -rf "$work/s1-gateback"; mkdir -p "$work/s1-gateback"
+printf 'Y\n' >"$work/s1-lizard"
+printf '%s\n' "<CANCEL>" >"$work/s1-gateback/choose.q"
+: >"$work/s1-gateback/iwctl.log"; : >"$work/s1-gateback/gum.log"
+gateback_rc=0
+env "${s1_env[@]}" \
+    DECK_WIFI_GAMING_GATE=1 \
+    DECK_FORM_PATH="$DECK_FORM_SH" \
+    DECK_NET_STATE_DIR="$work/s1-gateback" \
+    DECK_TEST_SAY_LOG="$work/s1-gateback/say.log" \
+    DECK_TEST_BACK_OUT="$work/s1-gateback/back" \
+    IWCTL_LOG="$work/s1-gateback/iwctl.log" \
+    FAKE_GUM_LOG="$work/s1-gateback/gum.log" \
+    FAKE_GUM_CHOOSE_QUEUE="$work/s1-gateback/choose.q" \
+    DECK_EARLY_BIN="$work/bin-net/omarchy-deck-early" \
+    DECK_EARLY_LOG="$work/s1-gateback/early.log" \
+    timeout 40 bash "$work/s1-boot.sh" >/dev/null 2>&1 || gateback_rc=$?
+[[ $gateback_rc -ne 0 ]] || fail "gate B must return nonzero (the group re-asks Install Steam?)" "rc=$gateback_rc"
+[[ $(cat "$work/s1-gateback/back") == yes ]] ||
+  fail "gate B must raise DECK_WIFI_WANT_GAMING_BACK=yes -- same effect as the Back row" "got: $(cat "$work/s1-gateback/back")"
+[[ $(LC_ALL=C command grep -c 'header Networks' "$work/s1-gateback/gum.log") -eq 1 ]] ||
+  fail "gate B must leave the list after ONE draw -- no redraw loop" "$(cat "$work/s1-gateback/gum.log")"
+LC_ALL=C grep -qF "CHOOSE-QUEUE-EXHAUSTED" "$work/s1-gateback/gum.log" &&
+  fail "the gate-B run over-ran its scripted answers" "$(cat "$work/s1-gateback/gum.log")"
+[[ ! -e "$work/s1-gateback/$DECK_NET_OUTCOME_FILE" ]] ||
+  fail "going back must record no Wi-Fi outcome -- the question is unanswered, not declined" "$(cat "$work/s1-gateback/$DECK_NET_OUTCOME_FILE")"
+pass "16a: B on the Wi-Fi list in the gate backs to Install Steam? (signal + nonzero, one draw, no record)"
 
 # --- §5 row 4: wrong passphrase, bounded at 3 tries ---
 printf 'wrong1\nwrong2\nwrong3\nwrong4\n' >"$work/pass.q"
@@ -4350,7 +4412,8 @@ deck_form_choice_write gaming maybe >/dev/null 2>&1 && fail "non-yes/no value mu
 pass "choice files: atomic yes/no + newline + 0644, last-write-wins, garbage refused, unset reads unset"
 export -n DECK_CHOICES_DIR
 
-# yesno screen mapping: Yes/No rows answer, B/Esc (empty) goes back.
+# yesno screen mapping: Yes/No rows answer; B/Esc goes back on the Steam
+# screen (back-mode "back") and is a no-op on pre-installs ("stay").
 printf 'Yes\n' >"$work/yn-yes.q"
 yn_ans=""
 FAKE_GUM_CHOOSE_QUEUE="$work/yn-yes.q" FAKE_GUM_LOG="$work/yn.log" PATH="$work/bin-fakegum:$PATH" deck_form_preinstalls_screen yn_ans
@@ -4373,15 +4436,25 @@ if LC_ALL=C grep -qF -- "--selected No" "$work/yn-default.log"; then
   fail "neither choice screen may default to No any more" "$(cat "$work/yn-default.log")"
 fi
 pass "pre-installs and Install Steam? both default to Yes"
+# 16a B map, split by screen: B on Install Steam? goes back (default
+# back-mode); B on pre-installs is a true no-op (stay mode: the B is
+# consumed inside the screen and the NEXT answer is what counts).
 printf '<CANCEL>\n' >"$work/yn-back.q"
-FAKE_GUM_CHOOSE_QUEUE="$work/yn-back.q" FAKE_GUM_LOG="$work/yn.log" PATH="$work/bin-fakegum:$PATH" deck_form_preinstalls_screen yn_ans
-[[ $yn_ans == back ]] || fail "B/Esc on a choice screen must go back, never guess" "got: $yn_ans"
+FAKE_GUM_CHOOSE_QUEUE="$work/yn-back.q" FAKE_GUM_LOG="$work/yn.log" PATH="$work/bin-fakegum:$PATH" deck_form_gaming_screen yn_ans
+[[ $yn_ans == back ]] || fail "B/Esc on Install Steam? must go back (to pre-installs), never guess" "got: $yn_ans"
+printf '<CANCEL>\nNo\n' >"$work/yn-stay.q"
+FAKE_GUM_CHOOSE_QUEUE="$work/yn-stay.q" FAKE_GUM_LOG="$work/yn.log" PATH="$work/bin-fakegum:$PATH" deck_form_preinstalls_screen yn_ans
+[[ $yn_ans == no ]] || fail "B on pre-installs must be a no-op -- the answer after it still counts" "got: $yn_ans"
 # The stdout-capture trap, pinned: screen chrome (blank echoes) must never
 # leak into the answer channel. Would have caught the $'\n\nno' bug.
+# (The queue is refilled: pop_queue CONSUMES lines, so yn-yes.q is dry after
+# the first Yes above -- and a dry queue in stay mode re-asks forever, which
+# is correct on a real screen and a hang here.)
+printf 'Yes\n' >"$work/yn-yes.q"
 yn_cap=$(FAKE_GUM_CHOOSE_QUEUE="$work/yn-yes.q" FAKE_GUM_LOG="$work/yn.log" PATH="$work/bin-fakegum:$PATH" deck_form_preinstalls_screen yn_cap2 2>/dev/null)
 [[ -z $yn_cap ]] || fail "choice screens must print NOTHING on stdout -- the answer travels via the result var" "got: $yn_cap"
 LC_ALL=C grep -qF "Can be installed later from the Omarchy desktop" "$work/yn.log" 2>/dev/null || true
-pass "choice screens: Yes/No answer, B goes back, No promises desktop-later"
+pass "choice screens: Yes/No answer, Steam B goes back, pre-installs B is a no-op, No promises desktop-later"
 
 # Both No lines carry the C6 desktop-later promise; gaming Yes says
 # Requires Internet. Asserted on what the screens SAY (say-stub log), not
@@ -4407,197 +4480,179 @@ LC_ALL=C grep -qF "Install Steam?" "$work/game-yes-say.log" ||
 eval "$say_saved"; unset say_saved
 pass "both No lines promise desktop-later; Steam Yes says Requires Internet under the 'Install Steam?' title"
 
-# Four combos: run_choice_screens with queued answers, assert files + lock.
-mk_choice_q() { printf '%s\n%s\n' "$1" "$2" >"$work/choice-$1-$2.q"; }
+# The variant GROUP (16a/17/18): choice screens with B-back, Wi-Fi stubbed,
+# ONE commit on exit. The stub stands in for deck_form_wifi_screen_gaming:
+# it logs the call and answers from WIFI_GROUP_QUEUE (0 = connected,
+# BACK = B back to the Steam question).
+group_wifi_saved=$(declare -f deck_form_wifi_screen_gaming)
+group_wifi_calls=""
+deck_form_wifi_screen_gaming() {
+  printf 'WIFI_CALL\n' >>"$work/group-wifi-calls.log"
+  local ans
+  ans=$(head -1 "$WIFI_GROUP_QUEUE" 2>/dev/null)
+  tail -n +2 "$WIFI_GROUP_QUEUE" >"$WIFI_GROUP_QUEUE.tmp" 2>/dev/null && mv "$WIFI_GROUP_QUEUE.tmp" "$WIFI_GROUP_QUEUE"
+  if [[ $ans == BACK ]]; then
+    DECK_WIFI_WANT_GAMING_BACK=yes
+    return 1
+  fi
+  return 0
+}
+group_run() {  # <name> <choice-queue...> -- queues passed as lines
+  local name=$1; shift
+  rm -rf "$work/group-$name"
+  : >"$work/group-wifi-calls.log"
+  printf '%s\n' "$@" >"$work/group-$name.q"
+  printf '%s\n' "${WIFI_GROUP_ANSWERS:-0}" >"$work/group-$name.wq"
+  unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
+  set +e
+  DECK_CHOICES_DIR="$work/group-$name" \
+  FAKE_GUM_CHOOSE_QUEUE="$work/group-$name.q" \
+  FAKE_GUM_LOG="$work/group-$name-gum.log" \
+  WIFI_GROUP_QUEUE="$work/group-$name.wq" \
+  PATH="$work/bin-fakegum:$PATH" \
+    deck_form_run_variant_group >/dev/null 2>&1
+  GROUP_RC=$?
+  set -e
+}
+
+# Four combos: Steam=No commits without Wi-Fi; Steam=Yes commits after it.
+# The Wi-Fi stub must NEVER run for a No finish, and MUST run for Yes.
 for combo in "Yes Yes" "Yes No" "No Yes" "No No"; do
   # shellcheck disable=SC2086
   set -- $combo
-  rm -rf "$work/choice-dir"
-  mk_choice_q "$1" "$2"
-  unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
-  DECK_CHOICES_DIR="$work/choice-dir" \
-  FAKE_GUM_CHOOSE_QUEUE="$work/choice-$1-$2.q" \
-  FAKE_GUM_LOG="$work/choice-$1-$2.log" \
-  PATH="$work/bin-fakegum:$PATH" \
-    deck_form_run_choice_screens ||
-    fail "combo $combo must complete"
   exp_pre=no; exp_game=no
   [[ $1 == Yes ]] && exp_pre=yes
   [[ $2 == Yes ]] && exp_game=yes
-  [[ $(cat "$work/choice-dir/preinstalls") == "$exp_pre" ]] || fail "combo $combo: preinstalls must be $exp_pre"
-  [[ $(cat "$work/choice-dir/gaming") == "$exp_game" ]] || fail "combo $combo: gaming must be $exp_game"
-  [[ -f "$work/choice-dir/locked" ]] || fail "combo $combo: locked marker must exist last"
+  WIFI_GROUP_ANSWERS=0 group_run "combo-$1-$2" "$1" "$2"
+  [[ $GROUP_RC -eq 0 ]] || fail "combo $combo must complete" "rc=$GROUP_RC"
+  [[ $(cat "$work/group-combo-$1-$2/preinstalls") == "$exp_pre" ]] || fail "combo $combo: preinstalls must be $exp_pre"
+  [[ $(cat "$work/group-combo-$1-$2/gaming") == "$exp_game" ]] || fail "combo $combo: gaming must be $exp_game"
+  [[ -f "$work/group-combo-$1-$2/locked" ]] || fail "combo $combo: locked marker must exist last"
   [[ ${DECK_PREINSTALLS:-} == "$exp_pre" && ${DECK_GAMING:-} == "$exp_game" ]] || fail "combo $combo: globals must mirror the files"
+  if [[ $exp_game == no ]]; then
+    [[ ! -s "$work/group-wifi-calls.log" ]] ||
+      fail "combo $combo (Steam=No) must NEVER run Wi-Fi -- desktop-only needs no network"
+  else
+    [[ $(LC_ALL=C command grep -c WIFI_CALL "$work/group-wifi-calls.log") -eq 1 ]] ||
+      fail "combo $combo (Steam=Yes) MUST run Wi-Fi exactly once" "$(cat "$work/group-wifi-calls.log")"
+  fi
 done
-pass "four combos lock the right yes/no files + locked marker, globals mirror files"
+pass "variant group: four combos commit the right files + lock; Wi-Fi runs iff Steam=Yes"
 
-# B-back: gaming back re-asks preinstalls; re-answers lock the new values.
-printf 'Yes\n<CANCEL>\nNo\nNo\n' >"$work/choice-back.q"
-rm -rf "$work/choice-backdir"
-unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
-: >"$work/choice-back.log"
-set +e
-DECK_CHOICES_DIR="$work/choice-backdir" \
-FAKE_GUM_CHOOSE_QUEUE="$work/choice-back.q" \
-FAKE_GUM_LOG="$work/choice-back.log" \
-PATH="$work/bin-fakegum:$PATH" \
-  deck_form_run_choice_screens >/dev/null 2>&1
-back_rc=$?
-set -e
-[[ $back_rc -eq 0 ]] || fail "gaming B-back then re-answer must still complete" "rc=$back_rc"
-[[ $(cat "$work/choice-backdir/preinstalls") == no ]] || fail "re-asked preinstalls must hold the NEW answer"
-[[ $(cat "$work/choice-backdir/gaming") == no ]] || fail "gaming must hold the new answer"
-pass "gaming B goes back to preinstalls; re-answers lock the new values"
+# B-back inside the group: gaming B re-asks preinstalls; re-answers commit.
+WIFI_GROUP_ANSWERS=0 group_run back Yes "<CANCEL>" No No
+[[ $GROUP_RC -eq 0 ]] || fail "gaming B-back then re-answer must still complete" "rc=$GROUP_RC"
+[[ $(cat "$work/group-back/preinstalls") == no ]] || fail "re-asked preinstalls must hold the NEW answer"
+[[ $(cat "$work/group-back/gaming") == no ]] || fail "gaming must hold the new answer"
+[[ ! -s "$work/group-wifi-calls.log" ]] ||
+  fail "a No finish must not run Wi-Fi even after a B-back"
+pass "gaming B goes back to preinstalls; re-answers commit the new values"
 
 # B on pre-installs -- the first screen AFTER the wipe started -- is a
-# no-op redraw (2026-09-24 hardware feedback). It must NEVER call the
-# cancel menu: "The drive was not touched." is FALSE once the wipe has
-# begun, and B must never return to the confirm, the drive list, or S0.
-printf '<CANCEL>\nYes\nNo\n' >"$work/choice-pre-back.q"
-rm -rf "$work/choice-predir"
-unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
+# no-op. It must NEVER call the cancel menu: "The drive was not touched."
+# is FALSE once the wipe has begun, and B must never return to the confirm,
+# the drive list, or S0. 16a: not even a full-screen redraw -- the chrome is
+# drawn once and B re-invokes only the picker.
 cancel_saved=$(declare -f deck_form_s0_cancel_menu)
-deck_form_s0_cancel_menu() { printf 'CANCEL_MENU\n' >>"$work/choice-pre-back.log"; return 0; }
-: >"$work/choice-pre-back.log"
-set +e
-DECK_CHOICES_DIR="$work/choice-predir" \
-FAKE_GUM_CHOOSE_QUEUE="$work/choice-pre-back.q" \
-FAKE_GUM_LOG="$work/choice-pre-back.log" \
-PATH="$work/bin-fakegum:$PATH" \
-  deck_form_run_choice_screens >/dev/null 2>&1
-pre_back_rc=$?
-set -e
+deck_form_s0_cancel_menu() { printf 'CANCEL_MENU\n' >>"$work/group-pre-back-cancel.log"; return 0; }
+clear_saved=$(declare -f clear_logo)
+: >"$work/group-pre-back-clear.log"
+clear_logo() { printf 'CLEAR\n' >>"$work/group-pre-back-clear.log"; }
+# Baseline WITHOUT B: one chrome per screen (pre + gaming = 2 clears).
+WIFI_GROUP_ANSWERS=0 group_run pre-back-nob Yes No
+nobl_clears=$(LC_ALL=C command grep -c CLEAR "$work/group-pre-back-clear.log")
+: >"$work/group-pre-back-clear.log"
+WIFI_GROUP_ANSWERS=0 group_run pre-back "<CANCEL>" Yes No
+eval "$clear_saved"; unset clear_saved
 eval "$cancel_saved"; unset cancel_saved
-[[ $pre_back_rc -eq 0 ]] || fail "B on pre-installs then re-answer must still complete (redraw, not cancel)" "rc=$pre_back_rc"
-if LC_ALL=C grep -qF "CANCEL_MENU" "$work/choice-pre-back.log"; then
-  fail "B on pre-installs must NOT call the cancel menu -- the drive WAS touched (the wipe started)" "$(cat "$work/choice-pre-back.log")"
+[[ $GROUP_RC -eq 0 ]] || fail "B on pre-installs then re-answer must still complete" "rc=$GROUP_RC"
+if LC_ALL=C grep -qF "CANCEL_MENU" "$work/group-pre-back-cancel.log" 2>/dev/null; then
+  fail "B on pre-installs must NOT call the cancel menu -- the drive WAS touched (the wipe started)"
 fi
-[[ $(cat "$work/choice-predir/preinstalls") == yes ]] || fail "redrawn pre-installs must hold the NEW answer"
-[[ $(cat "$work/choice-predir/gaming") == no ]] || fail "gaming must hold its answer"
-pass "B on pre-installs redraws the same screen; the cancel menu is never offered"
+[[ $(LC_ALL=C command grep -c CLEAR "$work/group-pre-back-clear.log") -eq "$nobl_clears" ]] ||
+  fail "B on pre-installs must NOT redraw the chrome -- same clear count ($nobl_clears) with and without the B" "$(cat "$work/group-pre-back-clear.log")"
+[[ $(cat "$work/group-pre-back/preinstalls") == yes ]] || fail "re-asked pre-installs must hold the NEW answer"
+[[ $(cat "$work/group-pre-back/gaming") == no ]] || fail "gaming must hold its answer"
+pass "B on pre-installs is a true no-op (no cancel menu, no chrome redraw); answers commit"
 
-echo "--- read-only Deck questions from the keyboard screen ------------------------"
+# Item 17, trip A: Yes -> Wi-Fi -> B -> Steam -> B -> pre-installs ->
+# change answer -> Steam No. NOTHING is written until the No (late lock),
+# so every leg is free; the final locked files match the LAST answers and
+# Wi-Fi ran exactly once (the No finish never re-enters it).
+WIFI_GROUP_ANSWERS=BACK group_run trip-no Yes Yes "<CANCEL>" No No
+[[ $GROUP_RC -eq 0 ]] || fail "the Yes->Wi-Fi->B->Steam->B->pre-installs->No trip must complete as Steam=No" "rc=$GROUP_RC"
+[[ $(cat "$work/group-trip-no/preinstalls") == no ]] || fail "changed pre-installs answer must be what locks" "$(cat "$work/group-trip-no/preinstalls" 2>/dev/null)"
+[[ $(cat "$work/group-trip-no/gaming") == no ]] || fail "Steam=No must lock gaming=no" "$(cat "$work/group-trip-no/gaming" 2>/dev/null)"
+[[ -f "$work/group-trip-no/locked" ]] || fail "the trip must end locked"
+[[ ${DECK_PREINSTALLS:-} == no && ${DECK_GAMING:-} == no ]] || fail "globals must mirror the final answers"
+[[ $(LC_ALL=C command grep -c WIFI_CALL "$work/group-wifi-calls.log") -eq 1 ]] ||
+  fail "Wi-Fi must have run exactly once on this trip (before the B)" "$(cat "$work/group-wifi-calls.log")"
+pass "round trip Yes->Wi-Fi->B->Steam->B->pre-installs->change->Steam No commits (no,no) + locked"
 
-# deck_form_choice_answer: globals first, files second, failure when unset.
+# Item 17, trip B: choosing Yes AGAIN returns to Wi-Fi (two Wi-Fi visits)
+# and commits (yes,yes).
+printf 'BACK\n0\n' >"$work/trip-yes.wq"
+rm -rf "$work/group-trip-yes"
+: >"$work/group-wifi-calls.log"
+printf '%s\n' Yes Yes Yes >"$work/group-trip-yes.q"
 unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
-rm -rf "$work/ro-choices"
-mkdir -p "$work/ro-choices"
-DECK_CHOICES_DIR="$work/ro-choices" deck_form_choice_write gaming no ||
-  fail "setup: seed gaming=no"
-DECK_PREINSTALLS=yes DECK_CHOICES_DIR="$work/ro-choices" \
-  deck_form_choice_answer preinstalls >/dev/null ||
-  fail "a set global must answer even when the file disagrees"
-[[ $(DECK_PREINSTALLS=yes DECK_CHOICES_DIR="$work/ro-choices" deck_form_choice_answer preinstalls) == yes ]] ||
-  fail "the global (which mirrors the file) wins over the file"
-[[ $(DECK_CHOICES_DIR="$work/ro-choices" deck_form_choice_answer gaming) == no ]] ||
-  fail "with no global, the persisted file answers"
-if DECK_CHOICES_DIR="$work/ro-choices" deck_form_choice_answer preinstalls >/dev/null 2>&1; then
-  fail "with neither global nor file, the answer must be missing (not a guessed yes/no)"
-fi
-export -n DECK_CHOICES_DIR 2>/dev/null || true
-pass "choice_answer reads global-then-file and fails when unset"
-
-# The read-only screen shows the locked answer and cannot change it: A on
-# Continue moves forward, B/Esc moves back, anything else redraws.
-printf 'Continue\n' >"$work/ro-fwd.q"
-: >"$work/ro-fwd-say.log"
-ro_nav=""
-DECK_TEST_SAY_LOG="$work/ro-fwd-say.log" \
-FAKE_GUM_CHOOSE_QUEUE="$work/ro-fwd.q" FAKE_GUM_LOG="$work/ro-fwd-gum.log" \
+set +e
+DECK_CHOICES_DIR="$work/group-trip-yes" \
+FAKE_GUM_CHOOSE_QUEUE="$work/group-trip-yes.q" \
+FAKE_GUM_LOG="$work/group-trip-yes-gum.log" \
+WIFI_GROUP_QUEUE="$work/trip-yes.wq" \
 PATH="$work/bin-fakegum:$PATH" \
-  deck_form_readonly_screen ro_nav "Install Steam?" no ||
-  fail "A on the read-only screen must move forward, not fail"
-[[ $ro_nav == forward ]] || fail "A on Continue must answer forward" "got: $ro_nav"
-LC_ALL=C grep -qF "Install Steam?" "$work/ro-fwd-say.log" ||
-  fail "the read-only screen must carry the REAL screen's title" "$(cat "$work/ro-fwd-say.log")"
-LC_ALL=C grep -qF "can't be changed now" "$work/ro-fwd-say.log" ||
-  fail "the read-only screen must say the answer is already being installed" "$(cat "$work/ro-fwd-say.log")"
-LC_ALL=C grep -qF "Your answer: No" "$work/ro-fwd-say.log" ||
-  fail "the read-only screen must show the chosen answer capitalised like the real rows (Yes/No)" "$(cat "$work/ro-fwd-say.log")"
-LC_ALL=C grep -qF "Press A to continue, B to go back" "$work/ro-fwd-say.log" ||
-  fail "the read-only screen must say A continues" "$(cat "$work/ro-fwd-say.log")"
-printf '<CANCEL>\n' >"$work/ro-back.q"
-DECK_TEST_SAY_LOG="$work/ro-fwd-say.log" \
-FAKE_GUM_CHOOSE_QUEUE="$work/ro-back.q" FAKE_GUM_LOG="$work/ro-fwd-gum.log" \
-PATH="$work/bin-fakegum:$PATH" \
-  deck_form_readonly_screen ro_nav "Install Omarchy pre-installs?" yes ||
-  fail "B on the read-only screen must go back, not fail"
-[[ $ro_nav == back ]] || fail "B/Esc must answer back" "got: $ro_nav"
-pass "read-only screen: same title, locked answer shown, A forwards, B backs"
+  deck_form_run_variant_group >/dev/null 2>&1
+trip_yes_rc=$?
+set -e
+[[ $trip_yes_rc -eq 0 ]] || fail "Yes-again must return to Wi-Fi and complete" "rc=$trip_yes_rc"
+[[ $(LC_ALL=C command grep -c WIFI_CALL "$work/group-wifi-calls.log") -eq 2 ]] ||
+  fail "choosing Yes again must re-enter Wi-Fi (2 visits)" "$(cat "$work/group-wifi-calls.log")"
+[[ $(cat "$work/group-trip-yes/preinstalls") == yes && $(cat "$work/group-trip-yes/gaming") == yes ]] ||
+  fail "Yes-again trip must commit (yes,yes)"
+[[ -f "$work/group-trip-yes/locked" ]] || fail "the Yes-again trip must end locked"
+pass "choosing Yes again returns to Wi-Fi; (yes,yes) commits + locked"
+eval "$group_wifi_saved"; unset group_wifi_saved
 
-# The walk: one screen per B from the keyboard layout -- Install Steam?
-# first, then pre-installs; B on pre-installs stays there; A moves
-# forward; A on the last returns to the keyboard screen.
-printf '<CANCEL>\n<CANCEL>\nContinue\nContinue\n' >"$work/ro-walk.q"
-: >"$work/ro-walk-say.log"
-DECK_PREINSTALLS=yes DECK_GAMING=no \
-DECK_TEST_SAY_LOG="$work/ro-walk-say.log" \
-FAKE_GUM_CHOOSE_QUEUE="$work/ro-walk.q" FAKE_GUM_LOG="$work/ro-walk-gum.log" \
-PATH="$work/bin-fakegum:$PATH" \
-  deck_form_readonly_choices ||
-  fail "the read-only walk must return 0 when A leaves the last screen"
-unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
-steam_pos=$(LC_ALL=C command grep -nF "Install Steam?" "$work/ro-walk-say.log" | head -1 | cut -d: -f1)
-pre_pos=$(LC_ALL=C command grep -nF "Install Omarchy pre-installs?" "$work/ro-walk-say.log" | head -1 | cut -d: -f1)
-[[ -n $steam_pos && -n $pre_pos ]] ||
-  fail "the walk must show BOTH read-only screens" "$(cat "$work/ro-walk-say.log")"
-[[ $steam_pos -lt $pre_pos ]] ||
-  fail "the walk must show Install Steam? BEFORE pre-installs (one screen per B, backwards)" "$(cat "$work/ro-walk-say.log")"
-LC_ALL=C grep -qF "Your answer: No" "$work/ro-walk-say.log" ||
-  fail "the Steam screen must show the locked gaming answer capitalised" "$(cat "$work/ro-walk-say.log")"
-LC_ALL=C grep -qF "Your answer: Yes" "$work/ro-walk-say.log" ||
-  fail "the pre-installs screen must show the locked preinstalls answer capitalised" "$(cat "$work/ro-walk-say.log")"
-pass "the read-only walk goes Steam? -> pre-installs per B, shows both locked answers, and returns on A"
-
-# keyboard_form B (reask): with locked answers it walks the read-only
-# screens and comes back to the picker; without answers it re-asks
-# directly (the dry-run shape, where greeter never ran).
-printf 'us:10\nlatam:0\n' >"$work/kb-ro.queue"
-: >"$work/kb-ro-say.log"
-printf 'Continue\n' >"$work/kb-ro-choose.q"
-: >"$work/kb-ro-lk.log"
+# 18, second half: once locked, NOTHING reopens pre-installs. The keyboard
+# screen's B is a bare picker re-ask -- stub the choice screens to fail the
+# run if either is reached, with locked files AND globals present.
+preinstalls_saved=$(declare -f deck_form_preinstalls_screen)
+gaming_saved=$(declare -f deck_form_gaming_screen)
+deck_form_preinstalls_screen() { printf 'PREINSTALLS_REOPENED\n' >>"$work/locked-reopen.log"; return 1; }
+deck_form_gaming_screen() { printf 'GAMING_REOPENED\n' >>"$work/locked-reopen.log"; return 1; }
+mkdir -p "$work/locked-choices"
+printf 'yes\n' >"$work/locked-choices/preinstalls"
+printf 'no\n' >"$work/locked-choices/gaming"
+printf 'locked\n' >"$work/locked-choices/locked"
+printf 'us:10\nlatam:0\n' >"$work/kb-locked.queue"
+: >"$work/locked-reopen.log"
+: >"$work/kb-locked-lk.log"
 keyboard=
 DECK_PREINSTALLS=yes DECK_GAMING=no \
-FAKE_KB_QUEUE="$work/kb-ro.queue" DECK_FORM_TTY_OVERRIDE=/dev/tty1 \
-DECK_TEST_SAY_LOG="$work/kb-ro-say.log" \
-FAKE_GUM_CHOOSE_QUEUE="$work/kb-ro-choose.q" FAKE_GUM_LOG="$work/kb-ro-gum.log" \
-FAKE_LOADKEYS_LOG="$work/kb-ro-lk.log" PATH="$work/bin-fakegum:$KEYS_PATH" \
-  keyboard_form true ||
-  fail "keyboard_form B with locked answers must walk read-only and return to the picker"
+FAKE_KB_QUEUE="$work/kb-locked.queue" DECK_FORM_TTY_OVERRIDE=/dev/tty1 \
+DECK_CHOICES_DIR="$work/locked-choices" \
+FAKE_LOADKEYS_LOG="$work/kb-locked-lk.log" PATH="$KEYS_PATH" keyboard_form true ||
+  fail "keyboard B with locked answers must still reach the picker and accept"
+eval "$preinstalls_saved"; unset preinstalls_saved
+eval "$gaming_saved"; unset gaming_saved
 unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
-[[ $keyboard == latam ]] ||
-  fail "after the read-only walk the picker's second answer must survive" "keyboard='$keyboard'"
-[[ ! -s "$work/kb-ro.queue" ]] ||
-  fail "the picker must have been reached twice (B then accept)" "$(cat "$work/kb-ro.queue")"
-LC_ALL=C grep -qF "Install Steam?" "$work/kb-ro-say.log" ||
-  fail "B on the keyboard screen must reach the read-only Deck questions" "$(cat "$work/kb-ro-say.log")"
-pass "B on the keyboard screen walks the read-only screens and returns to the picker"
+[[ $keyboard == latam ]] || fail "the picker's answer must survive a locked B" "keyboard='$keyboard'"
+[[ ! -s "$work/kb-locked.queue" ]] || fail "the picker must have been reached twice (B then accept)"
+if LC_ALL=C grep -qE 'REOPENED' "$work/locked-reopen.log" 2>/dev/null; then
+  fail "once locked, keyboard B must NEVER reopen the pre-installs or Steam screens" "$(cat "$work/locked-reopen.log")"
+fi
+pass "once locked, keyboard B re-asks only the picker -- pre-installs is never reopened"
 
-# A failed read-only walk warns LOUDLY and falls back to re-asking the
-# picker -- never `|| true` (CLAUDE.md: never silently swallow a failure).
-# The walk is stubbed to fail; the queue then proves the picker was
-# re-asked and kept its answer, and stderr proves the failure was said.
-ro_walk_saved=$(declare -f deck_form_readonly_choices)
-deck_form_readonly_choices() { return 1; }
-printf 'us:10\nlatam:0\n' >"$work/kb-ro-fail.queue"
-: >"$work/kb-ro-fail-say.log"
-: >"$work/kb-ro-fail-lk.log"
-keyboard=
-DECK_PREINSTALLS=yes DECK_GAMING=no \
-FAKE_KB_QUEUE="$work/kb-ro-fail.queue" DECK_FORM_TTY_OVERRIDE=/dev/tty1 \
-DECK_TEST_SAY_LOG="$work/kb-ro-fail-say.log" \
-FAKE_LOADKEYS_LOG="$work/kb-ro-fail-lk.log" PATH="$KEYS_PATH" \
-  keyboard_form true 2>"$work/kb-ro-fail-err.log" ||
-  fail "a failed read-only walk must fall back to re-asking, not abort"
-eval "$ro_walk_saved"; unset ro_walk_saved
-unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
-[[ $keyboard == latam ]] ||
-  fail "after a failed walk the picker's second answer must survive" "keyboard='$keyboard'"
-[[ ! -s "$work/kb-ro-fail.queue" ]] ||
-  fail "the picker must have been reached twice (failed walk, then accept)" "$(cat "$work/kb-ro-fail.queue")"
-LC_ALL=C grep -qF "read-only review" "$work/kb-ro-fail-err.log" ||
-  fail "a failed walk must WARN loudly instead of swallowing the failure" "$(cat "$work/kb-ro-fail-err.log")"
-pass "a failed read-only walk warns and re-asks the picker"
+# 16a: the removed names stay removed. The read-only walk (item 6,
+# superseded) and the global-then-file answer helper have no callers left;
+# a definition is dead code with a confident comment (§6.4's failure mode).
+for dead_fn in deck_form_readonly_screen deck_form_readonly_choices deck_form_choice_answer deck_form_run_choice_screens; do
+  if declare -f "$dead_fn" >/dev/null 2>&1; then
+    fail "$dead_fn must stay removed (16a supersedes item 6) -- an uncalled helper is false confidence"
+  fi
+done
+pass "the read-only walk and its helpers stay removed"
 echo "--- Wi-Fi gaming gate: list back row, B-to-gaming reversal ------------------"
 
 # Row mapping: the back row maps to gaming-back (new action), and plain
@@ -4619,24 +4674,30 @@ LC_ALL=C grep -qF "$DECK_NET_GAMING_BACK_ROW" <<<"$rows_gate" ||
   fail "the back row must read ABOVE Rescan, not after Stop"
 pass "gaming gate adds the back row above Rescan; plain lists unchanged; B still redraws"
 
-# Reversal: gaming file flipped to no + stale marker cleared, wifi screen
-# returns the back signal. Stub wifi_screen to emulate B-on-list (sets the
-printf 'yes\n' >"$work/rev-gaming-file"
-printf 'stale\n' >"$work/rev-marker"
+# Late lock (18): Wi-Fi B writes NOTHING -- the answers are still in memory,
+# so there is no file to rewrite and no marker to clear. The wrapper only
+# forwards the inner screen's signal. Stub wifi_screen to emulate B-on-list.
 wifi_saved=$(declare -f deck_form_wifi_screen)
 deck_form_wifi_screen() { DECK_WIFI_WANT_GAMING_BACK=yes; return 1; }
 rm -rf "$work/rev-choices"
-export DECK_CHOICES_DIR="$work/rev-choices"
-deck_form_choice_write gaming yes || fail "setup: seed gaming=yes"
+mkdir -p "$work/rev-choices"
+printf 'stale\n' >"$work/rev-marker"
 export DECK_NETWORK_READY_FILE="$work/rev-marker"
-DECK_GAMING=yes deck_form_wifi_screen_gaming || fail "reversal must return 0 (desktop-only continues)"
-[[ $(cat "$work/rev-choices/gaming") == no ]] ||
-  fail "Wi-Fi B must flip choices/gaming to no" "$(cat "$work/rev-choices/gaming")"
-[[ ! -e "$work/rev-marker" ]] ||
-  fail "reversal must clear the stale network-ready marker so the worker never installs gaming pkgs after opt-out"
-export -n DECK_CHOICES_DIR DECK_NETWORK_READY_FILE
+DECK_WIFI_WANT_GAMING_BACK=""
+set +e
+DECK_CHOICES_DIR="$work/rev-choices" deck_form_wifi_screen_gaming >/dev/null 2>&1
+rev_rc=$?
+set -e
 eval "$wifi_saved"; unset wifi_saved
-pass "Gaming yes→no via Wi-Fi B rewrites gaming=no and clears the stale marker"
+[[ $rev_rc -ne 0 ]] || fail "Wi-Fi B must propagate nonzero (the group re-asks Steam?)"
+[[ ${DECK_WIFI_WANT_GAMING_BACK:-} == yes ]] || fail "Wi-Fi B must raise the gaming-back signal"
+[[ ! -e "$work/rev-choices/gaming" && ! -e "$work/rev-choices/locked" ]] ||
+  fail "Wi-Fi B must write NO choice files -- late lock means nothing is committed yet" "$(ls "$work/rev-choices")"
+[[ -e "$work/rev-marker" ]] ||
+  fail "Wi-Fi B must not touch the network-ready marker -- it only ever fires on success"
+export -n DECK_NETWORK_READY_FILE
+unset DECK_WIFI_WANT_GAMING_BACK
+pass "Wi-Fi B signals back with no writes and no marker touch (late lock: still in memory)"
 echo "--- Wi-Fi shown only for Steam=yes -------------------------------------------"
 
 # Steam=no: greeter must never invoke the Wi-Fi or Steam screens. Stub both
@@ -4753,6 +4814,262 @@ LC_ALL=C grep -qF "70.8 MB" <<<"$text" || fail "progress text must carry downloa
 text=$(deck_form_steam_progress_text running "Verifying installation...")
 [[ $text == "Verifying installation..." ]] || fail "unparseable lines must show verbatim (indeterminate)" "got: $text"
 pass "bar + text: determinate bar, indeterminate bar, parsed text, verbatim fallback"
+
+echo "--- item 11: the stuck 0.00 MB/s -- failing-first, then the fix ---------"
+
+# 🔴 ROOT CAUSE, READ off both sides. The form polls steam/progress every
+# DECK_STEAM_POLL_SECS (1 s) and fed each pair of CONSECUTIVE POLLS to
+# deck_form_steam_rate. But the orchestrator only writes a new progress line
+# every PROGRESS_INTERVAL_SECS (20 s -- deck_steam_bootstrap.py:594). So ~19
+# of every 20 polls compared two IDENTICAL readings (dkb=0 -> "0.00"), and
+# the one poll that saw a new line measured 20 s of download over a 1 s dt.
+# The operator watched "0.00 MB/s" for the whole download while the MB count
+# climbed: the TEXT came from the latest LINE, the RATE from the latest POLL
+# GAP -- both halves true at once.
+#
+# Failing-first proof, built from the operator's own numbers: 203.9 MB of
+# 484.7 MB is 208,794 KB of 496,333 KB on the wire. Replay the OLD call
+# shape (consecutive 1 s polls, no new line between them -- the common case
+# for 19 of every 20 polls) and the old primitive really does answer 0.00
+# while the download is moving.
+if ! old_rate=$(deck_form_steam_rate 208794 2000 208794 2001); then
+  fail "harness broken: identical consecutive polls must return 0.00, not fail"
+fi
+[[ $old_rate == "0.00" ]] ||
+  fail "failing-first harness broken: identical 1 s polls must read 0.00 under the OLD call shape" "got: $old_rate"
+pass "failing-first: consecutive 1 s polls with no new line read 0.00 -- the stuck speed, reproduced"
+
+# The fix: rate over a WINDOW of samples, not a poll gap. Realistic replay:
+# Valve's KB lines 60 s apart (three orchestrator cadences), ~57 MB of motion.
+hist=""
+hist=$(deck_form_steam_hist_add "$hist" 2000 208794) ||
+  fail "hist_add must accept the first sample"
+hist=$(deck_form_steam_hist_add "$hist" 2020 227000) ||
+  fail "hist_add must accept the second sample"
+hist=$(deck_form_steam_hist_add "$hist" 2040 247000) ||
+  fail "hist_add must accept the third sample"
+hist=$(deck_form_steam_hist_add "$hist" 2060 266240) ||
+  fail "hist_add must accept the fourth sample"
+smooth=$(deck_form_steam_hist_rate "$hist" 2060 266240) ||
+  fail "hist_rate must report once the window covers $DECK_STEAM_RATE_MIN_ELAPSED_SECS s of history"
+# (266240-208794)/1024/60 = 0.935 -> 0.93 MB/s. A 1 s-gap reading of the
+# same motion would claim ~56 MB/s; 0.00 or ~56 would both fail this.
+[[ $smooth == "0.93" ]] || fail "windowed rate over 60 s of real samples must be 0.93 MB/s" "got: $smooth"
+eta_steps=$(deck_form_steam_eta $(( 496333 - 266240 )) "$smooth") ||
+  fail "ETA from the smoothed rate must be computable"
+[[ $eta_steps -ge 230 && $eta_steps -le 250 ]] ||
+  fail "time left for 230093 KB at 0.93 MB/s must be ~241 s" "got: $eta_steps"
+[[ $(deck_form_format_eta "$eta_steps") == "04:01" ]] ||
+  fail "241 s must format as 04:01" "got: $(deck_form_format_eta "$eta_steps")"
+pass "windowed rate reads 0.93 MB/s over real 60 s samples (not 0.00, not a 1 s spike) with time left 04:01"
+
+# Window mechanics, each load-bearing for the screen:
+# - too little history -> indeterminate (no rate shown, never a guess).
+short_hist=$(deck_form_steam_hist_add "" 2000 208794)
+if deck_form_steam_hist_rate "$short_hist" 2005 210000 >/dev/null 2>&1; then
+  fail "5 s of history must be indeterminate -- a rate from one poll gap is the old bug"
+fi
+pass "rate stays indeterminate until $DECK_STEAM_RATE_MIN_ELAPSED_SECS s of history exists"
+# - old samples fall off the window (stale fast history cannot inflate now).
+old_hist=""
+old_hist=$(deck_form_steam_hist_add "$old_hist" 1000 100000)
+old_hist=$(deck_form_steam_hist_add "$old_hist" 2000 208794)
+[[ $old_hist == "2000 208794" ]] ||
+  fail "entries older than the $DECK_STEAM_RATE_WINDOW_SECS s window must fall off" "got: $old_hist"
+pass "samples older than the window fall off"
+# - a reset counter reads 0.00 through the same clamp (never negative).
+reset_hist=""
+reset_hist=$(deck_form_steam_hist_add "$reset_hist" 2000 300000)
+reset_hist=$(deck_form_steam_hist_add "$reset_hist" 2020 50000)
+[[ $(deck_form_steam_hist_rate "$reset_hist" 2020 50000) == "0.00" ]] ||
+  fail "a reset counter must read 0.00, not negative"
+pass "a reset counter reads 0.00"
+# - garbage in is refused, loudly, not averaged in.
+if deck_form_steam_hist_add "" "not-a-time" 100 >/dev/null 2>&1; then
+  fail "hist_add must refuse non-numeric timestamps"
+fi
+if deck_form_steam_hist_rate "" 2060 266240 >/dev/null 2>&1; then
+  fail "hist_rate on empty history must be indeterminate"
+fi
+pass "hist helpers refuse bad input instead of averaging it in"
+
+echo "--- item 9: waiting line instead of the ???? bar --------------------------"
+
+waiting=$(deck_form_steam_waiting_text)
+LC_ALL=C grep -qF "Waiting for the base install to finish" <<<"$waiting" ||
+  fail "the indeterminate screen must say it is waiting for the base install" "$waiting"
+if LC_ALL=C grep -qF "?" <<<"$waiting"; then
+  fail "the waiting line must not contain a bar of ? marks" "$waiting"
+fi
+pass "the waiting line names the base install instead of drawing [????...]"
+# And the screen really uses it: the draw path for an unparseable line must
+# carry the waiting sentence and no ???? bar. (The full-screen path is proven
+# below; this pins the line selection on the helper pair.)
+[[ ${#waiting} -le 121 ]] ||
+  fail "the waiting line must fit the 121-column say() budget, or it wraps and costs a row"
+
+echo "--- item 10: chrome once, lines in place, B draws nothing -----------------"
+
+# The refresh emits cursor-up + clear-line around the same 3 lines the first
+# draw prints -- so chrome and refresh can never disagree about the shape.
+PADDING_LEFT_SPACES="  "
+first_draw=$(deck_form_steam_draw_lines "BAR" "TEXT" "SUB")
+refresh_out=$(deck_form_steam_refresh "BAR" "TEXT" "SUB")
+unset PADDING_LEFT_SPACES
+LC_ALL=C grep -qF $'\033[3A' <<<"$refresh_out" ||
+  fail "refresh must move the cursor up exactly $DECK_STEAM_PROGRESS_LINES lines" "$(printf '%s' "$refresh_out" | od -c | head -3)"
+[[ $(LC_ALL=C command grep -c $'\033\\[K' <<<"$refresh_out") -eq 3 ]] ||
+  fail "refresh must clear each of the 3 lines (EL) so a shorter line leaves no ghosts"
+for line in BAR TEXT SUB; do
+  LC_ALL=C grep -qF "$line" <<<"$first_draw" || fail "first draw must print $line"
+  LC_ALL=C grep -qF "$line" <<<"$refresh_out" || fail "refresh must reprint $line"
+done
+if LC_ALL=C grep -qF "CLEAR" <<<"$refresh_out"; then
+  fail "refresh must never full-clear -- that is the flash being removed"
+fi
+pass "refresh moves up 3, clears each line, reprints the same 3 lines with no full clear"
+# Chrome draws the full frame (and only the chrome full-clears).
+: >"$work/steam-chrome.log"
+clear_chrome_saved=$(declare -f clear_logo)
+clear_logo() { printf 'CHROME_CLEAR\n' >>"$work/steam-chrome.log"; }
+: >"$work/steam-chrome-say.log"
+DECK_TEST_SAY_LOG="$work/steam-chrome-say.log" deck_form_steam_draw_chrome >/dev/null
+eval "$clear_chrome_saved"; unset clear_chrome_saved
+LC_ALL=C grep -qF "CHROME_CLEAR" "$work/steam-chrome.log" ||
+  fail "chrome must full-clear once (the title frame)"
+LC_ALL=C grep -qF "Downloading Steam from Valve" "$work/steam-chrome-say.log" ||
+  fail "chrome must carry the screen title"
+pass "chrome draws the full frame once with the title"
+
+# B is consumed, never drawn for: pre-filled bytes vanish, idle costs one
+# short poll, non-ttys skip, and the answer is always 0 (hygiene, not a
+# gate). The poll interval is nonzero on purpose: `read -t 0` only POLLS
+# (reports ready without consuming), so a zero-timeout drain loop spins
+# forever on the first byte -- measured while debugging this very block.
+#
+# ⚠️ The fifo is held open RDWR by THIS shell (fd 9) for the whole block.
+# A background writer + a zero-timeout drain race two ways without it: the
+# drain's first poll can fire before the writer's bytes arrive (bytes left
+# behind, a false failure), or after the drain closed (the writer's open
+# blocks forever, or its printf dies of SIGPIPE -- exit 141 -- which `wait`
+# faithfully returns and `set -e` turns into a dead suite). With fd 9 open
+# throughout, the writer never blocks and never loses its reader, so the
+# only thing being proven is the drain.
+mkfifo "$work/steam-drain-fifo"
+exec 9<>"$work/steam-drain-fifo"
+printf 'ab\033' >&9
+deck_form_steam_discard_input "$work/steam-drain-fifo" ||
+  fail "discard must always return 0"
+if IFS= read -r -t 0.2 -n1 _ <&9 2>/dev/null; then
+  fail "discard must consume queued B bytes -- a later reader must find nothing"
+fi
+exec 9>&-
+printf 'untouched\n' >"$work/steam-drain-regular"
+deck_form_steam_discard_input "$work/steam-drain-regular" ||
+  fail "discard of a regular file must return 0"
+[[ $(cat "$work/steam-drain-regular") == "untouched" ]] ||
+  fail "discard must not touch a regular file"
+pass "B bytes are consumed with no draw; regular files are skipped"
+
+# End to end: several polls with a moving download draw ONE chrome and update
+# in place; B bytes queued mid-run cause no extra chrome and are consumed.
+# A fresh bash (the s1-boot.sh pattern): `timeout` cannot exec a function,
+# in-process state (globals, readonly constants) cannot be reset, and a hung
+# screen must fail this case -- not the suite watchdog -- with attribution.
+mkdir -p "$work/steam-live"
+printf 'running\n' >"$work/steam-live/status"
+printf 'running\n' >"$work/steam-live/early-status"
+cat >"$work/steam-live/early" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  status) cat "$DECK_EARLY_STATUS_FILE" ;;
+esac
+exit 0
+EOF
+chmod +x "$work/steam-live/early"
+printf "downloading Steam's client update: 208,794 of 496,333 KB (42%%)\n" >"$work/steam-live/progress"
+cat >"$work/steam-live-boot.sh" <<'BOOT'
+clear_logo() { printf 'CHROME_CLEAR\n' >>"$CHROME_LOG"; }
+say() { printf '%s\n' "$*" >>"${DECK_TEST_SAY_LOG:-/dev/null}"; }
+step() { :; }
+abort() { printf 'ABORT: %s\n' "$*" >&2; return 1; }
+get_root_disk() { printf '%s\n' "${DECK_TEST_ROOT_DISK:-}"; }
+get_disk_info() { printf '%s\n' "$1"; }
+source "$DECK_FORM_PATH"
+deck_form_steam_progress_screen
+BOOT
+mkfifo "$work/steam-live-tty"
+# Held open RDWR here (fd 9, inherited by the screen's own bash): the two B
+# bytes are ready for the screen's drain whenever it polls, and the writer can
+# neither block on open nor die of SIGPIPE -- see the discard block above
+# for why a background writer alone races both ways.
+exec 9<>"$work/steam-live-tty"
+(printf '\033\033' >&9; sleep 3) &
+steam_tty_writer=$!
+( sleep 1; printf 'done\n' >"$work/steam-live/status" ) &
+steam_flipper=$!
+set +e
+DECK_GAMING=yes \
+DECK_FORM_PATH="$DECK_FORM_SH" \
+CHROME_LOG="$work/steam-live-chrome.log" \
+DECK_STEAM_STATUS_FILE="$work/steam-live/status" \
+DECK_STEAM_PROGRESS_FILE="$work/steam-live/progress" \
+DECK_EARLY_BIN="$work/steam-live/early" \
+DECK_EARLY_STATUS_FILE="$work/steam-live/early-status" \
+DECK_TEST_SAY_LOG="$work/steam-live-say.log" \
+DECK_STEAM_TTY="$work/steam-live-tty" \
+DECK_STEAM_POLL_SECS_OVERRIDE=0.2 \
+FAKE_GUM_LOG="$work/steam-live-gum.log" \
+PATH="$work/bin-fakegum:$PATH" \
+  timeout 20 bash "$work/steam-live-boot.sh" >"$work/steam-live-screen.log" 2>&1
+live_rc=$?
+set -e
+wait "$steam_flipper" 2>/dev/null || true
+wait "$steam_tty_writer" 2>/dev/null || true
+[[ $live_rc -eq 0 ]] || fail "the live screen must exit 0 when Steam finishes" "rc=$live_rc"
+[[ $(LC_ALL=C command grep -c CHROME_CLEAR "$work/steam-live-chrome.log") -eq 1 ]] ||
+  fail "several polls must draw the chrome EXACTLY once -- every extra clear is the flash" "$(cat "$work/steam-live-chrome.log")"
+LC_ALL=C grep -qF $'\033[3A' "$work/steam-live-screen.log" ||
+  fail "polls after the first must update in place (cursor-up), not redraw" "$(od -c "$work/steam-live-screen.log" | head -5)"
+if LC_ALL=C grep -qF "????????" "$work/steam-live-screen.log"; then
+  fail "a parseable download must never show the indeterminate bar"
+fi
+if IFS= read -r -t 0.2 -n1 _ <&9 2>/dev/null; then
+  fail "the B bytes queued mid-run must have been consumed by the screen, not left for the next reader"
+fi
+exec 9>&-
+pass "live screen: one chrome, in-place updates, no ???? bar, queued B consumed with no redraw"
+
+# Item 9 through the real screen: no size yet (a phase line -- the base
+# install still running) draws the waiting sentence and no ???? bar.
+printf 'Verifying installation...\n' >"$work/steam-live/progress"
+printf 'running\n' >"$work/steam-live/status"
+( sleep 1; printf 'done\n' >"$work/steam-live/status" ) &
+steam_flipper2=$!
+set +e
+DECK_GAMING=yes \
+DECK_FORM_PATH="$DECK_FORM_SH" \
+CHROME_LOG="$work/steam-wait-chrome.log" \
+DECK_STEAM_STATUS_FILE="$work/steam-live/status" \
+DECK_STEAM_PROGRESS_FILE="$work/steam-live/progress" \
+DECK_EARLY_BIN="$work/steam-live/early" \
+DECK_EARLY_STATUS_FILE="$work/steam-live/early-status" \
+DECK_TEST_SAY_LOG="$work/steam-wait-say.log" \
+DECK_STEAM_TTY="$work/steam-drain-regular" \
+DECK_STEAM_POLL_SECS_OVERRIDE=0.2 \
+FAKE_GUM_LOG="$work/steam-wait-gum.log" \
+PATH="$work/bin-fakegum:$PATH" \
+  timeout 20 bash "$work/steam-live-boot.sh" >"$work/steam-wait-screen.log" 2>&1
+wait_rc=$?
+set -e
+wait "$steam_flipper2" 2>/dev/null || true
+[[ $wait_rc -eq 0 ]] || fail "the waiting screen must exit 0 when Steam finishes" "rc=$wait_rc"
+LC_ALL=C grep -qF "Waiting for the base install to finish" "$work/steam-wait-screen.log" ||
+  fail "before the download has a size the screen must show the waiting line" "$(cat "$work/steam-wait-screen.log")"
+if LC_ALL=C grep -qF "????" "$work/steam-wait-screen.log"; then
+  fail "the waiting screen must not draw a [????...] bar" "$(cat "$work/steam-wait-screen.log")"
+fi
+pass "waiting screen: the sentence, never the ???? bar"
 
 echo "--- Steam progress screen: exits on done, failure menu on failed ------------"
 

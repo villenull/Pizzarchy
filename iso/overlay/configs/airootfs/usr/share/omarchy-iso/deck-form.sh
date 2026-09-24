@@ -721,10 +721,18 @@ readonly DECK_S0_PROMPT_LINE="Press A to install, B to cancel"
 # Split out so the [U] suite asserts on the FUNCTION'S OWN OUTPUT
 # (T4-screen-spec.md §4 S0: "asserted on the function's output, not on a
 # screenshot") rather than needing a tty to read a screen back from.
+#
+# HW 2026-09-24 item 14: both lines start at the logo's left edge, like every
+# other screen. Upstream's `say` is `gum style --padding "0 0 0 $PADDING_LEFT"`,
+# and clear_logo's measure_terminal sets PADDING_LEFT_SPACES to that same
+# width in spaces (deck_final_summary already reuses it for the gum table via
+# sed). Prefixing here is that same pattern, so S0's text lines up with the
+# logo without needing a tty to prove it. Unset (unit fixtures, or a draw
+# before any clear_logo) means no padding, never a crash.
 deck_form_s0_text() {
-  local line
-  for line in "${DECK_S0_LINES[@]}"; do printf '%s\n' "$line"; done
-  printf '%s\n' "$DECK_S0_PROMPT_LINE"
+  local line pad=${PADDING_LEFT_SPACES:-}
+  for line in "${DECK_S0_LINES[@]}"; do printf '%s%s\n' "$pad" "$line"; done
+  printf '%s%s\n' "$pad" "$DECK_S0_PROMPT_LINE"
 }
 
 # deck_form_s0_wait_key <tty> -- S0's A/B answer. Prints "proceed" (A/Enter)
@@ -1164,6 +1172,72 @@ deck_form_steam_eta() {
   return 0
 }
 
+# --- smoothed rate over a sample window (HW 2026-09-24 item 11) ---------------
+#
+# ROOT CAUSE of the stuck `0.00 MB/s`, READ off both sides rather than
+# inferred. The form polls steam/progress every DECK_STEAM_POLL_SECS (1 s) and
+# fed each pair of CONSECUTIVE POLLS to deck_form_steam_rate above. But the
+# orchestrator only writes a new progress line every PROGRESS_INTERVAL_SECS
+# (20 s -- deck_steam_bootstrap.py:594): Valve's own `X of Y KB` counter is
+# extrapolated over the whole run so far there, deliberately, so a burst of
+# speed at the start cannot argue a slow connection will finish. So ~19 of
+# every 20 polls compared two IDENTICAL readings (dkb=0 -> "0.00"), and the
+# one poll that saw a new line measured 20 s of download over a 1 s dt --
+# a single-frame spike, then back to 0.00. The operator watched "0.00 MB/s"
+# for the whole download while the MB count climbed: both halves were true
+# at once, because the text came from the LATEST line while the rate came
+# from the latest POLL GAP. `date +%s`'s 1 s resolution made the same defect
+# worse (a ~1.4 s loop iteration truncates to dt=1).
+#
+# So the rate is now measured over a WINDOW, not a poll gap: every poll
+# appends "epoch have-kb" to a history, entries older than
+# DECK_STEAM_RATE_WINDOW_SECS fall off, and the displayed rate is the
+# average from the OLDEST surviving sample to now -- the same whole-run
+# shape the orchestrator's own projection uses. It needs
+# DECK_STEAM_RATE_MIN_ELAPSED_SECS of history before it reports anything
+# (before that the screen shows MB + percent with no rate, not a guess),
+# and a reset counter reads 0.00 via deck_form_steam_rate's own clamp.
+readonly DECK_STEAM_RATE_WINDOW_SECS=120
+readonly DECK_STEAM_RATE_MIN_ELAPSED_SECS=15
+
+# deck_form_steam_hist_add <hist> <t> <have> [window-secs] -- append one
+# "t have" sample and drop entries older than (t - window). Pure on strings:
+# prints the new history. Bad input is refused loudly (returns 1, prints
+# nothing usable) rather than silently poisoning the window.
+deck_form_steam_hist_add() {
+  local hist=${1:-} t=${2:-} have=${3:-} window=${4:-$DECK_STEAM_RATE_WINDOW_SECS}
+  [[ $t =~ ^[0-9]+$ && $have =~ ^[0-9]+$ && $window =~ ^[0-9]+$ ]] || return 1
+  (( window > 0 )) || return 1
+  {
+    [[ -n $hist ]] && printf '%s\n' "$hist"
+    printf '%s %s\n' "$t" "$have"
+  } | awk -v now="$t" -v w="$window" '$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && ($1 + 0 >= now - w)'
+  return 0
+}
+
+# deck_form_steam_hist_rate <hist> <now> <have> [min-elapsed-secs] --
+# MB/s with two decimals from the OLDEST sample in HIST to (NOW, HAVE).
+# Indeterminate (prints nothing, returns 1) when history is too short,
+# clocks disagree, or input is bad -- the caller shows no rate rather than
+# a wrong one. Implemented THROUGH deck_form_steam_rate (same units, same
+# clamps), so the single-interval primitive stays live and tested.
+deck_form_steam_hist_rate() {
+  local hist=${1:-} now=${2:-} have=${3:-} min_elapsed=${4:-$DECK_STEAM_RATE_MIN_ELAPSED_SECS}
+  local oldest_t="" oldest_have="" line ot oh
+  [[ $now =~ ^[0-9]+$ && $have =~ ^[0-9]+$ && $min_elapsed =~ ^[0-9]+$ ]] || return 1
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    ot=${line%% *}; oh=${line##* }
+    [[ $ot =~ ^[0-9]+$ && $oh =~ ^[0-9]+$ ]] || continue
+    if [[ -z $oldest_t || $ot -lt $oldest_t ]]; then
+      oldest_t=$ot; oldest_have=$oh
+    fi
+  done <<<"$hist"
+  [[ -n $oldest_t ]] || return 1
+  (( now - oldest_t >= min_elapsed )) || return 1
+  deck_form_steam_rate "$oldest_have" "$oldest_t" "$have" "$now"
+}
+
 # deck_form_format_eta <seconds> -- "MM:SS" (hours fold into minutes).
 deck_form_format_eta() {
   local secs=${1:-}
@@ -1192,18 +1266,18 @@ deck_form_format_mb() {
 #
 # SHAPE OF THE FLOW (2026-09-24, revised per hardware feedback): S0 welcome,
 # drive selection (NVMe/microSD, B back to welcome), wipe confirm (A wipes,
-# B back to the list), early start on the CONFIRMED disk, preinstalls
-# Yes/No, Steam Yes/No, Wi-Fi iff Steam=yes, Steam progress iff Steam=yes,
-# identity, S5. B goes one screen back: Steam -> preinstalls; preinstalls B
-# is a no-op redraw (the wipe already started -- there is no cancel that
-# tells the truth any more, and B must never return to the confirm, the
-# drive list, or S0). After BOTH answers the files plus `locked` are
-# written atomically; preinstalls is then NOT revisable (the package
-# delta may already be installing). Wi-Fi B is the narrow exception: it
-# flips Steam yes->no (rewriting `gaming`, clearing any stale network-ready)
-# before network-ready ever fired -- there is no path back to preinstalls
-# from Wi-Fi. The progress screen's failure menu may also flip Steam to no,
-# but only while the stage still allows it (see its own comment).
+# B back to the list), early start on the CONFIRMED disk, the variant GROUP
+# (preinstalls ⇄ Install Steam? ⇄ Wi-Fi, B-back between all three, ONE
+# commit on exit), Steam progress iff Steam=yes, identity, S5. B goes one
+# screen back: Steam -> preinstalls; preinstalls B is a no-op (the wipe
+# already started -- there is no cancel that tells the truth any more, and
+# B must never return to the confirm, the drive list, or S0). NOTHING is
+# written until the group is left (Steam=No answered, or Wi-Fi connected
+# with Steam=Yes), so every back-and-forth is safe; once locked,
+# pre-installs is never reopenable. Wi-Fi B flips nothing on disk -- the
+# answers are still in memory -- it just re-asks the Steam question. The
+# progress screen's failure menu may still flip Steam to no, but only while
+# the stage still allows it (see its own comment).
 #
 # DECK_CHOICES_DIR exists so the [U] suite and Stages' tests point this at a
 # temp dir instead of /run. Values are lowercase yes/no + trailing newline.
@@ -1268,11 +1342,11 @@ deck_form_choices_lock() {
   return 0
 }
 
-# deck_form_yesno_screen <result-var> <title> <yes-line> <no-line> <default: yes|no>
+# deck_form_yesno_screen <result-var> <title> <yes-line> <no-line> <default: yes|no> [back-mode]
 # D-pad controller yes/no via `gum choose` rows "Yes"/"No" (gum confirm has
-# no up/down list semantics on this hardware; choose rows do). Stores
-# "yes", "no", or "back" (B/Esc cancel) in $result-var and returns 0.
-# Never guesses: an unrecognised row redraws.
+# no up/down list semantics on this hardware; choose rows do). Stores "yes",
+# "no", or "back" (B/Esc cancel, back-mode only) in $result-var and
+# returns 0. Never guesses: an unrecognised row redraws.
 #
 # The answer travels via printf -v, NOT stdout: this screen draws chrome
 # (clear_logo/say/echo all write the terminal) and callers run screens for
@@ -1280,16 +1354,26 @@ deck_form_choices_lock() {
 # answer (measured: pre=$'\n\nno', which the atomic writer then loudly
 # refuses). Same reason deck_form_offline_detect's own comment bans `v=$(...)`
 # for globals.
+#
+# 16a: the chrome (clear_logo + title) is drawn ONCE. back-mode "stay" (the
+# pre-installs screen: B = nothing, the wipe already started) re-invokes
+# only the picker on B/Esc -- no clear, no return, visually a no-op -- and
+# therefore never answers "back". back-mode "back" (the default, the Steam
+# screen) answers "back" so the caller can navigate. Only an unrecognised
+# row (never B) redraws the chrome.
 deck_form_yesno_screen() {
-  local resultvar=$1 title=$2 yes_line=$3 no_line=$4 default=$5
-  local choice ans
+  local resultvar=$1 title=$2 yes_line=$3 no_line=$4 default=$5 back_mode=${6:-back}
+  local choice ans chrome_drawn=0
   while true; do
-    clear_logo
-    echo
-    say "$title"
-    say --foreground 8 "$yes_line"
-    say --foreground 8 "$no_line"
-    say --foreground 8 "B goes back."
+    if (( chrome_drawn == 0 )); then
+      clear_logo
+      echo
+      say "$title"
+      say --foreground 8 "$yes_line"
+      say --foreground 8 "$no_line"
+      say --foreground 8 "B goes back."
+      chrome_drawn=1
+    fi
     if [[ $default == yes ]]; then
       choice=$(printf 'Yes\nNo\n' | gum choose --header "Choose" --selected Yes) || choice=""
     else
@@ -1298,25 +1382,32 @@ deck_form_yesno_screen() {
     case $choice in
       Yes) ans=yes ;;
       No)  ans=no ;;
-      "")  ans=back ;;
-      *)   continue ;;
+      "")
+        if [[ $back_mode == stay ]]; then
+          continue
+        fi
+        ans=back ;;
+      *)   chrome_drawn=0; continue ;;
     esac
     printf -v "$resultvar" '%s' "$ans"
     return 0
   done
 }
 
-# deck_form_preinstalls_screen <result-var> -- stores yes/no/back. No carries the C6
-# promise: both No choices say they can be installed later from the desktop
-# (preinstalls via the existing menu action, Gaming via the conversion
-# script Steam builds) -- backed by real actions, never a bare promise.
+# deck_form_preinstalls_screen <result-var> -- stores yes/no. B is a true
+# no-op here (16a: the first screen AFTER the wipe started -- no cancel, no
+# way back, no redraw), so this passes back-mode "stay" and never answers
+# "back". No carries the C6 promise: both No choices say they can be
+# installed later from the desktop (preinstalls via the existing menu
+# action, Gaming via the conversion script Steam builds) -- backed by real
+# actions, never a bare promise.
 # The cursor starts on Yes (2026-09-24 hardware feedback).
 deck_form_preinstalls_screen() {
   deck_form_yesno_screen "$1" \
     "Install Omarchy pre-installs?" \
     "Yes: office, media and creative apps are ready on first boot." \
     "No: skip them now. (Can be installed later from the Omarchy desktop.)" \
-    yes
+    yes stay
 }
 
 # deck_form_gaming_screen <result-var> -- the "Install Steam?" question.
@@ -1332,122 +1423,83 @@ deck_form_gaming_screen() {
     yes
 }
 
-# deck_form_run_choice_screens -- preinstalls then Gaming, with B-back.
-# Writes NOTHING until both are answered, then publishes preinstalls +
-# gaming + locked atomically (locked LAST: Stages gates on it). Returns:
-#   0 both answered and locked (globals DECK_PREINSTALLS/DECK_GAMING set)
-#   1 only when publishing the answers fails (caller aborts)
-# B on preinstalls -- the first screen AFTER the wipe started -- is a
-# no-op that redraws the same screen (2026-09-24 hardware feedback). The
-# old behaviour called deck_form_s0_cancel_menu, whose "The drive was not
-# touched." is FALSE once the wipe has begun, and B must never return to
-# the wipe confirm, the drive list, or S0 from here. B on Gaming returns
-# to preinstalls.
+# deck_form_commit_choices <preinstalls-yes-no> <gaming-yes-no>
+# Publish the variant answers and lock, atomically per file with `locked`
+# LAST (Stages gates on it). Called ONCE per install, at the moment the user
+# LEAVES the pre-installs / Install Steam? / Wi-Fi group -- never while B
+# can still move between those screens. Sets the DECK_PREINSTALLS/DECK_GAMING
+# globals to mirror the files (S5 reads the same values Stages does).
 # Globals (shellcheck: set here, read by summary/S5): DECK_PREINSTALLS,
 # DECK_GAMING.
-deck_form_run_choice_screens() {
-  local pre="" game=""
-  while true; do
-    if [[ -z $pre ]]; then
-      deck_form_preinstalls_screen pre
-      if [[ $pre == back ]]; then
-        pre=""
-        continue
-      fi
-    fi
-    deck_form_gaming_screen game
-    if [[ $game == back ]]; then
-      pre=""
-      continue
-    fi
-    # shellcheck disable=SC2034
-    DECK_PREINSTALLS=$pre
-    # shellcheck disable=SC2034
-    DECK_GAMING=$game
-    deck_form_choice_write preinstalls "$pre" || return 1
-    deck_form_choice_write gaming "$game" || return 1
-    deck_form_choices_lock || return 1
-    return 0
-  done
-}
-
-# deck_form_choice_answer <name> -- the locked answer for `preinstalls` or
-# `gaming`: the global first (it mirrors the file), the persisted file
-# second. Prints "yes" or "no" and returns 0; returns 1 when neither has
-# an answer (e.g. a dry run where greeter never ran the choice screens).
-deck_form_choice_answer() {
-  local name=$1 val=""
-  case $name in
-    preinstalls) val=${DECK_PREINSTALLS:-} ;;
-    gaming)      val=${DECK_GAMING:-} ;;
-    *)           deck_form_warn "unknown choice '$name'"; return 1 ;;
-  esac
-  if [[ -z $val ]]; then
-    val=$(deck_form_choice_read "$name")
-  fi
-  if [[ $val != yes && $val != no ]]; then
+deck_form_commit_choices() {
+  local pre=$1 game=$2
+  if [[ $pre != yes && $pre != no ]]; then
+    deck_form_warn "refusing to commit choices with non-yes/no preinstalls '$pre'"
     return 1
   fi
-  printf '%s\n' "$val"
+  if [[ $game != yes && $game != no ]]; then
+    deck_form_warn "refusing to commit choices with non-yes/no gaming '$game'"
+    return 1
+  fi
+  # shellcheck disable=SC2034
+  DECK_PREINSTALLS=$pre
+  # shellcheck disable=SC2034
+  DECK_GAMING=$game
+  deck_form_choice_write preinstalls "$pre" || return 1
+  deck_form_choice_write gaming "$game" || return 1
+  deck_form_choices_lock || return 1
   return 0
 }
 
-# deck_form_readonly_screen <result-var> <title> <answer>
-# One Deck question shown READ-ONLY (2026-09-24 hardware feedback, operator
-# decision): the background install is already acting on the answer, so it
-# is shown but cannot be changed. Same logo + title as the real screen so
-# it is recognisably the same screen. Stores "forward" (A on Continue) or
-# "back" (B/Esc) in $result-var and returns 0. Never guesses: an
-# unrecognised row redraws.
-deck_form_readonly_screen() {
-  local resultvar=$1 title=$2 answer=$3
-  local choice ans answer_word=No
-  [[ $answer == yes ]] && answer_word=Yes
+# deck_form_run_variant_group -- the pre-installs ⇄ Install Steam? ⇄ Wi-Fi
+# group (16a/17/18), with B-back between all three and ONE commit at exit.
+# Until the commit NOTHING is written, so every back-and-forth is safe:
+#   pre-installs?; B = no-op (the wipe already started -- no cancel, no
+#     confirm/drive/S0 behind this point, and the picker is re-invoked
+#     without a full redraw, so B is visually inert too)
+#   Install Steam?; B = back to pre-installs (the operator correction --
+#     NOT a no-op)
+#   Wi-Fi list; B = back to Install Steam? (the Back row's effect; the
+#     wrapper signals it via DECK_WIFI_WANT_GAMING_BACK)
+# The group is LEFT -- and the answers committed -- exactly twice: Steam=No
+# answered (desktop-only: no Wi-Fi, no Steam screen), or Wi-Fi connected with
+# Steam=Yes (network-ready already fired on the join path; the lock lands in
+# the same screen transition, and the worker gates choices BEFORE network, so
+# the marker-then-lock order is unobservable to it). Returns 0 with globals
+# + locked files matching the LAST answers; 1 only when publishing fails.
+# Once locked, pre-installs is never reopenable: keyboard B is a bare picker
+# re-ask (its own block), and nothing after this function re-enters it.
+deck_form_run_variant_group() {
+  local pre="" game=""
   while true; do
-    clear_logo
-    echo
-    say "$title"
-    say "Your answer: $answer_word -- already being installed, can't be changed now."
-    say "Press A to continue, B to go back"
-    choice=$(printf 'Continue\n' | gum choose --header "Choose") || choice=""
-    case $choice in
-      Continue) ans=forward ;;
-      "")       ans=back ;;
-      *)        continue ;;
-    esac
-    printf -v "$resultvar" '%s' "$ans"
-    return 0
-  done
-}
-
-# deck_form_readonly_choices -- walk the locked Deck questions backwards
-# from the keyboard layout screen. One screen per B: Install Steam? first,
-# then pre-installs; B on pre-installs stays there (nothing before it is
-# reachable -- B must never return to the wipe confirm, the drive list, or
-# S0 once the wipe has started). A moves forward one screen; A on the last
-# one returns to the keyboard layout screen (returns 0).
-deck_form_readonly_choices() {
-  local screen=gaming answer nav title
-  while true; do
-    if [[ $screen == gaming ]]; then
-      title="Install Steam?"
-      answer=$(deck_form_choice_answer gaming) || return 1
-    else
-      title="Install Omarchy pre-installs?"
-      answer=$(deck_form_choice_answer preinstalls) || return 1
+    # The pre-installs screen answers yes/no only (back-mode "stay": B is
+    # a true no-op there, so there is no "back" leg to handle here).
+    if [[ -z $pre ]]; then
+      deck_form_preinstalls_screen pre
     fi
-    deck_form_readonly_screen nav "$title" "$answer"
-    if [[ $screen == gaming ]]; then
-      if [[ $nav == back ]]; then
-        screen=preinstalls
-      else
-        return 0
-      fi
-    else
-      if [[ $nav == forward ]]; then
-        screen=gaming
+    if [[ -z $game ]]; then
+      deck_form_gaming_screen game
+      if [[ $game == back ]]; then
+        pre=""
+        game=""
+        continue
       fi
     fi
+    if [[ $game == no ]]; then
+      deck_form_commit_choices "$pre" "$game" || return 1
+      return 0
+    fi
+    DECK_WIFI_WANT_GAMING_BACK=""
+    if deck_form_wifi_screen_gaming; then
+      deck_form_commit_choices "$pre" "$game" || return 1
+      return 0
+    fi
+    if [[ ${DECK_WIFI_WANT_GAMING_BACK:-} == yes ]]; then
+      game=""
+      continue
+    fi
+    deck_form_warn "the Wi-Fi screen ended without connecting and without going back -- refusing to guess the variant"
+    return 1
   done
 }
 
@@ -1535,15 +1587,13 @@ greeter() {
     drive_choice=""
   done
   deck_form_start_early_install "$drive_choice" || return 1
-  # The two choice screens (preinstalls, then Steam/Gaming), with B-back
-  # between them. Locked on completion: Stages gates on `choices/locked`.
-  deck_form_run_choice_screens || return 1
-  # Wi-Fi ONLY when Steam=yes (Stages skips its network gate entirely on
-  # steam=no, so no marker is ever needed there). Steam=yes with no
-  # connection keeps the network screen until connected, or B returns to
-  # the Steam choice (flipping to no, clearing any stale marker state).
+  # The variant group: pre-installs ⇄ Install Steam? ⇄ Wi-Fi with B-back
+  # between all three and ONE commit on exit (16a/17/18). Locked on
+  # completion: Stages gates on `choices/locked`.
+  deck_form_run_variant_group || return 1
+  # Steam progress ONLY when Steam=yes (Stages skips its network gate
+  # entirely on steam=no, so no marker is ever needed there).
   if [[ ${DECK_GAMING:-no} == yes ]]; then
-    deck_form_wifi_screen_gaming || return 1
     deck_form_steam_progress_screen || return 1
   fi
 }
@@ -1699,16 +1749,27 @@ deck_form_keyboard_status_action() {
 # nothing on it types anything.
 keyboard_form() {
   local allow_defer_provisioning="${1:-false}"
-  local status action
+  local status action need_chrome=1
 
   while true; do
-    clear_logo
-    echo
-    say "Let's setup your machine..."
-    if [[ $allow_defer_provisioning == true ]]; then
-      say --foreground 8 "Press Ctrl+C to prepare this machine for another owner."
+    # 16a: the chrome is drawn on ENTRY, never on B. Upstream's picker
+    # (gum choose in omarchy_prompt_keyboard, setup-form.sh) exits 1 on
+    # Esc, which arrives here as `reask` -- and re-invoking the picker
+    # WITHOUT clear_logo/redraw is visually a no-op (gum repaints only its
+    # own widget; the full-screen clear is what flashed). The read-only
+    # walk that used to live on this branch is gone (item 6 superseded by
+    # 16a): B on the keyboard layout does NOTHING, and once the variant
+    # group has locked, nothing here can reopen pre-installs.
+    if (( need_chrome == 1 )); then
+      clear_logo
+      echo
+      say "Let's setup your machine..."
+      if [[ $allow_defer_provisioning == true ]]; then
+        say --foreground 8 "Press Ctrl+C to prepare this machine for another owner."
+      fi
+      echo
+      need_chrome=0
     fi
-    echo
 
     # Upstream's picker, untouched -- see this block's "WHAT IS NOT DONE
     # HERE". A missing `omarchy_prompt_keyboard` (setup-form.sh unsourced)
@@ -1722,22 +1783,15 @@ keyboard_form() {
     case $action in
       accept) break ;;
       reask)
-        # B on the keyboard layout screen walks back to the Deck questions
-        # READ-ONLY (2026-09-24 hardware feedback, operator decision: the
-        # background install is already acting on those answers, so they
-        # are shown but cannot be changed). When the answers are empty --
-        # e.g. a dry run where greeter never ran the choice screens -- keep
-        # the old behaviour and re-ask the picker. A failed walk warns
-        # loudly and falls back to re-asking, never stops the install
-        # silently.
-        if deck_form_choice_answer preinstalls >/dev/null 2>&1 &&
-           deck_form_choice_answer gaming >/dev/null 2>&1; then
-          deck_form_readonly_choices ||
-            deck_form_warn "the read-only review of the Deck answers failed -- re-asking the keyboard layout instead of stopping"
-        fi
+        # B on the keyboard layout screen: a bare re-ask of the picker, no
+        # chrome, no walk, no flash. need_chrome stays 0.
         continue
         ;;
       defer-offer)
+        # The defer confirm draws its own screen over ours, so the chrome
+        # is re-armed for the return trip -- declining must still show the
+        # full screen, not the picker's widget floating over the confirm.
+        need_chrome=1
         if confirm_prepare_for_another_owner; then
           # shellcheck disable=SC2034  # read by configurator:991
           defer_provisioning=true
@@ -2161,11 +2215,14 @@ readonly DECK_NET_STOP_ROW="Stop the install"
 # Gaming-gate back row. Shown ONLY when the Wi-Fi screen runs inside the
 # Gaming=yes gate (deck_form_wifi_screen_gaming sets DECK_WIFI_GAMING_GATE=1):
 # B-on-list in the old shape redrew, which is correct for a mandatory
-# network -- but Gaming B must be able to reach the Gaming choice to flip
-# yes->no (four-variant flow). The row is explicit (never the Esc fallback:
-# Esc still redraws, per deck_form_net_choice_action's rule) and returns to
-# the Gaming question; the reversal rewrites `gaming` to no and clears any
-# stale marker BEFORE network-ready ever fired.
+# network -- but Gaming B must be able to reach the Gaming choice (16a: B on
+# the Wi-Fi list = back to Install Steam?, the Back row's effect). The row
+# is explicit (never the Esc fallback: Esc in the gate acts like this row,
+# while Esc with no gate still redraws, per deck_form_net_choice_action's
+# rule) and returns to the Gaming question. NOTHING is rewritten: with the
+# late lock (item 18) the answers are still in memory at this point, so
+# going back just re-asks -- there is no stale marker to clear because
+# network-ready only fires on success paths, which leave the group.
 readonly DECK_NET_GAMING_BACK_ROW="Back to Gaming choice"
 
 # What marks a secured network in the list.
@@ -3335,34 +3392,21 @@ deck_form_wifi_join() {
 # deck_form_wifi_screen_gaming -- the Gaming=yes network gate (four-variant
 # flow). Gaming=yes REQUIRES Internet (Steam downloads from Valve): this
 # wrapper stays in the network screen until connected, or B anywhere backs
-# out to the Gaming choice. The reversal (Gaming yes->no) rewrites the
-# `gaming` file to no and clears any marker state BEFORE network-ready ever
-# fired -- network-ready only fires on success paths below, so a flipped
-# answer can never leave a stale "online" signal for the worker. There is
-# deliberately no path back to preinstalls from here: once both choices were
-# answered the files are LOCKED (the package delta may already be running),
-# and un-asking preinstalls would contradict installed packages.
+# out to the Gaming choice (signalled via DECK_WIFI_WANT_GAMING_BACK with a
+# nonzero return -- the GROUP loop re-asks Install Steam?; with the late
+# lock (item 18) the answers are still in memory, so there is no file to
+# rewrite and no marker to clear: network-ready only fires on success).
 deck_form_wifi_screen_gaming() {
-  local rc=0
   # shellcheck disable=SC2034
   DECK_WIFI_GAMING_GATE=1
-  while true; do
-    DECK_WIFI_WANT_GAMING_BACK=""
-    deck_form_wifi_screen && rc=0 || rc=$?
-    if [[ $rc -eq 0 ]]; then
-      return 0
-    fi
-    if [[ ${DECK_WIFI_WANT_GAMING_BACK:-} == yes ]]; then
-      # shellcheck disable=SC2034
-      DECK_GAMING=no
-      deck_form_choice_write gaming no || return 1
-      deck_form_gaming_opt_out_cleanup || deck_form_warn "gaming opt-out cleanup reported an issue -- continuing desktop-only"
-      return 0
-    fi
-    return 1
-  done
+  DECK_WIFI_WANT_GAMING_BACK=""
+  deck_form_wifi_screen
 }
-# success), and a removal error is warned, not fatal.
+# deck_form_gaming_opt_out_cleanup -- after a POST-LOCK Gaming yes->no (the
+# Steam progress screen's "Continue without Steam"), remove the
+# network-ready marker so the worker's network gate observes the flip
+# instead of a stale "online" signal. A missing marker is fine (gaming=no
+# may never have fired it); a removal error is warned, not fatal.
 deck_form_gaming_opt_out_cleanup() {
   local marker=${DECK_NETWORK_READY_FILE:-/run/omarchy-deck/network-ready}
   if [[ -e $marker ]]; then
@@ -3417,7 +3461,78 @@ deck_form_steam_bar() {
   return 0
 }
 
-# deck_form_steam_failure_action_for <choice> -- failure menu decision:
+# deck_form_steam_waiting_text -- item 9: before the download has a size.
+# While the base install still runs, steam/progress carries no `X of Y KB`
+# pair (a phase line, or nothing yet). The old screen drew its indeterminate
+# `[????...]` bar there, which reads as broken. One clear sentence instead,
+# asserted on this function's own output like deck_form_s0_text.
+deck_form_steam_waiting_text() {
+  printf '%s\n' "Waiting for the base install to finish -- Steam starts downloading after it."
+}
+
+# The dynamic block below the chrome is ALWAYS this many lines -- determinate
+# or waiting -- so every refresh moves up exactly this far. A caller that
+# printed a variable number of lines would desync the cursor after one early
+# phase appeared or vanished, and the screen would tear instead of update.
+readonly DECK_STEAM_PROGRESS_LINES=3
+
+# deck_form_steam_draw_chrome -- item 10: drawn ONCE per screen visit.
+# The old screen ran clear_logo + the whole frame every ~1 s poll, which
+# flashes on the Deck's console. Now the chrome (full clear, title) is drawn
+# once and only the 3 changing lines move afterwards.
+deck_form_steam_draw_chrome() {
+  clear_logo
+  echo
+  say "Downloading Steam from Valve..."
+}
+
+# deck_form_steam_draw_lines <l1> <l2> <l3> -- the 3 dynamic lines, padded to
+# the logo's left edge like every other screen (PADDING_LEFT_SPACES, the same
+# width say/gum pads with). No cursor movement: first draw and refresh share
+# this, so the two can never disagree about the lines' shape.
+deck_form_steam_draw_lines() {
+  local l1=${1:-} l2=${2:-} l3=${3:-}
+  local pad=${PADDING_LEFT_SPACES:-}
+  printf '%s%s\n' "$pad" "$l1"
+  printf '%s%s\n' "$pad" "$l2"
+  printf '%s%s\n' "$pad" "$l3"
+}
+
+# deck_form_steam_refresh <l1> <l2> <l3> -- item 10: update the changing lines
+# IN PLACE. Move up DECK_STEAM_PROGRESS_LINES, clear each line (EL, so a
+# shorter line cannot leave ghosts of the longer one before it), redraw.
+# No clear_logo, no full-screen flash. B pressed here causes no redraw either:
+# the loop never reads keys for drawing purposes (see
+# deck_form_steam_discard_input -- B is consumed, never acted on).
+deck_form_steam_refresh() {
+  printf '\033[%dA\r' "$DECK_STEAM_PROGRESS_LINES"
+  local l1=${1:-} l2=${2:-} l3=${3:-}
+  local pad=${PADDING_LEFT_SPACES:-}
+  printf '\033[K%s%s\n' "$pad" "$l1"
+  printf '\033[K%s%s\n' "$pad" "$l2"
+  printf '\033[K%s%s\n' "$pad" "$l3"
+}
+
+# deck_form_steam_discard_input [tty] -- B on the download screen is a no-op
+# (16a), in BOTH senses: nothing is redrawn, and the byte must not leak into
+# the NEXT screen's reader (a stale Esc in the keyboard picker or an account
+# prompt would answer a question nobody asked). Zero-timeout reads: free when
+# idle. Hygiene, never a gate: always returns 0, skips non-tty paths.
+deck_form_steam_discard_input() {
+  local tty=${1:-${DECK_STEAM_TTY:-/dev/tty}}
+  local discarded_byte
+  if [[ ! -c $tty && ! -p $tty ]]; then
+    return 0
+  fi
+  # A SMALL NONZERO timeout, not `-t 0`: `read -t 0` only POLLS (it reports
+  # data ready without consuming a byte), so a `-t 0` loop spins forever the
+  # instant any byte is present -- measured, not assumed. The nonzero poll
+  # consumes what is there and costs one interval when idle, exactly like
+  # deck_form_drain_tty's own DECK_DRAIN_POLL_SECS.
+  # shellcheck disable=SC2034  # discarded_byte is deliberately discarded -- discarding IS the use
+  while IFS= read -r -t "$DECK_DRAIN_POLL_SECS" -n1 discarded_byte <>"$tty" 2>/dev/null; do :; done
+  return 0
+}
 # retry (re-poll), continue without Steam (flip gaming to no -- only if the
 # stage still allows it, checked by the caller), reboot/poweroff.
 # Empty/unrecognised redraws, never guesses.
@@ -3460,8 +3575,9 @@ deck_form_steam_may_drop_gaming() {
 deck_form_steam_progress_screen() {
   local status="" line="" early="" err action choice
   local systemctl_bin=${DECK_SYSTEMCTL_BIN:-systemctl}
-  local last_have="" last_t="" have_kb total_kb parsed now rate="" eta="" eta_text=""
-  local pct="" bar text
+  local have_kb total_kb parsed now rate="" eta="" eta_text=""
+  local pct="" bar text sub l1 l2 l3 new_hist
+  local steam_hist="" chrome_drawn=0 tty=${DECK_STEAM_TTY:-/dev/tty}
   while true; do
     if [[ ${DECK_GAMING:-no} != yes ]]; then
       return 0
@@ -3513,36 +3629,55 @@ deck_form_steam_progress_screen() {
     fi
     line=$(deck_form_steam_progress_line)
     text=$(deck_form_steam_progress_text "$status" "$line")
-    pct=""
+    pct=""; rate=""; eta=""; eta_text=""; sub=""
     if parsed=$(deck_form_parse_steam_progress "$line"); then
       have_kb=${parsed%% *}; total_kb=${parsed##* }
       pct=$(deck_form_steam_percent "$have_kb" "$total_kb" 2>/dev/null) || pct=""
       now=$(date +%s)
-      if [[ -n $last_have && -n $last_t && $have_kb =~ ^[0-9]+$ && $last_have =~ ^[0-9]+$ ]]; then
-        rate=$(deck_form_steam_rate "$last_have" "$last_t" "$have_kb" "$now" 2>/dev/null) || rate=""
-        if [[ -n $rate ]]; then
-          eta=$(deck_form_steam_eta "$(( total_kb - have_kb ))" "$rate" 2>/dev/null) || eta=""
-          [[ -n $eta ]] && eta_text=$(deck_form_format_eta "$eta" 2>/dev/null) || eta_text=""
+      # Windowed rate (item 11): every poll appends a sample; the displayed
+      # rate is the average over the surviving window, not over the last
+      # poll gap (which is 0.00 whenever the 20 s orchestrator cadence did
+      # not land a new line since the previous 1 s poll).
+      new_hist=$(deck_form_steam_hist_add "$steam_hist" "$now" "$have_kb" 2>/dev/null) && steam_hist=$new_hist
+      rate=$(deck_form_steam_hist_rate "$steam_hist" "$now" "$have_kb" 2>/dev/null) || rate=""
+      if [[ -n $rate ]]; then
+        eta=$(deck_form_steam_eta "$(( total_kb - have_kb ))" "$rate" 2>/dev/null) || eta=""
+        [[ -n $eta ]] && eta_text=$(deck_form_format_eta "$eta" 2>/dev/null) || eta_text=""
+      fi
+      bar=$(deck_form_steam_bar "$pct" 20)
+      l1=$bar; l2=$text
+      if [[ -n $rate ]]; then
+        if [[ -n $eta_text ]]; then
+          sub="${rate} MB/s, about ${eta_text} left"
+        else
+          sub="${rate} MB/s"
         fi
+      elif [[ -n $early && $early != "done" ]]; then
+        sub="Early install: $early"
       fi
-      last_have=$have_kb; last_t=$now
-    fi
-    bar=$(deck_form_steam_bar "$pct" 20)
-    clear_logo
-    echo
-    say "Downloading Steam from Valve..."
-    say "$bar"
-    say "$text"
-    if [[ -n $rate ]]; then
-      if [[ -n $eta_text ]]; then
-        say --foreground 8 "${rate} MB/s, about ${eta_text} left"
-      else
-        say --foreground 8 "${rate} MB/s"
+      l3=$sub
+    else
+      # Item 9: no size yet -- the base install is still running. No
+      # `[????...]` bar; the waiting sentence, the base phase when there is
+      # one, and a blank third line (the block is always 3 lines, so the
+      # cursor math below never desyncs).
+      l1=$(deck_form_steam_waiting_text)
+      l2=""
+      if [[ -n $early && $early != "done" ]]; then
+        l2="Base install: $early"
       fi
-    elif [[ -n $early && $early != "done" ]]; then
-      say --foreground 8 "Early install: $early"
+      l3=""
     fi
-    echo
+    if (( chrome_drawn == 0 )); then
+      deck_form_steam_draw_chrome
+      deck_form_steam_draw_lines "$l1" "$l2" "$l3"
+      chrome_drawn=1
+    else
+      deck_form_steam_refresh "$l1" "$l2" "$l3"
+    fi
+    # B is a no-op here (16a): consumed so it cannot leak into the next
+    # screen's reader, never redrawn for.
+    deck_form_steam_discard_input "$tty"
     # Bounded by the stage, not by this file: every iteration re-reads
     # steam/status (done/skipped/failed all return above) and the early
     # state (failed aborts above), so the loop ends when the download or
@@ -3663,13 +3798,26 @@ deck_form_wifi_screen() {
     choice=$(gum choose --header "Networks" <"$rows") || choice=""
     action=$(deck_form_net_choice_action "$choice")
     case $action in
-      redraw) continue ;;
+      redraw)
+        # 16a: B on the Wi-Fi list = back to Install Steam? -- the Back
+        # row's effect -- whenever the gate is set (which is every
+        # production visit: the group only ever calls the gate wrapper).
+        # With no gate (dry runs, the unit harness's direct calls) B keeps
+        # the old redraw, which is also what the direct-call tests pin.
+        if [[ ${DECK_WIFI_GAMING_GATE:-} == 1 ]]; then
+          # shellcheck disable=SC2034
+          DECK_WIFI_WANT_GAMING_BACK=yes
+          rm -f "$parsed" "$rows"
+          return 1
+        fi
+        continue ;;
       rescan) continue ;;
       gaming-back)
         # Gaming-gate back row: return to the Gaming choice. Signals the
-        # wrapper (DECK_WIFI_WANT_GAMING_BACK) and returns 1 -- the wrapper
-        # rewrites `gaming` to no and clears stale marker state. Only drawn
-        # inside the Gaming=yes gate (row only exists then).
+        # group (DECK_WIFI_WANT_GAMING_BACK) and returns 1 -- the group
+        # re-asks Install Steam? with the answers still in memory (late
+        # lock: nothing written yet, so no rewrite and no marker to clear).
+        # Only drawn inside the Gaming=yes gate (row only exists then).
         # shellcheck disable=SC2034
         DECK_WIFI_WANT_GAMING_BACK=yes
         rm -f "$parsed" "$rows"
@@ -4162,7 +4310,7 @@ deck_form_wipe_confirm() {
   clear_logo
   echo
   say "Are you sure? This will wipe $label."
-  say "Press A to wipe and install, B to go back"
+  say "Press A to wipe and install NOW, B to go back"
   # A held or bouncing A from the drive screen's own answer may still be
   # queued -- or still ARRIVING, under typematic autorepeat. Drain until the
   # input has been quiet for a full release window, so only a NEW press

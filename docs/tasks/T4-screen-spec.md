@@ -458,9 +458,10 @@ failure states · verified by**. Verification tiers follow
   ONE helper both the first showing and the B-from-drive-screen re-draw go
   through), then exactly two lines:
   *"This will install Omarchy on your Steam Deck."* /
-  *`Press A to install, B to cancel`*. The 2026-09-24 operator revision cut
-  everything else: the wipe scope lives on the drive screen and the wipe
-  confirm, where the choice is actually made.
+  *`Press A to install, B to cancel`* — both starting at the logo's left
+  edge (HW 2026-09-24 item 14: `deck_form_s0_text` prefixes
+  `PADDING_LEFT_SPACES`, the same width `say`/gum pads with, instead of
+  printing bare).
 - **After A: the drive screen, then the wipe confirm, then the early stage
   starts — OLED-gated.**
   A lists the eligible targets (`deck_form_drive_screen`: built-in NVMe
@@ -482,37 +483,42 @@ failure states · verified by**. Verification tiers follow
   invoked. A failed start aborts loudly; nothing continues silently. B on S0
   (Esc) is the safe exit: nothing erased yet, Reboot / Power off menu, never
   a shell.
-- **Then the two choice screens** (D-pad `gum choose` Yes/No rows, default
+- **Then the variant GROUP** (D-pad `gum choose` Yes/No rows, default
   **Yes** on both — 2026-09-24 hardware feedback): **Install Omarchy
   pre-installs?** (No: *"Can be installed later from
-  the Omarchy desktop."* — existing menu action) then **Install Steam?**
+  the Omarchy desktop."* — existing menu action) ⇄ **Install Steam?**
   (Yes: installs Steam, boots into Gaming Mode, *"(Requires Internet.)"*;
   No: *"Can be installed later from the Omarchy desktop."* — C6 conversion
-  script). B on Steam returns to preinstalls; B on preinstalls (the first
-  screen after the wipe started) is a no-op redraw — the old cancel menu's
-  "The drive was not touched." is false once the wipe has begun, and B must
-  never return to the wipe confirm, the drive list, or S0. Both answered → `choices/{preinstalls,gaming}` + `choices/locked`
-  written atomically (Stages gates on `locked`); preinstalls is then not
-  revisable. Steam=yes requires Internet: Wi-Fi runs (B on the list returns
-  to the Steam choice — yes→no flip, stale marker cleared), then the NEW
-  blocking Steam progress screen runs (bar + percent + MB + rate + ETA;
-  auto-proceeds on done; failure menu on failed — retry / continue-without-
-  Steam gated on unfinished work / reboot / power off, never a shell, never
-  a silent skip); Steam=no skips Wi-Fi AND the progress screen entirely
+  script) ⇄ Wi-Fi iff Steam=yes. B moves freely inside the group
+  (16a B map, which SUPERSEDES item 6's read-only walk — the walk is
+  removed): pre-installs B = nothing (no redraw, no cancel); Steam B = back
+  to pre-installs; Wi-Fi list B = back to Install Steam? (the Back row's
+  effect). NOTHING is written until the group is LEFT (item 18): Steam=No
+  answered, or Wi-Fi connected with Steam=Yes (network-ready fires on the
+  join path; the lock lands in the same transition — the worker gates
+  choices BEFORE network, so the order is unobservable). Then
+  `choices/{preinstalls,gaming}` + `choices/locked` are committed once, and
+  pre-installs is never reopenable. The NEW blocking Steam progress screen
+  runs iff Steam=yes (bar + percent + MB + smoothed windowed rate + ETA,
+  chrome drawn once with in-place line updates — HW items 9/10/11; waiting
+  sentence while the base install still runs; auto-proceeds on done;
+  failure menu on failed — retry / continue-without-Steam gated on
+  unfinished work / reboot / power off, never a shell, never a silent
+  skip); Steam=no skips Wi-Fi AND the progress screen entirely
   (Stages skips its network gate too — no marker needed).
 - **Controls.** A = install (Enter), B = cancel/back (Esc). Single-byte
   read; anything else loops, never guesses consent.
-- **B-back rules (2026-09-24 hardware feedback).** B always returns to the
-  previous screen, EXCEPT it can never return to the wipe confirmation (or
-  the drive list / S0) once the wipe has started. B on the keyboard layout
-  screen therefore walks back to the Deck questions **read-only**
-  (operator decision: the background install is already acting on those
-  answers, so they are shown — same logo + title — but cannot be changed):
-  one screen per B, Install Steam? first, then pre-installs; B on
-  pre-installs read-only stays there. A moves forward one screen; A on the
-  last returns to the keyboard layout screen. With no locked answers (a
-  dry run where greeter never ran), B keeps the old behaviour and re-asks
-  the picker. B from Wi-Fi returns to the Steam question, unchanged.
+- **B-back rules (16a B map — SUPERSEDES the read-only walk below).**
+  Welcome: B = cancel menu. Drive list: B = Welcome. Wipe confirm: B =
+  drive list. Pre-installs?: B = nothing (no redraw, no cancel — the wipe
+  has started). Install Steam?: B = back to Install pre-installs?
+  (operator correction — NOT a no-op). Wi-Fi list: B = back to Install
+  Steam? (the Back row's effect). Steam download: B = nothing (consumed,
+  never redrawn). Keyboard layout: B = nothing (the picker is re-invoked
+  with no chrome redraw; the read-only walk is REMOVED). Account screens
+  and summary: unchanged (B on an account field returns to the start of
+  the account screens via upstream's own `user_step` unwind — verified
+  against `configurator`, not changed).
 - **Text entry.** None.
 - **Failure states.** ⚠️ Upstream runs a `tte` colour animation here and **leaves
   the tty in raw/no-echo mode when killed**, which silently kills the gum prompts
@@ -552,9 +558,11 @@ failure states · verified by**. Verification tiers follow
   3. `Connecting to <SSID>…` (`gum spin`), then either `Connected` + the IP, or
      the failure branch (§5).
 - **Controls.** D-pad/stick = move, A = select, B = back to the list. In the Gaming gate the list carries a "Back to
-  Gaming choice" row above Rescan (B/Esc still redraws, never jumps); it
-  flips Gaming yes→no, rewrites the file, and clears any stale
-  network-ready marker. No path back to pre-installs from Wi-Fi (locked).
+  Gaming choice" row above Rescan, and B/Esc acts like that row (16a — back
+  to Install Steam?, with the answers still uncommitted, so nothing is
+  rewritten); with no gate B still redraws. No path back to pre-installs
+  from Wi-Fi (the group loop re-asks Steam?, never pre-installs, on a Wi-Fi
+  back).
   Trackpads = the two OSK cursors, triggers = press the key under **their own**
   cursor. `close` on the OSK hides it and restores B→Esc.
 - **Text entry.** ✅ **Yes — this is the one that made T8 exist.** Text-entry mode
@@ -674,7 +682,8 @@ failure states · verified by**. Verification tiers follow
   `NAME ^/dev/mmcblk[0-9]+$`, whole disk).
 - **The wipe confirm.** Logo, `Are you sure? This will wipe <label>.`
   (the same `deck_form_disk_label`, so rows, confirm and summary can never
-  disagree about the drive), `Press A to wipe and install, B to go back`.
+  disagree about the drive), `Press A to wipe and install NOW, B to go back`
+  ("NOW" in caps on purpose — HW item 15).
   The answer is read with S0's own single-byte A/B reader
   (`deck_form_s0_wait_key`) — NOT a gum confirm whose highlighted default
   could turn A into the wrong answer — and travels via result-var, never
