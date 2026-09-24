@@ -9,6 +9,65 @@ measured 82 MB/s. Not exercised: the physical controller, Wi-Fi radio, panel, ga
 rendering, audio, and the real form (cidata answers the form; `form-delay-seconds` simulates
 how long a human takes). A physical install wipes the Deck and needs the operator.
 
+## v6 — 2716be0, the v6 screen changes (same day, evening)
+
+**Current ISO.** Supersedes v5 as the one to install.
+
+| | |
+|---|---|
+| File | `pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-v6-x86_64.iso` |
+| Size / sha256 | 6,861,922,304 B · `b94ea1188cbbc26f7e10961dc57d98578adf8a8083ad62c8ffcc20ffa1fd092b` |
+| Source | commit `2716be0` (branch `hw-feedback-1`) |
+| Where | `~/.cache/omarchy-deck/release-2026.09.24-v6/` (ISO + `SHA256SUMS`, verified); build log `~/.cache/omarchy-deck/build-v6.log` |
+| Build | `iso/bin/build` against scratch `~/.cache/omarchy-deck/iso-build-fast-variants`, all guards green (`6.1`, `6.3`, `6.4a`, `6.4b`, `6.5a`, `6.5b`, `6.6`, `6.7`, `6.8`), `WRAPPER_EXIT=0`, script's final size/sha lines present, staged artifact re-hashed to the logged sha, first attempt |
+| Pins | unchanged: `omacom/omarchy@c668141e9c42` · `omacom/omarchy-iso@7cfb7111a068` · `omacom/omarchy-pkgs@5fe236736607` |
+
+What changed since v5 is exactly `2716be0` (items 9, 10, 11, 14, 15, 16a,
+17, 18 of `docs/findings/HW-INSTALL-FEEDBACK-2026-09-24.md`): the Steam
+download screen says "Waiting for the base install to finish" instead of a
+`[?????]` bar while the size is unknown (9), updates the changing lines in
+place instead of full-clearing every ~3 s (10), fixes the stuck-at-0.00 MB/s
+rate calculation and shows time left (11), aligns the welcome lines to the
+logo's left edge (14), the wipe confirm reads `Press A to wipe and install
+NOW, B to go back` (15), the operator's B map including Install Steam? B =
+back to pre-installs and true no-op B on pre-installs / Steam download /
+keyboard layout (16a), the Steam Yes → Wi-Fi → B → Steam No round trip that
+continues as a no-Steam install (17), and choice locking only when leaving
+the pre-installs/Steam/Wi-Fi group (18).
+
+Build note: the `==> ERROR: Invalid option -k` line from the container's
+mkinitcpio step appears once, exactly as in v4b's and v5's logs; it is
+pre-existing noise, not a guard failure (no FATAL anywhere, all guards
+green). The built tree was verified to carry the v6 changes ("Waiting for
+the base install to finish" and "install NOW" both present in the scratched
+`deck-form.sh`).
+
+QEMU on this ISO (`test/vm/vm-fast-install-test.sh`, `VM_FAST_REBOOT_CHECK=1`,
+form delay 90 s). Same odd-sized NVMe target as v3/v4/v5 (21,475,469,824
+bytes, mod 1 MiB = 633,344); neither harness log nor either serial log
+mentions "misalign". Both runs show the cidata early-stage start on screen
+and both reach `FASTINSTALL:DONE`.
+
+| pre-installs / Gaming | target | network | early stage | post-confirm (A) | of which waiting for early | reboot check | result | wall |
+|---|---|---|---|---|---|---|---|---|
+| no / no | NVMe (odd) | none | 29 s | 5 s | 0 s | login after 25 s | PASS | ~5 min |
+| no / yes | NVMe (odd) | user | 109 s | 26 s | 20 s | login after 35 s | PASS | ~5 min |
+
+Reading it: identical shape to v5's rows (28→29 s, 5→5 s; 99→109 s, 16→26 s)
+-- `2716be0` changes no timing path, as expected. The Steam fetch inside the
+no/yes early stage took 48 s here (38 s in v5; dev-box link variance, not a
+product change).
+
+Harness note: the wipe-confirm "NOW" text and the no-longer-full-clearing
+Steam screen caused no harness issue -- both runs PASSed on the first try,
+and no log matches on either the old or the new strings (the harness takes
+the cidata path and never shows those screens).
+
+**QEMU still cannot exercise the interactive screens** -- every VM run takes
+the cidata branch, so items 9, 10, 11, 14, 15, 16a, 17, and 18 run only in
+unit tests here (`test/unit/test-deck-form.sh`, green at `2716be0` per the
+orchestrator's review); they need the Deck.
+
 ## v5 — d76bab6, the interactive-install blocker + Steam=No screen trims (same day, evening)
 
 **Current ISO.** Supersedes v4 as the one to install.
