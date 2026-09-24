@@ -703,6 +703,27 @@ done <<<"$s0"
   fail "S0 must be exactly the install line plus the prompt line (2 total)" "got $s0_n lines: $s0"
 pass "S0 fits the width budget ($s0_width columns) and the row budget (2 lines)"
 
+# Raw-mode Enter: a tty left raw (upstream's own tte animation leaves it
+# raw/no-echo when killed mid-frame) delivers CR, not the empty read the
+# old code accepted alone -- and the old reader then looped forever on it.
+printf '\r' >"$work/s0-cr-tty"
+[[ $(deck_form_s0_wait_key "$work/s0-cr-tty") == proceed ]] ||
+  fail "a CR byte (raw-mode Enter) must answer proceed, not loop forever"
+pass "deck_form_s0_wait_key accepts CR as Enter (raw tty)"
+
+# A third byte still answers nothing: on a controller only A and B exist.
+# A fifo delivers junk, then Enter: the junk must be skipped and the Enter
+# after it still answers. (Not a regular file: re-opening one re-reads byte
+# 1 forever, which hangs the reader -- the suite's own watchdog had to kill
+# the first draft of this test.)
+mkfifo "$work/s0-junk-fifo"
+(printf 'x'; sleep 0.5; printf '\n') >"$work/s0-junk-fifo" &
+junk_writer=$!
+[[ $(deck_form_s0_wait_key "$work/s0-junk-fifo") == proceed ]] ||
+  fail "a junk byte must be skipped, with the Enter after it still answering proceed"
+wait "$junk_writer" 2>/dev/null || true
+pass "deck_form_s0_wait_key answers only A/Enter and B/Esc, never a third byte"
+
 
 # a fake `stty` on PATH that just records it was invoked with 'sane'.
 mkdir -p "$work/bin"
@@ -797,6 +818,40 @@ LC_ALL=C grep -qF "Press A to install, B to cancel" <<<"$out" ||
 LC_ALL=C grep -qF "Are you sure? This will wipe" "$work/s0-say.log" ||
   fail "greeter must show the wipe confirm after the drive screen -- the wipe starts ONLY on that A" "$(cat "$work/s0-say.log")"
 pass "greeter calls 'stty sane', prints the S0 text, and asks the wipe confirm"
+
+echo "--- deck_form_stty_sane: loud on failure, never fatal ----------------------"
+
+# A failing stty must WARN (the old `|| true` swallowed it whole) and still
+# return 0 -- a doubtful line discipline must not abort the installer.
+mkdir -p "$work/bin-failstty"
+cat >"$work/bin-failstty/stty" <<'EOF'
+#!/usr/bin/env bash
+printf 'ran\n' >>"$STTY_MARKER"
+printf 'stty: sans everything\n' >&2
+exit 3
+EOF
+chmod +x "$work/bin-failstty/stty"
+: >"$work/some-tty"
+: >"$work/stty-fail.marker"
+stty_rc=0
+out=$(STTY_MARKER="$work/stty-fail.marker" PATH="$work/bin-failstty:$PATH" deck_form_stty_sane "$work/some-tty" 2>&1) || stty_rc=$?
+LC_ALL=C grep -qF "ran" "$work/stty-fail.marker" ||
+  fail "the failing-stty harness is broken -- the fake stty never ran" "$(cat "$work/stty-fail.marker")"
+[[ $stty_rc -eq 0 ]] ||
+  fail "stty_sane must NOT abort when stty fails -- continuing with a doubtful tty beats no installer"
+LC_ALL=C grep -qF "WARNING" <<<"$out" ||
+  fail "stty_sane must WARN when stty fails, not go silent the way '|| true' did" "got: $out"
+pass "deck_form_stty_sane warns loudly and still returns 0 when stty fails"
+
+# Positive control: success stays silent (the suite's recording fake stty).
+: >"$work/stty-ok.marker"
+out=$(STTY_MARKER="$work/stty-ok.marker" PATH="$work/bin:$PATH" deck_form_stty_sane "$work/some-tty" 2>&1) ||
+  fail "stty_sane must return 0 when stty succeeds"
+LC_ALL=C grep -qF "sane-called" "$work/stty-ok.marker" ||
+  fail "stty_sane must still run 'stty sane' on the tty" "$(cat "$work/stty-ok.marker")"
+[[ -z $out ]] ||
+  fail "stty_sane must be silent on success" "got: $out"
+pass "deck_form_stty_sane runs 'stty sane' and says nothing when it works"
 
 # Four-variant flow: this greeter run answers preinstalls No + gaming No
 # via the choose queue, so Wi-Fi is SKIPPED (gaming=no never needs the
@@ -1049,11 +1104,85 @@ wait "$stale_writer" 2>/dev/null || true
 [[ $confirm_stale == proceed ]] ||
   fail "a STALE queued press must be drained -- only the NEW A counts" "got: $confirm_stale"
 pass "a stale queued press does not answer the confirm; the fresh A does"
-# And the drain is really wired into the confirm, not just present.
+# And the drain is really wired into the confirm, not just present. This
+# used to assert deck_form_drain_tty; that drain stops at the FIRST 50 ms
+# gap, which a held A (typematic autorepeat, ~30 ms spacing, no gaps at all)
+# never produces -- it sails through to the 64-byte bound and returns while
+# input is still flowing. The confirm now drains until QUIET instead, so
+# this assertion changed with the semantics (2026-09-24 hardware review).
 confirm_body=$(declare -f deck_form_wipe_confirm)
-LC_ALL=C grep -qF 'deck_form_drain_tty' <<<"$confirm_body" ||
-  fail "deck_form_wipe_confirm must drain the tty before reading -- a held A would confirm the wipe by itself" "$confirm_body"
-pass "the wipe confirm drains before it reads"
+LC_ALL=C grep -qF 'deck_form_drain_until_quiet' <<<"$confirm_body" ||
+  fail "deck_form_wipe_confirm must drain the tty until QUIET before reading -- a held A defeats a first-gap drain" "$confirm_body"
+pass "the wipe confirm drains until quiet before it reads"
+
+# The release window is a named constant, and it must exceed the VT
+# typematic delay (~250 ms): anything shorter still accepts a held key.
+[[ -n ${DECK_CONFIRM_QUIET_SECS:-} ]] ||
+  fail "the release window must be a named constant (DECK_CONFIRM_QUIET_SECS)"
+awk -v q="$DECK_CONFIRM_QUIET_SECS" 'BEGIN { exit !(q + 0 >= 0.5) }' ||
+  fail "the release window ($DECK_CONFIRM_QUIET_SECS s) must exceed the typematic delay, or a held key still counts as a fresh press"
+[[ -n ${DECK_CONFIRM_QUIET_CAP_SECS:-} ]] ||
+  fail "the quiet drain must be bounded by a named total cap (DECK_CONFIRM_QUIET_CAP_SECS)"
+pass "the release window is a named constant (${DECK_CONFIRM_QUIET_SECS}s, cap ${DECK_CONFIRM_QUIET_CAP_SECS}s) longer than the typematic delay"
+
+# Helper level, deterministic: a fifo pre-filled by a writer, then closed.
+# Quiet follows the bytes, so the helper consumes and returns 0.
+mkfifo "$work/quiet-fifo"
+(printf 'ab\n') >"$work/quiet-fifo" &
+quiet_writer=$!
+deck_form_drain_until_quiet "$work/quiet-fifo"
+wait "$quiet_writer"
+if IFS= read -r -t 0.2 -n1 _ <>"$work/quiet-fifo" 2>/dev/null; then
+  fail "drain_until_quiet must consume pre-filled fifo bytes -- a later read still found one"
+fi
+pass "deck_form_drain_until_quiet consumes every queued byte, then sees the silence"
+# Regular files skip, like deck_form_drain_tty: they never consume (every
+# open re-reads byte 1), so "until quiet" would never arrive -- and pending
+# input is a tty concept anyway.
+printf 'stale\n' >"$work/quiet-regular"
+deck_form_drain_until_quiet "$work/quiet-regular" ||
+  fail "drain_until_quiet of a regular file must return 0"
+[[ $(cat "$work/quiet-regular") == "stale" ]] ||
+  fail "drain_until_quiet must not touch a regular file" "$(cat "$work/quiet-regular")"
+pass "drain_until_quiet skips regular files (the unit fixtures), waiting only on ttys and fifos"
+
+echo "--- wipe confirm: a HELD A is not a press (typematic autorepeat) ----------"
+
+# A steady stream of Enters every ~30 ms for ~2.4 s (80 bytes, past the old
+# 64-byte bound, so the old first-gap drain provably returns mid-stream and
+# the confirm answers the stale input), then a full second of silence, then
+# ONE fresh key. The stale stream must NOT yield proceed; the fresh key
+# decides. The writer holds the fifo open throughout, so the confirm's own
+# `stty sane` open (read-only) can never block waiting for a writer.
+mkfifo "$work/confirm-held-fifo"
+(for ((i = 0; i < 80; i++)); do printf '\n'; sleep 0.03; done; sleep 1; printf '\033') >"$work/confirm-held-fifo" &
+held_writer=$!
+: >"$work/confirm-held-say.log"
+confirm_held=""
+DECK_TEST_SAY_LOG="$work/confirm-held-say.log" \
+DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-one-row" \
+  deck_form_wipe_confirm confirm_held /dev/nvme0n1 "$work/confirm-held-fifo" ||
+  fail "confirm after a held-A stream and a fresh B must answer, not fail"
+wait "$held_writer" 2>/dev/null || true
+[[ $confirm_held == back ]] ||
+  fail "a HELD A must not confirm the wipe -- only the fresh B after the silence counts" "got: $confirm_held"
+pass "a 2.4 s stream of stale Enters does not confirm; the fresh B after the silence does"
+
+# Control: the same stream, but the fresh key is A -- it must still confirm.
+# The gate blocks held keys, not new presses.
+mkfifo "$work/confirm-fresh-fifo"
+(for ((i = 0; i < 80; i++)); do printf '\n'; sleep 0.03; done; sleep 1; printf '\n') >"$work/confirm-fresh-fifo" &
+fresh_writer=$!
+: >"$work/confirm-fresh-say.log"
+confirm_fresh=""
+DECK_TEST_SAY_LOG="$work/confirm-fresh-say.log" \
+DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-one-row" \
+  deck_form_wipe_confirm confirm_fresh /dev/nvme0n1 "$work/confirm-fresh-fifo" ||
+  fail "confirm with a fresh A after the silence must answer, not fail"
+wait "$fresh_writer" 2>/dev/null || true
+[[ $confirm_fresh == proceed ]] ||
+  fail "a fresh A after the release silence must still confirm the wipe" "got: $confirm_fresh"
+pass "a fresh A after the release silence confirms (the gate blocks held keys, not new presses)"
 
 # Greeter-level: B on the confirm returns to the drive list (second row
 # picked), and only that run's A starts the wipe. The confirm is stubbed
@@ -3703,6 +3832,33 @@ if declare -f deck_form_disk_autoselect >/dev/null 2>&1; then
   fail "deck_form_disk_autoselect must be deleted -- nothing calls it any more, and a tested helper with no callers is §6.4's false confidence"
 fi
 pass "no auto-pick helper remains: every wipe target is chosen and confirmed"
+
+echo "--- eligible_disks: a missing boot source degrades loudly ------------------"
+
+# deck_form_eligible_disks calls bare `findmnt`, so it is faked via PATH.
+# Empty output (the suite-machine shape: no /run/archiso/bootmnt) must WARN
+# -- the exclusion then cannot work -- while still listing what is eligible.
+mkdir -p "$work/bin-findmnt"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$work/bin-findmnt/findmnt"
+chmod +x "$work/bin-findmnt/findmnt"
+out=$(PATH="$work/bin-findmnt:$PATH" DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-one-row" \
+      DECK_TEST_ROOT_DISK="" deck_form_eligible_disks 2>&1) ||
+  fail "eligible_disks must still list the NVMe when the boot source is unknown"
+LC_ALL=C grep -qxF "/dev/nvme0n1" <<<"$out" ||
+  fail "an unknown boot medium must not hide the eligible NVMe" "$out"
+LC_ALL=C grep -qF "boot-medium exclusion" <<<"$out" ||
+  fail "eligible_disks must WARN when findmnt gives no boot source -- the exclusion then silently cannot work" "$out"
+pass "eligible_disks warns loudly when the boot medium is unknown, and still lists what is eligible"
+
+# Positive control: a findmnt that reports a source stays silent about it.
+printf '#!/usr/bin/env bash\nprintf "/dev/sda1\\n"\n' >"$work/bin-findmnt/findmnt"
+out=$(PATH="$work/bin-findmnt:$PATH" DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-one-row" \
+      DECK_TEST_ROOT_DISK="" deck_form_eligible_disks 2>&1) ||
+  fail "eligible_disks must succeed when findmnt reports a source"
+if LC_ALL=C grep -qF "boot-medium exclusion" <<<"$out"; then
+  fail "no boot-source warning when findmnt DID report a source" "$out"
+fi
+pass "eligible_disks stays silent about the exclusion when findmnt reports a source"
 
 echo "--- S4 disk label formatting -------------------------------------------------"
 

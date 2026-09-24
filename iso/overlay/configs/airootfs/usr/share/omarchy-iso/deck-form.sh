@@ -732,6 +732,13 @@ deck_form_s0_text() {
 # read at all (fail loudly, never guess). Loops on any other key: on a
 # controller only A and B exist, and accepting a third byte as consent
 # would be consent by typo.
+# An empty read is Enter in cooked mode; a raw tty delivers it as CR (\r)
+# instead (upstream's own tte animation leaves the tty raw when killed
+# mid-frame -- the reason greeter runs `stty sane` first). Accepting only
+# the empty read would loop forever on a raw tty, so \r counts as Enter
+# too. \n is accepted alongside it for completeness (read -n1 can never
+# yield it -- a newline terminates the read and arrives empty -- but the
+# intent "either newline byte is Enter" should not depend on that).
 # DECK_S0_TTY is overridable so the unit suite never needs a real
 # controlling terminal.
 deck_form_s0_wait_key() {
@@ -742,7 +749,7 @@ deck_form_s0_wait_key() {
       deck_form_warn "could not read the S0 answer from $tty -- refusing to guess consent"
       return 1
     fi
-    if [[ -z $key ]]; then
+    if [[ -z $key || $key == $'\r' || $key == $'\n' ]]; then
       printf 'proceed\n'
       return 0
     fi
@@ -800,6 +807,56 @@ deck_form_drain_tty() {
   done
   deck_form_warn "discarded $i pending input bytes from $tty and stopped at the bound -- a held key may still have input queued"
   return 0
+}
+
+# The wipe confirm's release gate: keep draining until no byte has arrived
+# for DECK_CONFIRM_QUIET_SECS.
+#
+# WHY deck_form_drain_tty ABOVE IS NOT ENOUGH HERE (2026-09-24 hardware
+# review). That drain stops at the FIRST 50 ms gap -- but VT typematic
+# autorepeat keeps sending Enters ~every 30 ms for as long as A is held, so
+# holding A from the drive screen straight through the confirm's draw leaves
+# no 50 ms gap at all: the drain consumes its 64-byte bound and returns while
+# input is still flowing, and the confirm's own wait_key then reads the next
+# autorepeat Enter as a NEW press. The wipe confirms itself with nobody
+# pressing anything.
+#
+# So the confirm drains until QUIET, not until the first gap: only a full
+# DECK_CONFIRM_QUIET_SECS with zero bytes -- longer than the typematic delay
+# (~250 ms), so a held key can never produce it -- proves the key was
+# released. Only a press AFTER that silence counts.
+#
+# Bounded by DECK_CONFIRM_QUIET_CAP_SECS of silent draining: past the cap a
+# warning is issued and the wait continues LOUDLY rather than returning --
+# the cap bounds how long the drain stays silent, never what it accepts. A
+# cap-hit that returned "drained" would re-arm the exact defect (accepting
+# while input still flows). Always returns 0: like deck_form_drain_tty this
+# is hygiene before a destructive read, never a gate -- the wait_key after
+# it is what blocks for the real answer.
+#
+# Regular files skip, like deck_form_drain_tty: they never consume (every
+# open re-reads byte 1), so "until quiet" would never arrive. Pending input
+# is a tty concept anyway.
+readonly DECK_CONFIRM_QUIET_SECS=0.6
+readonly DECK_CONFIRM_QUIET_CAP_SECS=10
+deck_form_drain_until_quiet() {
+  local tty=$1
+  if [[ ! -c $tty && ! -p $tty ]]; then
+    return 0
+  fi
+  local quiet_byte drained=0 warned=0 start=$EPOCHSECONDS
+  while true; do
+    # shellcheck disable=SC2034  # quiet_byte is deliberately discarded -- draining IS the use
+    if IFS= read -r -t "$DECK_CONFIRM_QUIET_SECS" -n1 quiet_byte <>"$tty" 2>/dev/null; then
+      drained=$(( drained + 1 ))
+      if (( warned == 0 )) && (( EPOCHSECONDS - start >= DECK_CONFIRM_QUIET_CAP_SECS )); then
+        deck_form_warn "discarded $drained pending input bytes from $tty over ${DECK_CONFIRM_QUIET_CAP_SECS}s without a ${DECK_CONFIRM_QUIET_SECS}s silence -- a key may be held down. Still waiting for release, NOT accepting."
+        warned=1
+      fi
+    else
+      return 0
+    fi
+  done
 }
 
 # deck_form_s0_cancel_menu -- B on S0: the safe exit. Nothing is erased yet,
@@ -1492,7 +1549,10 @@ greeter() {
 }
 deck_form_stty_sane() {
   local tty=$1
-  stty sane <"$tty" 2>/dev/null || true
+  if ! stty sane <"$tty" 2>/dev/null; then
+    deck_form_warn "could not reset $tty with 'stty sane' -- later prompts may misbehave (raw/no-echo tty), continuing anyway"
+  fi
+  return 0
 }
 
 # ===========================================================================
@@ -1619,12 +1679,12 @@ deck_form_keyboard_status_action() {
 
 # keyboard_form [allow-defer-provisioning]
 #
-# Overrides `configurator`'s own (:189). The NAME is measured, not chosen:
-# `configurator` calls `keyboard_form` at :989 (top level, with `true`),
-# :273 (Esc unwind out of the user step) and :292 ("No, change it" on the
-# recap). All three re-enter this function, which is why the fix cannot be
-# "run the text screens earlier" -- there is no "earlier" that survives a
-# re-edit.
+# Overrides `configurator`'s own (:206). The NAME is measured, not chosen:
+# `configurator` calls `keyboard_form` bare (no `true` argument since the
+# 4.0.0-stable rebase) at :1044 (top level), :288 (Esc unwind out of the
+# user step) and :308 ("No, change it" on the recap). All three re-enter
+# this function, which is why the fix cannot be "run the text screens
+# earlier" -- there is no "earlier" that survives a re-edit.
 #
 # The loop mirrors upstream's structure deliberately, including the
 # deferred-provisioning Ctrl+C path (unreachable on a Deck -- §2.2 item 1,
@@ -4005,6 +4065,9 @@ deck_form_disk_dead_end() {
 deck_form_eligible_disks() {
   local boot_source exclude_disk lsblk_bin=${DECK_LSBLK_BIN:-lsblk}
   boot_source=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
+  if [[ -z $boot_source ]]; then
+    deck_form_warn "could not determine the live boot medium (findmnt gave no source for /run/archiso/bootmnt) -- the boot-medium exclusion cannot work, so the boot device may be listed as an install target"
+  fi
   exclude_disk=$(get_root_disk "$boot_source")
 
   local lsblk_tmp
@@ -4101,8 +4164,18 @@ deck_form_wipe_confirm() {
   say "Are you sure? This will wipe $label."
   say "Press A to wipe and install, B to go back"
   # A held or bouncing A from the drive screen's own answer may still be
-  # queued: drain it so only a NEW press confirms the wipe.
-  deck_form_drain_tty "$tty"
+  # queued -- or still ARRIVING, under typematic autorepeat. Drain until the
+  # input has been quiet for a full release window, so only a NEW press
+  # after a proven release confirms the wipe (see
+  # deck_form_drain_until_quiet: a first-gap drain is defeated by a held A).
+  deck_form_drain_until_quiet "$tty"
+  # The tty may have been left raw (upstream's own tte animation leaves it
+  # raw/no-echo when killed mid-frame -- greeter's `stty sane` note). A raw
+  # tty delivers Enter as CR, which the old reader looped on forever; the
+  # reader now accepts it, and this reset makes the confirm robust even if
+  # something since greeter left the line discipline raw again. Never fatal
+  # (deck_form_stty_sane only warns).
+  deck_form_stty_sane "$tty"
   if ! answer=$(deck_form_s0_wait_key "$tty"); then
     deck_form_warn "could not read the wipe confirmation from $tty -- refusing to guess consent"
     return 1

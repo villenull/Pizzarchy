@@ -81,3 +81,68 @@ pass "ESP stays at 1 MiB / 2 GiB; root starts immediately after it"
 read -r _ _ _ rz < <(deck_early_layout $((1024 * MIB)))
 (( rz <= 0 )) || fail "a 1 GiB disk must leave no room for root" "$rz"
 pass "a disk too small for the ESP yields a non-positive root size (render_early_config refuses it)"
+
+echo "--- run_early_orchestrator stops when render_early_config fails -----------"
+
+# The caller must propagate render's failure. It used to call it bare, and
+# the caller runs inside `if ! ...` where set -e is suspended -- so a too
+# small disk (or a blockdev failure) ran the orchestrator on an UNWRITTEN
+# config, and the precise "too small" error was overwritten by the generic
+# orchestrator failure. Extract the caller verbatim too.
+orchestrator_src=$(sed -n '/^run_early_orchestrator() {$/,/^}$/p' "$EARLY_SH")
+[[ -n $orchestrator_src ]] || fail "could not extract run_early_orchestrator from $EARLY_SH"
+render_full_src=$(sed -n '/^render_early_config() {$/,/^}$/p' "$EARLY_SH")
+[[ -n $render_full_src ]] || fail "could not extract render_early_config from $EARLY_SH"
+eval "$orchestrator_src"
+eval "$render_full_src"
+
+# shellcheck disable=SC2016 # a literal: the guarded call as written in the source
+LC_ALL=C grep -qF 'render_early_config "$disk" "$config" || return 1' "$EARLY_SH" ||
+  fail "run_early_orchestrator must check render_early_config (|| return 1) -- an unchecked call runs the orchestrator on an unwritten config"
+pass "run_early_orchestrator propagates a render failure instead of running on"
+
+# Functional: a too-small disk (fake blockdev fails -> 0 bytes) stops the
+# caller before the orchestrator binary, and the precise error survives in
+# the error file. Without the guard the missing-binary invocation fails and
+# overwrites it with the generic message, which is what the content
+# assertion below catches. (This suite previously needed no temp dir, so
+# this block makes its own.)
+orch_work=$(mktemp -d)
+trap 'rm -rf "$orch_work"' EXIT
+mkdir -p "$orch_work/render-bin"
+cat >"$orch_work/render-bin/blockdev" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$orch_work/render-bin/blockdev"
+orch_dir="$orch_work/render-state"
+mkdir -p "$orch_dir"
+# shellcheck disable=SC2034 # read by the eval'd functions, not this file
+DECK_EARLY_PROG=omarchy-deck-early
+# shellcheck disable=SC2034 # same
+DECK_EARLY_PHASE_FILE="$orch_dir/phase"
+# shellcheck disable=SC2034 # same
+DECK_EARLY_ERROR_FILE="$orch_dir/error"
+# shellcheck disable=SC2034 # same
+DECK_EARLY_LOG="$orch_dir/early.log"
+# run_early_orchestrator's inputs dir is hardcoded to /run (not writable
+# without root), so mkdir is shimmed to a temp root for this test only --
+# the shipped code is unmodified (asserted byte-identical above).
+mkdir() {
+  local a args=()
+  for a in "$@"; do
+    [[ $a == /run/omarchy-deck/* ]] && a="$orch_dir/fakeroot${a#/run/omarchy-deck}"
+    args+=("$a")
+  done
+  command mkdir "${args[@]}"
+}
+set +e
+PATH="$orch_work/render-bin:$PATH" run_early_orchestrator /dev/nvme0n1 1234567890 >"$orch_dir/out.log" 2>&1
+orch_rc=$?
+set -e
+unset -f mkdir
+[[ $orch_rc -ne 0 ]] ||
+  fail "run_early_orchestrator must fail on a too-small disk, not run the orchestrator"
+LC_ALL=C grep -qF "too small" "$DECK_EARLY_ERROR_FILE" ||
+  fail "the precise 'too small' error must survive -- it must not be overwritten by the generic orchestrator failure" "$(cat "$DECK_EARLY_ERROR_FILE" 2>/dev/null)"
+pass "a too-small disk stops the caller before the orchestrator, and the precise error survives"

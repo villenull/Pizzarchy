@@ -243,7 +243,7 @@ run_early_orchestrator() {
   local full_name=$workdir/user_full_name.txt
   local email=$workdir/user_email_address.txt
   local encrypt=$workdir/user_encrypt_installation.txt
-  render_early_config "$disk" "$config"
+  render_early_config "$disk" "$config" || return 1
   printf '{\n    "users": []\n}\n' >"$creds"
   chmod 600 "$creds"
   printf 'Deck User\n' >"$full_name"
