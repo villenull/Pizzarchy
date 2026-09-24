@@ -13,9 +13,9 @@ how long a human takes). A physical install wipes the Deck and needs the operato
 
 | | |
 |---|---|
-| Source | commit `892f3f5`; later commits change only `test/vm/` harnesses and docs |
+| File | `pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-x86_64.iso` |
 | Size / sha256 | 6,874,292,224 B · `8835528647421697f786e4b70ff9af7813c834520d80c9e2bfc56389911f94e1` |
-| Source | branch `fast-install`, commit `892f3f5` plus the harness-only follow-up in the same push as this file |
+| Source | commit `892f3f5`; later commits change only `test/vm/` harnesses and docs |
 | Build | `iso/bin/build`, all guards green; offline mirror ships 485 of 1,291 packages, the root image provides the rest |
 | Pins | unchanged: `omacom/omarchy@c668141e9c42` · `omacom/omarchy-iso@7cfb7111a068` · `omacom/omarchy-pkgs@5fe236736607` |
 
