@@ -149,6 +149,8 @@ source=('README'
   'omarchy-deck-patch-check.service'
   'omarchy-deck-enable-gaming'
   'omarchy-deck-enable-gaming.desktop'
+  'omarchy-deck-greeter.qml'
+  'omarchy-deck-greeter.metadata.desktop'
   'deck-session.sh'
   'deck-input-mapper.py'
   'deck_osk_layout.py'
@@ -162,7 +164,7 @@ source=('README'
   '0030-screensaver-font-fits-panel.meta'
   '0040-limine-boot-timeout.patch'
   '0040-limine-boot-timeout.meta')
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 # The one place the patch payload's destination is written down. The applier's
 # own DEFAULT_PATCH_DIR is /usr/share/omarchy-deck/patches and deck_patches.py's
@@ -251,6 +253,17 @@ package() {
   # action must stay discoverable after Gaming Mode exists.
   install -Dm644 "$srcdir/omarchy-deck-enable-gaming.desktop" \
     "$pkgdir/usr/share/applications/omarchy-deck-enable-gaming.desktop"
+  # The Gaming=No login screen's keyboard (FAST-INSTALL.md C4): Omarchy's
+  # own SDDM theme, loaded unchanged by path, plus an always-visible Qt
+  # Virtual Keyboard. Selected by the installer's greeter drop-in only after
+  # it has checked every file this theme loads exists on the target -- its
+  # QtQuick.VirtualKeyboard import comes from qt6-virtualkeyboard, which
+  # deck-install.packages puts on every Deck (not a depends=: that list is
+  # held to upstream's fresh-install manifest, and this is a Deck addition).
+  install -Dm644 "$srcdir/omarchy-deck-greeter.qml" \
+    "$pkgdir/usr/share/sddm/themes/omarchy-deck/Main.qml"
+  install -Dm644 "$srcdir/omarchy-deck-greeter.metadata.desktop" \
+    "$pkgdir/usr/share/sddm/themes/omarchy-deck/metadata.desktop"
   # deck-session.sh beside its mapper/OSK siblings, exactly as stage-input-
   # mapper requires ("sync the whole src/ directory, not just this script"):
   # the script resolves MAPPER_SRC_NAME + OSK_MODULES beside $0 at bake time.

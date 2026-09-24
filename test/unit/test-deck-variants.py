@@ -715,9 +715,44 @@ def make_target_fs(name: str) -> pathlib.Path:
 
 t4 = make_target_fs("greeter")
 fctx = FakeCtx(t4, username="deck")
+def _theme_files(t):
+    for rel in identity.GREETER_THEME_REQUIRES:
+        (t / rel).parent.mkdir(parents=True, exist_ok=True)
+        (t / rel).write_text("x\n")
+
+
+_theme_files(t4)
+# Omarchy's own drop-in selects its stock theme; ours must sort after it.
+(t4 / "etc/sddm.conf.d/99-omarchy-login.conf").write_text("[Theme]\nCurrent=omarchy\n")
 identity.configure_desktop_greeter(t4, "deck")
-kb = (t4 / "etc/sddm.conf.d/95-deck-virtual-keyboard.conf").read_text()
-check_true("greeter enables Qt Virtual Keyboard", "InputMethod=qtvirtualkeyboard" in kb)
+
+
+def _sddm_effective(conf_dir):
+    """SDDM's merge: files in name order, later keys win."""
+    import configparser
+    merged = configparser.ConfigParser(interpolation=None, strict=False)
+    merged.optionxform = str
+    for conf in sorted(conf_dir.glob("*.conf")):
+        merged.read(conf)
+    return merged
+
+
+eff = _sddm_effective(t4 / "etc/sddm.conf.d")
+check("the Deck keyboard theme wins over Omarchy's own Current=",
+      eff.get("Theme", "Current"), identity.GREETER_THEME)
+check("the Wayland greeter gets QT_IM_MODULE (InputMethod= alone is X11-only)",
+      eff.get("General", "GreeterEnvironment"), "QT_IM_MODULE=qtvirtualkeyboard")
+check("greeter enables Qt Virtual Keyboard", eff.get("General", "InputMethod"), "qtvirtualkeyboard")
+t4c = tmpdir("greeter-no-theme") / "mnt"
+for d in ("etc/sddm.conf.d", "var/lib/sddm", "usr/share/wayland-sessions"):
+    (t4c / d).mkdir(parents=True, exist_ok=True)
+(t4c / "usr/share/wayland-sessions/omarchy.desktop").write_text("[Desktop Entry]\n")
+check_raises(
+    "a keyboard theme that cannot load is never selected (no un-loginable greeter)",
+    lambda: identity.configure_desktop_greeter(t4c, "deck"),
+    "cannot load",
+)
+check("…and nothing was written for it", list((t4c / "etc/sddm.conf.d").iterdir()), [])
 state = (t4 / "var/lib/sddm/state.conf").read_text()
 check_true("greeter selects the Omarchy desktop session", "omarchy.desktop" in state and "User=deck" in state)
 check("no autologin file on the password greeter", (t4 / "etc/sddm.conf.d/autologin.conf").exists(), False)

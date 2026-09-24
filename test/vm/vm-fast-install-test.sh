@@ -137,7 +137,9 @@ fi
 # unless explicitly disabled, in which case the guest records the failure
 # honestly instead.
 if [[ $GAMING == yes && $NET_CHECK == 1 ]]; then
-  if curl -fsS --max-time 15 -o /dev/null https://client-update.steamstatic.com/ 2>/dev/null; then
+  # The CDN's root answers 403 by design; probe the client manifest the
+  # bootstrap itself downloads, which answers 200 when Steam is reachable.
+  if curl -fsS --max-time 15 -o /dev/null https://client-update.steamstatic.com/steam_client_ubuntu12 2>/dev/null; then
     log "network reachability: Steam CDN answers (gaming=yes may fetch)"
   else
     { log "FAIL: gaming=yes needs network reachability (VM_GAMING_NET_CHECK=1); the Steam CDN did not answer. Set VM_GAMING_NET_CHECK=0 to run anyway."; exit 2; }
@@ -460,19 +462,24 @@ if (( timing_needed )); then
           log "FAIL: gaming=no but the Gamescope login session is installed"
           status=1
         fi
-        sddm_hit=""
-        for conf in "$root_at"/etc/sddm.conf.d/*.conf; do
-          [[ -f $conf ]] || continue
-          if LC_ALL=C command grep -aq '^InputMethod=qtvirtualkeyboard' "$conf" 2>/dev/null; then
-            sddm_hit=$conf
-            break
-          fi
-        done
-        if [[ -z $sddm_hit ]]; then
-          log "FAIL: gaming=no but no SDDM config sets InputMethod=qtvirtualkeyboard (controller-operable greeter required)"
+        # The keyboard the Gaming=No login needs, as SDDM will resolve it:
+        # files in name order, the LAST value of a key wins. InputMethod=
+        # alone showed no keyboard on the Wayland greeter (QEMU, 2026-09-24);
+        # it takes the omarchy-deck theme AND QT_IM_MODULE in the greeter env.
+        sddm_last() { cat "$root_at"/etc/sddm.conf.d/*.conf 2>/dev/null | LC_ALL=C command grep -a "^$1=" | tail -n 1; }
+        greeter_theme=$(sddm_last Current)
+        greeter_env=$(sddm_last GreeterEnvironment)
+        if [[ $greeter_theme != "Current=omarchy-deck" ]]; then
+          log "FAIL: gaming=no but the effective SDDM theme is '${greeter_theme:-<none>}', not the omarchy-deck keyboard theme"
+          status=1
+        elif [[ ! -f $root_at/usr/share/sddm/themes/omarchy-deck/Main.qml ]]; then
+          log "FAIL: gaming=no selects omarchy-deck but /usr/share/sddm/themes/omarchy-deck/Main.qml is absent"
+          status=1
+        elif [[ $greeter_env != *QT_IM_MODULE=qtvirtualkeyboard* ]]; then
+          log "FAIL: gaming=no but the greeter environment lacks QT_IM_MODULE=qtvirtualkeyboard ('${greeter_env:-<none>}')"
           status=1
         else
-          log "gaming=no SDDM virtual keyboard: $sddm_hit"
+          log "gaming=no greeter keyboard: ${greeter_theme}, ${greeter_env}"
         fi
       fi
       preinstall_pkgs=(aether cliamp libreoffice-fresh xournalpp pinta obsidian obs-studio kdenlive moonlight-qt lazydocker omacut omacalc omawrite)

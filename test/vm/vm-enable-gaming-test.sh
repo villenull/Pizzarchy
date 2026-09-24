@@ -62,13 +62,15 @@ mkdir -p "$WORK"
 disk="$WORK/target.raw"
 vars="$WORK/OVMF_VARS.fd"
 qmp_sock="$WORK/qmp.sock"
-serial_sock="$WORK/serial.sock"
+serial_pipe="$WORK/serial"
 pidfile="$WORK/qemu.pid"
 serial_log="$WORK/serial.log"
 log "work dir: $WORK"
 cp --reflink=auto --sparse=always "$SRC_DISK" "$disk" || fail "could not copy $SRC_DISK"
 cp "$OVMF_VARS_TEMPLATE" "$vars"
 : >"$serial_log"
+rm -f "$serial_pipe.in" "$serial_pipe.out"
+mkfifo "$serial_pipe.in" "$serial_pipe.out" || fail "could not create the serial FIFOs"
 
 qmp() {
   printf '{"execute":"qmp_capabilities"}\n%s\n' "$1" |
@@ -76,12 +78,16 @@ qmp() {
 }
 # The installed system's text consoles are rotated for the Deck's portrait
 # panel (fbcon=rotate:1), which defeats OCR, so the login happens on the
-# serial getty instead: a socket chardev with a logfile, written through one
-# persistent socat. Its stdout is discarded -- the logfile has every byte.
+# serial getty instead. A pipe chardev (FIFOs, no connection state -- a socket
+# chardev lost all output after Limine on one run) with a logfile: input is
+# written to serial.in, serial.out is drained to /dev/null, the logfile keeps
+# every byte.
 ser_open() {
-  coproc SER { socat - "UNIX-CONNECT:${serial_sock}" >/dev/null 2>&1; }
+  exec {SER_IN}>"$serial_pipe.in" || fail "could not open $serial_pipe.in"
+  cat "$serial_pipe.out" >/dev/null &
+  ser_drain_pid=$!
 }
-ser_send() { printf '%s\r' "$1" >&"${SER[1]}" || fail "serial write failed"; }
+ser_send() { printf '%s\r' "$1" >&"$SER_IN" || fail "serial write failed"; }
 # ser_wait <regex> <timeout-s>: wait for NEW serial output (after mark) to match.
 ser_mark=0
 ser_wait() {
@@ -100,6 +106,8 @@ cleanup() {
   if [[ -f $pidfile ]] && pid=$(cat "$pidfile" 2>/dev/null) && kill -0 "$pid" 2>/dev/null; then
     kill "$pid" 2>/dev/null; sleep 1; kill -9 "$pid" 2>/dev/null || true
   fi
+  [[ -n ${ser_drain_pid:-} ]] && kill "$ser_drain_pid" 2>/dev/null
+  return 0
 }
 trap cleanup EXIT
 
@@ -115,7 +123,7 @@ qemu-system-x86_64 \
   -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
   -display none -vga std \
   -qmp "unix:${qmp_sock},server,nowait" \
-  -chardev "socket,id=ser0,path=${serial_sock},server=on,wait=off,logfile=${serial_log}" \
+  -chardev "pipe,id=ser0,path=${serial_pipe},logfile=${serial_log}" \
   -serial chardev:ser0 \
   -daemonize -pidfile "$pidfile" -no-reboot ||
   fail "qemu failed to launch"

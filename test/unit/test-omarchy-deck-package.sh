@@ -82,7 +82,8 @@ ISO_ROOT="$REPO_ROOT/iso"
 T12_SRC="$REPO_ROOT/src/omarchy-deck-patches"
 APPLIER_SRC="$T12_SRC/omarchy-deck-apply-patches"
 SESSION_PAYLOAD_FILES=(deck-session.sh deck-input-mapper.py deck_osk_layout.py deck_osk_tty.py deck_osk_wayland.py)
-C6_PACKAGE_FILES=(omarchy-deck-enable-gaming omarchy-deck-enable-gaming.desktop)
+C6_PACKAGE_FILES=(omarchy-deck-enable-gaming omarchy-deck-enable-gaming.desktop
+  omarchy-deck-greeter.qml omarchy-deck-greeter.metadata.desktop)
 DECK_PATCHES_PY="$ISO_ROOT/overlay/configs/airootfs/usr/share/omarchy-iso/orchestrator/deck_patches.py"
 # A real package manifest from a fresh Omarchy 4 install -- the package set the
 # offline mirror is built to satisfy. Section 1's depends check resolves every
@@ -595,7 +596,9 @@ done
 expected_list=("$PAYLOAD_PATH" "$LICENSE_PATH" "$STEP_APPLIER_REL" "$HOOK_DEST"
   "$UNIT_DEST" "$WANTS_DEST" "${patch_dests[@]}" "${session_dests[@]}"
   "usr/bin/omarchy-deck-enable-gaming"
-  "usr/share/applications/omarchy-deck-enable-gaming.desktop")
+  "usr/share/applications/omarchy-deck-enable-gaming.desktop"
+  "usr/share/sddm/themes/omarchy-deck/Main.qml"
+  "usr/share/sddm/themes/omarchy-deck/metadata.desktop")
 expected_files=$(printf '%s\n' "${expected_list[@]}" | sort)
 installed_files=$(cd "$pkg_dst" && find . \( -type f -o -type l \) | sed 's|^\./||' | sort)
 [[ $installed_files == "$expected_files" ]] ||

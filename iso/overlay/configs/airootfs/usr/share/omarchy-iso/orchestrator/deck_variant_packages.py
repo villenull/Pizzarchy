@@ -104,7 +104,10 @@ LIVE_PACMAN_CONF_REL = "etc/pacman.conf"
 # The mirror, at the same path live and in the target (upstream's bind).
 OFFLINE_MIRROR = "/var/cache/omarchy/mirror/offline"
 # Where the offline config is staged inside the target for one transaction.
-TARGET_OFFLINE_CONF = "/tmp/omarchy-deck-offline-pacman.conf"
+# NOT /tmp: arch-chroot mounts a fresh tmpfs there, so a file written to the
+# target's /tmp from outside is invisible inside the chroot (QEMU: "config
+# file /tmp/... could not be read"). /var/tmp is the target's own disk.
+TARGET_OFFLINE_CONF = "/var/tmp/omarchy-deck-offline-pacman.conf"
 
 
 def _target_has_file(target: Path, abs_path: str) -> bool:

@@ -1,0 +1,8 @@
+[SddmGreeterTheme]
+Name=Omarchy Deck
+Description=Omarchy's login theme with an on-screen keyboard for the Steam Deck
+Author=Omarchy Deck
+Type=sddm-theme
+Version=1.0
+MainScript=Main.qml
+QtVersion=6

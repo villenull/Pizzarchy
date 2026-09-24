@@ -370,7 +370,7 @@ for f in "${staged[@]}"; do
 done
 count "test staged the session payload from canonical src/ (${staged[*]})"
 # The pre-existing payload the function also installs.
-for f in README LICENSE omarchy-deck-apply-patches 50-omarchy-deck-reapply-patches.hook omarchy-deck-patch-check.service; do
+for f in README LICENSE omarchy-deck-apply-patches 50-omarchy-deck-reapply-patches.hook omarchy-deck-patch-check.service omarchy-deck-greeter.qml omarchy-deck-greeter.metadata.desktop; do
   cp "$PKG_DIR/$f" "$pkg_src/$f" 2>/dev/null || true
 done
 for f in 0010-lock-blank-timer-20s 0020-limine-interface-rotation 0030-screensaver-font-fits-panel 0040-limine-boot-timeout; do

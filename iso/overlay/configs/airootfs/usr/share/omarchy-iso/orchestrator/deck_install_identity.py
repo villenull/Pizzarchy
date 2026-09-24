@@ -214,6 +214,7 @@ def create_user(ctx) -> None:
             )
         _set_password(target, username, password_hash)
         _ensure_membership(target, username, _user_groups(ctx))
+        _grant_wheel_sudo(target)
         info(f"Late user {username} already present (uid 1000); password refreshed")
         return
     if _uid_taken(target, STAGING_UID):
@@ -236,7 +237,50 @@ def create_user(ctx) -> None:
         detail = (result.stderr or result.stdout or "unknown useradd error").strip()
         raise RuntimeError(f"could not create target user {username}: {detail}")
     _set_password(target, username, password_hash)
+    _grant_wheel_sudo(target)
     info(f"Late user {username} created (uid 1000)")
+
+
+# The grant upstream's omarchy-provision-owner writes for deferred-provisioning
+# installs, verbatim and under the same name: those installs skip archinstall's
+# create_users, which is what normally enables %wheel, and the late stage
+# replaces provision-owner's account creation. Without it the owner is in
+# wheel and sudo still refuses them -- found by the first QEMU run of the
+# in-place Gaming Mode opt-in ("not allowed to execute ... as root").
+# Password-required, so the payload audit's NOPASSWD rule is not in play.
+WHEEL_SUDOERS = "/etc/sudoers.d/00-omarchy-wheel"
+WHEEL_SUDOERS_LINE = "%wheel ALL=(ALL:ALL) ALL"
+
+
+def _grant_wheel_sudo(target: Path) -> None:
+    """Install WHEEL_SUDOERS inside the target, validated by the target's own
+    visudo BEFORE it is moved into place (a malformed drop-in breaks sudo for
+    every user), then read back. Raises on any failure."""
+    script = (
+        "set -e; umask 0077; "
+        f"t=$(mktemp /etc/sudoers.d/.00-omarchy-wheel.XXXXXX); trap 'rm -f \"$t\"' EXIT; "
+        f"printf '%s\\n' '{WHEEL_SUDOERS_LINE}' >\"$t\"; "
+        "visudo -cf \"$t\" >/dev/null; chmod 0440 \"$t\"; "
+        f"mv -f \"$t\" {WHEEL_SUDOERS}"
+    )
+    result = subprocess.run(
+        ["arch-chroot", str(target), "sh", "-c", script],
+        check=False, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "unknown error").strip()
+        raise RuntimeError(f"could not install {WHEEL_SUDOERS} on the target: {detail}")
+    written = target / WHEEL_SUDOERS.lstrip("/")
+    try:
+        lines = written.read_text().splitlines()
+        mode = written.stat().st_mode & 0o777
+    except OSError as exc:
+        raise RuntimeError(f"{WHEEL_SUDOERS} is not readable back from the target: {exc}") from exc
+    if lines != [WHEEL_SUDOERS_LINE] or mode != 0o440:
+        raise RuntimeError(
+            f"{WHEEL_SUDOERS} read back as {lines!r} mode {mode:04o}, "
+            f"not [{WHEEL_SUDOERS_LINE!r}] mode 0440"
+        )
 
 
 def _staging_home_present(target: Path) -> bool:
@@ -315,13 +359,37 @@ def _set_password(target: Path, username: str, password_hash: str) -> None:
 # Qt Virtual Keyboard must be enabled so the Deck's trackpad/controller can
 # type the password. The session file assertion is the enforcement: a
 # greeter naming a missing .desktop is a login loop with no controller
-# escape, and Main verifies the surface visually in QEMU.
+# escape. Verified in QEMU (2026-09-24) that InputMethod= ALONE shows no
+# keyboard: SDDM applies it only on its X11 path, the Wayland greeter logs
+# "input method is not set", and Omarchy's theme has no InputPanel. So this
+# drop-in also passes QT_IM_MODULE through GreeterEnvironment= and selects
+# the omarchy-deck theme (the omarchy-deck package: Omarchy's own theme,
+# loaded unchanged, plus an always-visible InputPanel). With both, pointer
+# clicks alone typed a password and logged in.
 
 DESKTOP_SESSION = "omarchy"
 DESKTOP_SESSION_DIRS = ("usr/share/wayland-sessions", "usr/local/share/wayland-sessions")
-GREETER_KB_REL = "etc/sddm.conf.d/95-deck-virtual-keyboard.conf"
-GREETER_KB_TEXT = "[General]\nInputMethod=qtvirtualkeyboard\n"
+# 'zx-' sorts after Omarchy's 99-omarchy-login.conf (Current=omarchy), so our
+# Current= wins, and before zy-deck-greeter.conf / zz-deck-session.conf.
+GREETER_KB_REL = "etc/sddm.conf.d/zx-deck-greeter-keyboard.conf"
+GREETER_THEME = "omarchy-deck"
+GREETER_KB_TEXT = (
+    "[General]\n"
+    "InputMethod=qtvirtualkeyboard\n"
+    "GreeterEnvironment=QT_IM_MODULE=qtvirtualkeyboard\n"
+    "\n"
+    "[Theme]\n"
+    f"Current={GREETER_THEME}\n"
+)
 GREETER_KB_MODE = 0o644
+# Everything the selected theme loads. A theme that cannot load leaves SDDM
+# with a greeter that cannot log in -- so each must exist before we point at it.
+GREETER_THEME_REQUIRES = (
+    f"usr/share/sddm/themes/{GREETER_THEME}/Main.qml",
+    f"usr/share/sddm/themes/{GREETER_THEME}/metadata.desktop",
+    "usr/share/sddm/themes/omarchy/Main.qml",
+    "usr/lib/qt6/qml/QtQuick/VirtualKeyboard/qmldir",
+)
 SDDM_CONF_D_REL = "etc/sddm.conf.d"
 # Basename shared with deck_autologin (same sort-last contract); imported
 # lazily to avoid a hard cross-module constant that drifts silently.
@@ -367,6 +435,16 @@ def configure_desktop_greeter(target, username: str) -> dict:
         _error(f"Desktop greeter: {record['error']}")
         raise RuntimeError(record["error"])
     record["session_file"] = session_file
+    missing = [rel for rel in GREETER_THEME_REQUIRES if not (target / rel).is_file()]
+    if missing:
+        record["status"] = "failed"
+        record["error"] = (
+            f"the {GREETER_THEME} greeter theme cannot load on this target (missing: "
+            + ", ".join("/" + rel for rel in missing)
+            + "); selecting it would leave a login screen that cannot log in"
+        )
+        _error(f"Desktop greeter: {record['error']}")
+        raise RuntimeError(record["error"])
     kb_path = target / GREETER_KB_REL
     try:
         kb_path.parent.mkdir(parents=True, exist_ok=True)
