@@ -183,8 +183,21 @@ CHROOT_ENV_FLAG = "DECK_SESSION_CHROOT"
 USER_ENV_FLAG = "DECK_SESSION_USER"
 
 # The verb that prints the stage list. Asked of the script rather than written
-# down here -- decision 1.
+# down here -- a copy here would be a second source of truth for what an
+# install bakes, and the wrong copy the day a stage is added.
 LIST_VERB = "list-bake-stages"
+
+# The verb that prints the desktop-only stage list (gaming=no). Asked of the
+# script, never copied here -- same rule as LIST_VERB above. Main owns the
+# script side (`list-desktop-bake-stages` + DESKTOP_BAKE_STAGES); this module
+# only consumes the answer.
+DESKTOP_LIST_VERB = "list-desktop-bake-stages"
+
+# Env flag selecting the desktop-only branches inside the chroot (set
+# alongside CHROOT/USER for every stage invocation in desktop mode, including
+# the list verb itself: the script refuses DESKTOP_ONLY outside the chroot).
+DESKTOP_ONLY_ENV_FLAG = "DECK_SESSION_DESKTOP_ONLY"
+
 
 # The prefix deck-session.sh's defer() prints. Every line carrying it is copied
 # into the record, because a deferred check that is only in the install log is a
@@ -281,20 +294,24 @@ def chroot_command(target, argv) -> list[str]:
     return ["arch-chroot", str(target), *argv]
 
 
-def chroot_env(user: str) -> dict:
+def chroot_env(user: str, desktop_only: bool = False) -> dict:
     """The environment the script sees inside the chroot.
 
     Built from this process's, not from scratch: ``arch-chroot`` needs PATH and
-    the script shells out to ordinary tools. The two flags are what select the
-    adapted branches -- see the CHROOT MODE block in ``src/deck-session.sh``.
+    the script shells out to ordinary tools. The flags select the adapted
+    branches -- see the CHROOT MODE block in ``src/deck-session.sh``. Desktop
+    mode additionally sets ``DECK_SESSION_DESKTOP_ONLY=1`` so gaming-only
+    session preconditions are skipped while hardware/SDDM checks stay.
     """
     env = dict(os.environ)
     env[CHROOT_ENV_FLAG] = "1"
     env[USER_ENV_FLAG] = user
+    if desktop_only:
+        env[DESKTOP_ONLY_ENV_FLAG] = "1"
     return env
 
 
-def run_in_target(target, argv, user: str, timeout: int = STAGE_TIMEOUT_SECONDS) -> tuple[int, str]:
+def run_in_target(target, argv, user: str, timeout: int = STAGE_TIMEOUT_SECONDS, desktop_only: bool = False) -> tuple[int, str]:
     """Run the script in the target. Returns (exit code, combined output).
 
     ``check=False``: a non-zero exit is a stage reporting, not an accident, and
@@ -307,7 +324,7 @@ def run_in_target(target, argv, user: str, timeout: int = STAGE_TIMEOUT_SECONDS)
             text=True,
             check=False,
             timeout=timeout,
-            env=chroot_env(user),
+            env=chroot_env(user, desktop_only),
         )
     except subprocess.TimeoutExpired as exc:
         captured = (exc.stdout or "") + (exc.stderr or "")
@@ -382,7 +399,7 @@ def parse_stage_list(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def bake_session(ctx, runner=None, asset_dir=None) -> dict:
+def bake_session(ctx, runner=None, asset_dir=None, desktop_only: bool = False) -> dict:
     """Bake the session layer onto ``ctx.target`` and return the record.
 
     ``runner`` is injectable so the suite can drive every branch without a
@@ -391,9 +408,16 @@ def bake_session(ctx, runner=None, asset_dir=None) -> dict:
     ``runner=run_in_target`` for ``deck_patches.apply_patches``'s reason: a
     default argument binds the function object at *definition* time, so
     replacing the module attribute would silently keep calling the real one.
+
+    ``desktop_only`` selects the ``list-desktop-bake-stages`` subset (mapper,
+    lizard, OSK, greeter, power -- no Steam/session-switch/default-gaming)
+    with ``DECK_SESSION_DESKTOP_ONLY=1`` on every chroot invocation. The
+    default runner is wrapped, not replaced, so existing callers keep working.
     """
     if runner is None:
         runner = run_in_target
+    if desktop_only:
+        runner = _desktop_runner(runner)
     target = Path(ctx.target)
 
     record: dict = {
@@ -456,9 +480,11 @@ def bake_session(ctx, runner=None, asset_dir=None) -> dict:
     record["payload"] = [sanitize_text(n) for n in names]
     script = script_path_in_target()
     record["script"] = script
+    record["desktop_only"] = desktop_only
+    record["list_verb"] = DESKTOP_LIST_VERB if desktop_only else LIST_VERB
 
     try:
-        _run_stages(record, target, script, user.name, runner)
+        _run_stages(record, target, script, user.name, runner, desktop_only)
     finally:
         # Always, and on every path: the scaffolding is not part of the
         # installed system. A failure to clean it up is a warning rather than a
@@ -474,9 +500,27 @@ def bake_session(ctx, runner=None, asset_dir=None) -> dict:
     return record
 
 
-def _run_stages(record: dict, target: Path, script: str, user: str, runner) -> None:
+def _desktop_runner(runner):
+    """Wrap a runner so every chroot invocation carries the desktop-only flag.
+
+    The real ``run_in_target`` takes ``desktop_only`` natively; test doubles
+    take ``(target, argv, user, timeout)`` and would fail on the extra kwarg.
+    Calling with the flag first and falling back keeps both working without
+    a second calling convention to drift.
+    """
+    def wrapped(target, argv, user, timeout=None):
+        kwargs = {} if timeout is None else {"timeout": timeout}
+        try:
+            return runner(target, argv, user, desktop_only=True, **kwargs)
+        except TypeError:
+            return runner(target, argv, user, **kwargs)
+    return wrapped
+
+
+def _run_stages(record: dict, target: Path, script: str, user: str, runner, desktop_only: bool = False) -> None:
     """Ask the script for its stage list, run each one, fill in the record."""
-    code, output = runner(target, [script, LIST_VERB], user, LIST_TIMEOUT_SECONDS)
+    verb = DESKTOP_LIST_VERB if desktop_only else LIST_VERB
+    code, output = runner(target, [script, verb], user, LIST_TIMEOUT_SECONDS)
     stages = parse_stage_list(output) if code == 0 else []
     if not stages:
         # 🔴 NOT recoverable with a hardcoded list, deliberately. A list written
@@ -552,9 +596,14 @@ def _run_stages(record: dict, target: Path, script: str, user: str, runner) -> N
     record["error"] = sanitize_text(
         f"{len(record['failed'])} session stage(s) failed ({', '.join(record['failed'])})"
         + (f" and {len(record['skipped'])} were skipped" if record["skipped"] else "")
-        + ". The Deck boots and reaches Gaming Mode; what it may be missing is the way to "
-        "Desktop Mode and back. Re-runnable on the installed machine: every stage is "
-        "idempotent.",
+        + (
+            ". The desktop-only installer cannot complete with a missing controller or "
+            "keyboard stage; fix the reported failure and retry."
+            if desktop_only
+            else ". The Deck boots and reaches Gaming Mode; what it may be missing is the "
+            "way to Desktop Mode and back. Re-runnable on the installed machine: every "
+            "stage is idempotent."
+        ),
         limit=400,
     )
     error(f"Deck session bake: {record['error']}")

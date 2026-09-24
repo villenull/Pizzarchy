@@ -707,11 +707,19 @@ deck_form_text_prompt() {
 # ===========================================================================
 
 readonly -a DECK_S0_LINES=(
-  "This installs Omarchy on your Steam Deck and erases the internal drive."
-  "It includes proprietary firmware from AMD and Valve (graphics, Wi-Fi, Bluetooth, audio DSP) -- the Deck does not work without it."
-  "Steam is downloaded from Valve during setup; everything else is already on this USB stick."
+  "THIS WILL INSTALL OMARCHY ON YOUR STEAM DECK. PROCEED?"
+  ""
+  "Pressing A wipes the built-in drive immediately; there is no later disk confirmation."
+  "The SD card is never touched."
+  "Stopping after A leaves no working system until an install finishes."
+  "It includes proprietary firmware from AMD and Valve -- graphics, Wi-Fi,"
+  "Bluetooth, audio DSP. The Deck does not work without it."
+  "Gaming Mode downloads Steam from Valve during setup; everything else is already on this USB stick."
 )
-readonly DECK_S0_PROMPT_LINE="Press A to begin"
+# The prompt names both keys: A installs, B cancels. The old "Press A to
+# erase the drive and begin" is retired with the bare-Enter greeter -- B is
+# now a real answer, so the line must say so.
+readonly DECK_S0_PROMPT_LINE="Press A to install, B to cancel"
 
 # deck_form_s0_text
 # Split out so the [U] suite asserts on the FUNCTION'S OWN OUTPUT
@@ -721,6 +729,423 @@ deck_form_s0_text() {
   local line
   for line in "${DECK_S0_LINES[@]}"; do printf '%s\n' "$line"; done
   printf '%s\n' "$DECK_S0_PROMPT_LINE"
+}
+
+# deck_form_s0_wait_key <tty> -- S0's A/B answer. Prints "proceed" (A/Enter)
+# or "cancel" (B/Esc) and returns 0; returns 1 only when the tty cannot be
+# read at all (fail loudly, never guess). Loops on any other key: on a
+# controller only A and B exist, and accepting a third byte as consent
+# would be consent by typo.
+# DECK_S0_TTY is overridable so the unit suite never needs a real
+# controlling terminal.
+deck_form_s0_wait_key() {
+  local tty=$1 key=""
+  while true; do
+    key=""
+    if ! IFS= read -r -n1 key <"$tty" 2>/dev/null; then
+      deck_form_warn "could not read the S0 answer from $tty -- refusing to guess consent"
+      return 1
+    fi
+    if [[ -z $key ]]; then
+      printf 'proceed\n'
+      return 0
+    fi
+    if [[ $key == $'\e' ]]; then
+      printf 'cancel\n'
+      return 0
+    fi
+  done
+}
+
+# deck_form_s0_cancel_menu -- B on S0: the safe exit. Nothing is erased yet,
+# so this says so and offers Reboot / Power off (the existing dead-end
+# pattern: never a shell). Never returns on a real machine; under the suite's
+# stubs it returns so the caller can be asserted.
+deck_form_s0_cancel_menu() {
+  local choice action
+  while true; do
+    clear_logo
+    echo
+    say "Install cancelled. The drive was not touched."
+    echo
+    choice=$(deck_form_disk_dead_end_items | gum choose --header "What next?") || choice=""
+    action=$(deck_form_disk_dead_end_action_for "$choice")
+    case $action in
+      reboot)   systemctl reboot ;;
+      poweroff) systemctl poweroff ;;
+      *)        : ;;
+    esac
+  done
+}
+# ===========================================================================
+# FAST-INSTALL C4 -- the early stage (docs/tasks/FAST-INSTALL.md contracts
+# C1/C4; the binary itself is Stages' slice, this file only shells out to it)
+# ===========================================================================
+#
+# S0's A press IS the erase consent, so A starts the background install:
+# greeter resolves the single eligible disk (deck_form_eligible_disks +
+# deck_form_disk_autoselect -- the same resolver disk_form uses) and runs
+# `omarchy-deck-early start "$disk"`. Zero or 2+ disks reach the existing
+# dead end BEFORE anything is erased; a failed start aborts loudly.
+#
+# DECK_EARLY_BIN exists so the [U] suite can point this at a fake instead
+# of starting a real background install on the test machine. The default is
+# C1's live-ISO command name.
+readonly DECK_EARLY_BIN_DEFAULT=omarchy-deck-early
+readonly DECK_EARLY_ERROR_FILE_DEFAULT=/run/omarchy-deck/early/error
+readonly DECK_STEAM_STATUS_FILE_DEFAULT=/run/omarchy-deck/steam/status
+readonly DECK_STEAM_ERROR_FILE_DEFAULT=/run/omarchy-deck/steam/error
+
+deck_form_early_bin() { printf '%s\n' "${DECK_EARLY_BIN:-$DECK_EARLY_BIN_DEFAULT}"; }
+
+# deck_form_start_early_install -- S0-A. Verified-OLED + single-NVMe gate,
+# then sets the global `disk` (configurator's JSON writers read it) and
+# starts the early stage. Returns nonzero -- and aborts -- when the machine
+# is not a verified OLED Deck, when there is no single NVMe disk, or when
+# the start fails. Never returns 0 without the early stage running.
+deck_form_start_early_install() {
+  local eligible sole early_bin product_msg vendor_msg
+  # OLED wipe gate FIRST -- before even listing disks. Kernel selection may
+  # accept Jupiter/generic Valve (harmless, reversible); the irreversible
+  # wipe may not. A Jupiter (unverified LCD), a generic laptop NVMe, or
+  # unreadable DMI reaches the dead end here, with the reason SAID, before
+  # anything is probed for erasure.
+  if ! deck_form_is_oled_deck; then
+    product_msg="unreadable"; vendor_msg="unreadable"
+    [[ -r ${DECK_DMI_PRODUCT:-$DECK_DMI_PRODUCT_DEFAULT} ]] && product_msg=$(<"${DECK_DMI_PRODUCT:-$DECK_DMI_PRODUCT_DEFAULT}")
+    [[ -r ${DECK_DMI_VENDOR:-$DECK_DMI_VENDOR_DEFAULT} ]] && vendor_msg=$(<"${DECK_DMI_VENDOR:-$DECK_DMI_VENDOR_DEFAULT}")
+    deck_form_warn "not a verified OLED Deck (product='${product_msg}', vendor='${vendor_msg}') -- refusing to wipe"
+    deck_form_disk_dead_end
+    abort "This installer wipes only a verified OLED Steam Deck (Galileo/Valve) with its built-in NVMe."
+    return 1
+  fi
+  if ! eligible=$(deck_form_eligible_disks); then
+    deck_form_disk_dead_end
+    abort "No eligible install disk was found."
+    return 1
+  fi
+  if ! sole=$(deck_form_disk_autoselect "$eligible"); then
+    deck_form_warn "more than one eligible install disk -- refusing to guess which one to erase"
+    deck_form_disk_dead_end
+    abort "More than one eligible install disk was found."
+    return 1
+  fi
+  # shellcheck disable=SC2034
+  disk=$sole
+  early_bin=$(deck_form_early_bin)
+  if ! "$early_bin" start "$disk"; then
+    deck_form_warn "'$early_bin start $disk' failed -- the background install never started, and nothing was erased by it"
+    abort "The background install failed to start."
+    return 1
+  fi
+  return 0
+}
+# deck_form_early_network_ready -- S1's hand-off (C1). Attempts the marker
+# write up to DECK_EARLY_MARKER_TRIES times (bounded: the write is idempotent
+# and instantaneous, so retrying is cheap) and returns 0 once it lands.
+# Returns 1 on persistent failure -- NEVER 0: a silent success here leaves
+# the early stage waiting on the marker forever while the network works,
+# which is the exact silent-continuation CLAUDE.md forbids. Callers respond
+# on screen (deck_form_network_ready_or_stop); this function only reports,
+# loudly, via deck_form_warn.
+readonly DECK_EARLY_MARKER_TRIES=3
+deck_form_early_network_ready() {
+  local early_bin tries=0 max=${DECK_EARLY_MARKER_TRIES_OVERRIDE:-$DECK_EARLY_MARKER_TRIES}
+  early_bin=$(deck_form_early_bin)
+  while (( tries < max )); do
+    tries=$(( tries + 1 ))
+    if "$early_bin" network-ready; then
+      return 0
+    fi
+    deck_form_warn "'$early_bin network-ready' failed (attempt $tries of $max)"
+  done
+  deck_form_warn "'$early_bin network-ready' failed $tries times -- the background install was NOT told the network is up"
+  return 1
+}
+
+# deck_form_network_ready_or_stop -- the screen-level half of the hand-off.
+# Success returns 0 silently: the happy path -- including every QEMU run --
+# stays keypress-free, and the existing S1 tests pin that (empty gum log).
+# Persistent failure is said ON SCREEN with the consequence, then offers Try
+# again / Stop the install: retry re-runs the bounded helper, Stop reaches
+# the existing dead end (Reboot / Power off, never a shell) and aborts.
+# There is deliberately no "continue anyway": continuing would build a
+# machine whose Steam silently never downloads -- the black-screen outcome
+# S1 exists to prevent, via the operator's no-Skip decision.
+deck_form_network_ready_or_stop() {
+  while true; do
+    if deck_form_early_network_ready; then
+      return 0
+    fi
+    clear_logo
+    echo
+    say --foreground 1 "The installer could not tell the background install the network is up."
+    say "Without that signal Steam is never downloaded, and the Deck boots with no Steam."
+    echo
+    if gum confirm --affirmative "Try again" --negative "Stop the install" "Tell the background install again?"; then
+      continue
+    fi
+    deck_form_disk_dead_end
+    abort "The background install was never told the network is up."
+    return 1
+  done
+}
+
+# deck_form_early_status -- C1's `status` word (absent/running/done/failed).
+# A binary that cannot be asked is "unknown", said loudly -- S5 must show
+# the state honestly, and "unknown" is honest where a guess would not be.
+deck_form_early_status() {
+  local early_bin out
+  early_bin=$(deck_form_early_bin)
+  if ! out=$("$early_bin" status 2>/dev/null); then
+    deck_form_warn "'$early_bin status' failed -- showing the early install state as unknown"
+    printf 'unknown\n'
+    return 0
+  fi
+  printf '%s\n' "$out"
+  return 0
+}
+
+# deck_form_early_error -- C1's one-line reason, or empty. Commas become
+# semicolons: S5 renders this inside a `gum table -s ","` row.
+deck_form_early_error() {
+  local file=${DECK_EARLY_ERROR_FILE:-$DECK_EARLY_ERROR_FILE_DEFAULT}
+  local err=""
+  if [[ -r $file ]]; then
+    err=$(head -n 1 "$file" 2>/dev/null | tr ',' ';')
+  fi
+  printf '%s\n' "$err"
+  return 0
+}
+
+deck_form_early_status_display() {
+  local st err
+  st=$(deck_form_early_status)
+  if [[ $st == failed ]]; then
+    err=$(deck_form_early_error)
+    if [[ -n $err ]]; then
+      printf 'failed: %s\n' "$err"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$st"
+  return 0
+}
+
+# deck_form_steam_status -- Steam's own record (Steam's slice owns the
+# values: pending/running/done/incomplete/skipped/failed). Shown verbatim;
+# a file that is missing or empty is "unknown" -- early has not reported
+# yet -- not a failure.
+deck_form_steam_status() {
+  local file=${DECK_STEAM_STATUS_FILE:-$DECK_STEAM_STATUS_FILE_DEFAULT}
+  local val=""
+  if [[ -r $file ]]; then
+    val=$(head -n 1 "$file" 2>/dev/null | tr ',' ';')
+  fi
+  [[ -n $val ]] || val=unknown
+  printf '%s\n' "$val"
+  return 0
+}
+
+deck_form_steam_error() {
+  local file=${DECK_STEAM_ERROR_FILE:-$DECK_STEAM_ERROR_FILE_DEFAULT}
+  local err=""
+  if [[ -r $file ]]; then
+    err=$(head -n 1 "$file" 2>/dev/null | tr ',' ';')
+  fi
+  printf '%s\n' "$err"
+  return 0
+}
+
+deck_form_steam_status_display() {
+  local st err
+  st=$(deck_form_steam_status)
+  case $st in
+    failed|incomplete)
+      err=$(deck_form_steam_error)
+      if [[ -n $err ]]; then
+        printf '%s: %s\n' "$st" "$err"
+        return 0
+      fi
+      ;;
+  esac
+  printf '%s\n' "$st"
+  return 0
+}
+
+# ===========================================================================
+# FAST-INSTALL four variants -- the preinstalls/gaming choice screens
+# (docs/tasks/FAST-INSTALL.md C2/C5/C6). Read by Stages' early worker AFTER
+# the common restore: the worker gates on `choices/locked`, never on these
+# files appearing, so the screens below must never block the S0-A restore.
+# ===========================================================================
+#
+# SHAPE OF THE FLOW (Main, 2026-09-24): S0-A wipes FIRST, then preinstalls
+# Yes/No, then Gaming Yes/No, then (Gaming Yes only) Wi-Fi, then identity.
+# B goes one screen back: Gaming -> preinstalls, preinstalls -> safe exit
+# (nothing erased yet? NO -- S0-A already wiped. B on preinstalls reaches
+# the power menu, same as S0-B). After BOTH answers the files plus `locked`
+# are written atomically; preinstalls is then NOT revisable (the package
+# delta may already be installing). Wi-Fi B is the narrow exception: it
+# flips Gaming yes->no (rewriting `gaming`, clearing any stale network-ready)
+# before network-ready ever fired -- there is no path back to preinstalls
+# from Wi-Fi.
+#
+# DECK_CHOICES_DIR exists so the [U] suite and Stages' tests point this at a
+# temp dir instead of /run. Values are lowercase yes/no + trailing newline.
+readonly DECK_CHOICES_DIR_DEFAULT=/run/omarchy-deck/choices
+readonly DECK_CHOICES_LOCKED_FILE=locked
+
+deck_form_choices_dir() { printf '%s\n' "${DECK_CHOICES_DIR:-$DECK_CHOICES_DIR_DEFAULT}"; }
+
+# deck_form_choice_write <name> <yes|no> -- atomic (mktemp in-dir + rename),
+# 0644. Refuses anything but yes/no LOUDLY: a typo'd value the worker
+# misreads as "no" would silently drop Gaming Mode.
+deck_form_choice_write() {
+  local name=$1 value=$2
+  local dir tmp
+  dir=$(deck_form_choices_dir)
+  if [[ $value != yes && $value != no ]]; then
+    deck_form_warn "refusing to write choice '$name' with non-yes/no value '$value'"
+    return 1
+  fi
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    deck_form_warn "could not create choices dir $dir"
+    return 1
+  fi
+  tmp=$(mktemp "$dir/.$name.XXXXXX") || { deck_form_warn "mktemp failed in $dir"; return 1; }
+  printf '%s\n' "$value" >"$tmp" || { deck_form_warn "could not write $tmp"; rm -f "$tmp"; return 1; }
+  chmod 644 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$dir/$name" || { deck_form_warn "could not publish $dir/$name"; rm -f "$tmp"; return 1; }
+  return 0
+}
+
+# deck_form_choice_read <name> -- prints the value, or "unset" when absent.
+# The S5 rows and the worker-gating logic share this: one spelling of
+# "no answer yet", never two.
+deck_form_choice_read() {
+  local name=$1 val=""
+  local dir
+  dir=$(deck_form_choices_dir)
+  if [[ -f $dir/$name ]]; then
+    val=$(head -n 1 "$dir/$name" 2>/dev/null | tr -d '[:space:]')
+  fi
+  if [[ -z $val ]]; then val="unset"; fi
+  printf '%s\n' "$val"
+  return 0
+}
+
+# deck_form_choices_locked -- 0 iff the locked marker exists.
+deck_form_choices_locked() {
+  local dir
+  dir=$(deck_form_choices_dir)
+  [[ -f $dir/$DECK_CHOICES_LOCKED_FILE ]]
+}
+
+# deck_form_choices_lock -- publish the locked marker last (Stages gates on
+# it). Atomic like the choices.
+deck_form_choices_lock() {
+  local dir tmp
+  dir=$(deck_form_choices_dir)
+  mkdir -p "$dir" 2>/dev/null || { deck_form_warn "could not create choices dir $dir"; return 1; }
+  tmp=$(mktemp "$dir/.locked.XXXXXX") || { deck_form_warn "mktemp failed in $dir"; return 1; }
+  printf 'locked\n' >"$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$dir/$DECK_CHOICES_LOCKED_FILE" || { rm -f "$tmp"; return 1; }
+  return 0
+}
+
+# deck_form_yesno_screen <result-var> <title> <yes-line> <no-line> <default: yes|no>
+# D-pad controller yes/no via `gum choose` rows "Yes"/"No" (gum confirm has
+# no up/down list semantics on this hardware; choose rows do). Stores
+# "yes", "no", or "back" (B/Esc cancel) in $result-var and returns 0.
+# Never guesses: an unrecognised row redraws.
+#
+# The answer travels via printf -v, NOT stdout: this screen draws chrome
+# (clear_logo/say/echo all write the terminal) and callers run screens for
+# side effects -- capturing stdout swallows blank `echo` lines into the
+# answer (measured: pre=$'\n\nno', which the atomic writer then loudly
+# refuses). Same reason deck_form_offline_detect's own comment bans `v=$(...)`
+# for globals.
+deck_form_yesno_screen() {
+  local resultvar=$1 title=$2 yes_line=$3 no_line=$4 default=$5
+  local choice ans
+  while true; do
+    clear_logo
+    echo
+    say "$title"
+    say --foreground 8 "$yes_line"
+    say --foreground 8 "$no_line"
+    say --foreground 8 "B goes back."
+    if [[ $default == yes ]]; then
+      choice=$(printf 'Yes\nNo\n' | gum choose --header "Choose" --selected Yes) || choice=""
+    else
+      choice=$(printf 'Yes\nNo\n' | gum choose --header "Choose" --selected No) || choice=""
+    fi
+    case $choice in
+      Yes) ans=yes ;;
+      No)  ans=no ;;
+      "")  ans=back ;;
+      *)   continue ;;
+    esac
+    printf -v "$resultvar" '%s' "$ans"
+    return 0
+  done
+}
+
+# deck_form_preinstalls_screen <result-var> -- stores yes/no/back. No carries the C6
+# promise: both No choices say they can be installed later from the desktop
+# (preinstalls via the existing menu action, Gaming via the conversion
+# script Steam builds) -- backed by real actions, never a bare promise.
+deck_form_preinstalls_screen() {
+  deck_form_yesno_screen "$1" \
+    "Install Omarchy pre-installs?" \
+    "Yes: office, media and creative apps are ready on first boot." \
+    "No: skip them now. (Can be installed later from the Omarchy desktop.)" \
+    no
+}
+
+# deck_form_gaming_screen <result-var> -- stores yes/no/back. Yes requires Internet;
+# No says it can be added later from the desktop (C6 conversion script).
+deck_form_gaming_screen() {
+  deck_form_yesno_screen "$1" \
+    "Install Steam Deck Gaming Mode?" \
+    "Yes: boots into Steam Gaming Mode. (Requires Internet.)" \
+    "No: desktop-only Omarchy. (Can be installed later from the Omarchy desktop.)" \
+    no
+}
+
+# deck_form_run_choice_screens -- preinstalls then Gaming, with B-back.
+# Writes NOTHING until both are answered, then publishes preinstalls +
+# gaming + locked atomically (locked LAST: Stages gates on it). Returns:
+#   0 both answered and locked (globals DECK_PREINSTALLS/DECK_GAMING set)
+#   1 user backed out of preinstalls to the power menu (caller aborts)
+# Globals (shellcheck: set here, read by summary/S5): DECK_PREINSTALLS,
+# DECK_GAMING.
+deck_form_run_choice_screens() {
+  local pre="" game=""
+  while true; do
+    if [[ -z $pre ]]; then
+      deck_form_preinstalls_screen pre
+      if [[ $pre == back ]]; then
+        deck_form_s0_cancel_menu
+        abort "Install cancelled at the pre-installs choice."
+        return 1
+      fi
+    fi
+    deck_form_gaming_screen game
+    if [[ $game == back ]]; then
+      pre=""
+      continue
+    fi
+    # shellcheck disable=SC2034
+    DECK_PREINSTALLS=$pre
+    # shellcheck disable=SC2034
+    DECK_GAMING=$game
+    deck_form_choice_write preinstalls "$pre" || return 1
+    deck_form_choice_write gaming "$game" || return 1
+    deck_form_choices_lock || return 1
+    return 0
+  done
 }
 
 # greeter -- overrides upstream's own S0 screen.
@@ -753,15 +1178,35 @@ greeter() {
   deck_form_pin_console_font
   deck_form_s0_text
   deck_form_stty_sane "$tty"
-  IFS= read -r _ <"$tty" 2>/dev/null
-  # Never gated on its status: S1 returns 0 on every path a user can reach
-  # (§5 -- "the install must still succeed"), so a nonzero here is this
-  # file's own plumbing failing, which is logged rather than swallowed and
-  # still does not stop the install.
-  deck_form_wifi_screen ||
-    deck_form_warn "the Wi-Fi screen returned $? -- continuing the install offline"
+  # S0's A/B answer: A (Enter) wipes and starts the common restore NOW
+  # (first-A wipe, built-in NVMe only); B (Esc) is the safe exit -- nothing
+  # erased yet. A bare read that accepts anything as consent is how a typo
+  # becomes a wipe, so only these two bytes answer.
+  local s0_answer
+  if ! s0_answer=$(deck_form_s0_wait_key "$tty"); then
+    abort "Could not read the S0 answer -- refusing to guess consent."
+    return 1
+  fi
+  if [[ $s0_answer == cancel ]]; then
+    deck_form_s0_cancel_menu
+    abort "Install cancelled at the first screen."
+    return 1
+  fi
+  # FAST-INSTALL: the A press IS the erase consent (see the S0 text above).
+  # Built-in NVMe only -- never microSD/USB; ambiguous or missing is the
+  # dead end, never a guess. A failed start aborts before anything else.
+  deck_form_start_early_install || return 1
+  # The two choice screens (preinstalls, then Gaming), with B-back between
+  # them. Locked on completion: Stages gates on `choices/locked`.
+  deck_form_run_choice_screens || return 1
+  # Wi-Fi ONLY when Gaming=yes (Stages skips its network gate entirely on
+  # gaming=no, so no marker is ever needed there). Gaming=yes with no
+  # connection keeps the network screen until connected, or B returns to
+  # the Gaming choice (flipping to no, clearing any stale marker state).
+  if [[ ${DECK_GAMING:-no} == yes ]]; then
+    deck_form_wifi_screen_gaming || return 1
+  fi
 }
-
 deck_form_stty_sane() {
   local tty=$1
   stty sane <"$tty" 2>/dev/null || true
@@ -1348,6 +1793,16 @@ readonly DECK_NET_RESCAN_ROW="Rescan"
 # that would still work, and that promise was the defect.
 readonly DECK_NET_STOP_ROW="Stop the install"
 
+# Gaming-gate back row. Shown ONLY when the Wi-Fi screen runs inside the
+# Gaming=yes gate (deck_form_wifi_screen_gaming sets DECK_WIFI_GAMING_GATE=1):
+# B-on-list in the old shape redrew, which is correct for a mandatory
+# network -- but Gaming B must be able to reach the Gaming choice to flip
+# yes->no (four-variant flow). The row is explicit (never the Esc fallback:
+# Esc still redraws, per deck_form_net_choice_action's rule) and returns to
+# the Gaming question; the reversal rewrites `gaming` to no and clears any
+# stale marker BEFORE network-ready ever fired.
+readonly DECK_NET_GAMING_BACK_ROW="Back to Gaming choice"
+
 # What marks a secured network in the list.
 #
 # 🔴 THIS WAS U+1F512 🔒 AND THE CONSOLE CANNOT DRAW IT. Confirmed by looking
@@ -1535,6 +1990,13 @@ deck_form_build_network_rows() {
     if [[ $security == open ]]; then glyph=""; else glyph=$DECK_NET_SECURED_GLYPH; fi
     printf '%s%s\n' "$glyph" "$safe_ssid"
   done <"$parsed"
+  # Gaming-gate back row FIRST of the fixed rows (above Rescan): it is the
+  # way out of a mandatory network, so it must read before the recovery
+  # action, not after Stop. Plain lists (no gate) are byte-identical to
+  # before -- existing row-order tests pin that.
+  if [[ ${DECK_WIFI_GAMING_GATE:-} == 1 ]]; then
+    printf '%s\n' "$DECK_NET_GAMING_BACK_ROW"
+  fi
   printf '%s\n' "$DECK_NET_RESCAN_ROW"
   printf '%s\n' "$DECK_NET_STOP_ROW"
 }
@@ -1591,16 +2053,13 @@ deck_form_network_at() {
 # Esc SELECT an action ("Drop to shell") via `|| choice=...`, so the one
 # gesture a controller-only user reaches for became the most destructive
 # one. Here an empty choice -- B/Esc, or gum exiting nonzero for any other
-# reason -- REDRAWS. That matters MORE now, not less: the row a cancel could
-# fall into used to be a harmless-looking Skip and is now `Stop the install`.
-# "The cancel fallback maps to the menu, not to an action" is the rule.
-# Mutation-test target (§6.5: single-string changes).
 deck_form_net_choice_action() {
   local choice=$1
   case $choice in
     "")                        printf 'redraw\n' ;;
     "$DECK_NET_STOP_ROW")      printf 'stop\n' ;;
     "$DECK_NET_RESCAN_ROW")    printf 'rescan\n' ;;
+    "$DECK_NET_GAMING_BACK_ROW") printf 'gaming-back\n' ;;
     *)                         printf 'connect\n' ;;
   esac
 }
@@ -2499,11 +2958,54 @@ deck_form_wifi_join() {
   fi
   deck_form_wifi_record_outcome "$state_dir" connected "$ssid" ||
     deck_form_warn "the Wi-Fi outcome was not recorded"
+  # FAST-INSTALL C4: S1 reports connected, so the early stage's online work
+  # (Steam) may start. The marker call is LOUD: on persistent failure the
+  # screen offers Try again / Stop instead of silently continuing to a
+  # Steam-less install. Abort exits in production, so `return 1` below only
+  # runs under stubs -- where it sends the caller back to the list, never on.
+  deck_form_network_ready_or_stop || return 1
   say "Connected to $safe_ssid."
   return 0
 }
+# deck_form_wifi_screen_gaming -- the Gaming=yes network gate (four-variant
+# flow). Gaming=yes REQUIRES Internet (Steam downloads from Valve): this
+# wrapper stays in the network screen until connected, or B anywhere backs
+# out to the Gaming choice. The reversal (Gaming yes->no) rewrites the
+# `gaming` file to no and clears any marker state BEFORE network-ready ever
+# fired -- network-ready only fires on success paths below, so a flipped
+# answer can never leave a stale "online" signal for the worker. There is
+# deliberately no path back to preinstalls from here: once both choices were
+# answered the files are LOCKED (the package delta may already be running),
+# and un-asking preinstalls would contradict installed packages.
+deck_form_wifi_screen_gaming() {
+  local rc=0
+  # shellcheck disable=SC2034
+  DECK_WIFI_GAMING_GATE=1
+  while true; do
+    DECK_WIFI_WANT_GAMING_BACK=""
+    deck_form_wifi_screen && rc=0 || rc=$?
+    if [[ $rc -eq 0 ]]; then
+      return 0
+    fi
+    if [[ ${DECK_WIFI_WANT_GAMING_BACK:-} == yes ]]; then
+      # shellcheck disable=SC2034
+      DECK_GAMING=no
+      deck_form_choice_write gaming no || return 1
+      deck_form_gaming_opt_out_cleanup || deck_form_warn "gaming opt-out cleanup reported an issue -- continuing desktop-only"
+      return 0
+    fi
+    return 1
+  done
+}
+# success), and a removal error is warned, not fatal.
+deck_form_gaming_opt_out_cleanup() {
+  local marker=${DECK_NETWORK_READY_FILE:-/run/omarchy-deck/network-ready}
+  if [[ -e $marker ]]; then
+    rm -f "$marker" || { deck_form_warn "could not clear stale $marker after Gaming yes->no"; return 1; }
+  fi
+  return 0
+}
 
-# deck_form_wifi_screen -- S1 itself. Always returns 0 on any path a user
 # can reach; a nonzero return means this function's OWN plumbing broke.
 deck_form_wifi_screen() {
   local state_dir=${DECK_NET_STATE_DIR:-$DECK_NET_STATE_DIR_DEFAULT}
@@ -2557,6 +3059,13 @@ deck_form_wifi_screen() {
     # this exact machine -- "a Deck on a dock's ethernet legitimately has
     # status=skipped" -- so the record already means what happened here.
     deck_form_wifi_record_outcome "$state_dir" skipped ""
+    # FAST-INSTALL C4: an existing link IS S1 reporting connected (Main's
+    # ethernet rule): the early stage's online work may start. Without this
+    # the early stage would wait on the marker forever on a docked Deck.
+    # Same loudness as the join path: Stay keypress-free when it lands
+    # (both VM tiers take neither this branch nor any confirm here), and
+    # offer Try again / Stop when it persistently fails.
+    deck_form_network_ready_or_stop || return 1
     return 0
   fi
 
@@ -2610,6 +3119,16 @@ deck_form_wifi_screen() {
     case $action in
       redraw) continue ;;
       rescan) continue ;;
+      gaming-back)
+        # Gaming-gate back row: return to the Gaming choice. Signals the
+        # wrapper (DECK_WIFI_WANT_GAMING_BACK) and returns 1 -- the wrapper
+        # rewrites `gaming` to no and clears stale marker state. Only drawn
+        # inside the Gaming=yes gate (row only exists then).
+        # shellcheck disable=SC2034
+        DECK_WIFI_WANT_GAMING_BACK=yes
+        rm -f "$parsed" "$rows"
+        return 1
+        ;;
       stop)
         # The dead end is the only way out of S1 without a connection, and it
         # never returns "continue": it reboots, powers off, or comes back here
@@ -2862,30 +3381,32 @@ omarchy_prompt_timezone() {
 # brick with another. Said here, and in this session's final report.
 
 # deck_form_disk_list <lsblk-fixture-file> [<exclude-device>]
-# lsblk-fixture-file: lines of "NAME TYPE RM" (matches
-# `lsblk -dpno NAME,TYPE,RM`'s own column order). Keeps TYPE=="disk" and
-# RM=="0" -- §3 deviation 5's own warning, quoted: "the microSD must be
-# excluded ... by lsblk -dno RM, not by name. Excluding mmcblk* would also
-# exclude the 64GB LCD Deck's internal eMMC." RM, not a name pattern, is
-# the only test applied here, so an internal eMMC (RM=0) is kept exactly
-# like an internal NVMe. EXCLUDE-DEVICE (the resolved boot/install medium,
-# upstream's own `get_root_disk` walk -- reused live in disk_form below,
-# not reimplemented here) is dropped by exact NAME match. An empty result
-# is a REPORTED failure (return 1), never a silently empty list -- §4 S4's
-# own verified-by row.
+# lsblk-fixture-file: lines of "NAME TYPE RM TRAN" (matches
+# `lsblk -dpno NAME,TYPE,RM,TRAN`'s own column order). Keeps TYPE=="disk",
+# RM=="0" AND TRAN=="nvme" -- the built-in drive is NVMe on the verified
+# OLED Deck; microSD (mmc) and USB sticks (usb) are never targets even when
+# they report RM=0, and a USB NVMe enclosure must not be mistaken for the
+# internal drive either (TRAN distinguishes the bus, the name does not).
+# (Supersedes the old RM-only rule: the old rule deliberately kept internal
+# eMMC, but only OLED/NVMe is verified hardware now, and an eMMC-kept path
+# is how a Jupiter or a card reader would sneak in.) EXCLUDE-DEVICE (the
+# resolved boot/install medium, upstream's own `get_root_disk` walk) is
+# dropped by exact NAME match. An empty result is a REPORTED failure
+# (return 1), never a silently empty list -- §4 S4's own verified-by row.
 deck_form_disk_list() {
   local file=$1 exclude=${2:-}
-  local name type rm found=0
-  while read -r name type rm; do
+  local name type rm tran found=0
+  while read -r name type rm tran; do
     [[ -n $name ]] || continue
     [[ $type == disk ]] || continue
     [[ $rm == 0 ]] || continue
+    [[ $tran == nvme ]] || continue
     [[ -n $exclude && $name == "$exclude" ]] && continue
     printf '%s\n' "$name"
     found=1
   done <"$file"
   if [[ $found -eq 0 ]]; then
-    deck_form_warn "no eligible install disk found in $file (every candidate is removable or is the boot medium)"
+    deck_form_warn "no eligible install disk found in $file (no built-in NVMe: every candidate is removable, non-NVMe, or the boot medium)"
     return 1
   fi
   return 0
@@ -2945,14 +3466,13 @@ deck_form_disk_label() {
 # indirectly through a gum-driving function it cannot safely execute.
 deck_form_disk_encryption_mode() { printf 'false\n'; }
 
-# DECK_DISK_CONFIRM_DEFAULT: §6.5's OTHER named example ("S4's default
-# cursor"). gum confirm with no --default flag defaults to the AFFIRMATIVE
-# (matches upstream's own confirm_disk_overwrite, which never passes
-# --default and where the affirmative IS the dangerous action) --
-# T4-screen-spec.md §4 S4 requires the opposite here ("The cursor starts on
-# No"), so this must be explicit, and is kept as its own named constant so a
-# mutation that drops or flips it is a one-line, directly assertable change.
-readonly DECK_DISK_CONFIRM_DEFAULT=false
+# FAST-INSTALL C4 retired the S4 erase-confirm screen (consent moved to S0),
+# so the confirm-cursor constant below is gone with it: confirm_disk_overwrite
+# above returns 0 without drawing anything, and there is no gum confirm whose
+# default could drift back to the dangerous affirmative. The constant is
+# deleted, not left as a stale "false": a named value nothing reads is how
+# §6.4's "passes while asserting nothing" starts, and the S0 prompt line
+# ("Press A to erase the drive and begin") is now the tested safety wording.
 
 readonly -a DECK_DISK_DEAD_END_ITEMS=(Reboot "Power off")
 
@@ -2994,6 +3514,25 @@ deck_form_disk_dead_end() {
   done
 }
 
+# deck_form_eligible_disks -- the resolver both disk_form and the S0-A
+# early start share (FAST-INSTALL C4: "`disk_form` stays as the resolver").
+# Built-in NVMe only (TRAN==nvme), boot-medium exclusion via upstream's own
+# get_root_disk walk. Fails loudly when there is no single NVMe. Never draws
+# anything: safe to call before any screen.
+deck_form_eligible_disks() {
+  local boot_source exclude_disk lsblk_bin=${DECK_LSBLK_BIN:-lsblk}
+  boot_source=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
+  exclude_disk=$(get_root_disk "$boot_source")
+
+  local lsblk_tmp
+  lsblk_tmp=$(mktemp) || { deck_form_die "mktemp failed"; return 1; }
+  "$lsblk_bin" -dpno NAME,TYPE,RM,TRAN >"$lsblk_tmp" 2>/dev/null
+  deck_form_disk_list "$lsblk_tmp" "$exclude_disk"
+  local rc=$?
+  rm -f "$lsblk_tmp"
+  return $rc
+}
+
 # disk_form -- overrides upstream's own disk picker.
 # Reuses upstream's OWN `get_root_disk`/`get_disk_info` (still defined --
 # this file does not override them) rather than reimplementing the boot-
@@ -3002,22 +3541,12 @@ deck_form_disk_dead_end() {
 disk_form() {
   step "Let's select where to install Omarchy..."
 
-  local boot_source exclude_disk lsblk_bin=${DECK_LSBLK_BIN:-lsblk}
-  boot_source=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
-  exclude_disk=$(get_root_disk "$boot_source")
-
-  local lsblk_tmp
-  lsblk_tmp=$(mktemp) || { deck_form_die "mktemp failed"; abort; return; }
-  "$lsblk_bin" -dpno NAME,TYPE,RM >"$lsblk_tmp" 2>/dev/null
-
   local eligible
-  if ! eligible=$(deck_form_disk_list "$lsblk_tmp" "$exclude_disk"); then
-    rm -f "$lsblk_tmp"
+  if ! eligible=$(deck_form_eligible_disks); then
     deck_form_disk_dead_end
     abort "No eligible install disk was found."
     return
   fi
-  rm -f "$lsblk_tmp"
 
   local sole
   if sole=$(deck_form_disk_autoselect "$eligible"); then
@@ -3051,26 +3580,22 @@ disk_form() {
 requires_full_disk_install() { return 0; }
 
 # confirm_disk_overwrite -- overrides upstream's own S4 confirm screen.
+#
+# FAST-INSTALL C4 removed S4 as a screen (consent moved to S0's A press,
+# where `deck_form_start_early_install` already runs). Upstream still CALLS
+# this name twice -- `select_installation`'s "Full disk install" branch and
+# the `until confirm_disk_overwrite` deferred-provisioning loop -- so it
+# must keep existing and must keep SUCCEEDING (return 0) without drawing
+# anything: re-prompting here would offer a disk choice that contradicts
+# the early stage already erasing one. `disk` was set by the S0-A start,
+# `encrypt_installation` stays the unconditional constant `false`, and
+# "Go back" paths that call disk_form/select_installation are themselves
+# replaced below (see deck_final_summary). The old gum-confirm body is
+# deleted, not kept as a fallback.
 confirm_disk_overwrite() {
-  local label confirm_status
-  label=$(deck_form_disk_label "$disk")
-
-  clear_logo
-  echo
-  say "Everything on $label will be erased. There is no recovery."
-  say "This install is not encrypted, so the Deck can start without anyone typing a passphrase."
-  echo
-  gum confirm --affirmative "Yes, erase and install" --negative "No, go back" \
-    --default="$DECK_DISK_CONFIRM_DEFAULT" "Confirm erasing $disk?"
-  confirm_status=$?
-
-  # Unconditional, every path through this function, including the decline
-  # branch below -- there is no code path in which this is ever anything
-  # but false (see deck_form_disk_encryption_mode's own comment above).
+  # shellcheck disable=SC2034
   encrypt_installation=$(deck_form_disk_encryption_mode)
-
-  [[ $confirm_status -eq 0 ]] && return 0
-  return 1
+  return 0
 }
 
 # ===========================================================================
@@ -3168,7 +3693,7 @@ deck_form_reboot_notice() {
 # interactive flow; read defensively here so this function has a defined
 # answer even before that exists.
 deck_form_summary_rows() {
-  local pw_mask disk_label wifi_display encryption_display
+  local pw_mask disk_label wifi_display encryption_display early_display steam_display pre_display game_display
   # shellcheck disable=SC2154  # set by upstream's user_form / S3's override -- see this file's header CORRECTION note
   pw_mask=$(printf '%*s' "${#password}" '' | tr ' ' '*')
   disk_label=$(deck_form_disk_label "$disk")
@@ -3178,6 +3703,17 @@ deck_form_summary_rows() {
   else
     encryption_display=Off
   fi
+  # FAST-INSTALL C4: the early stage started at S0-A and the Steam fetch
+  # inside it -- read live, not from a global S1 could not have set, so the
+  # row and the stage can never disagree the way DECK_NET_VERDICT once did.
+  early_display=$(deck_form_early_status_display)
+  steam_display=$(deck_form_steam_status_display)
+  # Four-variant choices: read from the SAME globals the choice screens set
+  # (which mirror the locked files -- see deck_form_choice_write), so the
+  # row and Stages' input can never disagree. Unset (unattended path that
+  # skipped the screens) reads as "unset", never as a guessed yes/no.
+  pre_display=${DECK_PREINSTALLS:-$(deck_form_choice_read preinstalls)}
+  game_display=${DECK_GAMING:-$(deck_form_choice_read gaming)}
 
   printf 'Field,Value\n'
   printf 'Username,%s\n' "$username"
@@ -3200,18 +3736,52 @@ deck_form_summary_rows() {
   printf 'Encryption,%s\n' "$encryption_display"
   printf 'Desktop,%s\n' "$DECK_SUMMARY_DESKTOP"
   printf 'Boot,%s\n' "$DECK_SUMMARY_BOOT"
+  printf 'Pre-installs,%s\n' "$pre_display"
+  printf 'Gaming Mode,%s\n' "$game_display"
+  printf 'Early install,%s\n' "$early_display"
+  printf 'Steam download,%s\n' "$steam_display"
 }
 
 # deck_final_summary -- the S5 screen.
-# On decline ("Go back"), §4 S5: "matching upstream's existing user_step
-# recap loop." Nothing later in configurator's own flow loops back INTO
-# this function for us (it runs once, right before write_user_files), so
-# this re-drives upstream's own user_step/disk_form/select_installation
-# itself and redraws the summary -- the same recap-then-redo shape
-# user_step already uses internally, applied here to the whole flow instead
-# of just the account fields.
-deck_final_summary() {
+# FAST-INSTALL C4: the erase already began at S0-A, so this screen reports
+# the early stage honestly instead of re-asking about the disk. On decline
+# ("Go back") it re-runs upstream's own user_step ONLY -- no disk_form, no
+# select_installation: re-offering a disk choice (or an erase confirm, via
+# select_installation -> confirm_disk_overwrite) would contradict the stage
+# already running on $disk.
+#
+# If the early stage failed, S5 says so and offers the failure menu
+# (Reboot / Power off, never a shell -- the existing dead-end pattern)
+# instead of Install: there is nothing to wait for and no LATE to run.
+deck_form_early_failed_menu() {
+  local choice action err
+  err=$(deck_form_early_error)
   while true; do
+    clear_logo
+    echo
+    say --foreground 1 "The background install failed before it finished."
+    [[ -n $err ]] && say --foreground 1 "$err"
+    say "Nothing more can be installed from here, and Install is not offered."
+    echo
+    choice=$(deck_form_disk_dead_end_items | gum choose --header "What next?") || choice=""
+    action=$(deck_form_disk_dead_end_action_for "$choice")
+    case $action in
+      reboot)   systemctl reboot ;;
+      poweroff) systemctl poweroff ;;
+      *)        : ;;
+    esac
+  done
+}
+
+deck_final_summary() {
+  local early_state
+  while true; do
+    early_state=$(deck_form_early_status)
+    if [[ $early_state == failed ]]; then
+      deck_form_early_failed_menu
+      abort "The background install failed."
+      return 1
+    fi
     clear_logo
     echo
     deck_form_summary_rows | gum table -s ',' -p | sed "s/^/${PADDING_LEFT_SPACES:-}/"
@@ -3243,8 +3813,6 @@ deck_final_summary() {
       return 0
     fi
     user_step || return 1
-    disk_form
-    select_installation
   done
 }
 
@@ -3399,6 +3967,9 @@ readonly DECK_DMI_VENDOR_DEFAULT=/sys/class/dmi/id/sys_vendor
 # Returns 0 on Steam Deck hardware of EITHER model, 1 otherwise. Never fails
 # on an unreadable/absent sysfs node -- an absent node is a legitimate
 # "not a Deck" answer (a VM, a laptop), not an error.
+# (Unchanged by the OLED wipe gate below: kernel SELECTION stays broad --
+# naming linux-omarchy on a Jupiter is harmless and reversible. Wiping is
+# not, so the wipe has its own narrower predicate.)
 deck_form_is_steam_deck() {
   local product="" vendor=""
   local product_path=${DECK_DMI_PRODUCT:-$DECK_DMI_PRODUCT_DEFAULT}
@@ -3412,6 +3983,34 @@ deck_form_is_steam_deck() {
 
   [[ ${product,,} =~ (steam\ deck|jupiter|galileo) || ${vendor,,} == *valve* ]]
 }
+
+# deck_form_is_oled_deck -- the WIPE gate. product_name==Galileo AND
+# sys_vendor contains Valve, EXACT on the product (the recorded factory
+# string). Narrower than deck_form_is_steam_deck ON PURPOSE: the kernel
+# predicate accepts Jupiter and generic Valve strings because naming
+# linux-omarchy there is harmless and reversible; wiping a disk is not. An
+# LCD Deck (Jupiter, unverified), a generic laptop NVMe, or unreadable DMI
+# all answer 1: the S0-A wipe refuses, loudly, before anything is erased.
+# Shares the DECK_DMI_PRODUCT/DECK_DMI_VENDOR seams so the [U] suite fakes
+# every branch in a temp dir.
+deck_form_is_oled_deck() {
+  local product="" vendor=""
+  local product_path=${DECK_DMI_PRODUCT:-$DECK_DMI_PRODUCT_DEFAULT}
+  local vendor_path=${DECK_DMI_VENDOR:-$DECK_DMI_VENDOR_DEFAULT}
+
+  if [[ -r $product_path ]]; then product=$(<"$product_path"); fi
+  if [[ -r $vendor_path ]];  then vendor=$(<"$vendor_path");  fi
+
+  # Trailing newlines are command-substitution-stripped by $(<...); a
+  # literal "Galileo\n" from sysfs therefore compares equal. Embedded
+  # whitespace or case drift does NOT match: fail closed, never fuzzy.
+  if [[ $product == Galileo && $vendor == *Valve* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+
 
 # detect_kernel -- OVERRIDES upstream's own (configurator:414).
 #

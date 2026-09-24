@@ -81,6 +81,8 @@ ISO_ROOT="$REPO_ROOT/iso"
 # section 2b proves the two are the same set, byte for byte.
 T12_SRC="$REPO_ROOT/src/omarchy-deck-patches"
 APPLIER_SRC="$T12_SRC/omarchy-deck-apply-patches"
+SESSION_PAYLOAD_FILES=(deck-session.sh deck-input-mapper.py deck_osk_layout.py deck_osk_tty.py deck_osk_wayland.py)
+C6_PACKAGE_FILES=(omarchy-deck-enable-gaming omarchy-deck-enable-gaming.desktop)
 DECK_PATCHES_PY="$ISO_ROOT/overlay/configs/airootfs/usr/share/omarchy-iso/orchestrator/deck_patches.py"
 # A real package manifest from a fresh Omarchy 4 install -- the package set the
 # offline mirror is built to satisfy. Section 1's depends check resolves every
@@ -453,14 +455,27 @@ pkg_src="$work/src"
 pkg_dst="$work/pkg"
 mkdir -p "$pkg_src" "$pkg_dst"
 
-# The local source listed in source=() must actually exist beside the PKGBUILD,
-# or makepkg fails before package() is ever reached.
+# T12's sources live beside the recipe. The session sources instead come from
+# canonical src/ and are staged into the scratch recipe by iso/bin/build before
+# Docker starts. Reproduce that staging here; an unrelated missing source is
+# still a hard error.
 for src_entry in $(field source); do
-  [[ -f "$PKG_DIR/$src_entry" ]] ||
-    fail "source=('$src_entry') exists next to the PKGBUILD" \
-      "makepkg copies local sources out of the recipe directory; a listed file that is not there fails the container build."
-  cp "$PKG_DIR/$src_entry" "$pkg_src/$src_entry"
+  if [[ -f "$PKG_DIR/$src_entry" ]]; then
+    cp "$PKG_DIR/$src_entry" "$pkg_src/$src_entry"
+  elif [[ -f "$REPO_ROOT/src/$src_entry" ]] &&
+       [[ " ${SESSION_PAYLOAD_FILES[*]} " == *" $src_entry "* ]]; then
+    cp "$REPO_ROOT/src/$src_entry" "$pkg_src/$src_entry"
+  else
+    fail "source=('$src_entry') is supplied by the recipe or canonical session staging" \
+      "makepkg cannot see a missing source; only the listed session payload may be generated from src/."
+  fi
 done
+builder_text=$(<"$ISO_ROOT/bin/build")
+# shellcheck disable=SC2016 # literal build-script expressions, not expanded here
+[[ $builder_text == *'DECK_PKGBUILD_STAGING_DIR='* &&
+   $builder_text == *'deck_session_files+=("${DECK_SESSION_OSK[@]}")'* &&
+   $builder_text == *'cp -a "$REPO_ROOT/src/$deck_session_file" "$DECK_PKGBUILD_STAGING_DIR/$deck_session_file"'* ]] ||
+  fail "iso/bin/build stages canonical session sources into the scratch PKGBUILD before Docker"
 [[ -n $(field source) ]] || fail "the PKGBUILD declares its payload in source=()" \
   "Reaching into \$startdir instead would not be checked by makepkg at all."
 
@@ -475,7 +490,7 @@ for src_entry in $(field source); do
     fail "source=('$src_entry') contains a directory component" \
       "makepkg reduces a local source to its basename and then looks for \$startdir/<basename>; this entry can never be found. Put the file flat beside the PKGBUILD and re-nest it in package()."
 done
-count "every file in source=() exists beside the PKGBUILD, and none of them is a path makepkg cannot resolve"
+count "every source is available from the tracked recipe or canonical session staging, with no path makepkg cannot resolve"
 
 # ===========================================================================
 # 2b. The payload beside the PKGBUILD is the SAME payload as src/'s
@@ -508,23 +523,24 @@ makepkg cannot see src/omarchy-deck-patches/, so a file that is not here never r
   canonical: ${canonical#"$REPO_ROOT"/}
   packaged:  ${copy#"$REPO_ROOT"/}"
 done
-count "all ${#payload_pairs[@]} payload files beside the PKGBUILD are byte-identical to src/omarchy-deck-patches/"
+count "all ${#payload_pairs[@]} tracked T12 payload files are byte-identical to src/omarchy-deck-patches/"
 
-# ...and the SET matches in the other direction too. Byte-identity over the
-# canonical list alone would say nothing about a stray patch that exists only in
-# the pkgbuild directory -- it would ship, and guard 6.6 would never have
-# checked it against the pinned runtime.
+# Only T12's payload must be tracked beside the recipe. C6's two actions
+# live here; its session assets are staged from src/ into the build scratch.
+# An extra tracked patch could ship without guard 6.6 ever checking it against
+# the pinned runtime; compare the exact tracked recipe set, not just pairs.
 canonical_set=$(printf '%s\n' "$T12_APPLIER" "$T12_HOOK" "$T12_UNIT" "${T12_PATCH_FILES[@]}" | sort)
 packaged_set=$(
   cd "$PKG_DIR" && find . -maxdepth 1 -type f -printf '%f\n' |
     grep -vxE 'PKGBUILD|README|LICENSE' | sort
 )
-[[ $packaged_set == "$canonical_set" ]] ||
-  fail "the pkgbuild directory and src/omarchy-deck-patches/ hold different sets of files" "in the pkgbuild directory:
+expected_recipe_set=$(printf '%s\n' "$canonical_set" "${C6_PACKAGE_FILES[@]}" | sort)
+[[ $packaged_set == "$expected_recipe_set" ]] ||
+  fail "the tracked recipe contains T12 copies and C6 actions only" "in the pkgbuild directory:
 $packaged_set
-canonical:
-$canonical_set"
-count "neither directory carries a payload file the other does not (${#T12_PATCH_FILES[@]} patch files + applier + hook + unit)"
+expected:
+$expected_recipe_set"
+count "tracked recipe source set matches T12 copies plus C6 actions"
 
 # Every payload file must also be in source=(), or makepkg never links it into
 # $srcdir and package() installs from a path that does not exist.
@@ -572,8 +588,14 @@ patch_dests=()
 for f in "${T12_PATCH_FILES[@]}"; do
   patch_dests+=("$STEP_PATCH_DIR_REL/$f")
 done
+session_dests=()
+for f in "${SESSION_PAYLOAD_FILES[@]}"; do
+  session_dests+=("usr/share/omarchy-deck/$f")
+done
 expected_list=("$PAYLOAD_PATH" "$LICENSE_PATH" "$STEP_APPLIER_REL" "$HOOK_DEST"
-  "$UNIT_DEST" "$WANTS_DEST" "${patch_dests[@]}")
+  "$UNIT_DEST" "$WANTS_DEST" "${patch_dests[@]}" "${session_dests[@]}"
+  "usr/bin/omarchy-deck-enable-gaming"
+  "usr/share/applications/omarchy-deck-enable-gaming.desktop")
 expected_files=$(printf '%s\n' "${expected_list[@]}" | sort)
 installed_files=$(cd "$pkg_dst" && find . \( -type f -o -type l \) | sed 's|^\./||' | sort)
 [[ $installed_files == "$expected_files" ]] ||
@@ -581,7 +603,15 @@ installed_files=$(cd "$pkg_dst" && find . \( -type f -o -type l \) | sed 's|^\./
 $installed_files
 want:
 $expected_files"
-count "package() really installs exactly the ${#expected_list[@]} enumerated paths -- README, licence, applier, hook, unit, its .wants link, and ${#T12_PATCH_FILES[@]} patch file(s) (executed, not grepped)"
+count "package() installs exactly ${#expected_list[@]} enumerated paths: T12 seam, C6 opt-in and canonical session assets"
+[[ -x "$pkg_dst/usr/bin/omarchy-deck-enable-gaming" &&
+   -x "$pkg_dst/usr/share/omarchy-deck/deck-session.sh" ]] ||
+  fail "C6 opt-in and installed session script are executable"
+for f in "${SESSION_PAYLOAD_FILES[@]}"; do
+  cmp -s "$REPO_ROOT/src/$f" "$pkg_dst/usr/share/omarchy-deck/$f" ||
+    fail "the installed session asset $f matches canonical src/ byte-for-byte"
+done
+count "installed C6 script runs canonical, byte-identical session assets"
 
 # --- the modes, which are contract, not cosmetics --------------------------
 #

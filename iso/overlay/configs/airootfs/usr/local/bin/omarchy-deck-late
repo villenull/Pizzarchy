@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# omarchy-deck-late -- FAST-INSTALL C6: the post-confirm stage driver.
+#
+# Invoked by the dashboard after the S5 Install confirm (and by the
+# autoinstall delayed-form path, identically). Joins the early stage, applies
+# the user's identity from the configurator output, runs the late
+# orchestrator slice, writes the stages timing record, and prints the
+# Harness serial markers.
+#
+#   omarchy-deck-late <log-file> /usr/local/bin/omarchy-iso-install
+#     --config <path> --creds <path> --full-name-file <path>
+#     --email-file <path> --encrypt-file <path>
+#     --authorized-keys-file <path> --tailscale-authkey-file <path>
+#     --defer-provisioning-file <path>
+#
+# The dashboard forwards the exact installer command and log path. Parse its
+# named arguments rather than assuming their order or treating the executable
+# name as a config path.
+# Human output goes to stdout (captured in the support log) and to
+# /dev/ttyS0 for the VM harness; missing serial never fails the install.
+set -euo pipefail
+
+readonly DECK_LATE_PROG=omarchy-deck-late
+readonly DECK_LATE_EARLY_STATUS=/run/omarchy-deck/early/status
+readonly DECK_LATE_EARLY_ERROR=/run/omarchy-deck/early/error
+readonly DECK_LATE_STEAM_STATUS=/run/omarchy-deck/steam/status
+readonly DECK_LATE_STEAM_ERROR=/run/omarchy-deck/steam/error
+readonly DECK_LATE_SKIP=/run/omarchy-deck/early/skip-online
+readonly DECK_LATE_TIMING=/var/log/omarchy-deck-stages-timing.json
+readonly DECK_LATE_SERIAL=/dev/ttyS0
+
+(( $# == 18 )) || { echo "Usage: $DECK_LATE_PROG <log-file> /usr/local/bin/omarchy-iso-install <eight named option/value pairs>" >&2; exit 2; }
+LOG_FILE=$1
+[[ $2 == /usr/local/bin/omarchy-iso-install ]] ||
+  { echo "$DECK_LATE_PROG: refusing unexpected installer command '$2'" >&2; exit 2; }
+shift 2
+CONFIG="" CREDS="" FULL_NAME_FILE="" EMAIL_FILE=""
+ENCRYPT_FILE="" AUTHORIZED_KEYS_FILE="" TAILSCALE_AUTHKEY_FILE="" DEFER_FILE=""
+while (( $# )); do
+  key=$1 value=$2
+  case $key in
+    --config) CONFIG=$value ;;
+    --creds) CREDS=$value ;;
+    --full-name-file) FULL_NAME_FILE=$value ;;
+    --email-file) EMAIL_FILE=$value ;;
+    --encrypt-file) ENCRYPT_FILE=$value ;;
+    --authorized-keys-file) AUTHORIZED_KEYS_FILE=$value ;;
+    --tailscale-authkey-file) TAILSCALE_AUTHKEY_FILE=$value ;;
+    --defer-provisioning-file) DEFER_FILE=$value ;;
+    *) echo "$DECK_LATE_PROG: unexpected installer option '$key'" >&2; exit 2 ;;
+  esac
+  shift 2
+done
+for value in "$CONFIG" "$CREDS" "$FULL_NAME_FILE" "$EMAIL_FILE" "$ENCRYPT_FILE" \
+             "$AUTHORIZED_KEYS_FILE" "$TAILSCALE_AUTHKEY_FILE" "$DEFER_FILE"; do
+  [[ -n $value ]] || { echo "$DECK_LATE_PROG: missing installer option in dashboard command" >&2; exit 2; }
+done
+
+confirmed_at=$(date +%s)
+
+late_say() {
+  printf '[%s] %s\n' "$DECK_LATE_PROG" "$*"
+  printf '[%s] %s\n' "$DECK_LATE_PROG" "$*" >>"$LOG_FILE" 2>/dev/null || true
+}
+
+late_serial() {
+  printf '%s\n' "$1" >"$DECK_LATE_SERIAL" 2>/dev/null || true
+}
+
+file_word() {
+    # Status words only: strip all whitespace. Error text uses file_line.
+    if [[ -r $1 ]]; then
+        head -n 1 "$1" 2>/dev/null | tr -d '[:space:]'
+    fi
+}
+
+file_line() {
+    # One-line human reason: preserve inner spaces, drop the newline only.
+    if [[ -r $1 ]]; then
+        head -n 1 "$1" 2>/dev/null | tr -d '\r\n'
+    fi
+}
+
+# Stop the early stage stalling on a network that never comes: LATE is here,
+# so the form is over and the wait is over. The early worker polls this file.
+mkdir -p "$(dirname "$DECK_LATE_SKIP")"
+touch "$DECK_LATE_SKIP"
+
+# --- join EARLY ------------------------------------------------------------
+# The post-confirm clock INCLUDES this wait (C6): when the form outlasted the
+# early work it is ~0s; when it did not, the remainder shows as progress.
+early_t0=$(date +%s)
+while true; do
+  st=$(file_word "$DECK_LATE_EARLY_STATUS")
+  case $st in
+    done) break ;;
+    failed)
+      err=$(file_line "$DECK_LATE_EARLY_ERROR")
+      late_say "ERROR: the early stage failed before the confirm${err:+: $err}"
+      late_say "The install cannot proceed: the disk holds a half-restored system."
+      exit 1
+      ;;
+    running|absent|"")
+      sleep 5
+      ;;
+    *)
+      late_say "ERROR: unknown early state '$st'; refusing to guess"
+      exit 1
+      ;;
+  esac
+  if (( $(date +%s) - early_t0 > 3600 )); then
+    late_say "ERROR: timed out after 1h waiting for the early stage"
+    exit 1
+  fi
+done
+early_join_wait_s=$(($(date +%s) - early_t0))
+late_say "early stage joined (waited ${early_join_wait_s}s)"
+
+# --- join STEAM ------------------------------------------------------------
+# Steam is critical=False: incomplete/skipped/failed never fails LATE, but
+# the state is recorded and surfaced. Wait only for a `running` fetch to
+# settle; a terminal state is read as-is.
+steam_t0=$(date +%s)
+while true; do
+  sst=$(file_word "$DECK_LATE_STEAM_STATUS")
+  case $sst in
+    running) sleep 5 ;;
+    *) break ;;
+  esac
+  if (( $(date +%s) - steam_t0 > 1800 )); then
+    late_say "WARNING: timed out waiting for the Steam fetch; proceeding without it"
+    sst="unknown"
+    break
+  fi
+  # The Steam fetch runs inside early's last phase; early `done` bounds this.
+  if [[ $(file_word "$DECK_LATE_EARLY_STATUS") == "done" ]]; then
+    sst=$(file_word "$DECK_LATE_STEAM_STATUS")
+    [[ $sst == running ]] && sst="unknown"
+    break
+  fi
+done
+steam_join_wait_s=$(($(date +%s) - steam_t0))
+sst=${sst:-unknown}
+[[ -n $sst ]] || sst=unknown
+if [[ $sst == failed || $sst == incomplete ]]; then
+  serr=$(file_line "$DECK_LATE_STEAM_ERROR")
+  late_say "WARNING: Steam fetch ended in state '$sst'${serr:+: $serr}; first boot finishes it"
+else
+  late_say "Steam state at confirm: $sst (waited ${steam_join_wait_s}s)"
+fi
+
+# --- run LATE --------------------------------------------------------------
+late_say "running the late stage (identity, user, finalization)"
+if ! OMARCHY_INSTALL_STAGE=late \
+  OMARCHY_INSTALL_CONFIG="$CONFIG" \
+  OMARCHY_INSTALL_CREDS="$CREDS" \
+  OMARCHY_INSTALL_FULL_NAME_FILE="$FULL_NAME_FILE" \
+  OMARCHY_INSTALL_EMAIL_FILE="$EMAIL_FILE" \
+  OMARCHY_INSTALL_ENCRYPT_FILE="$ENCRYPT_FILE" \
+  OMARCHY_INSTALL_AUTHORIZED_KEYS_FILE="$AUTHORIZED_KEYS_FILE" \
+  OMARCHY_INSTALL_TAILSCALE_AUTHKEY_FILE="$TAILSCALE_AUTHKEY_FILE" \
+  OMARCHY_INSTALL_DEFER_PROVISIONING_FILE="$DEFER_FILE" \
+  OMARCHY_INSTALL_STATE_DIR=/run/omarchy-install \
+    /usr/local/bin/omarchy-iso-install \
+      --config "$CONFIG" \
+      --creds "$CREDS" \
+      --full-name-file "$FULL_NAME_FILE" \
+      --email-file "$EMAIL_FILE" \
+      --encrypt-file "$ENCRYPT_FILE" \
+      --authorized-keys-file "$AUTHORIZED_KEYS_FILE" \
+      --tailscale-authkey-file "$TAILSCALE_AUTHKEY_FILE" \
+      --defer-provisioning-file "$DEFER_FILE"; then
+  late_say "ERROR: the late stage failed; see the log above"
+  exit 1
+fi
+
+finished_at=$(date +%s)
+
+# --- timing record (C6) ----------------------------------------------------
+# Fail loud: a missing early record means early never reported, and an empty
+# timing file would silently pass the harness with no clocks to compare.
+[[ -r /run/omarchy-deck/early/timing.json ]] \
+  || { late_say "ERROR: /run/omarchy-deck/early/timing.json missing; early never reported"; exit 1; }
+early_started=$(jq -r '.started_at // empty' /run/omarchy-deck/early/timing.json)
+[[ -n $early_started ]] || { late_say "ERROR: early timing.json has no started_at"; exit 1; }
+early_finished=$(jq -r '.finished_at // empty' /run/omarchy-deck/early/timing.json)
+[[ -n $early_finished ]] || { late_say "ERROR: early timing.json has no finished_at"; exit 1; }
+early_phases=$(jq -c '.phases // empty' /run/omarchy-deck/early/timing.json)
+[[ -n $early_phases && $early_phases != "" ]] || { late_say "ERROR: early timing.json has no phases array"; exit 1; }
+late_phases=$(jq -c '.phases // empty' /run/omarchy-install/state.json)
+[[ -n $late_phases && $late_phases != "" ]] || { late_say "ERROR: late state.json has no phases array"; exit 1; }
+timing_json=$(jq -n \
+  --argjson confirmed "$confirmed_at" --argjson finished "$finished_at" \
+  --argjson early_join "$early_join_wait_s" --argjson steam_join "$steam_join_wait_s" \
+  --argjson early_started "$early_started" --argjson early_finished "$early_finished" \
+  --argjson early_phases "$early_phases" --argjson late_phases "$late_phases" \
+  --arg steam_state "$sst" \
+  '{
+    early: {started_at: $early_started, finished_at: $early_finished, phases: $early_phases},
+    late: {confirmed_at: $confirmed, early_join_wait_s: $early_join, steam_join_wait_s: $steam_join, finished_at: $finished, phases: $late_phases, steam_state_at_confirm: $steam_state}
+  }')
+printf '%s\n' "$timing_json" >"$DECK_LATE_TIMING"
+late_say "post-confirm install took $((finished_at - confirmed_at))s (early-join ${early_join_wait_s}s, steam-join ${steam_join_wait_s}s)"
+
+# --- serial markers (Harness transport) ------------------------------------
+compact=$(printf '%s' "$timing_json" | jq -c . 2>/dev/null || printf '%s' "$timing_json")
+late_say "FASTINSTALL_TIMING:$compact"
+late_serial "FASTINSTALL_TIMING:$compact"
+late_say "FASTINSTALL:DONE"
+late_serial "FASTINSTALL:DONE"

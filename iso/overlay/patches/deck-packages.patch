@@ -1,9 +1,9 @@
 diff --git i/builder/build-iso.sh w/builder/build-iso.sh
-index db8daa2..c0e085f 100755
+index 931beda..3d3d1bb 100755
 --- i/builder/build-iso.sh
 +++ w/builder/build-iso.sh
-@@ -104,6 +104,208 @@ if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
-   LOCAL_OMARCHY_BUILD=1
+@@ -112,6 +112,225 @@ if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
+   done
  fi
  
 +# ===========================================================================
@@ -68,7 +68,24 @@ index db8daa2..c0e085f 100755
 +# one runs. The per-list emptiness refusals further down and
 +# test/unit/test-deck-pkgs.py are the other half; nothing here can notice a
 +# consumer that was deleted from the orchestrator.
-+deck_known_lists=(deck-install deck-mirror deck-live deck-fetch)
++#   deck-gaming.packages     copied into the live ISO below as
++#                          /usr/share/omarchy-iso/deck-gaming.packages and read
++#                          at INSTALL time by the early optional delta (Gaming=yes
++#                          only, offline from the mirror) and by the C6 desktop
++#                          opt-in; never baked into the common image.
++#   deck-preinstalls.packages
++#                          copied into the live ISO below as
++#                          /usr/share/omarchy-iso/deck-preinstalls.packages
++#                          and read at INSTALL time by the early optional delta
++#                          (preinstalls=yes only, offline from the mirror);
++#                          preinstalls=no skips the add step and late runs the
++#                          canonical removal tools.
++#
++# ⚠️ This checks that a consumer is DECLARED, which is not the same as proving
++# one runs. The per-list emptiness refusals further down and
++# test/unit/test-deck-pkgs.py are the other half; nothing here can notice a
++# consumer that was deleted from the orchestrator.
++deck_known_lists=(deck-install deck-mirror deck-live deck-fetch deck-gaming deck-preinstalls)
 +
 +for deck_list in "${deck_known_lists[@]}"; do
 +  if [[ ! -f "$deck_list_dir/$deck_list.packages" ]]; then
@@ -211,8 +228,8 @@ index db8daa2..c0e085f 100755
  # Node.js binary for offline mise install.
  NODE_DIST_URL="https://nodejs.org/dist/latest"
  NODE_SHASUMS=$(curl -fsSL "$NODE_DIST_URL/SHASUMS256.txt")
-@@ -121,6 +323,46 @@ cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
- arch_packages=(linux-t2 git gum jq openssl plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
+@@ -129,6 +348,46 @@ cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
+ arch_packages=(linux-t2 git gum jq openssl plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted qemu-img)
  printf '%s\n' "${arch_packages[@]}" >> "$build_cache_dir/packages.x86_64"
  
 +# --- Steam Deck (omarchy-deck overlay, T5-fork-plan.md §3 seam S6) ----------
@@ -258,7 +275,7 @@ index db8daa2..c0e085f 100755
  # The live ISO boots linux-t2 (see airootfs/etc/mkinitcpio.d/linux-t2.preset), so
  # stock linux is a second kernel nobody boots: ~147MB of ISO, plus its own archiso
  # initramfs, copied into both the ISO tree and the size-constrained FAT EFI image.
-@@ -164,10 +406,71 @@ else
+@@ -172,10 +431,75 @@ else
    setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
  fi
  
@@ -286,7 +303,7 @@ index db8daa2..c0e085f 100755
 +# install time by deck_pkgs.py, hours later, on the user's machine. An empty
 +# one would install nothing and there would be nothing left to notice it. That
 +# is precisely the P3.2 failure, so the refusal belongs where it costs seconds.
-+for deck_list in deck-install deck-mirror deck-fetch; do
++for deck_list in deck-install deck-mirror deck-fetch deck-gaming deck-preinstalls; do
 +  if ! grep -qv '^#\|^$' "$deck_list_dir/$deck_list.packages"; then
 +    echo "ERROR: $deck_list_dir/$deck_list.packages has no package entries" >&2
 +    echo "       (missing, empty, or entirely comments)." >&2
@@ -326,11 +343,15 @@ index db8daa2..c0e085f 100755
 +# dangling link inside a squashfs.
 +cp "$deck_list_dir/deck-fetch.packages" \
 +  "$build_cache_dir/airootfs/usr/share/omarchy-iso/deck-fetch.packages"
++for deck_variant_list in deck-gaming deck-preinstalls; do
++  cp "$deck_list_dir/$deck_variant_list.packages" \
++    "$build_cache_dir/airootfs/usr/share/omarchy-iso/$deck_variant_list.packages"
++done
 +
  # The configurator's setup form comes from the runtime this ISO bundles, so the
  # installer and the first-boot setup that finishes a deferred install can never
  # disagree. A runtime predating the split ships no such file, which would leave
-@@ -187,12 +490,40 @@ if [[ ! -f $setup_form ]]; then
+@@ -195,12 +519,46 @@ if [[ ! -f $setup_form ]]; then
  fi
  cp "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"
  
@@ -348,13 +369,19 @@ index db8daa2..c0e085f 100755
 +# rather than being taught to tolerate failure: it still asserts each excluded
 +# name IS in deck-install.packages, and that excluding it actually removed
 +# something from the target list.
++# FAST-INSTALL.md C2: the Gaming-only pins (deck-gaming.packages) must be in
++# the online resolve -- steam's virtual vulkan-driver deps are satisfiable
++# only when the AMD providers are in the transaction -- but they are NOT in
++# the merged omarchy-base.packages (never baked). Pass them as extra targets;
++# the dry-run reads EXTRA_TARGETS into the same transaction it asserts over.
 +DECK_LOCAL_PACKAGES="${deck_local_packages[*]}" \
 +  bash "$deck_list_dir/deck-nvidia-dry-run.sh" \
 +  "/configs/pacman-online-${OMARCHY_MIRROR}.conf" \
 +  "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages" \
 +  /builder/archinstall.packages \
 +  "$deck_list_dir" \
-+  "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"
++  "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE" \
++  $(grep -hv '^#\|^$' "$deck_list_dir/deck-gaming.packages")
 +
  # Collect every package we want available in the offline mirror.
  declare -a all_packages
@@ -369,9 +396,9 @@ index db8daa2..c0e085f 100755
 +    # aborts the single-repo offline resolve both this build and pacstrap do.
 +    grep -hv '^#\|^$' "$deck_list_dir/deck-mirror.packages"
      grep -hv '^#\|^$' /builder/archinstall.packages
-     # Always include the selected Omarchy packages so the target install can
-     # find the runtime and companion packages in the offline mirror.
-@@ -213,6 +544,98 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+     # The root image is pacstrapped from the pruned mirror, so its packages
+     # must be in the keep-set even when nothing in the lists depends on them.
+@@ -234,6 +592,98 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
    )
  fi
  
@@ -470,7 +497,7 @@ index db8daa2..c0e085f 100755
  mkdir -p /tmp/offlinedb
  download_offline_packages() {
    pacman --config /configs/pacman-online-${OMARCHY_MIRROR}.conf --noconfirm -Syw \
-@@ -266,6 +660,36 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+@@ -303,9 +753,57 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
    done
  fi
  
@@ -507,3 +534,91 @@ index db8daa2..c0e085f 100755
  printf '%s\n' "${required_package_files[@]}" |
    bash /builder/prune-offline-mirror.sh "$offline_mirror_dir"
  
++# Evict same-named, different-bytes copies from the pacman cache (formerly
++# iso/overlay/patches/zz-pacman-cache-eviction.patch, retired 2026-09-24): the mirror is
++# authoritative, so a cache entry that disagrees with it is always the wrong
++# copy. Inline here (not as a separate patch) because both this block and the
++# root-image rebuild above replace the same repo-add hunk; a second patch
++# touching that hunk conflicts on every rebase. Compare by content, never by
++# name alone: an identical cache hit is a legitimate saved download.
++evicted=0
++for mirror_pkg in "$offline_mirror_dir"/*.pkg.tar.zst; do
++  cached_pkg="/var/cache/pacman/pkg/$(basename "$mirror_pkg")"
++  [[ -f $cached_pkg ]] || continue
++  if cmp -s "$mirror_pkg" "$cached_pkg"; then continue; fi
++  echo "evicting stale pacman-cache copy (differs from the mirror): $(basename "$cached_pkg")"
++  rm -f "$cached_pkg" "$cached_pkg.sig"
++  evicted=$((evicted + 1))
++done
++echo "pacman-cache eviction: $evicted file(s) differed from the offline mirror and were removed"
++
+ # Index the mirror only now, from scratch, so size/checksum/depends entries
+ # reflect only the package files selected for this build. The cache persists
+ # across builds and can hold several versions of a package; repo-add keeps
+@@ -323,6 +821,24 @@ rebuild_offline_repo_db
+ # else the target gets is in the image.
+ hardware_packages=(linux-t2 amd-ucode intel-ucode sof-firmware alsa-firmware tailscale)
+ 
++# FAST-INSTALL.md C2: the Deck image is the MINIMAL common closure. The 13
++# optional pre-installs (deck-preinstalls.packages) and the Gaming-only set
++# (deck-gaming.packages) stay in the offline mirror for the early optional
++# delta but must never bake: a minimal image that already contains them is a
++# slower No/No install and a desktop variant carrying Gaming Mode. The strip
++# below is exact-name (-Fxv); a variant entry that stops matching anything
++# here fails loudly in the count check instead of silently baking.
++variant_exclude_args=()
++while IFS= read -r variant_entry; do
++  [[ -n $variant_entry ]] || continue
++  variant_exclude_args+=(-e "$variant_entry")
++done < <(grep -hv '^#\|^$' "$deck_list_dir/deck-gaming.packages" "$deck_list_dir/deck-preinstalls.packages")
++if ((${#variant_exclude_args[@]} == 0)); then
++  echo "ERROR: the Deck variant lists (deck-gaming + deck-preinstalls) yielded no package entries" >&2
++  echo "       An empty exclusion would bake every optional package into the minimal image." >&2
++  exit 1
++fi
++
+ mapfile -t image_packages < <(
+   {
+     grep -hv '^#\|^$' /builder/archinstall.packages
+@@ -330,8 +846,16 @@ mapfile -t image_packages < <(
+     # The shipped copy, which is what the install reads too.
+     grep -hv '^#\|^$' "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
+     printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"
++    # The Deck boots linux-omarchy only (FAST-INSTALL.md C5): bake it in
++    # place of the stock kernel, so no install extracts a second kernel,
++    # builds a second UKI, or trips the late stage's kernel assertion.
++    printf '%s\n' linux-omarchy
+-  } | sort -u | grep -Fxv "${hardware_packages[@]/#/-e}"
++  } | sort -u | grep -Fxv "${hardware_packages[@]/#/-e}" -e linux | grep -Fxv "${variant_exclude_args[@]}" || true
+ )
++if ((${#image_packages[@]} == 0)); then
++  echo "ERROR: stripping the Deck variant packages emptied the root-image package set." >&2
++  exit 1
++fi
+ 
+ # pacstrap resolves the image against the offline repo and, with CacheDir on
+ # the mirror itself, extracts the package files in place instead of copying
+@@ -429,10 +949,11 @@ fi
+ echo "Shipping $shipped_count of $mirror_count mirror packages; the root image provides the rest."
+ 
+ # Denominator for the install dashboard's progress bar: what the image holds
+-# plus any missing stock-kernel closure on top of it, resolved against the
++# (the minimal common closure; variant counts derive at install time from what
++# was actually installed, per FAST-INSTALL.md C2) plus any missing
++# stock-kernel closure on top of it, resolved against the
+ # image's own local db with the pruned mirror, which is the question the
+-# installer's delta pacstrap asks. (It is normally empty now that linux is in
+-# the image.) Hardware-specific packages cannot be predicted by the builder:
++# installer's delta pacstrap asks. Hardware-specific packages cannot be predicted by the builder:
+ # in particular, VMs correctly have no CPU microcode delta while physical AMD
+ # and Intel machines do. Do not fabricate a fixed +1 that makes every VM look
+ # incomplete. phases.py records this deterministic minimum and the actual
+@@ -455,7 +976,7 @@ resolve_expected_packages() {
+   # dashboard's fallback.
+   resolved="$(pacman --config "$build_cache_dir/pacman-offline.conf" \
+     --root "$resolve_root" --dbpath "$resolve_root/var/lib/pacman" \
+-    --noconfirm -S --print --print-format '%n' --needed linux)" || return 1
++    --noconfirm -S --print --print-format '%n' --needed linux-omarchy)" || return 1
+ 
+   echo $(( image_count + $(printf '%s\n' "$resolved" | sort -u | grep -c .) ))
+ }

@@ -112,12 +112,17 @@ disk_image::root_mount() {
     return 1
   }
 
-  mount_line=$(udisksctl mount -b "$loop_dev" 2>&1) || {
+  if mount_line=$(udisksctl mount -b "$loop_dev" 2>&1); then
+    mount_point=$(grep -oP '(?<=at ).*' <<<"$mount_line")
+  elif [[ $mount_line == *org.freedesktop.UDisks2.Error.AlreadyMounted* ]]; then
+    # A desktop automounter can mount the loop between loop-setup and this
+    # call. It is still our read-only loop; use its actual mount point.
+    mount_point=$(lsblk -no MOUNTPOINT "$loop_dev")
+  else
     udisksctl loop-delete -b "$loop_dev" >/dev/null 2>&1
     echo "disk_image::root_mount: mount failed: $mount_line" >&2
     return 1
-  }
-  mount_point=$(grep -oP '(?<=at ).*' <<<"$mount_line")
+  fi
   if [[ -z $mount_point || ! -d "$mount_point/@" ]]; then
     udisksctl unmount -b "$loop_dev" >/dev/null 2>&1
     udisksctl loop-delete -b "$loop_dev" >/dev/null 2>&1

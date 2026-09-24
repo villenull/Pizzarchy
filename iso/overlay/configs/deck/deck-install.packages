@@ -1,11 +1,17 @@
-# Steam Deck packages INSTALLED ON EVERY TARGET.
+# Steam Deck packages INSTALLED ON EVERY TARGET (the common minimal set).
+#
+# FAST-INSTALL.md C2: the root image bakes exactly this closure plus the
+# runtime base. Gaming-only packages live in deck-gaming.packages and the 13
+# optional pre-installs in deck-preinstalls.packages -- both stay in the
+# offline mirror for the early optional delta, but neither is baked.
 #
 # T5-fork-plan.md §3 seam S1: this list is merged into the runtime's own
 # omarchy-base.packages *before* build-iso.sh copies it to
 # airootfs/usr/share/omarchy-iso/, so one edit reaches all three consumers at
 # once -- the offline mirror's `pacman -Syw`, the target install's
-# `_runtime_package_list`, and the `expected-packages` denominator the install
-# dashboard draws its progress bar from. Appending anywhere later desyncs them.
+# image package set (which reads the shipped copy), and the
+# `expected-packages` denominator the install dashboard draws its progress
+# bar from. Appending anywhere later desyncs them.
 #
 # ⚠️ NO REPO-QUALIFIED NAMES IN THIS FILE. Entries here are resolved twice
 # against the OFFLINE mirror, whose pacman.conf declares exactly one repo
@@ -45,147 +51,36 @@
 # Anything that touches the boot chain is T1/T5f's, not this file's -- with the
 # one deliberate exception argued in the kernel section below.
 #
-# ---------------------------------------------------------------------------
-# The two vulkan-driver pins -- docs/PROGRESS.md §3.8
-# ---------------------------------------------------------------------------
+# --- COMMON entries: baked into the minimal image, on every variant ---------
 #
-# `steam` depends on the VIRTUAL packages `vulkan-driver` and
-# `lib32-vulkan-driver`. With no AMD provider selected, pacman picks the NVIDIA
-# stack on its own and nothing errors: several hundred MB of driver that cannot
-# run on this hardware.
+# READER: pacstrap, from the offline mirror (merged into base_pkg_lists[0] by
+# deck-packages.patch seam S1, which also feeds the mirror download and the
+# image package set).
 #
-# 🔴 §3.8's list of what appears is incomplete, MEASURED 2026-08-12 against the
-# live repos: it names nvidia-utils, egl-wayland, egl-gbm and egl-x11, and the
-# actual set is six -- `lib32-nvidia-utils` and `egl-wayland2` as well.
+# steamdeck-dsp: Valve audio DSP firmware, COMMON (operator decision
+# 2026-08-15 -- a first boot with tinny speakers is not a degradation anyone
+# can act on); `jupiter-staging/steamdeck-dsp` in deck-mirror.packages decides
+# the build. `steam` stays in deck-fetch.packages (Steam Subscriber Agreement;
+# online only) -- do not "finish the job" here.
 #
-#   pacman -S steam                        -> egl-gbm egl-wayland egl-wayland2
-#                                             egl-x11 lib32-nvidia-utils
-#                                             nvidia-utils     (6)
-#   pacman -S steam lib32-vulkan-radeon    -> egl-gbm egl-wayland egl-wayland2
-#                                             egl-x11 nvidia-utils   (5)
-#   pacman -S steam vulkan-radeon lib32-vulkan-radeon         -> none  (0)
+# qt6-virtualkeyboard: SDDM greeter input on a controller-only machine
+# (FAST-INSTALL.md C4: Gaming=no password login + InputMethod=
+# qtvirtualkeyboard via trackpad). Without it the greeter is an unanswerable
+# screen -- the P32 OSK shape. extra/, redistributable (LGPL/GPL Qt).
 #
-# ⚠️ And §3.8's "naming lib32-vulkan-radeon explicitly drops them to zero" is
-# TRUE ONLY BY ACCIDENT OF RESOLUTION ORDER -- do not lean on it. The 32-bit
-# package hard-depends on the 64-bit one, so `lib32-vulkan-radeon` alone does
-# eventually put `vulkan-radeon` in the transaction. Whether that happens
-# BEFORE pacman has to pick a provider for steam's separate 64-bit
-# `vulkan-driver` dependency depends on the order the resolver reaches them:
-# in the isolated two-package transaction above it does not (nvidia-utils is
-# chosen anyway, middle row), and in the full ISO target set it does. Naming
-# both is what makes the outcome independent of that order.
+# python-evdev: target-side mapper runtime for DESKTOP MODE navigation
+# (stage-input-mapper). NOT a duplicate of the deck-live.packages entry,
+# which serves the LIVE ISO's installer keyboard (guard 6.7) -- both lists
+# need it, for different roots.
 #
-# Consequence for anyone mutation-testing this file: deleting the
-# `lib32-vulkan-radeon` line makes deck-nvidia-dry-run.sh fail the build, but
-# deleting `vulkan-radeon` currently does NOT, because the full-set ordering
-# happens to save it. That is a behaviour-preserving mutation, not a hole in
-# the guard -- the line is here for determinism, and the guard is what notices
-# if the ordering ever stops being kind.
-#
-# Both resolve to ARCH's build, not Valve's, because the Valve repos are
-# appended last -- deliberate, on measured evidence (docs/PROGRESS.md §5.13,
-# docs/findings/P16-repo-overlap-audit.md: 101 names overlap and Valve's is
-# older in 50 of them, the whole mesa/vulkan stack included). The test Deck
-# runs Arch's vulkan-radeon with Gaming Mode working.
-vulkan-radeon
-lib32-vulkan-radeon
-
-# ---------------------------------------------------------------------------
-# Our own package -- T5-fork-plan.md §3 seam S4
-# ---------------------------------------------------------------------------
-#
-# Built by us, from pkgbuilds/omarchy-deck/, straight into the ISO's offline
-# mirror. It exists in NO online repository, which makes it different from
-# every other entry in this file and is why the patched build-iso.sh has to
-# know about it in four separate places (build it / strip it from the online
-# `pacman -Syw` / add it back to the prune keep-set / exclude it from
-# deck-nvidia-dry-run.sh's online resolve). Those four all read one
-# declaration, derived from the pkgbuilds/ directory listing itself.
-#
-# It is safe HERE, in the install list, precisely because this file is
-# resolved against the OFFLINE mirror -- by resolve_expected_packages after
-# repo-add, and by pacstrap at install time -- and the package is in that
-# mirror by then. Not repo-qualified, per this file's header: the offline
-# pacman.conf declares one repo and a `foo/bar` entry aborts both resolves.
-#
-# 🔴 If you delete this line, the pipeline still builds a package and still
-# carries it in the mirror -- and nothing installs it. That failure is silent
-# on the build side and only visible on the target, which is what
-# test/unit/test-omarchy-deck-package.sh exists to catch in seconds.
+# omarchy-deck: our own package (seam S4); resolved against the OFFLINE
+# mirror where it exists by build time. If this line goes missing the build
+# stays green and the target gets nothing -- test-omarchy-deck-package.sh
+# catches exactly that.
 omarchy-deck
-
-# --- Gaming Mode's session file (§14.6) ---------------------------------------
-#
-# 🔴 This line is what puts `/usr/share/wayland-sessions/gamescope-wayland.desktop`
-# on the target, which is the file deck_autologin.py's GAMING_SESSION looks for.
-# Without it the install completes and lands in DESKTOP mode -- the §14.6 gap.
-#
-# It said `gamescope-session` from 2026-08-14 (commit 56c6578) until 2026-08-15.
-# That package EXISTS IN NO VALVE REPO -- measured against the package databases
-# of all four (jupiter, jupiter-staging, holo, holo-staging): none ships any
-# `gamescope-session*`. The name was never build-validated, because the last real
-# ISO build predated it; the first build that tried it died on
-# `error: target not found: gamescope-session`.
-#
-# The session file is shipped by the gamescope PACKAGE ITSELF -- but only Valve's
-# build of it. Measured from the repo file-lists 2026-08-15:
-#   jupiter-staging/gamescope 3.16.25-3  ->  usr/share/wayland-sessions/gamescope-wayland.desktop
-#   extra/gamescope           3.16.25-1  ->  no wayland-sessions/ entry at all
-# deck-mirror.packages already pulls the Valve build into the offline mirror as
-# `jupiter-staging/gamescope` (qualified there, per §5.13). Nothing installed it:
-# omarchy-deck does not depend on gamescope and no other list named it, so the
-# mirror carried the compositor and the target never got it.
-#
-# Bare, NOT repo-qualified -- this file is resolved twice against the offline
-# mirror, whose pacman.conf declares one repo; a `jupiter-staging/` prefix here
-# aborts both resolves (this file's header, and deck-nvidia-dry-run.sh fails the
-# build on it). One repo means one candidate: Valve's, the one the mirror kept.
-#
-# READER: pacstrap, from the offline mirror, during the target install.
-gamescope
-
-# --- Gaming Mode's performance overlay ---------------------------------------
-#
-# READER: pacstrap, from the offline mirror, during the target install.
-#
-# `mangohud`/`lib32-mangohud` ship /usr/bin/mangoapp, which Valve's
-# gamescope-mangoapp.service and src/deck-session.sh both expect
-# (deck-session.sh line ~962 warns "mangoapp not found (install mangohud) --
-# Gaming Mode's performance overlay will not work"). docs/PROGRESS.md §5.13's
-# follow-on measured that Arch's 0.8.4-1 is NEWER than Valve's 0.8.3-4 and
-# already carries mangoapp, so these stay BARE and resolve to Arch's build --
-# do not qualify them into jupiter-staging/ to match the line above.
-#
-# They were mirror-only until 2026-08-15, i.e. downloaded into the ISO and
-# installed by nobody -- the same defect as the kernel below, found by the same
-# hardware boot. The dual entry is the fix; deck-mirror.packages keeps its copy
-# so the "which build" decision stays where the measurement is written down.
-mangohud
-lib32-mangohud
-
-# ---------------------------------------------------------------------------
-# Valve's audio DSP firmware -- MOVED HERE FROM deck-fetch.packages 2026-08-15
-# ---------------------------------------------------------------------------
-#
-# READER: pacstrap, from the offline mirror, during the target install.
-#
-# T5-fork-plan.md §4.1 chose FETCH for this package on redistribution grounds
-# (`Licenses: Proprietary`, no licence text shipped --
-# docs/findings/P16-redistribution-and-trademark.md §1). Reversed by the
-# operator on 2026-08-15: it now rides in the offline mirror because it is
-# FIRMWARE the machine needs to have working audio at all, and a first boot
-# with tinny speakers is not a degradation anyone can act on.
-#
-# The bare name is here; `jupiter-staging/steamdeck-dsp` is in
-# deck-mirror.packages, which is what decides the build and keeps the online
-# download list unambiguous. Verified against the live repo 2026-08-15:
-# jupiter-staging carries steamdeck-dsp-0.38-1-any.
-#
-# ⚠️ `steam` did NOT move. It stays in deck-fetch.packages and is downloaded
-# from Valve at install time (Steam Subscriber Agreement; the installer's S0
-# screen discloses it). Do not "finish the job" by bundling it -- that is a
-# licensing question this project has deliberately not taken on.
 steamdeck-dsp
+qt6-virtualkeyboard
+python-evdev
 
 # ---------------------------------------------------------------------------
 # 🔴 RETIRED 2026-09-17 (v4.0.4 rebase): the Neptune kernel is gone.
@@ -212,23 +107,18 @@ steamdeck-dsp
 # With linux-omarchy-only there should be exactly one -- which is itself a
 # thing the next build must confirm rather than assume.
 
-# --- python-evdev -----------------------------------------------------------
+# ---------------------------------------------------------------------------
+# MOVED TO deck-gaming.packages (FAST-INSTALL.md C2): gamescope,
+# vulkan-radeon, lib32-vulkan-radeon, mangohud, lib32-mangohud.
+# ---------------------------------------------------------------------------
 #
-# CONSUMER: pacstrap, from the offline mirror (this list merges into
-# base_pkg_lists[0], which feeds both the mirror download and the target
-# install -- see deck-packages.patch's seam S1).
-#
-# 🔴 NOT a duplicate of the identically-named entry in deck-live.packages.
-# Those two lists answer different questions and BOTH need it:
-#
-#   deck-live.packages   the LIVE ISO's root, so the INSTALLER's on-screen
-#                        keyboard can run (guard 6.7)
-#   this list            the TARGET, so `stage-input-mapper` can install the
-#                        mapper for DESKTOP MODE navigation after the install
-#
-# Added 2026-08-15 (session 28) after the live run of deck-session.sh on the
-# operator's Deck aborted exactly here: `python3 -c "import evdev"` ->
-# ModuleNotFoundError, so stage-input-mapper failed -- correctly and loudly,
-# but to stderr, which is why nothing appeared in the journal. Without this
-# line the baked session layer (`session_bake`) fails on EVERY install.
-python-evdev
+# These install for Gaming=yes only, offline from the mirror, via the early
+# optional delta (which reads deck-gaming.packages off the live ISO) and the
+# C6 desktop opt-in. They were unconditional here until the four-variant
+# contract: baking them would put the Gaming stack (and the NVIDIA-provider
+# question the vulkan pins exist to settle) into every desktop-only image.
+# deck-mirror.packages keeps the "which build" decisions (notably
+# jupiter-staging/gamescope, the ONLY build shipping
+# gamescope-wayland.desktop); deck-gaming.packages decides THAT they install.
+# Do not re-add them here -- a second kernel-style dual install is not the
+# risk, a slower minimal image and a desktop variant carrying Gaming Mode is.

@@ -1257,11 +1257,27 @@ shopt -u nullglob
 # whenever upstream has published a package at the same pkgver-pkgrel we
 # compile -- i.e. whenever our pin is current, which is the normal case.
 #
-# A SEVENTH has to argue again, from scratch, against this same rule.
-(( ${#overlay_patches[@]} <= 6 )) ||
-  fail "iso/overlay/patches/ holds ${#overlay_patches[@]} patches; the budget is 6 (T5-fork-plan.md §1 point 3, raised from 4 in T5e and from 5 in P34 -- see the block above)" \
-    "A seventh patch has to argue for itself -- and the argument is usually that the change belongs in the omarchy-deck package instead. Raising this number is a decision, not a fix."
-pass "the overlay patch budget is respected (${#overlay_patches[@]}/6 -- T5-fork-plan.md §1 point 3, raised from 4 in T5e and from 5 in P34)"
+# FAST-INSTALL folds the cache-eviction fix into deck-packages.patch because
+# both touch the same builder package/cache transaction; the standalone
+# zz-pacman-cache-eviction.patch was deleted. The six-patch pre-change set
+# therefore became five before the following two additions.
+#
+# 00-root-image-pr145.patch ports upstream's root-image builder and installer
+# phases onto our pinned ISO. It edits code running before omarchy-deck exists:
+# restoring a root image and resolving a base delta cannot be supplied by the
+# installed package. A patch exposes rebase conflicts that a verbatim builder
+# overlay would hide.
+#
+# deck-install-invocation.patch connects the live ISO's cidata and dashboard
+# entrypoints to the early/late drivers. Those upstream-owned entrypoints run
+# before the target package exists and offer no drop-in hook; the actual
+# drivers remain additive in deck_stage_split.py and /usr/local/bin.
+#
+# Keep the limit: an eighth patch needs its own reason, not a test waiver.
+(( ${#overlay_patches[@]} <= 7 )) ||
+  fail "iso/overlay/patches/ holds ${#overlay_patches[@]} patches; the budget is 7 (cache eviction folded into deck-packages; two ISO-only FAST-INSTALL seams added)" \
+    "An eighth patch has to argue for itself; prefer an additive overlay or the omarchy-deck package wherever either can run."
+pass "the overlay patch budget is respected (${#overlay_patches[@]}/7 -- T5-fork-plan.md §1 point 3)"
 
 # C. Staged and promoted are mutually exclusive states for the same patch.
 for staged in "${staged_patches[@]}"; do
@@ -1487,23 +1503,16 @@ fi
 # ---------------------------------------------------------------------------
 
 ORCHESTRATOR_OVERLAY="$ISO_ROOT/overlay/configs/airootfs/usr/share/omarchy-iso/orchestrator"
-ORCHESTRATOR_UPSTREAM="$ISO_ROOT/upstream/configs/airootfs/usr/share/omarchy-iso/orchestrator"
+ORCHESTRATOR_PATCHED="$apply_scratch/configs/airootfs/usr/share/omarchy-iso/orchestrator"
 
-# orchestrator_module_missing <name> -- empty if the module resolves, otherwise
-# a sentence saying why not. A relative import may legitimately name an
-# UPSTREAM module (deck_configure's own `from .ui import error, info` does), so
-# the overlay is checked first and upstream second. When the submodule is not
-# checked out the upstream half cannot be consulted, and that is reported as
-# part of the failure rather than quietly treated as a pass.
+# A provider can be additive in the overlay, present in the pinned upstream,
+# or introduced as a NEW FILE by another promoted patch (PR #145 adds
+# luks_lifecycle.py). The already-applied scratch tree contains all three and
+# is the exact source the ISO builder will use.
 orchestrator_module_missing() {
   local name=$1
-  [[ -f "$ORCHESTRATOR_OVERLAY/$name.py" ]] && return 0
-  if [[ -d $ORCHESTRATOR_UPSTREAM ]]; then
-    [[ -f "$ORCHESTRATOR_UPSTREAM/$name.py" ]] && return 0
-    printf 'no %s.py in the overlay orchestrator, and none in the pinned upstream orchestrator either' "$name"
-    return 0
-  fi
-  printf 'no %s.py in the overlay orchestrator (iso/upstream is not checked out here, so it could not be confirmed as an upstream module either)' "$name"
+  [[ -f "$ORCHESTRATOR_OVERLAY/$name.py" || -f "$ORCHESTRATOR_PATCHED/$name.py" ]] && return 0
+  printf 'no %s.py in the overlay or the fully patched upstream orchestrator' "$name"
 }
 
 (( ${#overlay_patches[@]} > 0 )) ||
@@ -1673,13 +1682,12 @@ patch_sourced_of() {
 # lines it adds. Command position only: the name must open a statement (start
 # of an added line, or after ; & | ( or one of the keywords that introduce
 # one), optionally negated, and must be followed by a delimiter rather than
-# `=`. That last clause is what keeps `deck_destination=...` in
-# deck-packages.patch -- a variable assignment, not a call -- out of the set.
-# Added lines only, and never comment lines: a name a patch merely mentions in
-# prose is not a dependency.
+# `=`. Arithmetic `(( deck_counter ))` is NOT a call; filter those lines
+# before extraction. Added lines only, never comments.
 patch_calls_of() {
   grep -hE '^\+' "$1" |
     grep -vE '^\+[[:space:]]*#' |
+    grep -vE '^\+.*\(\([[:space:]]*deck_[A-Za-z0-9_]+[[:space:]]' |
     grep -oE '(^\+|[;&|(]|\b(if|until|while|then|do|else|elif))[[:space:]]*!?[[:space:]]*deck_[A-Za-z0-9_]+([[:space:]]|;|\)|\||$)' |
     grep -oE 'deck_[A-Za-z0-9_]+' | sort -u
 }

@@ -1,0 +1,375 @@
+#!/usr/bin/env bash
+# omarchy-deck-enable-gaming -- turn a Gaming-No Omarchy desktop into a full
+# Steam Deck Gaming Mode machine, in place, with no disk wipe.
+#
+# C6 (docs/tasks/FAST-INSTALL.md): the Gaming No installer choice promises a
+# REAL desktop action that enables Gaming Mode later. This is that action's
+# implementation: a terminal-visible script the Omarchy menu and a .desktop
+# launcher both invoke. Installed by the omarchy-deck package as
+# /usr/bin/omarchy-deck-enable-gaming (0755).
+#
+# What it does, in order, and nothing else:
+#
+#   1. Refuses offline, with a retry loop rather than a silent skip.
+#   2. Installs the Gaming-only package set in ONE full-system transaction
+#      (`pacman -Syu --needed`, never `-Sy` + `-S`: a partial upgrade is
+#      unsupported and can strand the machine on mixed library versions).
+#      Valve's gamescope build, the AMD vulkan providers, the mangoapp
+#      overlay, steam. steamdeck-dsp is NOT here: firmware every variant
+#      already carries.
+#   3. Runs the SAME session-switch layer Gaming Yes bakes EXCEPT the two
+#      stages that change boot/login behavior (stage-boot-default-gaming,
+#      stage-default-session -- both deferred to step 5). The list is
+#      `list-bake-stages` minus `list-desktop-bake-stages`, never hand-kept.
+#   4. Bootstraps Valve's client once as the desktop user (bounded, then
+#      verifies its installed manifest before switching sessions).
+#   5. Verifies readiness (session file, session launcher, client manifest)
+#      and ONLY then runs the canonical stage-default-session (which invokes
+#      deck-session-select gamescope -- the ONE SDDM writer) followed by the
+#      deferred stage-boot-default-gaming. Until step 5 succeeds the desktop
+#      password login is untouched.
+#
+# Failure is loud: every failure exits non-zero with the reason on stderr and
+# in /var/log/omarchy-deck-enable-gaming.log. Idempotent: every stage is a
+# re-runnable check-then-write, so a re-run after a failure resumes rather
+# than restarts. bake_gaming_stages stops at the FIRST failed stage -- later
+# stages may depend on it, and running them anyway would pile misleading
+# errors onto a machine whose login state is then harder to reason about.
+#
+# NEVER run as part of the ISO installer. It assumes a booted, provisioned
+# desktop with a real user, a network, and systemd running.
+set -euo pipefail
+
+PROG=omarchy-deck-enable-gaming
+LOG=/var/log/omarchy-deck-enable-gaming.log
+STATE_DIR=/var/lib/omarchy-deck
+READY_MARKER=$STATE_DIR/gaming-ready
+
+# --- Gaming-only packages: manifest first, builtin fallback -------------------
+#
+# The authority is RootImageMuse's iso/overlay/configs/deck/deck-gaming.packages
+# (shipped on the ISO at /usr/share/omarchy-iso/deck-gaming.packages and, once
+# the package carries it, at /usr/share/omarchy-deck/deck-gaming.packages).
+# load_gaming_packages() prefers the first non-empty manifest on disk and falls
+# back to the builtin below -- which MUST always equal the manifest, so an
+# older package against a newer image (or no manifest at all) still installs
+# the same set. The builtin's own authority is the installer's lists
+# (deck-install.packages bare forms + deck-mirror.packages Valve qualification
+# + deck-fetch.packages online steam); the suite asserts builtin == manifest
+# whenever the manifest file exists in the repo.
+#
+#   jupiter-staging/gamescope   Valve's build: the ONLY one shipping
+#                               gamescope-wayland.desktop (deck-install
+#                               §14.6; deck-mirror §Gaming Mode). A bare
+#                               `gamescope` resolves to Arch's extra build
+#                               and ships no session file.
+#   vulkan-radeon               64-bit AMD provider: without it pacman picks
+#   lib32-vulkan-radeon         NVIDIA's stack for steam's virtual
+#                               vulkan-driver deps (deck-install §3.8).
+#   mangohud lib32-mangohud     /usr/bin/mangoapp: the performance overlay
+#                               gamescope-mangoapp.service expects.
+#   steam                       multilib launcher (deck-fetch.packages):
+#                               online, never redistributed (Steam Subscriber
+#                               Agreement). Pulls its ~34 lib32 deps itself.
+#
+# steamdeck-dsp is NOT listed: it is firmware every variant installs.
+GAMING_PACKAGES=(jupiter-staging/gamescope vulkan-radeon lib32-vulkan-radeon mangohud lib32-mangohud steam)
+GAMING_MANIFEST_FILES=(/usr/share/omarchy-deck/deck-gaming.packages /usr/share/omarchy-iso/deck-gaming.packages)
+load_gaming_packages() {
+  # Prints the ONLINE package list: repo-qualified gamescope + the bare rest
+  # + fetch-only steam. A manifest entry maps to itself EXCEPT bare
+  # `gamescope`, which maps to `jupiter-staging/gamescope` (the manifest's
+  # own header states the mapping: bare resolves offline, qualified online).
+  # steam is online-only (deck-fetch.packages) and always appended: the
+  # offline manifest never carries it.
+  local f line entries=() mapped=()
+  for f in "${GAMING_MANIFEST_FILES[@]}"; do
+    [[ -s $f ]] || continue
+    entries=()
+    while IFS= read -r line; do
+      line="${line%%#*}"
+      line="${line//[[:space:]]/}"
+      [[ -n $line ]] && entries+=("$line")
+    done <"$f"
+    if (( ${#entries[@]} > 0 )); then
+      mapped=()
+      for line in "${entries[@]}"; do
+        if [[ $line == gamescope ]]; then
+          mapped+=(jupiter-staging/gamescope)
+        else
+          mapped+=("$line")
+        fi
+      done
+      mapped+=(steam)
+      printf '%s\n' "${mapped[@]}"
+      return 0
+    fi
+  done
+  printf '%s\n' "${GAMING_PACKAGES[@]}"
+}
+
+# Session name, matching src/deck-session.sh's GAMING_SESSION and the
+# orchestrator's deck_autologin.py GAMING_SESSION: the bare basename, no
+# .desktop extension.
+GAMING_SESSION=gamescope-wayland
+
+# Where the session layer lives on an installed system: the omarchy-deck
+# package ships deck-session.sh at /usr/share/omarchy-deck/deck-session.sh
+# (the bake stages it into /var/tmp and deletes it, so it is NOT there to
+# re-run). Without that copy there is nothing to bake and this refuses.
+SESSION_SCRIPT=/usr/share/omarchy-deck/deck-session.sh
+
+log() { printf '[%s] %s\n' "$PROG" "$*" | tee -a "$LOG"; }
+fail() { printf '[%s] ERROR: %s\n' "$PROG" "$*" | tee -a "$LOG" >&2; exit 1; }
+
+need_root() {
+  [[ $EUID -eq 0 ]] || fail "must run as root (the menu launches it with sudo). Re-run with sudo."
+}
+
+# --- 0. never inside the installer ------------------------------------------
+#
+# The ISO installer has no provisioned user, no running systemd, and its own
+# /usr/share/omarchy-iso tree. Running here would bake stages into the live
+# ISO's root. Refuse loudly.
+guard_not_installer() {
+  if [[ -d /run/archiso ]]; then
+    fail "refusing to run inside the live installer (/run/archiso exists). This enables Gaming Mode on an INSTALLED Gaming-No desktop, never during installation."
+  fi
+}
+
+# --- 1. network, with a retry loop, never a silent skip ----------------------
+require_network() {
+  local tries=0
+  while (( tries < 30 )); do
+    if getent hosts client-update.steamstatic.com >/dev/null 2>&1; then
+      log "network: Valve CDN resolves"
+      return 0
+    fi
+    if (( tries == 0 )); then
+      log "no network yet (Valve CDN does not resolve) -- waiting up to 5 minutes; connect Wi-Fi and this continues on its own"
+    fi
+    tries=$((tries + 1))
+    sleep 10
+  done
+  fail "still offline after 5 minutes: Valve's CDN does not resolve. Connect this Deck to a network and re-run '$PROG'."
+}
+
+
+# --- 0b. the Gaming-No variant marker (Stages' late writes it) ----------------
+# /var/lib/omarchy-deck/variant carries gaming=no on Gaming-No machines
+# (plus preinstalls=yes/no). When present it confirms this machine came from
+# the No-Gaming path; when absent (older image, hand-built desktop) the
+# positive-facts checks elsewhere still gate correctly, so it is confirmation,
+# never a requirement. A marker saying gaming=yes means Gaming Mode is already
+# installed -- nothing to do.
+check_variant_marker() {
+  local marker=/var/lib/omarchy-deck/variant
+  [[ -f $marker ]] || return 0
+  if grep -q '^gaming=yes' "$marker" 2>/dev/null; then
+    log "variant marker says gaming=yes -- Gaming Mode is already installed; verifying it still works"
+  elif grep -q '^gaming=no' "$marker" 2>/dev/null; then
+    log "variant marker confirms the Gaming-No install path"
+  else
+    log "WARNING: $marker exists but names no gaming= choice; continuing on positive facts"
+  fi
+}
+# --- who the desktop user is -------------------------------------------------
+#
+# SUDO_USER when launched with sudo from the desktop session (the menu and the
+# .desktop entry both do that); refuse a direct root run with no invoking user
+# rather than baking stages for nobody.
+desktop_user() {
+  local user="${SUDO_USER:-}"
+  [[ -n $user && $user != root ]] || fail "could not determine the desktop user (SUDO_USER='$user'). Run this with sudo from the desktop session, not as root directly."
+  id "$user" >/dev/null 2>&1 || fail "user '$user' does not exist"
+  printf '%s' "$user"
+}
+
+# --- 2. the Gaming-only package set: ONE full-system transaction ---------------
+# `pacman -Syu --needed` in a single transaction. `-Sy` followed by `-S` is a
+# partial upgrade (Arch unsupported): fresh package lists against old
+# libraries can strand the machine on mixed versions mid-run. A full -Syu
+# upgrades the whole desktop too -- slower, but the only supported shape, and
+# exactly what Gaming Yes's pacstrap already resolved coherently at install.
+install_gaming_packages() {
+  mapfile -t want < <(load_gaming_packages)
+  (( ${#want[@]} > 0 )) || fail "no Gaming packages resolved (manifest and builtin both empty) -- refusing to continue with nothing to install."
+  local missing=()
+  local pkg base
+  for pkg in "${want[@]}"; do
+    base="${pkg##*/}"
+    if ! pacman -Q "$base" >/dev/null 2>&1; then
+      missing+=("$pkg")
+    fi
+  done
+  if (( ${#missing[@]} == 0 )); then
+    log "packages: every Gaming package already installed ($(printf '%s ' "${want[@]##*/}"))"
+    return 0
+  fi
+  log "installing Gaming packages (full-system transaction): ${missing[*]}"
+  pacman -Syu --noconfirm --needed "${missing[@]}" \
+    || fail "pacman -Syu failed for: ${missing[*]}. NOTHING was half-installed (one transaction); fix the errors above and re-run '$PROG'."
+  for pkg in "${missing[@]}"; do
+    base="${pkg##*/}"
+    pacman -Q "$base" >/dev/null 2>&1 \
+      || fail "pacman exited 0 but '$base' is still not installed -- the exit code and the package database disagree. Re-run '$PROG'."
+  done
+  log "packages: installed ${missing[*]}"
+}
+
+# --- 2b. the client bootstrap ------------------------------------------------
+#
+# deck-fetch's steam package ships the bootstrap tarball, not the client.
+# Run Valve's own launcher once as the desktop user so first entry into
+# Gaming Mode verifies instead of downloading ~500 MB on a black screen.
+# Bounded (10 min outer wall); a stall or failure is a WARNING, never fatal:
+# Gaming Mode still works, its first start just downloads like stock.
+bootstrap_client() {
+  local user="$1"
+  local home
+  home=$(getent passwd "$user" | cut -d: -f6)
+  [[ -n $home && -d $home ]] || { log "WARNING: cannot resolve $user's home; skipping client pre-download (first Gaming Mode start downloads it)"; return 0; }
+  if [[ -n $(find "$home/.local/share/Steam/package" -maxdepth 1 -name 'steam_client_*.installed' 2>/dev/null | head -1) ]]; then
+    log "client: already bootstrapped, nothing to download"
+    return 0
+  fi
+  log "pre-downloading Steam's client (~500 MB) as $user; bounded at 10 minutes, first Gaming Mode start finishes whatever is left"
+  if runuser -u "$user" -- env -i "HOME=$home" "USER=$user" "LOGNAME=$user" \
+      PATH=/usr/bin:/bin TERM=dumb XDG_CURRENT_DESKTOP=gamescope \
+      timeout -s KILL 600 /usr/bin/steam -steamdeck -gamepadui -nocrashdialog -noassert \
+      >>"$LOG" 2>&1; then
+    log "client: bootstrap exited 0"
+  else
+    log "WARNING: client bootstrap exited $? -- Gaming Mode still works; its first start finishes the download"
+  fi
+  if [[ -z $(find "$home/.local/share/Steam/package" -maxdepth 1 -name 'steam_client_*.installed' 2>/dev/null | head -1) ]]; then
+    log "WARNING: no installed manifest yet -- first Gaming Mode start downloads the client like stock SteamOS"
+  else
+    log "client: installed manifest present"
+  fi
+}
+
+# --- 3. the session layer: Gaming Yes's stages MINUS the login-flippers ------
+#
+# The stage list has ONE home: deck-session.sh's own BAKE_STAGES. The gaming
+# subset is derived (BAKE minus DESKTOP_BAKE), never hand-kept here, so a
+# stage added to the script is baked by this script without anyone editing it.
+#
+# Two stages are DEFERRED to step 5, not skipped: stage-default-session (runs
+# deck-session-select gamescope, which WRITES the SDDM autologin drop-in) and
+# stage-boot-default-gaming (installs+enables the unit that re-asserts Gaming
+# Mode at every boot). Either one landing before readiness verifies would
+# point autologin -- now or at next reboot -- at a Gaming Mode whose session
+# file, launcher, or client may still be absent. Until step 5 succeeds, no
+# baked stage changes the login target: stage-session-select only INSTALLS
+# the selector tool (audited: its SDDM_DROPIN write fires solely for the
+# gamescope/desktop target its caller names, and the bake loop never invokes
+# it with a target at all).
+# bake_gaming_stages stops at the FIRST failed stage: later stages may depend
+# on it, and running them anyway would pile misleading errors onto a machine
+# whose login state is then harder to reason about.
+DEFERRED_STAGES=(stage-default-session stage-boot-default-gaming)
+bake_gaming_stages() {
+  local user="$1"
+  [[ -x $SESSION_SCRIPT ]] \
+    || fail "$SESSION_SCRIPT is missing or not executable -- the omarchy-deck package must ship deck-session.sh there. Reinstall omarchy-deck and re-run '$PROG'."
+  local bake desktop stage
+  bake=$("$SESSION_SCRIPT" list-bake-stages) \
+    || fail "deck-session.sh list-bake-stages failed -- refusing to bake a guessed stage list."
+  desktop=$("$SESSION_SCRIPT" list-desktop-bake-stages) \
+    || fail "deck-session.sh list-desktop-bake-stages failed -- refusing a guessed stage list."
+  while IFS= read -r stage; do
+    [[ -n $stage ]] || continue
+    if grep -qxF "$stage" <<<"$desktop"; then
+      continue
+    fi
+    # Already applied before the full pacman transaction, when the Valve
+    # repository must be available but no Gaming session exists yet.
+    [[ $stage == stage-valve-repos ]] && continue
+    local deferred=0
+    for d in "${DEFERRED_STAGES[@]}"; do
+      [[ $stage == "$d" ]] && deferred=1
+    done
+    (( deferred == 1 )) && continue
+    log "baking stage: $stage"
+    DECK_SESSION_USER="$user" "$SESSION_SCRIPT" "$stage" >>"$LOG" 2>&1 \
+      || fail "stage failed: $stage -- SDDM autologin untouched (deferred stages never ran). Fix the errors in $LOG and re-run '$PROG'."
+    log "stage ok: $stage"
+  done <<<"$bake"
+}
+# --- 4. readiness BEFORE any login-flipper -- never after -----------------------
+#
+# Three facts, all re-read off the disk, in this order: the session file Valve's
+# gamescope build ships, the launcher the session entry starts, and the client
+# manifest. Readiness runs BEFORE stage-default-session (which invokes
+# deck-session-select gamescope and WRITES the SDDM autologin drop-in) and
+# before stage-boot-default-gaming (whose unit would otherwise re-assert a
+# Gaming default at next reboot even after this run failed). Until readiness
+# verifies, the desktop password login AND the SDDM config bytes are untouched.
+verify_readiness() {
+  local session_file=""
+  local d
+  for d in /usr/share/wayland-sessions /usr/local/share/wayland-sessions; do
+    if [[ -f "$d/${GAMING_SESSION}.desktop" ]]; then session_file="$d/${GAMING_SESSION}.desktop"; break; fi
+  done
+  [[ -n $session_file ]] \
+    || fail "no ${GAMING_SESSION}.desktop in any wayland-sessions directory -- Valve's gamescope build is missing. SDDM autologin untouched. Reinstall with 'sudo pacman -S jupiter-staging/gamescope' (a bare 'pacman -S gamescope' installs Arch's bare compositor, which ships no SteamOS session), then re-run '$PROG'."
+  log "ready: $session_file"
+  command -v start-gamescope-session >/dev/null 2>&1 \
+    || fail "start-gamescope-session is not on PATH -- the gamescope install is incomplete. SDDM autologin untouched. Reinstall and re-run '$PROG'."
+  log "ready: start-gamescope-session on PATH"
+  local user="$1"
+  local home
+  home=$(getent passwd "$user" | cut -d: -f6)
+  if [[ -z $(find "$home/.local/share/Steam/package" -maxdepth 1 -name 'steam_client_*.installed' 2>/dev/null | head -1) ]]; then
+    fail "Steam's client is not bootstrapped yet (no installed manifest in ~/.local/share/Steam/package). SDDM autologin untouched. Re-run '$PROG' with a network to finish the download, then this continues."
+  fi
+  log "ready: Steam client manifest present"
+}
+
+# --- 5. the login-flippers, canonical stages only ------------------------------
+#
+# NO direct write to the SDDM drop-in lives here: stage-default-session IS the
+# writer (it invokes deck-session-select gamescope, which checks the session
+# .desktop exists, writes, and re-reads Session=/User=/Relogin= back). A
+# second implementation of that write would be the drift this project keeps
+# paying for. stage-boot-default-gaming runs after it: its unit re-asserts the
+# Gaming default at every boot, which is only safe once readiness verified.
+run_login_flippers() {
+  local user="$1"
+  log "setting the default session to Gaming Mode (canonical stage-default-session)"
+  DECK_SESSION_USER="$user" "$SESSION_SCRIPT" stage-default-session >>"$LOG" 2>&1 \
+    || fail "stage-default-session failed -- SDDM autologin may be partially written; the desktop session picker still offers the desktop login. Fix the errors in $LOG and re-run '$PROG'."
+  log "arming the boot-default re-assert (stage-boot-default-gaming)"
+  DECK_SESSION_USER="$user" "$SESSION_SCRIPT" stage-boot-default-gaming >>"$LOG" 2>&1 \
+    || fail "stage-boot-default-gaming failed -- Gaming Mode is the default but a reboot will not re-assert it after a manual desktop switch. Fix the errors in $LOG and re-run '$PROG'."
+}
+
+main() {
+  need_root
+  guard_not_installer
+  install -d -m 0755 -o root -g root "$STATE_DIR" ||
+    fail "cannot create $STATE_DIR for the Gaming Mode readiness marker"
+  : >>"$LOG" 2>/dev/null || fail "cannot write $LOG"
+  log "=== $PROG start ==="
+  check_variant_marker
+  if [[ -f $READY_MARKER ]]; then
+    log "already enabled ($(cat "$READY_MARKER" 2>/dev/null)): re-verifying readiness"
+  fi
+  require_network
+  local user
+  user=$(desktop_user)
+  log "desktop user: $user"
+  [[ -x $SESSION_SCRIPT ]] || fail "$SESSION_SCRIPT is missing or not executable"
+  DECK_SESSION_REPOS_ONLY=1 DECK_SESSION_USER="$user" "$SESSION_SCRIPT" stage-valve-repos >>"$LOG" 2>&1 \
+    || fail "could not configure Valve repositories before the full-system Gaming package transaction; see $LOG"
+  install_gaming_packages
+  bake_gaming_stages "$user"
+  bootstrap_client "$user"
+  verify_readiness "$user"
+  run_login_flippers "$user"
+  date -u +%FT%TZ >"$READY_MARKER"
+  log "=== $PROG done: Gaming Mode ready. Reboot or log out to enter it. Desktop password login is preserved via the SDDM session picker. ==="
+}
+
+main "$@"

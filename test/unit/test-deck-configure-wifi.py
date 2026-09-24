@@ -852,13 +852,19 @@ subprocess.run(
     check=True,
     capture_output=True,
 )
-proc = subprocess.run(
-    ["git", "-C", str(patch_work), "apply", "--3way", str(PATCH)],
-    capture_output=True,
-    text=True,
-    check=False,
-)
-check("the patch applies to the pinned upstream tree", proc.returncode, 0)
+# configure-deck-phase.patch is based on PR #145's modified main.py, not
+# directly on the pinned upstream. Apply the prerequisite first so this test
+# inspects the same phase order the ISO actually ships.
+for patch in (REPO_ROOT / "iso/overlay/patches/00-root-image-pr145.patch", PATCH):
+    proc = subprocess.run(
+        ["git", "-C", str(patch_work), "apply", "--3way", str(patch)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    check(f"{patch.name} applies to the pinned build tree", proc.returncode, 0)
+    if proc.returncode:
+        raise SystemExit(f"{patch.name} failed: {proc.stderr}")
 
 patched_main = patch_work / "configs/airootfs/usr/share/omarchy-iso/orchestrator/main.py"
 pkg_root = build_package(main_py=patched_main)
@@ -876,8 +882,8 @@ check(
     True,
 )
 check(
-    "🔴 and BEFORE 'Finalizing Limine boot'",
-    names.index("Configuring Steam Deck") < names.index("Finalizing Limine boot"),
+    "🔴 and BEFORE the PR #145 boot/user finalization fan",
+    names.index("Configuring Steam Deck") < names.index("Finalizing boot and user setup"),
     True,
 )
 check(
@@ -885,7 +891,7 @@ check(
     dict(patched.build_phases(None))["Configuring Steam Deck"],
     patched_deck_configure.configure_deck,
 )
-check("exactly one phase was added", len(names), 15)
+check("exactly one phase was added to PR #145's nine-phase pipeline", len(names), 10)
 check(
     "every upstream phase name survives, in its original order",
     [n for n in names if n != "Configuring Steam Deck"],
@@ -896,12 +902,7 @@ check(
         "Configuring hibernation",
         "Configuring system",
         "Staging provisioning",
-        "Finalizing Limine boot",
-        "Finalizing user",
-        "Configuring login",
-        "Configuring SSH access",
-        "Configuring Tailscale",
-        "Configuring DNS resolver",
+        "Finalizing boot and user setup",
         "Validating boot setup",
         "Creating factory snapshot",
     ],

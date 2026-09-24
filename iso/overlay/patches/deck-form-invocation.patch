@@ -167,7 +167,7 @@ index 44e428b..685b2fc 100644
  # Let the live VT reach its settled width before the first screen so the logo
  # isn't measured against the transient 80-column boot console.
  wait_for_stable_terminal
-@@ -1022,6 +1043,36 @@ fi
+@@ -1022,6 +1043,37 @@ fi
  
  clear
  
@@ -176,8 +176,9 @@ index 44e428b..685b2fc 100644
 +# S5, the review-before-install screen. NOT an override -- upstream has no
 +# such screen -- so it has to be called, and this is the only place it can be
 +# called from: every branch above converges here, and nothing below it is a
-+# question. Declining redraws the flow (deck_final_summary re-drives
-+# user_step/disk_form/select_installation itself) rather than returning here.
++# question. Declining re-runs user_step itself (identity only -- the disk was
++# decided at S0-A and the early stage is already erasing it) rather than
++# returning here.
 +deck_final_summary || abort
 +
 +# T5-fork-plan.md §5.5, enforced where it is decided rather than where it is
@@ -204,7 +205,7 @@ index 44e428b..685b2fc 100644
  write_user_files
  
  if [[ $install_target == "free_space" ]]; then
-@@ -1191,6 +1242,6 @@ _EOF_
+@@ -1191,6 +1243,6 @@ _EOF_
  }
  _EOF_
  

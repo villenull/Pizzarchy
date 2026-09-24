@@ -1,0 +1,12 @@
+# Installed by omarchy-deck. Launches the real conversion in a terminal,
+# with sudo preserving SUDO_USER for per-user session setup. The desktop
+# on-screen keyboard can answer sudo's password prompt by trackpad.
+[Desktop Entry]
+Type=Application
+Name=Enable Gaming Mode
+Comment=Install Steam Deck Gaming Mode on this desktop (downloads Steam, no disk wipe)
+Exec=/usr/bin/omarchy-launch-floating-terminal-with-presentation sudo /usr/bin/omarchy-deck-enable-gaming
+Icon=input-gaming
+Terminal=false
+Categories=Game;System;
+Keywords=steam;gaming;gamescope;deck;

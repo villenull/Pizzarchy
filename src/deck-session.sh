@@ -2007,6 +2007,23 @@ readonly -a BAKE_STAGES=(
   stage-power-button
 )
 
+# Desktop-only installations need the Deck's controller, display and power
+# support, but must not install Steam hooks or a Gaming Mode session selector.
+# The installer asks for this list with list-desktop-bake-stages; keep it next
+# to BAKE_STAGES so both variants use the same stage implementations.
+readonly -a DESKTOP_BAKE_STAGES=(
+  stage-preconditions
+  stage-mask-wait-online
+  stage-greeter-rotation
+  stage-sddm-resilience
+  stage-priv-write-helper
+  stage-input-mapper
+  stage-lizard-mode
+  stage-osk-kb-layout
+  stage-onboard-audio-name
+  stage-power-button
+)
+
 log()  { printf '[%s] %s\n' "$PROG" "$*"; }
 warn() { printf '[%s] WARNING: %s\n' "$PROG" "$*" >&2; }
 fail() { printf '[%s] ERROR: %s\n' "$PROG" "$*" >&2; exit 1; }
@@ -2070,6 +2087,10 @@ stage_preconditions() {   # stage_preconditions [--skip-session-probes]
   # SUDO setup and the DMI hardware gate still apply to the repair.
   local skip_session_probes=0
   if [[ ${1:-} == --skip-session-probes ]]; then skip_session_probes=1; fi
+  if [[ ${DECK_SESSION_DESKTOP_ONLY:-0} == 1 ]]; then
+    in_chroot || fail "DECK_SESSION_DESKTOP_ONLY=1 is only supported during installer chroot baking"
+    skip_session_probes=1
+  fi
   local tool
   for tool in systemctl install findmnt; do
     command -v "$tool" >/dev/null 2>&1 ||
@@ -2563,6 +2584,13 @@ stage_valve_repos() {
   $SUDO grep -qF -- "$INSTALL_MARKER_TEXT" "$VALVE_HOOK_SKEL" ||
     fail "installed ${VALVE_HOOK_SKEL} but the ownership marker is not there on re-read"
 
+  # The desktop opt-in must configure Valve's repositories before its single
+  # pacman -Syu transaction. In that mode do not sync a database or install
+  # gamescope here: the full upgrade below owns the entire package mutation.
+  if [[ ${DECK_SESSION_REPOS_ONLY:-0} == 1 ]]; then
+    log "stage-valve-repos: repository and refresh hook ready for the Gaming Mode conversion"
+    return 0
+  fi
   if in_chroot; then
     defer "pacman database sync and gamescope repair need the target's own network and keyring -- the chroot sees the installer's. Repos block and refresh hook ARE installed. Confirm on the installed machine with: pacman -Sl ${VALVE_REPOS[0]} && ls /usr/share/wayland-sessions/${GAMING_SESSION}.desktop"
     log "stage-valve-repos: ok (file-level work done; sync and repair deferred)"
@@ -9454,6 +9482,14 @@ run_stage() {
   # deadlock, so it keeps the tools, SUDO, hardware and SDDM probes and skips
   # only the Gaming Mode session probes -- hardware refusal and SUDO setup
   # still apply to this stage.
+  if [[ ${DECK_SESSION_DESKTOP_ONLY:-0} == 1 ]]; then
+    in_chroot || fail "desktop-only bake is only supported inside the installer chroot"
+    local allowed=0 candidate
+    for candidate in "${DESKTOP_BAKE_STAGES[@]}"; do
+      [[ $stage == "$candidate" ]] && { allowed=1; break; }
+    done
+    [[ $allowed -eq 1 ]] || fail "$stage is not a desktop-only bake stage"
+  fi
   if [[ $stage == stage-valve-repos ]]; then
     stage_preconditions --skip-session-probes
   elif [[ $stage != stage-preconditions ]]; then
@@ -9479,6 +9515,7 @@ main() {
     # it to be wrong. The module asks the script; the script answers from
     # BAKE_STAGES, which sits beside the stages themselves.
     list-bake-stages) printf '%s\n' "${BAKE_STAGES[@]}" ;;
+    list-desktop-bake-stages) printf '%s\n' "${DESKTOP_BAKE_STAGES[@]}" ;;
     -h|--help|help)
       cat <<EOF
 ${PROG}.sh -- two-way Gaming Mode <-> Desktop session switching for a Deck
@@ -9490,6 +9527,8 @@ ${PROG}.sh -- two-way Gaming Mode <-> Desktop session switching for a Deck
                                     target, in order. Read by the orchestrator's
                                     deck_session_bake step, which runs each one
                                     inside arch-chroot with DECK_SESSION_CHROOT=1
+  ${PROG}.sh list-desktop-bake-stages
+                                    target stages for a Deck without Gaming Mode
 
 ENVIRONMENT
   DECK_SESSION_CHROOT=1             chroot mode: you are inside arch-chroot, as
@@ -9500,6 +9539,8 @@ ENVIRONMENT
                                     CHROOT MODE block at the top of this file.
   DECK_SESSION_USER=<name>          who the desktop user is. Only chroot mode
                                     sets it -- there is no SUDO_USER in there.
+  DECK_SESSION_DESKTOP_ONLY=1       with DECK_SESSION_CHROOT=1: allow only the
+                                    desktop bake stages; skip Gaming Mode probes
   ${PROG}.sh stage-audit-privileges report sudoers drop-ins that grant blanket
                                     root; fails if any do (release check, T6)
   ${PROG}.sh stage-default-session  make Gaming Mode the default (do this last)

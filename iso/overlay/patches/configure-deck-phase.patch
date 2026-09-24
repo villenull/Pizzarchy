@@ -1,6 +1,18 @@
+diff --git a/configs/airootfs/usr/share/omarchy-iso/orchestrator/main.py b/configs/airootfs/usr/share/omarchy-iso/orchestrator/main.py
+index e4f466e..2ceeb99 100644
 --- a/configs/airootfs/usr/share/omarchy-iso/orchestrator/main.py
 +++ b/configs/airootfs/usr/share/omarchy-iso/orchestrator/main.py
-@@ -45,12 +45,26 @@ def build_phases(ctx: InstallContext):
+@@ -37,10 +37,30 @@ def build_phases(ctx: InstallContext):
+         run_system_finalizer,
+         stage_provisioning_state,
+         finalize_boot_and_user_setup,
++        finalize_limine_boot,
++        run_chroot_finalizer,
++        configure_dns_resolver,
++        configure_login,
++        configure_ssh_access,
++        configure_tailscale,
+         validate_boot,
          create_factory_snapshot,
      )
  
@@ -9,21 +21,58 @@
 +    # this one place instead of a merge conflict in a 1900-line file. An
 +    # ImportError here aborts before any phase runs -- i.e. before partitioning
 +    # -- which is the loud, early failure we want if the overlay is incomplete.
++    # FAST-INSTALL (C3): OMARCHY_INSTALL_STAGE=early|late selects the slice
++    # via deck_stage_split.select_phases; the default `full` keeps the fan
++    # entry below untouched. The parallel fan (finalize_boot_and_user_setup)
++    # must never run in the split flow: early must finish every pacman
++    # transaction before the Limine/UKI build, and late must not re-create the
++    # user or re-finalize boot -- so the split resolves the fan's members
++    # (Limine boot, user finalizer, login, SSH, Tailscale, DNS) individually.
 +    from .deck_configure import configure_deck
 +
      return [
          ("Preparing live environment", prepare_live),
          ("Preparing install target",   prepare_install_target),
-         ("Installing Arch + Omarchy",  arch_install_system),
-         ("Configuring hibernation",    configure_hibernation),
+@@ -49,6 +70,15 @@ def build_phases(ctx: InstallContext):
          ("Configuring system",         run_system_finalizer),
+         # Before the parallel fan: the deferred-provisioning cryptkey drop-in
+         # and keyfile must be in place for the final UKI build.
 +        # After run_system_finalizer: omarchy-setup-system runs
 +        # install/post-install/pacman.sh, which overwrites /etc/pacman.conf
 +        # wholesale, so anything written before it is destroyed. Before
-+        # finalize_limine_boot: the rotation bake-in (T5f) has to be in
++        # stage_provisioning_state: the rotation bake-in (T5f) has to be in
 +        # /boot/limine.conf and in the packaged template before limine-update
 +        # reads them.
 +        ("Configuring Steam Deck",     configure_deck),
-         # Before finalize_limine_boot: the deferred-provisioning cryptkey drop-in and keyfile
-         # must be in place for the final UKI build.
-         ("Staging provisioning",          stage_provisioning_state),
++        # Before the Limine/UKI build: the deferred-provisioning cryptkey
++        # drop-in and keyfile must be in place for the final UKI build.
+         ("Staging provisioning",       stage_provisioning_state),
+         ("Finalizing boot and user setup", finalize_boot_and_user_setup),
+         ("Validating boot setup",      validate_boot),
+@@ -56,6 +85,13 @@ def build_phases(ctx: InstallContext):
+     ]
+ 
+ 
++def build_staged_phases(ctx):
++    full = build_phases(ctx)
++    from .deck_stage_split import select_phases
++    from . import phases_impl
++    return select_phases(ctx, phases_impl, full)
++
++
+ def main() -> int:
+     try:
+         ctx = InstallContext.from_env()
+@@ -80,7 +116,11 @@ def main() -> int:
+     success = False
+     try:
+         try:
+-            run(ctx, build_phases(ctx))
++            from .deck_stage_split import stage_name, STAGE_FULL
++            if stage_name() == STAGE_FULL:
++                run(ctx, build_phases(ctx))
++            else:
++                run(ctx, build_staged_phases(ctx))
+             success = True
+         except PhaseError:
+             error("Installation halted.")

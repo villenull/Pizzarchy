@@ -1,0 +1,64 @@
+# Steam Deck GAMING-ONLY packages (FAST-INSTALL.md C2).
+#
+# Installed offline from the bundled mirror for Gaming=yes installs only --
+# by the early optional delta (which reads this file from
+# /usr/share/omarchy-iso/deck-gaming.packages on the LIVE ISO), and later by
+# /usr/bin/omarchy-deck-enable-gaming for the C6 desktop opt-in. Gaming=no
+# installs none of this; the common minimal root image excludes all of it.
+#
+# ⚠️ BARE NAMES, never repo-qualified. This list is resolved against the
+# single-repo OFFLINE mirror (configs/pacman-offline.conf declares exactly
+# one repo); a `jupiter-staging/foo` entry aborts that resolve the same way
+# it would in deck-install.packages. The offline mirror carries exactly one
+# build of gamescope -- Valve's, because builder/build-iso.sh downloads the
+# qualified `jupiter-staging/gamescope` (see deck-mirror.packages) and strips
+# the bare form from the download list -- so bare `gamescope` here resolves
+# to Valve's build, the ONLY one shipping
+# usr/share/wayland-sessions/gamescope-wayland.desktop.
+#
+# ONLINE consumers must re-qualify: against the online repos a bare
+# `gamescope` resolves by repo order to Arch's extra build, which ships no
+# session file. omarchy-deck-enable-gaming therefore installs
+# `jupiter-staging/gamescope` (qualified) plus the bare names below. The
+# mapping is stated here so the two consumers cannot drift: bare name <->
+# online name is identity for every entry except gamescope.
+#
+# --- Gaming Mode's session file (deck-install.packages §14.6, moved here) ----
+#
+# READER: the early gaming delta + the C6 opt-in, offline from the mirror.
+#
+# Valve's build ships /usr/share/wayland-sessions/gamescope-wayland.desktop,
+# the file deck_autologin.py's GAMING_SESSION looks for. Without it an
+# install completes and lands in DESKTOP mode. DUAL ENTRY with
+# `jupiter-staging/gamescope` in deck-mirror.packages (which decides the
+# build); this file decides THAT it is installed.
+gamescope
+
+# --- The two vulkan-driver pins (deck-install.packages §3.8, moved here) -----
+#
+# READER: the early gaming delta + the C6 opt-in, offline from the mirror.
+#
+# `steam` depends on the VIRTUAL packages `vulkan-driver` and
+# `lib32-vulkan-driver`. With no AMD provider selected, pacman picks the
+# NVIDIA stack on its own and nothing errors. Naming both pins makes the
+# outcome independent of resolver order. They must land BEFORE the online
+# `steam` fetch (deck-fetch.packages): the fetch resolves steam's virtual
+# deps against a target that already provides them. Moved here (not deleted)
+# because Gaming=no never fetches steam, so unconditional pins would drag
+# the NVIDIA question -- and the driver weight -- into a desktop-only image.
+vulkan-radeon
+lib32-vulkan-radeon
+
+# --- Gaming Mode's performance overlay (moved here) ---------------------------
+#
+# READER: the early gaming delta + the C6 opt-in, offline from the mirror.
+#
+# `mangohud`/`lib32-mangohud` ship /usr/bin/mangoapp, which Valve's
+# gamescope-mangoapp.service and src/deck-session.sh both expect. Arch's
+# 0.8.4-1 is NEWER than Valve's 0.8.3-4 and already carries mangoapp, so
+# these stay BARE and resolve to Arch's build -- do not qualify them into
+# jupiter-staging/ to match gamescope. DUAL ENTRY with deck-mirror.packages,
+# which keeps its copy so the "which build" decision stays where the
+# measurement is written down.
+mangohud
+lib32-mangohud

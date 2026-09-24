@@ -3930,6 +3930,23 @@ valve_conf() {
   printf '[options]\nHoldPkg = pacman glibc\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n\n[extra]\nInclude = /etc/pacman.d/mirrorlist\n'
 }
 
+# Gaming-No desktop conversion must configure repositories before its one
+# pacman -Syu transaction. There is no Gamescope session yet; this arm writes
+# repos and the refresh hook without syncing a database or installing a
+# package (either would be a partial upgrade before the full transaction).
+reset_root
+valve_conf >"$root/etc/pacman.conf"
+DECK_SESSION_REPOS_ONLY=1 run_stage_body stage_valve_repos
+ok_rc 0 "the desktop conversion can stage Valve repos without Gaming Mode"
+for repo in "${VALVE_REPOS[@]}"; do
+  ok_in_file /etc/pacman.conf "[${repo}]" "repos-only stages [$repo]"
+done
+ok_in_file "$VALVE_HOOK_SKEL" "${INSTALL_MARKER_TEXT}" "repos-only stages the refresh hook"
+if grep -q 'pacman -S' "$calls"; then
+  fail_test "repos-only writes no partial-upgrade package state" "$(cat "$calls")"
+fi
+pass "repos-only performs no pacman sync/install before the conversion's full upgrade"
+
 # --- happy path: repos absent, session present (no repair) ------------------
 reset_root
 export FAKE_PACMAN_SL_RC=0 FAKE_PACMAN_RC=0

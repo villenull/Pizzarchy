@@ -289,6 +289,9 @@ print("\n## 2. the real deck-fetch.packages, and its siblings")
 fetch_text = (DECK_LISTS / "deck-fetch.packages").read_text()
 fetch_names, fetch_warns = deck_pkgs.parse_package_list(fetch_text)
 install_names, _ = deck_pkgs.parse_package_list((DECK_LISTS / "deck-install.packages").read_text())
+gaming_names, gaming_warns = deck_pkgs.parse_package_list((DECK_LISTS / "deck-gaming.packages").read_text())
+preinstall_names, preinstall_warns = deck_pkgs.parse_package_list((DECK_LISTS / "deck-preinstalls.packages").read_text())
+offline_target_names = set(install_names) | set(gaming_names) | set(preinstall_names)
 mirror_raw = [
     line.strip()
     for line in (DECK_LISTS / "deck-mirror.packages").read_text().splitlines()
@@ -296,6 +299,8 @@ mirror_raw = [
 ]
 
 check("the shipped fetch list parses cleanly", fetch_warns, [])
+check("the gaming variant list parses cleanly", gaming_warns, [])
+check("the preinstall variant list parses cleanly", preinstall_warns, [])
 check_true("…is non-empty (an empty one installs nothing, silently)", fetch_names)
 check_true("…and names steam", "steam" in fetch_names)
 check(
@@ -346,8 +351,8 @@ check(
     "linux-neptune-611-headers" in install_names or "linux-neptune-611-headers" in mirror_raw,
     False,
 )
-check_true("mangoapp's package is installed, not merely carried", "mangohud" in install_names)
-check_true("…and its 32-bit half too", "lib32-mangohud" in install_names)
+check_true("mangoapp's package is installed for Gaming=yes, not merely carried", "mangohud" in gaming_names)
+check_true("…and its 32-bit half too", "lib32-mangohud" in gaming_names)
 
 check(
     "🔴 steam is NOT bundled — it stays a fetch (Steam Subscriber Agreement)",
@@ -360,16 +365,16 @@ check(
     [],
 )
 
-# Every bare form of a qualified mirror entry that we also install must be in
-# the install list — that is the dual-entry pattern, and getting it wrong is how
-# gamescope's session file went missing for a build.
+# Every qualified mirror entry that a variant installs must have a bare twin
+# in one of the target package lists. The gaming delta, preinstall delta and
+# common image all read the same offline mirror.
 for entry in mirror_raw:
     if "/" not in entry:
         continue
     bare = entry.rsplit("/", 1)[-1]
     check_true(
-        f"qualified mirror entry {entry} has a bare install-list twin ({bare})",
-        bare in install_names,
+        f"qualified mirror entry {entry} has a bare target-list twin ({bare})",
+        bare in offline_target_names,
     )
 
 
@@ -388,12 +393,10 @@ for entry in mirror_raw:
 # anywhere could see it. docs/findings/P32-neptune-firmware-placement.md §5
 # proposed exactly this rule and did not write it; this is it.
 #
-# The rule: every entry either (a) has a bare twin in deck-install.packages, so
-# pacstrap installs it — the dual-entry pattern — or (b) carries an explicit
-# "READER: NOBODY" annotation in the comment block directly above it, which is
-# the file's own established convention for a deliberate mirror-only line.
-# Silence is the failure. An entry that is neither installed nor annotated is
-# the exact shape of the defect.
+# The rule: every entry either (a) has a bare twin in the common image,
+# gaming or preinstall manifest and therefore reaches an installed target
+# variant, or (b) carries an explicit "READER: NOBODY" annotation in the
+# comment block directly above it. Silence is the failure.
 
 
 def mirror_entries_with_comment_blocks(text: str):
@@ -420,19 +423,18 @@ mirror_text = (DECK_LISTS / "deck-mirror.packages").read_text()
 annotated = 0
 for entry, block in mirror_entries_with_comment_blocks(mirror_text):
     bare = entry.rsplit("/", 1)[-1]
-    installed = bare in install_names
+    installed = bare in offline_target_names
     no_reader = "READER: NOBODY" in block
     if no_reader:
         annotated += 1
     check_true(
-        f"🔴 mirror entry {entry!r} either installs on the target ({bare} in "
-        f"deck-install.packages) or is annotated 'READER: NOBODY' in the comment "
-        f"block above it — installed={installed}, annotated={no_reader}",
+        f"🔴 mirror entry {entry!r} either reaches a target variant ({bare}) "
+        f"or is annotated 'READER: NOBODY' immediately above it "
+        f"— installed={installed}, annotated={no_reader}",
         installed or no_reader,
     )
     check(
-        f"…and not BOTH, which would be a contradiction ({entry!r} claims no "
-        f"reader while deck-install.packages installs it)",
+        f"…and not BOTH ({entry!r} claims no reader but a target variant installs it)",
         installed and no_reader,
         False,
     )

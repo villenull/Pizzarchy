@@ -141,6 +141,10 @@ make_fixture() {
 # Run the guard. $1 = fixture root; any further args become extra environment.
 run_guard() {
   local root=$1; shift
+  local -a optional_targets=()
+  if [[ ${STUB_GAMING_EXTRA:-0} == 1 ]]; then
+    optional_targets=(vulkan-radeon lib32-vulkan-radeon)
+  fi
   GUARD_OUT=""
   GUARD_STATUS=0
   GUARD_OUT=$(
@@ -153,7 +157,7 @@ run_guard() {
       "$@" \
       "$GUARD" "$root/pacman.conf" "$root/base.packages" \
       "$root/archinstall.packages" "$root/deck" \
-      omarchy-dev omarchy-settings-dev omarchy-nvim 2>&1
+      omarchy-dev omarchy-settings-dev omarchy-nvim "${optional_targets[@]}" 2>&1
   ) || GUARD_STATUS=$?
   return 0
 }
@@ -175,6 +179,25 @@ grep -q -- '--print-format %n.*steam' "$f/calls" ||
 [[ $(grep -c -- '--print-format' "$f/calls") -eq 2 ]] ||
   fail "the guard ran exactly two resolves (assertion + negative control)" "$(cat "$f/calls")"
 pass "a clean package set passes, and the run log proves both resolves happened"
+# The four-variant image keeps AMD Vulkan outside the common base list.
+# Negative control must remove those *extra* targets, not just base pins:
+# otherwise the control never fires and the real ISO build fails.
+f="$work/f1-optional"; make_fixture "$f"
+printf '# common hardware pin\npython-evdev\n' >"$f/deck/deck-install.packages"
+printf 'hyprland\nsddm\npython-evdev\n' >"$f/base.packages"
+printf 'python-evdev\n' >>"$f/closure-clean"
+printf 'python-evdev\n' >>"$f/closure-nvidia"
+STUB_GAMING_EXTRA=1 run_guard "$f"
+[[ $GUARD_STATUS -eq 0 && $GUARD_OUT == *"negative control fired as designed"* ]] ||
+  fail "gaming-only providers outside the common image still fire the negative control" "$GUARD_OUT"
+if grep -q -- '--print-format %n.*vulkan-radeon' "$f/calls"; then
+  control=$(grep -- '--print-format %n' "$f/calls" | sed -n '1p')
+  [[ $control != *vulkan-radeon* && $control != *lib32-vulkan-radeon* ]] ||
+    fail "the negative-control pacman call still carries gaming providers" "$control"
+else
+  fail "the passing pacman resolve omitted gaming providers"
+fi
+pass "gaming-only AMD providers are removed from the negative control, not the passing transaction"
 
 # --- 2. an NVIDIA package in the closure fails the build, by name ----------
 
@@ -438,7 +461,8 @@ pass "an install list of nothing but locally built packages is refused -- the ne
 install_list="$LIST_DIR/deck-install.packages"
 mirror_list="$LIST_DIR/deck-mirror.packages"
 fetch_list="$LIST_DIR/deck-fetch.packages"
-for f in "$install_list" "$mirror_list" "$fetch_list"; do
+gaming_list="$LIST_DIR/deck-gaming.packages"
+for f in "$install_list" "$mirror_list" "$fetch_list" "$gaming_list"; do
   [[ -f $f ]] || fail "$(basename "$f") exists in iso/overlay/configs/deck/"
 done
 read_entries() { awk '!/^[[:space:]]*(#|$)/' "$1"; }
@@ -451,12 +475,17 @@ while IFS= read -r entry; do
 done <<<"$install_entries"
 pass "the shipped deck-install.packages has entries and none is repo-qualified"
 
-# §3.8's pin, stated as a requirement on the file rather than on a fixture.
+# Vulkan providers are conditional: Gaming=yes needs both before Steam's
+# virtual-driver transaction; Gaming=no omits the gaming driver stack.
+gaming_entries=$(read_entries "$gaming_list")
 for required in vulkan-radeon lib32-vulkan-radeon; do
-  grep -qx -- "$required" <<<"$install_entries" ||
-    fail "deck-install.packages pins '$required' (docs/PROGRESS.md §3.8)"
+  grep -qx -- "$required" <<<"$gaming_entries" ||
+    fail "deck-gaming.packages pins '$required' before Steam's virtual-driver dependency"
+  if grep -qx -- "$required" <<<"$install_entries"; then
+    fail "deck-install.packages must not install Gaming-only '$required' unconditionally"
+  fi
 done
-pass "deck-install.packages pins both vulkan-radeon and lib32-vulkan-radeon"
+pass "Gaming=yes pins both AMD Vulkan providers; Gaming=no omits them"
 
 # The fetch list must stay OUT of the mirror list: §4.1 decided fetch-not-bundle
 # for steamdeck-dsp on licence grounds, and a copy-paste into the mirror list

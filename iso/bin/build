@@ -453,6 +453,58 @@ git -C "$SCRATCH_SRC" submodule update --init --recursive --jobs=8 --quiet ||
 
 build_log "applying overlay/configs/ ..."
 rsync -a --exclude='.gitkeep' "$ISO_ROOT/overlay/configs/" "$SCRATCH_SRC/configs/"
+#
+# 4b. Stage the omarchy-deck PACKAGE's session payload from canonical src/.
+#
+# Main's decision (FAST-INSTALL.md C6): Steam's /usr/bin/omarchy-deck-enable-
+# gaming runs deck-session.sh's gaming BAKE_STAGES from the INSTALLED copy at
+# /usr/share/omarchy-deck/deck-session.sh, which must sit beside its
+# mapper/OSK siblings exactly as stage-input-mapper requires ("sync the whole
+# src/ directory, not just this script"). makepkg can only see the pkgbuild
+# directory, so this step copies the canonical src/ files into the SCRATCH
+# pkgbuild dir BEFORE docker -- generated, never tracked (the delivery rule:
+# no untracked generated artifacts in the repo). The derivation matches
+# step 5c's scrape of the same constants (MAPPER_SRC_NAME, OSK_MODULES with
+# $NAME resolution, STEAM_LAUNCHER_SRC_NAME), so a rename breaks the build
+# loudly instead of shipping a package whose session copy is stale. Steam
+# owns the PKGBUILD source=()/install lines; this step only guarantees the
+# files those lines name exist, byte-identical to src/.
+DECK_PKGBUILD_STAGING_DIR="$SCRATCH_SRC/configs/deck/pkgbuilds/omarchy-deck"
+if [[ -d $DECK_PKGBUILD_STAGING_DIR ]]; then
+  deck_session_files=(deck-session.sh)
+  deck_session_mapper=$(sed -n 's/^readonly MAPPER_SRC_NAME=\(.*\)$/\1/p' "$REPO_ROOT/src/deck-session.sh" | tr -d "\"'" | head -1)
+  [[ -n $deck_session_mapper ]] ||
+    build_fail "cannot stage the package session payload: no 'readonly MAPPER_SRC_NAME=<file>' in src/deck-session.sh."
+  deck_session_files+=("$deck_session_mapper")
+  deck_session_launcher=$(sed -n 's/^readonly STEAM_LAUNCHER_SRC_NAME=\(.*\)$/\1/p' "$REPO_ROOT/src/deck-session.sh" | tr -d "\"'" | head -1)
+  [[ -n $deck_session_launcher ]] ||
+    build_fail "cannot stage the package session payload: no 'readonly STEAM_LAUNCHER_SRC_NAME=<file>' in src/deck-session.sh."
+  deck_session_files+=("$deck_session_launcher")
+  deck_session_osk_line=$(grep -m1 '^OSK_MODULES=(' "$REPO_ROOT/src/deck-session.sh") ||
+    build_fail "cannot stage the package session payload: no 'OSK_MODULES=(' array in src/deck-session.sh."
+  read -r -a DECK_SESSION_OSK <<<"$(printf '%s' "$deck_session_osk_line" | sed 's/^OSK_MODULES=(//; s/).*$//' | tr -d "\"'")"
+  for deck_session_osk_i in "${!DECK_SESSION_OSK[@]}"; do
+    deck_session_osk_raw=${DECK_SESSION_OSK[deck_session_osk_i]}
+    [[ $deck_session_osk_raw == \$* ]] || continue
+    deck_session_osk_var=${deck_session_osk_raw#\$}
+    deck_session_osk_var=${deck_session_osk_var#\{}
+    deck_session_osk_var=${deck_session_osk_var%\}}
+    deck_session_osk_val=$(sed -n "s/^readonly ${deck_session_osk_var}=\(.*\)$/\1/p" "$REPO_ROOT/src/deck-session.sh" | tr -d "\"'" | head -1)
+    [[ -n $deck_session_osk_val ]] ||
+      build_fail "cannot stage the package session payload: src/deck-session.sh's OSK_MODULES contains '$deck_session_osk_raw' with no 'readonly ${deck_session_osk_var}=<file>'."
+    DECK_SESSION_OSK[deck_session_osk_i]=$deck_session_osk_val
+  done
+  deck_session_files+=("${DECK_SESSION_OSK[@]}")
+  for deck_session_file in "${deck_session_files[@]}"; do
+    [[ -f "$REPO_ROOT/src/$deck_session_file" ]] ||
+      build_fail "cannot stage the package session payload: no src/$deck_session_file."
+    cp -a "$REPO_ROOT/src/$deck_session_file" "$DECK_PKGBUILD_STAGING_DIR/$deck_session_file" ||
+      build_fail "could not stage src/$deck_session_file into the pkgbuild dir."
+    cmp -s "$REPO_ROOT/src/$deck_session_file" "$DECK_PKGBUILD_STAGING_DIR/$deck_session_file" ||
+      build_fail "staged $deck_session_file differs from src/$deck_session_file immediately after copy."
+  done
+  build_log "staged the package session payload: ${deck_session_files[*]} (byte-identical to src/)"
+fi
 
 # ---------------------------------------------------------------------------
 # 5. git apply --3way the patches. Fail loudly on any reject.

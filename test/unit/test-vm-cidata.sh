@@ -51,6 +51,11 @@ hostname=$(jq -r '.hostname' "$config")
 network_type=$(jq -r '.network_config.type' "$config")
 [[ $network_type == iso ]] || fail "network_config.type stays 'iso' (offline install, no network dependency)" "$network_type"
 pass "device/hostname/offline-network fields are set correctly"
+kernel=$(jq -r '.omarchy_install.storage.kernel' "$config")
+selected_kernel=$(jq -r '.kernels[0]' "$config")
+[[ $kernel == linux-omarchy && $selected_kernel == "$kernel" ]] ||
+  fail "cidata selects the image's Omarchy kernel consistently" "storage=$kernel kernels=$selected_kernel"
+pass "cidata selects linux-omarchy for the target and boot config"
 
 # Real bug caught by an actual VM install run (session 2): archinstall's
 # DiskLayoutConfiguration.parse_arg does `partition['obj_id']` unconditionally

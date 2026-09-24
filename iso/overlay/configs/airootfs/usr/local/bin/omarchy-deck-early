@@ -1,0 +1,385 @@
+#!/usr/bin/env bash
+# omarchy-deck-early -- FAST-INSTALL C1: the live-ISO early-stage driver.
+#
+#   omarchy-deck-early start <disk>   start the early stage in the background
+#   omarchy-deck-early network-ready  open the gate for the online Steam work
+#   omarchy-deck-early status         absent|running|done|failed (exactly one)
+#
+# `start` launches the transient unit `omarchy-deck-early.service` via
+# systemd-run and returns immediately. The stage itself runs the upstream
+# orchestrator in deferred-provisioning mode (no user, hostname `omarchy`,
+# timezone UTC, default keymap, unencrypted, full disk on <disk>) with
+# OMARCHY_INSTALL_STAGE=early, then the online Steam section once both the
+# restore is complete and the network-ready marker exists.
+#
+# State (C1): /run/omarchy-deck/early/{status,phase,error,timing.json} and
+# /run/omarchy-deck/steam/{status,error} (the Steam module's own record).
+# The log goes to /var/log/omarchy-deck-early.log, never the tty.
+#
+# Idempotent: the same disk already running or done is a no-op (exit 0). A
+# *different* disk is refused loudly (exit 2): wiping the wrong disk is the
+# one outcome this command must never produce.
+set -euo pipefail
+
+readonly DECK_EARLY_PROG=omarchy-deck-early
+readonly DECK_EARLY_STATE_DIR=/run/omarchy-deck/early
+readonly DECK_EARLY_DISK_FILE="$DECK_EARLY_STATE_DIR/disk"
+readonly DECK_EARLY_STATUS_FILE="$DECK_EARLY_STATE_DIR/status"
+readonly DECK_EARLY_PHASE_FILE="$DECK_EARLY_STATE_DIR/phase"
+readonly DECK_EARLY_ERROR_FILE="$DECK_EARLY_STATE_DIR/error"
+readonly DECK_EARLY_TIMING_FILE="$DECK_EARLY_STATE_DIR/timing.json"
+readonly DECK_EARLY_NETWORK_FILE=/run/omarchy-deck/network-ready
+readonly DECK_EARLY_LOG=/var/log/omarchy-deck-early.log
+readonly DECK_EARLY_UNIT=omarchy-deck-early.service
+readonly DECK_EARLY_DMI_PRODUCT_DEFAULT=/sys/class/dmi/id/product_name
+readonly DECK_EARLY_DMI_VENDOR_DEFAULT=/sys/class/dmi/id/sys_vendor
+readonly DECK_EARLY_LSBLK_BIN_DEFAULT=lsblk
+
+
+usage() {
+  echo "Usage: $DECK_EARLY_PROG {start <disk>|network-ready|status}" >&2
+  exit 2
+}
+
+deck_early_log() {
+  printf '[%s] %s\n' "$DECK_EARLY_PROG" "$*" >>"$DECK_EARLY_LOG" ||
+    { echo "$DECK_EARLY_PROG: cannot append to $DECK_EARLY_LOG" >&2; return 1; }
+}
+
+deck_early_status_word() {
+  if [[ -r $DECK_EARLY_STATUS_FILE ]]; then
+    head -n 1 "$DECK_EARLY_STATUS_FILE" 2>/dev/null | tr -d '[:space:]'
+    return 0
+  fi
+  printf 'absent'
+}
+
+cmd_status() {
+  local st
+  st=$(deck_early_status_word)
+  case $st in
+    absent|running|done|failed) printf '%s\n' "$st" ;;
+    *) printf 'failed\n' ;;
+  esac
+}
+# deck_early_require_oled -- the WIPE gate, mirroring the form's own
+# deck_form_is_oled_deck: product_name==Galileo AND sys_vendor contains
+# Valve, exact on the product. A Jupiter (unverified LCD), a generic laptop
+# NVMe, or unreadable DMI refuses loudly before anything is erased. Paths
+# and the lsblk binary are overridable so tests fake every branch. There is
+# deliberately NO bypass: the QEMU harness fakes Galileo/Valve in SMBIOS,
+deck_early_require_oled() {
+  local product_path=${DECK_EARLY_DMI_PRODUCT:-$DECK_EARLY_DMI_PRODUCT_DEFAULT}
+  local vendor_path=${DECK_EARLY_DMI_VENDOR:-$DECK_EARLY_DMI_VENDOR_DEFAULT}
+  local product="" vendor=""
+  [[ -r $product_path ]] && product=$(<"$product_path")
+  [[ -r $vendor_path ]] && vendor=$(<"$vendor_path")
+  if [[ $product == Galileo && $vendor == *Valve* ]]; then
+    return 0
+  fi
+  echo "$DECK_EARLY_PROG: refusing to wipe on unverified hardware (product='${product:-unreadable}', vendor='${vendor:-unreadable}'): OLED Steam Deck (Galileo/Valve) with built-in NVMe only" >&2
+  return 2
+}
+
+# deck_early_require_nvme_disk -- the disk half of the wipe gate: the named
+# disk must be a non-removable NVMe disk and must not be the live boot
+# source. Same rule as deck_form_disk_list (TYPE==disk, RM==0, TRAN==nvme,
+# minus boot medium), enforced here so the CLI cannot bypass it.
+deck_early_require_nvme_disk() {
+  local disk=$1
+  local lsblk_bin=${DECK_EARLY_LSBLK_BIN:-$DECK_EARLY_LSBLK_BIN_DEFAULT}
+  local base=${disk#/dev/}
+  local row
+  row=$("$lsblk_bin" -dpno NAME,TYPE,RM,TRAN "$disk" 2>/dev/null | head -n 1 || true)
+  if [[ -z $row ]]; then
+    echo "$DECK_EARLY_PROG: refusing '$disk': not visible to lsblk as a disk" >&2
+    return 2
+  fi
+  local _discard="" type="" rm="" tran=""
+  read -r _discard type rm tran <<<"$row"
+  if [[ $type != disk || $rm != 0 || $tran != nvme ]]; then
+    echo "$DECK_EARLY_PROG: refusing '$disk': not a built-in NVMe disk (TYPE=$type RM=$rm TRAN=$tran; SD/USB never targets)" >&2
+    return 2
+  fi
+  local boot_source boot_disk
+  boot_source=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
+  if [[ -n $boot_source ]]; then
+    boot_disk=$(lsblk -no PKNAME "$boot_source" 2>/dev/null || true)
+    [[ -n $boot_disk ]] || boot_disk=$boot_source
+    if [[ $disk == "$boot_disk" || $disk == "$boot_source" || $base == "${boot_disk#/dev/}" ]]; then
+      echo "$DECK_EARLY_PROG: refusing '$disk': it is the live boot medium, not the install target" >&2
+      return 2
+    fi
+  fi
+  return 0
+}
+
+
+cmd_network_ready() {
+  mkdir -p "$(dirname "$DECK_EARLY_NETWORK_FILE")"
+  touch "$DECK_EARLY_NETWORK_FILE"
+  deck_early_log "network-ready marker written"
+}
+
+cmd_start() {
+  local disk=${1:-}
+  [[ -n $disk ]] || usage
+  # Built-in NVMe only: microSD (mmc) and USB sticks (usb) are never
+  # targets, and a /dev/sd*/vd* name can be a USB enclosure or a VM disk.
+  # The form's own resolver (deck_form_disk_list: TYPE==disk, RM==0,
+  # TRAN==nvme, minus the boot medium) offers only NVMe; the CLI enforces
+  # the same so calling it directly cannot bypass the wipe gate.
+  case $disk in
+    /dev/nvme[0-9]n[0-9]) ;;
+    *) echo "$DECK_EARLY_PROG: refusing non-NVMe device '$disk' (built-in NVMe only; SD/USB never targets)" >&2; exit 2 ;;
+  esac
+  [[ -b $disk ]] || { echo "$DECK_EARLY_PROG: no such block device '$disk'" >&2; exit 2; }
+  deck_early_require_oled
+  deck_early_require_nvme_disk "$disk"
+  mkdir -p "$DECK_EARLY_STATE_DIR"
+  if [[ -f $DECK_EARLY_DISK_FILE ]]; then
+    local prior
+    prior=$(cat "$DECK_EARLY_DISK_FILE" 2>/dev/null || true)
+    if [[ $prior == "$disk" ]]; then
+      local st
+      st=$(deck_early_status_word)
+      case $st in
+        running|done) exit 0 ;;
+        failed) echo "$DECK_EARLY_PROG: early stage for $disk already failed; see $DECK_EARLY_ERROR_FILE" >&2; exit 1 ;;
+      esac
+      # A stale non-terminal state (e.g. `absent`) with the same disk: restart below.
+    else
+      echo "$DECK_EARLY_PROG: early stage already bound to '$prior'; refusing a different disk '$disk'" >&2
+      exit 2
+    fi
+  fi
+
+  printf '%s\n' "$disk" >"$DECK_EARLY_DISK_FILE"
+  : >"$DECK_EARLY_PHASE_FILE" 2>/dev/null || true
+  : >"$DECK_EARLY_ERROR_FILE" 2>/dev/null || true
+  touch "$DECK_EARLY_LOG" 2>/dev/null || true
+
+  # The worker re-execs this same file (argv[0] path), so no second binary
+  # name can drift: the unit runs exactly what the form invoked. Status is
+  # written ONLY after systemd-run succeeds: a launch failure must leave
+  # `failed` + error, never a permanent `running` that misleads S5.
+  local self_bin
+  self_bin=$(command -v "$DECK_EARLY_PROG" 2>/dev/null || printf '/usr/local/bin/%s' "$DECK_EARLY_PROG")
+  if systemd-run --collect --quiet --unit="$DECK_EARLY_UNIT" \
+    "$self_bin" _worker "$disk" >>"$DECK_EARLY_LOG" 2>&1; then
+    printf 'running\n' >"$DECK_EARLY_STATUS_FILE"
+    deck_early_log "early stage started for $disk (unit $DECK_EARLY_UNIT)"
+  else
+    printf 'failed\n' >"$DECK_EARLY_STATUS_FILE"
+    printf 'could not start the early-stage unit %s for %s\n' "$DECK_EARLY_UNIT" "$disk" >"$DECK_EARLY_ERROR_FILE"
+    rm -f "$DECK_EARLY_DISK_FILE"
+    return 1
+  fi
+}
+
+# --- the background worker -------------------------------------------------
+# Runs under the transient unit, writing status/phase/error/timing.json.
+# A failed Gaming=yes Steam fetch fails the install rather than leaving a
+# machine whose default session cannot start.
+
+cmd_worker() {
+  local disk=${1:-}
+  [[ -n $disk ]] || { echo "$DECK_EARLY_PROG: worker needs a disk" >&2; exit 2; }
+  # The private entry point is still callable directly. Re-check the same
+  # irreversible wipe gate here rather than trusting that `start` ran first.
+  if [[ $(cat "$DECK_EARLY_DISK_FILE" 2>/dev/null || true) != "$disk" ]] ||
+     ! deck_early_require_oled ||
+     ! deck_early_require_nvme_disk "$disk"; then
+    printf 'failed\n' >"$DECK_EARLY_STATUS_FILE"
+    printf 'early worker refused unverified disk %s; see stderr\n' "$disk" >"$DECK_EARLY_ERROR_FILE"
+    return 2
+  fi
+  # All output lands in the log file: the unit has no tty, and the dashboard
+  # owns the visible screen.
+  exec >>"$DECK_EARLY_LOG" 2>&1
+  echo "[$DECK_EARLY_PROG] early stage starting for $disk ($(date -u +%FT%TZ))"
+
+  printf 'running\n' >"$DECK_EARLY_STATUS_FILE"
+  local started_at
+  started_at=$(date +%s)
+
+  # The orchestrator runs ONCE with OMARCHY_INSTALL_STAGE=early. Its slice
+  # restores the common image, waits for both choices, applies the offline
+  # variant delta, waits for network only for Gaming=yes, installs its Steam
+  # launcher, then finalizes the UKI and fetches Valve's client. An online
+  # failure is fatal for Gaming=yes; Gaming=no never waits for the network.
+  # The JSON mirrors the configurator's full-disk layout: a 2 GiB ESP and
+  # btrfs root with @/@home/@log/@pkg subvolumes, Limine, linux-omarchy,
+  # users=[] and deferred provisioning.
+  if ! run_early_orchestrator "$disk" "$started_at"; then
+    printf 'failed\n' >"$DECK_EARLY_STATUS_FILE"
+    exit 1
+  fi
+
+  if ! write_timing_json "$started_at" ""; then
+    printf 'failed\n' >"$DECK_EARLY_STATUS_FILE"
+    printf 'early orchestrator finished without phase timing; see %s\n' "$DECK_EARLY_LOG" >"$DECK_EARLY_ERROR_FILE"
+    return 1
+  fi
+  printf 'done\n' >"$DECK_EARLY_STATUS_FILE"
+  echo "[$DECK_EARLY_PROG] early stage done ($(($(date +%s) - started_at))s)"
+}
+
+run_early_orchestrator() {
+  local disk=$1 started_at=$2
+  local workdir=/run/omarchy-deck/early/inputs
+  mkdir -p "$workdir"
+  printf 'Preparing install target\n' >"$DECK_EARLY_PHASE_FILE"
+
+  local config=$workdir/user_configuration.json
+  local creds=$workdir/user_credentials.json
+  local full_name=$workdir/user_full_name.txt
+  local email=$workdir/user_email_address.txt
+  local encrypt=$workdir/user_encrypt_installation.txt
+  render_early_config "$disk" "$config"
+  printf '{\n    "users": []\n}\n' >"$creds"
+  chmod 600 "$creds"
+  printf 'Deck User\n' >"$full_name"
+  printf '\n' >"$email"
+  printf 'false\n' >"$encrypt"
+
+  printf 'Installing Arch + Omarchy\n' >"$DECK_EARLY_PHASE_FILE"
+  OMARCHY_INSTALL_STAGE=early \
+  OMARCHY_INSTALL_CONFIG="$config" \
+  OMARCHY_INSTALL_CREDS="$creds" \
+  OMARCHY_INSTALL_FULL_NAME_FILE="$full_name" \
+  OMARCHY_INSTALL_EMAIL_FILE="$email" \
+  OMARCHY_INSTALL_ENCRYPT_FILE="$encrypt" \
+  OMARCHY_INSTALL_STATE_DIR=/run/omarchy-deck/early/orchestrator \
+    /usr/local/bin/omarchy-iso-install \
+      --config "$config" \
+      --creds "$creds" \
+      --full-name-file "$full_name" \
+      --email-file "$email" \
+      --encrypt-file "$encrypt" \
+      --authorized-keys-file "$workdir/authorized_keys" \
+      --tailscale-authkey-file "$workdir/tailscale_authkey" \
+      --defer-provisioning-file "$workdir/defer-provisioning" \
+    || {
+      local detail="the early orchestrator run failed; see $DECK_EARLY_LOG"
+      printf '%s\n' "$detail" >"$DECK_EARLY_ERROR_FILE"
+      echo "[$DECK_EARLY_PROG] ERROR: $detail"
+      write_timing_json "$started_at" "orchestrator-failed"
+      return 1
+    }
+  return 0
+}
+
+render_early_config() {
+  local device=$1 out=$2
+  local disk_bytes boot_start boot_size root_start root_size
+  disk_bytes=$(blockdev --getsize64 "$device" 2>/dev/null || echo 0)
+  boot_start=1048576
+  boot_size=2147483648
+  root_start=$((boot_start + boot_size))
+  root_size=$((disk_bytes - root_start - 1048576))
+  if (( root_size <= 0 )); then
+    echo "$DECK_EARLY_PROG: disk $device is too small for a 2GiB ESP + any root" >&2
+    printf 'disk %s is too small for the early install layout\n' "$device" >"$DECK_EARLY_ERROR_FILE"
+    return 1
+  fi
+  local boot_obj_id root_obj_id
+  boot_obj_id=$(cat /proc/sys/kernel/random/uuid)
+  root_obj_id=$(cat /proc/sys/kernel/random/uuid)
+  jq -n \
+    --arg device "$device" \
+    --arg hostname "omarchy" \
+    --arg boot_obj_id "$boot_obj_id" --arg root_obj_id "$root_obj_id" \
+    --argjson boot_start "$boot_start" --argjson boot_size "$boot_size" \
+    --argjson root_start "$root_start" --argjson root_size "$root_size" \
+    '{
+      "archinstall-language": "English",
+      "auth_config": {},
+      "audio_config": { "audio": "pipewire" },
+      "bootloader_config": { "bootloader": "Limine", "uki": false, "removable": false },
+      "custom_commands": [],
+      "omarchy_install": {
+        "mode": "full_disk",
+        "defer_provisioning": true,
+        "target_mount": "/mnt",
+        "boot": {
+          "esp_mount": "/boot",
+          "esp_path": "/EFI/limine",
+          "efi_binary": "limine_x64.efi",
+          "enable_fallback": true
+        },
+        "storage": { "kernel": "linux-omarchy" }
+      },
+      "disk_config": {
+        "config_type": "default_layout",
+        "device_modifications": [ {
+          "device": $device,
+          "wipe": true,
+          "partitions": [
+            {
+              "obj_id": $boot_obj_id,
+              "btrfs": [], "dev_path": null, "flags": ["boot", "esp"],
+              "fs_type": "fat32", "mount_options": [], "mountpoint": "/boot",
+              "size": { "sector_size": {"unit":"B","value":512}, "unit": "B", "value": $boot_size },
+              "start": { "sector_size": {"unit":"B","value":512}, "unit": "B", "value": $boot_start },
+              "status": "create", "type": "primary"
+            },
+            {
+              "obj_id": $root_obj_id,
+              "btrfs": [
+                {"mountpoint": "/", "name": "@"},
+                {"mountpoint": "/home", "name": "@home"},
+                {"mountpoint": "/var/log", "name": "@log"},
+                {"mountpoint": "/var/cache/pacman/pkg", "name": "@pkg"}
+              ],
+              "dev_path": null, "flags": [], "fs_type": "btrfs",
+              "mount_options": ["compress=zstd"], "mountpoint": null,
+              "size": { "sector_size": {"unit":"B","value":512}, "unit": "B", "value": $root_size },
+              "start": { "sector_size": {"unit":"B","value":512}, "unit": "B", "value": $root_start },
+              "status": "create", "type": "primary"
+            }
+          ]
+        } ]
+      },
+      "hostname": $hostname,
+      "kernels": ["linux-omarchy"],
+      "network_config": { "type": "iso" },
+      "ntp": true,
+      "parallel_downloads": 8,
+      "script": null,
+      "services": [],
+      "swap": true,
+      "timezone": "UTC",
+      "locale_config": { "kb_layout": "us", "sys_enc": "UTF-8", "sys_lang": "en_US.UTF-8" },
+      "mirror_config": {
+        "custom_repositories": [], "mirror_regions": {}, "optional_repositories": [],
+        "custom_servers": [ {"url": "https://mirror.omarchy.org/$repo/os/$arch"} ]
+      },
+      "packages": ["base-devel", "git", "omarchy-keyring", "omarchy-settings", "omarchy"],
+      "profile_config": { "gfx_driver": null, "greeter": null, "profile": {} },
+      "version": "3.0.9"
+    }' >"$out"
+}
+
+write_timing_json() {
+  local started_at=$1 note=$2
+  local finished_at phases='[]' state=/run/omarchy-deck/early/orchestrator/state.json
+  finished_at=$(date +%s)
+  if [[ -z $note ]]; then
+    [[ -r $state ]] || { echo "[$DECK_EARLY_PROG] ERROR: early phase state missing: $state" >&2; return 1; }
+    phases=$(jq -c '.phases // empty' "$state") || return 1
+    [[ -n $phases && $phases != '[]' ]] ||
+      { echo "[$DECK_EARLY_PROG] ERROR: early phase state has no phases: $state" >&2; return 1; }
+  fi
+  jq -n --argjson started "$started_at" --argjson finished "$finished_at" \
+    --argjson phases "$phases" --arg note "$note" \
+    '{started_at: $started, finished_at: $finished, phases: $phases, note: $note}' >"$DECK_EARLY_TIMING_FILE"
+}
+
+case ${1:-} in
+  start) shift; cmd_start "$@" ;;
+  network-ready) cmd_network_ready ;;
+  status) cmd_status ;;
+  _worker) shift; cmd_worker "$@" ;;
+  *) usage ;;
+esac

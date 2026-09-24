@@ -147,6 +147,13 @@ source=('README'
   'omarchy-deck-apply-patches'
   '50-omarchy-deck-reapply-patches.hook'
   'omarchy-deck-patch-check.service'
+  'omarchy-deck-enable-gaming'
+  'omarchy-deck-enable-gaming.desktop'
+  'deck-session.sh'
+  'deck-input-mapper.py'
+  'deck_osk_layout.py'
+  'deck_osk_tty.py'
+  'deck_osk_wayland.py'
   '0010-lock-blank-timer-20s.patch'
   '0010-lock-blank-timer-20s.meta'
   '0020-limine-interface-rotation.patch'
@@ -155,7 +162,7 @@ source=('README'
   '0030-screensaver-font-fits-panel.meta'
   '0040-limine-boot-timeout.patch'
   '0040-limine-boot-timeout.meta')
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 # The one place the patch payload's destination is written down. The applier's
 # own DEFAULT_PATCH_DIR is /usr/share/omarchy-deck/patches and deck_patches.py's
@@ -227,8 +234,37 @@ package() {
   ln -sf ../omarchy-deck-patch-check.service \
     "$pkgdir/usr/lib/systemd/system/multi-user.target.wants/omarchy-deck-patch-check.service"
 
-  # --- the patches ---------------------------------------------------------
+
+  # --- C6: the in-place Gaming Mode opt-in ----------------------------------
   #
+  # /usr/bin/omarchy-deck-enable-gaming is the REAL desktop action behind the
+  # Gaming No promise (FAST-INSTALL.md C6): it installs the Gaming-only
+  # package set online, runs deck-session.sh's gaming BAKE_STAGES, and flips
+  # SDDM autologin to Gaming Mode only after readiness verifies. 0755, like
+  # the applier: a non-executable action is a menu row that does nothing.
+  install -Dm755 "$srcdir/omarchy-deck-enable-gaming" \
+    "$pkgdir/usr/bin/omarchy-deck-enable-gaming"
+  # Controller-navigable launcher: the Omarchy menu's Install > Gaming section
+  # invokes the same binary via omarchy-launch-floating-terminal-with-
+  # presentation; this .desktop entry is the app-grid half. NoDisplay is NOT
+  # set: unlike the return-to-gaming shim (which the menu row covers), this
+  # action must stay discoverable after Gaming Mode exists.
+  install -Dm644 "$srcdir/omarchy-deck-enable-gaming.desktop" \
+    "$pkgdir/usr/share/applications/omarchy-deck-enable-gaming.desktop"
+  # deck-session.sh beside its mapper/OSK siblings, exactly as stage-input-
+  # mapper requires ("sync the whole src/ directory, not just this script"):
+  # the script resolves MAPPER_SRC_NAME + OSK_MODULES beside $0 at bake time.
+  # 0755: the opt-in runs its stages from this copy on a live system.
+  install -Dm755 "$srcdir/deck-session.sh" \
+    "$pkgdir/usr/share/omarchy-deck/deck-session.sh"
+  install -Dm755 "$srcdir/deck-input-mapper.py" \
+    "$pkgdir/usr/share/omarchy-deck/deck-input-mapper.py"
+  install -Dm644 "$srcdir/deck_osk_layout.py" \
+    "$pkgdir/usr/share/omarchy-deck/deck_osk_layout.py"
+  install -Dm644 "$srcdir/deck_osk_tty.py" \
+    "$pkgdir/usr/share/omarchy-deck/deck_osk_tty.py"
+  install -Dm644 "$srcdir/deck_osk_wayland.py" \
+    "$pkgdir/usr/share/omarchy-deck/deck_osk_wayland.py"
   # Both halves of every patch: the .patch and its .meta. A patch without its
   # .meta is not "one post-condition short", it is `bad_meta` and a non-zero
   # exit -- the applier refuses to apply a patch that declares no target and no

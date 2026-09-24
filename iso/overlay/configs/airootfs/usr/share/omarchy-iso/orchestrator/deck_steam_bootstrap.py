@@ -386,6 +386,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -471,6 +472,80 @@ INSTALLED_MARKER_GLOB = "steam_client_*.installed"
 
 # The branch marker `-steamdeck` writes. Recorded, never written by us.
 BETA_FILE_REL = f"{PACKAGE_DIR_REL}/beta"
+# --- the staging home (FAST-INSTALL contract C2) ----------------------------------
+#
+# During EARLY the client is bootstrapped with HOME set to a staging directory
+# in the target, owned 1000:1000 from the start so LATE never needs a recursive
+# chown. During LATE the staging directory is renamed onto the real home (same
+# filesystem, instant) and every absolute path embedding it is repaired.
+# Proven relocatable 2026-09-23: a real 2.4 GiB bootstrapped tree (20,068
+# entries, 963 symlinks) embeds the staging path in exactly 22 symlinks and 3
+# log files, and nothing else -- no binary, no config, no registry key. The
+# full hit list is RELOCATION_EVIDENCE below; the suite's fixture tree
+# (test/unit/test-deck-steam-bootstrap.py) reproduces its shape.
+# RELOCATION_EVIDENCE (measured 2026-09-23, archlinux:latest container,
+# steam 1.0.0.87-3, HOME=/home/.omarchy-deck-staging, uid/gid 1000, run as
+# `setpriv --reuid=1000 --regid=1000 --clear-groups` with `env -i`
+# HOME/USER/LOGNAME/PATH/TERM/XDG_CURRENT_DESKTOP, flags `-steamdeck
+# -gamepadui -nocrashdialog -noassert`; 2.4 GiB, 20,068 entries, 963
+# symlinks; full grep -rIl of the tree):
+#   symlinks embedding the staging path (22): ~/.steam/{root,steam,bin,
+#   bin32,bin64,sdk32,sdk64} (absolute, into the data dir / the staging
+#   root), ~/.steampath, ~/.steampid (absolute, into ~/.steam), and 13
+#   runtime-internal pinned_libs_{32,64} links (absolute, into
+#   ubuntu12_32/steam-runtime/... -- self-consistent, rewritten anyway);
+#   all remaining ~941 symlinks are relative and move with the rename.
+#   file bytes embedding the staging path (3, logs only):
+#   .local/share/Steam/logs/{bootstrap_log.txt (startup/manifest lines),
+#   console-linux.txt (startup lines), updateui_child.txt}; no binary, no
+#   .vdf, no config outside logs/ contains it (full-tree grep, binary
+#   included).
+#   registry.vdf: Valve wrote HKLM/Software/Valve/Steam/{SteamPID,
+#   ClientLauncherType} only -- no HOME-derived key, no username.
+#   stale files removed at relocate: ~/.steam/{steam.pid (install-time PID),
+#   steam.pipe (FIFO)}.
+STAGING_HOME_ABS = "/home/.omarchy-deck-staging"
+STAGING_MODE = 0o700
+# UIDs/GIDs below this are system accounts; the staging home is always the
+# ordinary desktop uid so LATE's rename needs no ownership walk.
+STAGING_UID = 1000
+STAGING_GID = 1000
+# Live /run state Stages (C1) and Form (C4) read: status/error/progress files.
+# Overridable via $STEAM_STATUS_DIR so unit tests never touch /run.
+STEAM_STATUS_DIR_REL = "run/omarchy-deck/steam"
+# early_steam status values written to steam/status (Form displays verbatim;
+# unknown/missing means "early hasn't reported yet").
+STEAM_STATE_PENDING = "pending"
+STEAM_STATE_RUNNING = "running"
+STEAM_STATE_DONE = "done"
+STEAM_STATE_INCOMPLETE = "incomplete"
+STEAM_STATE_SKIPPED = "skipped"
+STEAM_STATE_FAILED = "failed"
+# late_steam record statuses.
+LATE_STATUS_RELOCATED = "relocated"
+LATE_STATUS_NO_STAGING = "skipped-no-staging"
+LATE_STATUS_FAILED = "failed"
+# Symlink names directly under ~/.steam that Valve's launcher (bin_steam.sh)
+# creates as absolute links into the Steam data dir, plus the two top-level
+# dotfiles. Repaired by the general walk; listed here so the record names
+# them when repaired.
+DOT_STEAM_LINKS = ("root", "steam", "bin", "bin32", "bin64", "sdk32", "sdk64")
+# Files over this size are not content-scanned: the evidence (RELOCATION_EVIDENCE)
+# is that only small text logs embed $HOME, and reading 800+ MB of client
+# binaries/zips through the page cache is what makes a naive scan cost ~4 s on
+# a real tree (measured 2026-09-23 on a 2.4 GiB tree: 3.6 s in read()). Their
+# names are still walked for symlinks. Skipped files are named in the record.
+MAX_CONTENT_SCAN_BYTES = 64 * 1024
+# Basenames Valve leaves behind that must not survive the rename: a PID from
+# the install-time run and a FIFO the next launch recreates.
+STALE_NAMES = ("steam.pid", "steam.pipe")
+# Log files whose bytes embed the staging path (startup lines, manifest
+# paths). Rotating diagnostics only: left in place and reported, never
+# rewritten.
+LOG_ONLY_NAMES = ("bootstrap_log.txt", "console-linux.txt", "updateui_child.txt")
+# Cap on the relocation walk so a pathological tree cannot turn LATE into a
+# hang of its own. A real tree is ~20k entries; the cap is 25x that.
+MAX_RELOCATE_ENTRIES = 500_000
 
 # --- how the child is invoked -----------------------------------------------
 
@@ -1577,6 +1652,691 @@ def _read_beta(target: Path, user) -> str | None:
     except OSError:
         return None
     return sanitize_text(text) or None
+
+# ---------------------------------------------------------------------------
+# FAST-INSTALL contract C2: the staging home
+# ---------------------------------------------------------------------------
+
+
+def steam_status_dir(live_root=LIVE_ROOT) -> Path:
+    """Where steam/{status,error,progress} live. $STEAM_STATUS_DIR overrides
+    so unit tests never touch /run."""
+    override = os.environ.get("STEAM_STATUS_DIR")
+    if override:
+        return Path(override)
+    return Path(live_root) / STEAM_STATUS_DIR_REL
+
+
+def write_steam_state(live_root, state: str, err: str | None = None) -> None:
+    """Write steam/status (+error) for Stages (C1) and Form (C4). Never raises:
+    a failed status write must not fail an install."""
+    try:
+        directory = steam_status_dir(live_root)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "status").write_text(state + "\n")
+        (directory / "error").write_text(((err or "") + "\n") if err else "")
+    except OSError:
+        pass
+
+
+def write_steam_progress(live_root, line: str | None) -> None:
+    """The last Valve progress/phase line, for the S5 display. Never raises."""
+    try:
+        directory = steam_status_dir(live_root)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "progress").write_text((line or "") + "\n")
+    except OSError:
+        pass
+
+
+def ensure_staging_home(target, staging_home: str, uid: int, gid: int) -> Path:
+    """Create the staging home in the target: 1000:1000, 0700. Idempotent:
+    an existing directory with the right owner/mode is left alone; anything
+    else (missing, wrong owner, wrong mode, a symlink, a file) is rebuilt
+    only when empty and otherwise a loud failure -- never a chown of a
+    tree Valve has written into, which would hide whose files they are."""
+    target = Path(target)
+    if staging_home != STAGING_HOME_ABS and not staging_home.startswith("/home/"):
+        raise DeckSteamBootstrapError(
+            f"staging home {staging_home!r} is outside /home -- refusing"
+        )
+    path = target / staging_home.lstrip("/")
+    if path.is_symlink():
+        raise DeckSteamBootstrapError(
+            f"{staging_home} is a symlink on the target; refusing to write through it"
+        )
+    if path.exists() and not path.is_dir():
+        raise DeckSteamBootstrapError(
+            f"{staging_home} exists on the target and is not a directory"
+        )
+    if path.is_dir():
+        st = path.stat()
+        if (st.st_uid, st.st_gid) != (uid, gid):
+            raise DeckSteamBootstrapError(
+                f"{staging_home} is owned by uid {st.st_uid}:gid {st.st_gid}, not "
+                f"{uid}:{gid}; refusing to take it over"
+            )
+        os.chmod(path, STAGING_MODE)
+        try:
+            os.chown(path, uid, gid)
+        except OSError as exc:
+            raise DeckSteamBootstrapError(
+                f"could not chown {staging_home} to {uid}:{gid}: {exc}"
+            ) from exc
+        return path
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, STAGING_MODE)
+    try:
+        os.chown(path, uid, gid)
+    except OSError as exc:
+        raise DeckSteamBootstrapError(
+            f"could not chown {staging_home} to {uid}:{gid}: {exc}"
+        ) from exc
+    return path
+
+
+def _staging_target_user(staging_home: str, uid: int, gid: int):
+    """A deck_user.TargetUser-shaped stand-in for the not-yet-created account.
+
+    The real account will be `useradd -u <uid> -M` in LATE (Stages' side);
+    until then there is no passwd entry, and resolve_target_user would refuse.
+    setpriv needs only the numbers, and steam.sh needs only $HOME (measured:
+    no getent/passwd/whoami call in bin_steam.sh or the shipped steam.sh
+    outside `id -u`, which reads the uid, not the database)."""
+    from . import deck_user
+
+    return deck_user.TargetUser(name="staging", uid=uid, gid=gid, home=staging_home)
+
+
+class _StagingCtx:
+    """The sliver of InstallContext _bootstrap needs: target + username."""
+
+    def __init__(self, target, defer_provisioning: bool = False):
+        self.target = target
+        self.username = ""
+        self.defer_provisioning = defer_provisioning
+
+
+def early_steam(
+    target,
+    staging_home: str,
+    uid: int,
+    gid: int,
+    *,
+    run_pkgs: bool = True,
+    live_root=LIVE_ROOT,
+    runner=None,
+    pkgs_runner=None,
+    budget_secs: int = BUDGET_SECS,
+) -> dict:
+    """EARLY half of contract C2. Stage the Steam client while the form is up.
+
+    Creates the staging home, runs deck_pkgs' online steam install when
+    run_pkgs is set and steam is missing (Stages may instead call
+    fetch_packages itself first and pass run_pkgs=False -- see
+    early_steam_fetch_only), then bootstraps Valve's client with
+    HOME=staging_home under the same BUDGET_SECS/STALL_SECS/throughput bound
+    and watchdog this module already enforces. Writes
+    steam/{status,error,progress} for Stages/Form.
+
+    Critical=False semantics: failures are recorded loudly, never raised.
+    """
+    started = time.monotonic()
+    record: dict = {
+        "status": None,
+        "staging_home": staging_home,
+        "home": staging_home,
+        "user": None,
+        "pkgs": None,
+        "command": None,
+        "installed_manifest": None,
+        "markers_before": [],
+        "markers_after": [],
+        "beta": None,
+        "package_bytes": 0,
+        "seconds": 0,
+        "exit_code": None,
+        "stopped_because": None,
+        "projected_download_secs": None,
+        "pid": None,
+        "wifi_status": None,
+        "root_owned": [],
+        "stragglers": [],
+        "phase": None,
+        "output": None,
+        "launcher_log": None,
+        "launcher_errors": [],
+        "error": None,
+        "warnings": [],
+    }
+    warnings: list[str] = record["warnings"]
+    target = Path(target)
+    write_steam_state(live_root, STEAM_STATE_PENDING)
+    try:
+        staging_path = ensure_staging_home(target, staging_home, uid, gid)
+        record["user"] = f"staging({uid}:{gid})"
+    except (DeckSteamBootstrapError, OSError) as exc:
+        record["status"] = STATUS_FAILED
+        record["error"] = sanitize_text(f"{type(exc).__name__}: {exc}", limit=400)
+        error(f"Early Steam: {record['error']}")
+        write_steam_state(live_root, STEAM_STATE_FAILED, record["error"])
+        record["seconds"] = int(time.monotonic() - started)
+        return record
+
+    if run_pkgs:
+        try:
+            from . import deck_pkgs
+
+            query = pkgs_runner or deck_pkgs.run_command
+            names, _ = deck_pkgs.missing_on_target(
+                target, [deck_pkgs.STEAM_PACKAGE], query
+            )
+            if names:
+                pkgs_record = deck_pkgs.fetch_packages(
+                    target, live_root, runner=pkgs_runner
+                ) if pkgs_runner is not None else deck_pkgs.fetch_packages(target, live_root)
+                record["pkgs"] = pkgs_record
+        except Exception as exc:  # noqa: BLE001 -- pkgs classifies its own failures; this is the seam
+            warnings.append(f"online steam install could not run: {type(exc).__name__}: {exc}")
+
+    if not (target / STEAM_BOOTSTRAP_REL).is_file():
+        record["status"] = STATUS_NO_STEAM
+        record["error"] = sanitize_text(
+            f"/{STEAM_BOOTSTRAP_REL} is not on the target, so there is no Steam client to "
+            "bootstrap. See the 'pkgs' section of this record.",
+            limit=400,
+        )
+        error(f"Early Steam: {record['error']}")
+        write_steam_state(live_root, STEAM_STATE_SKIPPED, record["error"])
+        record["seconds"] = int(time.monotonic() - started)
+        return record
+
+    missing_live = [
+        rel for rel in LIVE_TOOL_RELS if not (Path(live_root) / rel).exists()
+    ]
+    if missing_live:
+        record["status"] = STATUS_NO_CONTAINER
+        record["error"] = sanitize_text(
+            "the live system is missing " + ", ".join("/" + rel for rel in missing_live)
+            + " -- Valve's launcher refuses to start inside a chroot and without "
+            "these the target cannot be entered any other way. First boot behaves as it "
+            "does today.",
+            limit=400,
+        )
+        error(f"Early Steam: {record['error']}")
+        write_steam_state(live_root, STEAM_STATE_SKIPPED, record["error"])
+        record["seconds"] = int(time.monotonic() - started)
+        return record
+
+    record["wifi_status"] = read_wifi_status(live_root)
+    package_dir = target / staging_home.lstrip("/") / PACKAGE_DIR_REL
+    record["markers_before"] = installed_markers(package_dir)
+    if record["markers_before"]:
+        record["status"] = STATUS_ALREADY
+        record["markers_after"] = record["markers_before"]
+        record["installed_manifest"] = record["markers_before"][0]
+        record["package_bytes"] = package_bytes(package_dir)
+        info(
+            "Early Steam: the client is already bootstrapped in the staging home "
+            f"({', '.join(record['markers_before'])}); nothing to download"
+        )
+        write_steam_state(live_root, STEAM_STATE_DONE)
+        record["seconds"] = int(time.monotonic() - started)
+        return record
+
+    free: int | None = None
+    try:
+        free = shutil.disk_usage(staging_path).free
+    except OSError as exc:
+        warnings.append(f"could not measure free space on the target: {exc}")
+    if free is not None and free < MIN_FREE_BYTES:
+        record["status"] = STATUS_NO_SPACE
+        record["error"] = sanitize_text(
+            f"the target has {free} bytes free and an installed Steam client is about "
+            f"{MIN_FREE_BYTES} with headroom. Skipped rather than filling the disk; first "
+            "boot behaves as it does today.",
+            limit=400,
+        )
+        error(f"Early Steam: {record['error']}")
+        write_steam_state(live_root, STEAM_STATE_SKIPPED, record["error"])
+        record["seconds"] = int(time.monotonic() - started)
+        return record
+
+    # The run itself reuses the existing bound/watchdog machinery: a staging
+    # user stand-in (no passwd entry exists yet -- the account is created in
+    # LATE), the same bootstrap_command, and run_bootstrap with progress
+    # forwarded to steam/progress.
+    user = _staging_target_user(staging_home, uid, gid)
+    record["home"] = user.home
+    argv = bootstrap_command(target, user.uid, user.gid, user.home, user.name)
+    record["command"] = " ".join(
+        "<ENTER_SCRIPT>" if part == ENTER_SCRIPT else part for part in argv
+    )
+    info(
+        "Early Steam: installing Steam's client update into the staging home now, "
+        "while the form is up, so the first boot does not spend two minutes on a "
+        "black screen doing it. "
+        f"(Wi-Fi status={record['wifi_status']}; gives up after {budget_secs}s and "
+        "lets the first boot finish instead.)"
+    )
+    write_steam_state(live_root, STEAM_STATE_RUNNING)
+    output_path = Path(live_root) / LIVE_OUTPUT_REL
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        warnings.append(f"could not create {output_path.parent}: {exc}")
+        output_path = None
+    if runner is None:
+        runner = run_bootstrap
+
+    reason = _run_with_progress(
+        runner, argv, target / staging_home.lstrip("/"), record,
+        budget_secs, output_path, live_root,
+    )
+    stragglers = sweep_target(target)
+    record["stragglers"] = stragglers
+    if stragglers:
+        warnings.append(
+            f"{len(stragglers)} process(es) were still running inside the target after the "
+            f"bootstrap and were killed (pids {', '.join(str(p) for p in stragglers)}). "
+            "They would have held the target's mounts open."
+        )
+    record["markers_after"] = installed_markers(package_dir)
+    record["package_bytes"] = package_bytes(package_dir)
+    try:
+        beta_text = (target / staging_home.lstrip("/") / BETA_FILE_REL).read_text(
+            errors="replace"
+        ).strip()
+        record["beta"] = sanitize_text(beta_text) or None
+    except OSError:
+        record["beta"] = None
+    record["phase"] = sanitize_text(
+        _phase(read_log_tail(target / staging_home.lstrip("/"))) or "",
+        limit=MAX_LINE_CHARS,
+    ) or None
+    launcher_text = read_launcher_log_tail(target / staging_home.lstrip("/"))
+    record["launcher_log"] = summarize_output(launcher_text) or None
+    record["launcher_errors"] = notable_lines(launcher_text)
+    owned, _, own_warning = root_owned_under(
+        target / staging_home.lstrip("/") / STEAM_DIR_REL
+    )
+    record["root_owned"] = [sanitize_text(p, limit=MAX_LINE_CHARS) for p in owned]
+    if own_warning:
+        warnings.append(own_warning)
+    if owned:
+        warnings.append(
+            "root owns " + ", ".join(record["root_owned"])
+            + " inside the staging home. The client was supposed to be written as "
+            "uid 1000; Steam may not be able to update itself."
+        )
+    if record["markers_after"]:
+        record["status"] = STATUS_INSTALLED
+        record["installed_manifest"] = record["markers_after"][0]
+        info(
+            "Early Steam: the client is installed in the staging home "
+            f"({record['installed_manifest']}, {record['package_bytes'] // (1024 * 1024)} MiB "
+            f"cached, {record['seconds'] or int(time.monotonic() - started)}s)."
+        )
+        write_steam_state(live_root, STEAM_STATE_DONE)
+    else:
+        record["status"] = STATUS_INCOMPLETE
+        for line in record["launcher_errors"]:
+            warnings.append("Valve's launcher said: " + line)
+        record["error"] = sanitize_text(
+            _incomplete_reason(reason, record)
+            + " Nothing was made worse: Steam downloads only what is missing, so the first boot "
+            "finishes the job -- faster than it would have if any bytes landed, and no slower "
+            "than today if none did.",
+            limit=400,
+        )
+        error(f"Early Steam: {record['error']}")
+        write_steam_state(live_root, STEAM_STATE_INCOMPLETE, record["error"])
+    for warning in warnings[:MAX_WARNINGS]:
+        error(f"Early Steam: {warning}")
+    if len(warnings) > MAX_WARNINGS:
+        error(
+            f"Early Steam: {len(warnings) - MAX_WARNINGS} further warning(s) are "
+            "in the install record and were not printed"
+        )
+    line = progress_line(read_log_tail(target / staging_home.lstrip("/")))
+    if line:
+        write_steam_progress(live_root, line)
+    record["seconds"] = int(time.monotonic() - started)
+    return record
+
+
+def _run_with_progress(
+    runner, argv, home_on_target, record, budget_secs, output_path, live_root
+) -> str:
+    """Run the bootstrap child, forwarding progress lines to steam/progress.
+
+    run_bootstrap already emits every PROGRESS_INTERVAL_SECS via its `emit`
+    hook; wrapping it here (rather than teaching every test double a new
+    kwarg) keeps the seam identical for the real runner and the fakes."""
+    def _emit(line: str) -> None:
+        info(line)
+        write_steam_progress(live_root, line)
+    try:
+        return runner(
+            argv, home_on_target, record,
+            budget_secs=budget_secs, output_path=output_path, emit=_emit,
+        )
+    except TypeError:
+        return runner(
+            argv, home_on_target, record,
+            budget_secs=budget_secs, output_path=output_path,
+        )
+
+
+def early_steam_fetch_only(
+    target,
+    staging_home: str,
+    uid: int,
+    gid: int,
+    *,
+    live_root=LIVE_ROOT,
+    runner=None,
+    budget_secs: int = BUDGET_SECS,
+) -> dict:
+    """EARLY client fetch for Stages' restore -> pkgs -> UKI -> fetch order.
+
+    Identical to early_steam with run_pkgs=False: Stages runs
+    deck_pkgs.fetch_packages(target) itself first (so no pacman mutation is
+    concurrent with the Limine/UKI finalizer) and only Valve's network fetch
+    overlaps the form."""
+    return early_steam(
+        target, staging_home, uid, gid,
+        run_pkgs=False, live_root=live_root, runner=runner,
+        budget_secs=budget_secs,
+    )
+
+
+def _relocate_tree(
+    final_on_target: Path, staging_home: str, final_home: str
+) -> tuple[list[str], list[str], str | None]:
+    """Rewrite every symlink embedding the staging path; drop stale files.
+
+    Returns (repaired, left_behind, warning). `repaired` names the links
+    retargeted (target-absolute display form). `left_behind` names files
+    whose BYTES still embed the staging path after the walk -- expected to
+    be only the rotating logs (RELOCATION_EVIDENCE); anything else is
+    reported, never rewritten. Bounded by MAX_RELOCATE_ENTRIES."""
+    repaired: list[str] = []
+    seen = 0
+    warning: str | None = None
+    old = staging_home
+    new = final_home
+    dot_steam = final_on_target / ".steam"
+    base = os.fspath(final_on_target)
+    # NOTE: plain os.* string paths, not pathlib, in this hot walk: on a
+    # 20k-entry tree pathlib's per-entry object cost dominates (~2.5 s of a
+    # 2.6 s relocate, measured 2026-09-23). lstat once per entry.
+    for dirpath, dirnames, filenames in os.walk(base, onerror=None):
+        for name in list(dirnames) + list(filenames):
+            seen += 1
+            if seen > MAX_RELOCATE_ENTRIES:
+                warning = (
+                    f"stopped the relocation walk after {MAX_RELOCATE_ENTRIES} entries; "
+                    "what was checked was repaired"
+                )
+                return repaired, _content_hits(final_on_target, old), warning
+            path = os.path.join(dirpath, name)
+            try:
+                try:
+                    tgt = os.readlink(path)
+                except OSError:
+                    continue
+                if old not in tgt:
+                    continue
+                os.unlink(path)
+                os.symlink(tgt.replace(old, new), path)
+                repaired.append("/" + os.path.relpath(path, base))
+            except OSError:
+                continue
+    for stale in STALE_NAMES:
+        try:
+            victim = dot_steam / stale
+            if victim.exists() and not victim.is_symlink():
+                victim.unlink()
+                repaired.append(f"/.steam/{stale} (removed stale)")
+        except OSError:
+            continue
+    # The top-level dotfiles must end up pointing at the FINAL home even if
+    # the walk above somehow missed them (it cannot -- they embed the path --
+    # but a rename is not the place to discover that).
+    for name in (".steampath", ".steampid"):
+        try:
+            link = final_on_target / name
+            if link.is_symlink():
+                tgt = os.readlink(link)
+                if old in tgt:
+                    os.unlink(link)
+                    os.symlink(tgt.replace(old, new), link)
+                    repaired.append(f"/{name} (repaired)")
+        except OSError:
+            continue
+    return repaired, _content_hits(final_on_target, old), warning
+
+
+def _content_hits(root: Path, needle: str) -> list[str]:
+    """Files under root whose bytes still embed needle. Read-only scan.
+
+    Size-gated at MAX_CONTENT_SCAN_BYTES: Valve's package cache zips (hundreds
+    of MiB) are Valve's own downloads and cannot embed $HOME; reading every
+    byte of them through the page cache is what makes a naive grep cost ~3 s
+    on a real tree (measured 2026-09-23: 3.0 s of late_steam's 3.1 s on a
+    2.4 GiB tree). Skipped files are still covered by the symlink walk above
+    (a link costs lstat, not a read) and are named in the record's warning
+    when skipped. Returns sorted target-absolute display paths."""
+    hits: list[str] = []
+    skipped = 0
+    encoded = needle.encode()
+    base = os.fspath(root)
+    for dirpath, _, filenames in os.walk(base, onerror=None):
+        for name in filenames:
+            path = os.path.join(dirpath, name)
+            try:
+                # lstat, not stat: a symlink must never be followed here.
+                # Valve leaves a FIFO (~/.steam/steam.pipe) behind, and
+                # opening a FIFO for reading blocks forever -- a content
+                # scan that does not skip non-regular files hangs LATE.
+                # (Found the hard way: two probe scans hung on it.)
+                try:
+                    st = os.lstat(path)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                if st.st_size > MAX_CONTENT_SCAN_BYTES:
+                    skipped += 1
+                    continue
+                with open(path, "rb") as handle:
+                    data = handle.read()
+                if encoded in data:
+                    hits.append("/" + os.path.relpath(path, base))
+            except OSError:
+                continue
+    if skipped:
+        hits.append(f"<{skipped} file(s) over {MAX_CONTENT_SCAN_BYTES} bytes not scanned>")
+    return sorted(hits)
+
+
+def _reseed_skel(target, final_on_target: Path, warnings: list[str]) -> list[str]:
+    """Copy /etc/skel files absent in the final home, never overwriting.
+
+    useradd -M copies nothing, so everything the image's account-creation
+    path would have copied has to be carried over -- except Steam's own
+    files, which win by being there first. Returns the target-absolute
+    paths copied."""
+    copied: list[str] = []
+    skel = Path(target) / "etc/skel"
+    try:
+        entries = list(skel.rglob("*"))
+    except OSError:
+        return copied
+    for src in sorted(entries):
+        try:
+            rel = src.relative_to(skel)
+        except ValueError:
+            continue
+        dst = final_on_target / rel
+        try:
+            if dst.exists() or dst.is_symlink():
+                continue
+            if src.is_symlink():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.symlink_to(os.readlink(src))
+                copied.append("/" + str(rel))
+            elif src.is_dir():
+                dst.mkdir(parents=True, exist_ok=True)
+            elif src.is_file():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(src.read_bytes())
+                try:
+                    os.chmod(dst, src.stat().st_mode & 0o7777)
+                except OSError:
+                    pass
+                copied.append("/" + str(rel))
+        except OSError as exc:
+            warnings.append(f"could not re-seed /etc/skel/{rel}: {exc}")
+    return copied
+
+
+def late_steam(
+    target,
+    staging_home: str,
+    final_home: str,
+    user: str,
+    ctx=None,
+    *,
+    live_root=LIVE_ROOT,
+) -> dict:
+    """LATE half of contract C2. Rename the staging home onto the real one.
+
+    Expects Stages' `useradd -u 1000 -M` first (the account inherits the
+    directory). os.rename on the same filesystem (instant), re-seed of
+    /etc/skel files without overwriting Steam's, repair of every absolute
+    path embedding the staging path, stale-file removal, then the existing
+    steam_seed so the seed stays the last writer (deck_configure:123-127).
+
+    Fast by construction: no recursive chown (uid fixed at 1000 from the
+    start), a single bounded walk for links plus a content grep. Failures
+    are recorded loudly, never raised."""
+    started = time.monotonic()
+    record: dict = {
+        "status": None,
+        "staging_home": staging_home,
+        "final_home": final_home,
+        "user": user,
+        "renamed": False,
+        "reseeded": [],
+        "repaired": [],
+        "leftover_hits": [],
+        "seed": None,
+        "seconds": 0,
+        "error": None,
+        "warnings": [],
+    }
+    warnings: list[str] = record["warnings"]
+    target = Path(target)
+    staging = target / staging_home.lstrip("/")
+    final = target / final_home.lstrip("/")
+    if not staging.is_dir() or staging.is_symlink():
+        record["status"] = LATE_STATUS_NO_STAGING
+        record["error"] = sanitize_text(
+            f"{staging_home} is not on the target (early stage produced no client); "
+            "first boot downloads Steam as it does today.",
+            limit=400,
+        )
+        error(f"Late Steam: {record['error']}")
+        record["seconds"] = int(time.monotonic() - started)
+        return record
+    if final.exists() or final.is_symlink():
+        record["status"] = LATE_STATUS_FAILED
+        record["error"] = sanitize_text(
+            f"{final_home} already exists on the target; refusing to rename "
+            f"{staging_home} over it",
+            limit=400,
+        )
+        error(f"Late Steam: {record['error']}")
+        record["seconds"] = int(time.monotonic() - started)
+        return record
+    try:
+        os.rename(staging, final)
+        record["renamed"] = True
+    except OSError as exc:
+        record["status"] = LATE_STATUS_FAILED
+        record["error"] = sanitize_text(f"could not rename {staging_home} to {final_home}: {exc}", limit=400)
+        error(f"Late Steam: {record['error']}")
+        record["seconds"] = int(time.monotonic() - started)
+        return record
+    record["reseeded"] = _reseed_skel(target, final, warnings)
+    repaired, leftover, walk_warning = _relocate_tree(final, staging_home, final_home)
+    record["repaired"] = [sanitize_text(p, limit=MAX_LINE_CHARS) for p in repaired]
+    if walk_warning:
+        warnings.append(walk_warning)
+    record["leftover_hits"] = [sanitize_text(p, limit=MAX_LINE_CHARS) for p in leftover]
+    expected_logs = {f"/.local/share/Steam/logs/{name}" for name in LOG_ONLY_NAMES}
+    # Log-only leftovers are EXPECTED (rotating diagnostics, never rewritten)
+    # and the "<N file(s) ...>" line is the scan gate doing its job. Only
+    # anything else warns.
+    unexpected = [p for p in leftover if p not in expected_logs and not p.startswith("<")]
+    if unexpected:
+        warnings.append(
+            "files outside Steam's rotating logs still embed "
+            + staging_home + ": " + ", ".join(record["leftover_hits"])
+        )
+    try:
+        from . import deck_steam_seed as seed_mod
+
+        seed_ctx = ctx
+        if seed_ctx is None:
+            seed_ctx = _SeedCtx(target, user)
+        seed_record = seed_mod.seed_steam(seed_ctx)
+        if seed_record.get("status") == "failed" and seed_ctx is ctx and ctx is not None:
+            # A caller-passed ctx names an account deck_user cannot confirm on
+            # this target (e.g. a full-path InstallContext from another
+            # machine); retry with the late ctx that resolves the renamed
+            # account through the target passwd.
+            seed_record = seed_mod.seed_steam(_SeedCtx(target, user))
+        record["seed"] = seed_record
+    except Exception as exc:  # noqa: BLE001 -- seed classifies its own failures; this is the seam
+        record["seed"] = {"status": "error", "error": sanitize_text(f"{type(exc).__name__}: {exc}", limit=400)}
+    seed_status = (record["seed"] or {}).get("status")
+    if seed_status not in ("seeded", "skel-only"):
+        warnings.append(
+            f"steam_seed after the rename reported status={seed_status}; "
+            "the client is relocated but the OOBE seed needs attention"
+        )
+    record["status"] = LATE_STATUS_RELOCATED
+    info(
+        f"Late Steam: {staging_home} -> {final_home} in "
+        f"{int(time.monotonic() - started)}s "
+        f"({len(record['repaired'])} path(s) repaired, "
+        f"{len(record['reseeded'])} skel file(s) re-seeded, "
+        f"steam_seed={seed_status})"
+    )
+    for warning in warnings[:MAX_WARNINGS]:
+        error(f"Late Steam: {warning}")
+    if len(warnings) > MAX_WARNINGS:
+        error(
+            f"Late Steam: {len(warnings) - MAX_WARNINGS} further warning(s) are "
+            "in the install record and were not printed"
+        )
+    record["seconds"] = int(time.monotonic() - started)
+    return record
+
+
+class _SeedCtx:
+    """Minimal ctx for seed_steam when Stages passes no ctx: carries the user
+    via user_configuration-free locale resolution (target /etc/locale.conf)
+    and a username deck_user can confirm -- best-effort only."""
+
+    def __init__(self, target, user: str):
+        self.target = Path(target)
+        self.username = user
+        self.defer_provisioning = False
+        self.user_configuration = {}
 
 
 def steam_bootstrap_step(ctx) -> None:

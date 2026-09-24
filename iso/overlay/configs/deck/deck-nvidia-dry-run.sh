@@ -11,6 +11,12 @@
 #   deck-nvidia-dry-run.sh <pacman-conf> <base-packages> <archinstall-packages> \
 #                          <deck-list-dir> [extra-target...]
 #
+# Variant lists (FAST-INSTALL.md C2): deck-gaming.packages entries ride as
+# EXTRA_TARGETS (passed by builder/build-iso.sh's call site) because they are
+# never baked into omarchy-base.packages yet must be in the transaction that
+# settles steam's virtual vulkan-driver deps; deck-preinstalls.packages needs
+# no resolve (plain Arch packages, no virtual providers).
+#
 # Env:
 #   DECK_NVIDIA_DRYRUN_ROOT   scratch --root for the resolve
 #                             (default /tmp/omarchy-deck-nvidia-dryrun)
@@ -64,10 +70,9 @@
 #  5. The accepted exception (`linux-firmware-nvidia`) must actually be
 #     present. An exception nobody needs any more is an exception that will
 #     silently widen later.
-#  6. NEGATIVE CONTROL: the identical resolve is run again with the pins
-#     removed, and the matcher is REQUIRED to fire. If it does not, either the
-#     matcher matches nothing any more or upstream changed the default
-#     provider -- and in both cases the green result above proves nothing, so
+#  6. NEGATIVE CONTROL: the identical resolve is run again without common
+#     pins or Gaming-only AMD provider targets. The matcher MUST fire on
+#     Steam's fallback driver choice, or the green result proves nothing and
 #     the build stops.
 #  7. DECK_LOCAL_PACKAGES is an EXCLUSION, and an exclusion is a hole. It has
 #     to prove it was deliberate, so each excluded name must (a) actually be in
@@ -323,29 +328,34 @@ log "dry run over ${#targets[@]} targets (installed set + ${fetched[*]})"
 #     before any passing result from it is believed.
 # ---------------------------------------------------------------------------
 
-# online_pinned, not pinned: the locally built names are already gone from
-# $targets, so asking to remove them again would make the arithmetic below
-# short by exactly the number of them and fail for a reason that is not real.
+# Gaming-only AMD providers are passed as extra targets instead of common
+# pins. Remove them too: without that, the control still has the providers
+# and cannot demonstrate Steam's unsafe default resolution.
+control_drop=("${online_pinned[@]}")
+for provider in vulkan-radeon lib32-vulkan-radeon; do
+  if contains "$provider" < <(printf '%s\n' "${EXTRA_TARGETS[@]}"); then
+    control_drop+=("$provider")
+  fi
+done
 mapfile -t control_targets < <(
   awk 'NR == FNR { drop[$0] = 1; next } !($0 in drop)' \
-    <(printf '%s\n' "${online_pinned[@]}") <(printf '%s\n' "${targets[@]}")
+    <(printf '%s\n' "${control_drop[@]}") <(printf '%s\n' "${targets[@]}")
 )
-((${#control_targets[@]} == ${#targets[@]} - ${#online_pinned[@]})) || fail \
-  "the negative control removed ${#targets[@]} - ${#control_targets[@]} targets, expected ${#online_pinned[@]}" \
-  "Every non-locally-built entry in $INSTALL_LIST must appear in the assembled" \
-  "target list, or the control is not testing the thing the real assertion" \
-  "depends on."
+(( ${#control_targets[@]} == ${#targets[@]} - ${#control_drop[@]} )) || fail \
+  "the negative control removed ${#targets[@]} - ${#control_targets[@]} targets, expected ${#control_drop[@]}" \
+  "Every common pin and optional gaming provider must appear in the assembled" \
+  "target list, or the control is not testing the actual Steam transaction." \
 
 if ! control=$(resolve "${control_targets[@]}"); then
   fail "the negative control's resolve failed" \
-    "It uses the same targets as the real assertion minus ${online_pinned[*]}," \
+    "It uses the same targets as the real assertion minus ${control_drop[*]}," \
     "so this is not a control-only problem."
 fi
 control_hits=$(printf '%s\n' "$control" | nvidia_matches)
 if [[ -z $control_hits ]]; then
   fail \
     "the NEGATIVE CONTROL did not fire" \
-    "Resolving the same targets WITHOUT ${online_pinned[*]} is supposed to make pacman" \
+    "Resolving the same targets WITHOUT ${control_drop[*]} is supposed to make pacman" \
     "satisfy steam's virtual vulkan-driver / lib32-vulkan-driver dependencies" \
     "with the NVIDIA stack (docs/PROGRESS.md §3.8, measured 2026-08-12:" \
     "egl-gbm egl-wayland egl-wayland2 egl-x11 lib32-nvidia-utils nvidia-utils)." \

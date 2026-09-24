@@ -1,0 +1,39 @@
+# Omarchy OPTIONAL pre-installs (FAST-INSTALL.md C2).
+#
+# The AUTHORITY is the pinned runtime's bin/omarchy-remove-preinstalls at
+# iso/RUNTIME: it removes exactly these 13 packages (plus web-app launchers,
+# TUI wrappers and mise stubs). bin/omarchy-install-preinstalls restores the
+# same set. If the runtime's list moves, THIS file moves with it in the same
+# commit -- a test asserts the two argv lists are identical.
+#
+# What preinstalls=no skips, by layer (nothing is hidden to make the timer
+# look faster):
+#
+#   these 13 PACKAGES   never enter the minimal image and the early delta
+#                       never installs them (this file is the delta's
+#                       allow-list). No install-then-remove on the fast path.
+#   launchers/wrappers  GENERATED post-install by omarchy-refresh-applications
+#   + mise stubs        (never baked into any image). preinstalls=no skips
+#                       the add step; late runs the canonical removal tools
+#                       after user provisioning and leaves the
+#                       preinstalls-removed marker, so the desktop offers
+#                       Install > Preinstalls (FAST-INSTALL.md C6).
+#
+# The common minimal root image EXCLUDES all 13 (builder strips them at image
+# time); they stay in the offline mirror, and the early optional delta reads
+# THIS file from /usr/share/omarchy-iso/deck-preinstalls.packages on the
+# LIVE ISO to install them offline for preinstalls=yes. BARE names: the delta
+# resolves against the single-repo offline mirror.
+aether
+cliamp
+libreoffice-fresh
+xournalpp
+pinta
+obsidian
+obs-studio
+kdenlive
+moonlight-qt
+lazydocker
+omacut
+omacalc
+omawrite

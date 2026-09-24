@@ -229,6 +229,7 @@ echo "# 2. no chroot branch is quiet, and none is unaccounted for"
 # a different hat.
 declare -A CHROOT_FUNCS=(
   [stage_preconditions]=refusal     # refuses a non-root run; warns on non-Deck DMI
+  [run_stage]=refusal              # desktop-only bake rejects every gaming-only stage
   [run_as_desktop_user]=refusal     # drops privilege with setpriv, or fails loudly
   [stage_sddm_resilience]=defer
   [verify_timezone_helper]=defer
@@ -654,6 +655,25 @@ printf '%s\n' "${baked[@]}" | grep -qx stage-desktop-settings &&
 printf '%s\n' "${baked[@]}" | grep -qx stage-osk-kb-layout ||
   fail_test "stage-osk-kb-layout IS baked" "it is the half of stage-desktop-settings nothing else writes"
 pass "the baked list is the install stages minus desktop-settings, plus the XKB rule"
+
+mapfile -t desktop_baked < <(bash "$SESSION_SH" list-desktop-bake-stages)
+[[ ${desktop_baked[0]} == stage-preconditions ]] ||
+  fail_test "desktop-only bake starts with target checks" "got '${desktop_baked[0]}'"
+for required in stage-input-mapper stage-lizard-mode stage-osk-kb-layout stage-greeter-rotation stage-sddm-resilience stage-priv-write-helper stage-power-button; do
+  printf '%s\n' "${desktop_baked[@]}" | grep -qx "$required" ||
+    fail_test "desktop-only bake keeps $required" "got: ${desktop_baked[*]}"
+done
+for forbidden in stage-session-select stage-valve-repos stage-steam-hook stage-steam-first-run stage-return-icon stage-menu-row stage-boot-default-gaming; do
+  printf '%s\n' "${desktop_baked[@]}" | grep -qx "$forbidden" &&
+    fail_test "desktop-only bake must not install $forbidden" "got: ${desktop_baked[*]}"
+done
+pass "desktop-only bake keeps controller and power support without Gaming Mode services"
+
+DECK_SESSION_DESKTOP_ONLY=1 run_chroot 'run_stage stage-session-select'
+if [[ $RC -eq 0 ]] || ! out_has "not a desktop-only bake stage"; then
+  fail_test "desktop-only mode rejects a Gaming Mode stage" "rc=$RC"$'\n'"$OUT"
+fi
+pass "desktop-only stage guard refuses Gaming Mode configuration"
 
 # The opt-in stages stay opt-in: each of them changes something a human has to
 # have watched work first.

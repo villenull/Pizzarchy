@@ -60,7 +60,7 @@ cidata::render_config() {
           "efi_binary": "limine_x64.efi",
           "enable_fallback": true
         },
-        "storage": { "kernel": "linux" }
+        "storage": { "kernel": "linux-omarchy" }
       },
       "disk_config": {
         "config_type": "default_layout",
@@ -94,7 +94,7 @@ cidata::render_config() {
         } ]
       },
       "hostname": $hostname,
-      "kernels": ["linux"],
+      "kernels": ["linux-omarchy"],
       "network_config": { "type": "iso" },
       "ntp": true,
       "parallel_downloads": 8,

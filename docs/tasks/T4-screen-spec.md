@@ -449,20 +449,48 @@ failure states · verified by**. Verification tiers follow
 `docs/tasks/T5-fork-plan.md` §5's convention: **[U]** unit (seconds, no VM) ·
 **[V]** QEMU, against the real ISO · **[H]** hardware, T6 release gate.
 
-### S0 — Welcome and disclosure
+### S0 — Welcome and disclosure (four-variant flow)
 
-- **Purpose.** One frame that says the machine is about to be installed, and
-  discloses the proprietary firmware the image relies on. §6.1a item 3's
-  "agreements" screen, merged into the greeter upstream already draws so it costs
-  no screen.
+- **Purpose.** One frame that says the machine is about to be installed, asks
+  the BIG proceed question, and warns that A wipes the built-in drive
+  immediately (SD card never touched). §6.1a item 3's "agreements" screen,
+  merged into the greeter upstream already draws so it costs no screen.
 - **On the console.** Upstream's centred Omarchy logo and tagline **(READ:
-  `greeter`)**, with the hint line replaced and three lines added:
-  *"This installs Omarchy on your Steam Deck and erases the internal drive."* /
-  *"It includes proprietary firmware from AMD and Valve (graphics, Wi-Fi,
-  Bluetooth, audio DSP) — the Deck does not work without it."* / *"Steam and the
-  audio DSP firmware are downloaded from Valve during setup."* Then
-  **`Press A to begin`**.
-- **Controls.** A (Enter) only. Upstream's `IFS= read -r _ </dev/tty` accepts it.
+  `greeter`)**, with the hint line replaced by (four-variant rewrite,
+  2026-09-24 — consent, wipe scope and A/B answers all live here):
+  *"THIS WILL INSTALL OMARCHY ON YOUR STEAM DECK. PROCEED?"* /
+  *"Pressing A wipes the built-in drive immediately; there is no later disk
+  confirmation."* / *"The SD card is never touched."* /
+  *"Stopping after A leaves no working system until an install finishes."* /
+  *"It includes proprietary firmware from AMD and Valve — graphics, Wi-Fi,
+  Bluetooth, audio DSP. The Deck does not work without it."* (split in two
+  only so no line wraps at the 121-column `say` budget) /
+  *"Gaming Mode downloads Steam from Valve during setup; everything else is
+  already on this USB stick."* Then **`Press A to install, B to cancel`**.
+- **After A: the early stage starts — OLED-gated.** S0-A first checks
+  `deck_form_is_oled_deck` (product_name==Galileo AND sys_vendor contains
+  Valve — the ONLY verified hardware; the kernel predicate stays broader
+  because naming a kernel is reversible and wiping is not). A Jupiter
+  (unverified LCD), a generic laptop NVMe, or unreadable DMI is the dead
+  end with the reason said, BEFORE `early start` is ever invoked. Then it
+  resolves the single BUILT-IN NVMe (`deck_form_disk_list` keeps TRAN==nvme
+  only — never microSD/USB; zero or 2+ NVMe is the dead end, never a guess)
+  and runs `omarchy-deck-early start "$disk"` (FAST-INSTALL C1). A failed
+  start aborts loudly; nothing continues silently. B (Esc) is the safe
+  exit: nothing erased yet, Reboot / Power off menu, never a shell.
+- **Then the two choice screens** (D-pad `gum choose` Yes/No rows, default
+  No): **Install Omarchy pre-installs?** (No: *"Can be installed later from
+  the Omarchy desktop."* — existing menu action) then **Install Steam Deck
+  Gaming Mode?** (Yes: *"(Requires Internet.)"*; No: *"Can be installed
+  later from the Omarchy desktop."* — C6 conversion script). B goes one
+  screen back (Gaming → preinstalls; preinstalls → power menu). Both
+  answered → `choices/{preinstalls,gaming}` + `choices/locked` written
+  atomically (Stages gates on `locked`); preinstalls is then not revisable.
+  Gaming=yes requires Internet: Wi-Fi runs, B on the list returns to the
+  Gaming choice (yes→no flip, stale marker cleared); Gaming=no skips Wi-Fi
+  entirely (Stages skips its network gate too — no marker needed).
+- **Controls.** A = install (Enter), B = cancel/back (Esc). Single-byte
+  read; anything else loops, never guesses consent.
 - **Text entry.** None.
 - **Failure states.** ⚠️ Upstream runs a `tte` colour animation here and **leaves
   the tty in raw/no-echo mode when killed**, which silently kills the gum prompts
@@ -470,20 +498,26 @@ failure states · verified by**. Verification tiers follow
   Our override must keep that `stty sane`. Losing it is invisible until S1
   refuses input.
 - **Verified by.**
-  - **[U]** the rendered text contains the firmware sentence; asserted on the
-    function's output, not on a screenshot.
+  - **[U]** the rendered text contains the BIG question, the wipe warning,
+    the SD promise, and the A/B prompt; asserted on the function's output,
+    not on a screenshot. Width ≤ 121 columns, one screen (9 lines).
+  - **[U]** OLED wipe gate refuses Jupiter, generic NVMe, SD-only and
+    unreadable DMI without invoking early (says why); disk filter keeps
+    NVMe only (USB/microSD excluded even at RM=0); zero/2+ NVMe dead-ends
+    without calling start; four choice combos lock the right files; B-back
+    rewrites correctly.
   - **[V]** `/dev/vcs1` carries the disclosure line **and** the prompt marker,
     and a single A press advances (the S1 marker appears and the S0 marker is
     gone — *both halves*, per `docs/findings/T2-gamepad-spike.md` §5 bug 2).
   - **[V]** `stty -a </dev/tty1` reports `echo` after S0 returns.
   - **[H]** T6: the frame is upright and not wrapped.
 
-### S1 — Wi-Fi  🔴 the hardest screen in the flow
+### S1 — Wi-Fi, Gaming-gated (four-variant flow)
 
-- **Purpose.** Join a network. Needed for the timezone default (S2), for
-  `configure_deck`'s fetch of `steamdeck-dsp` and `steam`
-  (`docs/tasks/T5-fork-plan.md` §4.1), and for Steam to be usable at all
-  (`docs/findings/R1-10.4.md`). **Upstream has no such screen** — `build-iso.sh`'s
+- **Purpose.** Join a network — ONLY when Gaming=yes (Steam downloads from
+  Valve). Gaming=no skips this screen entirely (Stages skips its network
+  gate too — no marker needed). Still feeds the timezone default (S2).
+  **Upstream has no such screen** — `build-iso.sh`'s
   own comment is *"The install is entirely offline and the live environment needs
   no Wi-Fi driver"* **(READ)** — so this is the single largest piece of new UI T4
   builds.
@@ -494,7 +528,10 @@ failure states · verified by**. Verification tiers follow
      five rows.
   3. `Connecting to <SSID>…` (`gum spin`), then either `Connected` + the IP, or
      the failure branch (§5).
-- **Controls.** D-pad/stick = move, A = select, B = back to the list.
+- **Controls.** D-pad/stick = move, A = select, B = back to the list. In the Gaming gate the list carries a "Back to
+  Gaming choice" row above Rescan (B/Esc still redraws, never jumps); it
+  flips Gaming yes→no, rewrites the file, and clears any stale
+  network-ready marker. No path back to pre-installs from Wi-Fi (locked).
   Trackpads = the two OSK cursors, triggers = press the key under **their own**
   cursor. `close` on the OSK hides it and restores B→Esc.
 - **Text entry.** ✅ **Yes — this is the one that made T8 exist.** Text-entry mode
@@ -596,32 +633,28 @@ failure states · verified by**. Verification tiers follow
 > input to build and test, and the password it produces is also the `sudo`
 > password. One keyboard, used everywhere.
 
-### S4 — Disk
+### S4 — Disk — REMOVED by FAST-INSTALL C4 (consent moved to S0)
 
-- **Purpose.** The destructive step. Never defaulted, explicit confirm.
-- **On the console.** When exactly one eligible disk exists — the expected Deck
-  case — the picker is skipped and the screen is upstream's overwrite confirm
-  with our text: `Everything on <model> (<size>) will be erased. There is no
-  recovery.` / `This install is not encrypted, so the Deck can start without
-  anyone typing a passphrase.` / affirmative **`Yes, erase and install`**,
-  negative **`No, go back`**. When more than one is eligible, `disk_form` runs
-  first with the cursor on internal storage.
-- **Controls.** Left/right on the d-pad between the two buttons (⧉ View also
-  sends Tab in lizard mode), A to confirm, B to go back. The cursor starts on
-  **`No`**.
-- **Text entry.** None.
+- **Purpose.** Was the destructive step. The erase-confirm screen is gone:
+  consent happens at S0-A, where the early stage starts erasing immediately.
+- **What remains.** `disk_form` stays as the disk *resolver* (shared with the
+  S0-A start: `deck_form_disk_list`/`deck_form_disk_autoselect`, boot-medium
+  exclusion, dead end when not exactly one disk). `confirm_disk_overwrite`
+  keeps overriding upstream's name but draws nothing and always returns 0, so
+  upstream's `select_installation` branch and the `until confirm_disk_overwrite`
+  loop cannot re-prompt for a disk that is already erasing;
+  `encrypt_installation` stays the unconditional constant `false`.
 - **Failure states.** No eligible disk (every candidate is removable or is the
-  boot medium) → a dead-end screen offering Reboot / Power off, never a shell.
-  Declining returns to the picker, or re-asks — upstream's loop **(READ,
-  `select_installation`)**.
+  boot medium) → a dead-end screen offering Reboot / Power off, never a shell
+  (reached at S0-A, before anything is erased).
 - **Verified by.**
   - **[U]** the eligibility filter over `lsblk` fixtures: the install medium is
     excluded (upstream's `get_root_disk` walk), removable devices are excluded by
     `RM`, an NVMe internal is kept, an eMMC internal is kept, and an empty result
     is an error rather than an empty list.
-  - **[V]** ⭐ **the blocking assertion:** with the cursor defaulting to `No`, a
-    scripted "press A immediately" sequence must **not** produce an install. Then
-    an explicit left-then-A must. Both, or the screen is not proven.
+  - **[U]** S0-A with one disk calls `early start` with it; with zero or two
+    disks it dead-ends and never calls `early start`; a failed start aborts.
+  - **[U]** `confirm_disk_overwrite` draws no prompt and always returns 0.
   - **[V]** the artefact: `.disk_config.device_modifications[0].device` is the
     intended disk and `.wipe` is `true`; `.disk_config` carries **no**
     `disk_encryption` block, and `/root/user_encrypt_installation.txt` is `false`.
@@ -635,12 +668,20 @@ failure states · verified by**. Verification tiers follow
 - **On the console.** `gum table` (upstream's recap style) with: Username,
   Password (masked), Hostname, Timezone, Wi-Fi (SSID or **`Not connected`**),
   Disk (device, model, size), Encryption (**`Off`**), Desktop (`Omarchy`), Boot
-  (`Gaming Mode`). Then `gum confirm --affirmative "Install" --negative "Go back"`.
-- **Controls.** A / B. Cursor starts on `Install` (nothing here is destructive
-  that S4 did not already confirm).
+  (`Gaming Mode`), Pre-installs (`yes`/`no`), Gaming Mode (`yes`/`no` — the
+  locked choice files mirrored in globals), Early install (the early stage's
+  live state: `running` / `done`, or `failed: <reason>`), Steam download
+  (Steam's live state: `pending` / `running` / `done` / `incomplete` /
+  `skipped` / `failed`, with the reason appended on failure; `unknown` when
+  nothing reported yet). Then
+  `gum confirm --affirmative "Install" --negative "Go back"`.
+- **Controls.** A / B. Cursor starts on `Install` (the erase was already
+  consented at S0-A; nothing here re-asks it).
 - **Text entry.** None.
-- **Failure states.** `Go back` returns to S3, matching upstream's existing
-  `user_step` recap loop **(READ)**.
+- **Failure states.** Early `failed` → the failure menu (Reboot / Power off,
+  never a shell) instead of Install, with the stage's one-line reason shown.
+  `Go back` re-runs `user_step` only (identity may change; the disk may not —
+  the early stage is already erasing it).
 - **Verified by.**
   - **[U]** the table body is built from the same variables the JSON writer reads
     — assert on the *pair*, so a screen that shows one thing and writes another
