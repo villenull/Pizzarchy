@@ -23,6 +23,11 @@
 #   VM_INSTALL_TIMEOUT_SEC  default 1800 (30 min)
 #   VM_HOSTNAME             default test-vm
 #   VM_USERNAME             default tester
+#   VM_FULL_NAME            default 'Deck Tester'. cidata `user_full_name.txt`
+#                           identity file (used for git; empty skips the name).
+#   VM_EMAIL                default 'deck@example.invalid'. cidata
+#                           `user_email_address.txt` identity file (used for
+#                           git; empty skips the email).
 #   VM_PREINSTALLS            default no. cidata `preinstalls` choice file
 #                           (yes/no, matching /run/omarchy-deck/choices/*).
 #   VM_GAMING                 default no. cidata `gaming` choice file (yes/no).
@@ -102,6 +107,8 @@ INSTALL_TIMEOUT=${VM_INSTALL_TIMEOUT_SEC:-1800}
 REBOOT_TIMEOUT=${VM_REBOOT_TIMEOUT_SEC:-300}
 HOSTNAME_=${VM_HOSTNAME:-test-vm}
 USERNAME=${VM_USERNAME:-tester}
+FULL_NAME=${VM_FULL_NAME:-Deck Tester}
+EMAIL=${VM_EMAIL:-deck@example.invalid}
 PASSWORD=${VM_PASSWORD:-tester123}
 FORM_DELAY=${VM_FORM_DELAY_SEC:-90}
 PREINSTALLS=${VM_PREINSTALLS:-no}
@@ -194,6 +201,8 @@ creds_json="$WORK/user_credentials.json"
 form_delay_file="$WORK/form-delay-seconds"
 preinstalls_file="$WORK/preinstalls"
 gaming_file="$WORK/gaming"
+full_name_file="$WORK/user_full_name.txt"
+email_file="$WORK/user_email_address.txt"
 qmp_sock="$WORK/qmp.sock"
 pidfile="$WORK/qemu.pid"
 serial_log="$WORK/serial.log"
@@ -208,7 +217,7 @@ truncate -s "${DISK_SIZE_GB}G" "$target_raw"
 
 cp "$OVMF_VARS_TEMPLATE" "$ovmf_vars"
 
-log "rendering cidata autoinstall config (hostname=$HOSTNAME_ user=$USERNAME preinstalls=$PREINSTALLS gaming=$GAMING)"
+log "rendering cidata autoinstall config (hostname=$HOSTNAME_ user=$USERNAME full_name=$FULL_NAME email=$EMAIL preinstalls=$PREINSTALLS gaming=$GAMING)"
 cidata::render_config /dev/nvme0n1 "$disk_bytes" "$HOSTNAME_" "$config_json"
 # vm-cidata.sh renders the Deck kernel (linux-omarchy) in both config fields
 # itself; the offline mirror carries no stock linux-headers, so selecting
@@ -220,7 +229,12 @@ printf '%s\n' "$FORM_DELAY" >"$form_delay_file"
 # release ISO predates them and ignores the extra files, like form-delay.
 printf '%s\n' "$PREINSTALLS" >"$preinstalls_file"
 printf '%s\n' "$GAMING" >"$gaming_file"
-cidata::build_image "$cidata_img" "$config_json" "$creds_json" "$form_delay_file" "$preinstalls_file" "$gaming_file"
+# Identity files: exact basenames the loader accepts (user_full_name.txt /
+# user_email_address.txt, deck-install-invocation.patch optional_inputs),
+# matching what configurator's write_user_files writes on the ISO path.
+printf '%s\n' "$FULL_NAME" >"$full_name_file"
+printf '%s\n' "$EMAIL" >"$email_file"
+cidata::build_image "$cidata_img" "$config_json" "$creds_json" "$form_delay_file" "$preinstalls_file" "$gaming_file" "$full_name_file" "$email_file"
 
 cleanup_qemu() {
   local pid
@@ -511,6 +525,20 @@ if (( timing_needed )); then
           fi
         done
         (( marker_found == 1 )) || { log "FAIL: preinstalls=no but no ~/.local/state/omarchy/preinstalls-removed marker in any installed home"; status=1; }
+      fi
+      # Identity (used for git): cidata's user_full_name.txt /
+      # user_email_address.txt must reach the installed user's ~/.gitconfig
+      # via the late stage (install/user/git.sh runs `git config --global`
+      # as the installed user, so HOME there is @home/$USERNAME).
+      gitconfig="$mount_point/@home/$USERNAME/.gitconfig"
+      if [[ ! -f $gitconfig ]]; then
+        log "FAIL: $USERNAME has no ~/.gitconfig on the target (expected name/email from cidata)"
+        status=1
+      else
+        LC_ALL=C command grep -aqF "name = $FULL_NAME" "$gitconfig" ||
+          { log "FAIL: ~/.gitconfig lacks 'name = $FULL_NAME'"; status=1; }
+        LC_ALL=C command grep -aqF "email = $EMAIL" "$gitconfig" ||
+          { log "FAIL: ~/.gitconfig lacks 'email = $EMAIL'"; status=1; }
       fi
       log "variant assertions done (preinstalls=$PREINSTALLS gaming=$GAMING)"
     else

@@ -1681,13 +1681,20 @@ omarchy_prompt_password() {
 # upstream never calls is a screen that silently never appears, which is the
 # whole failure mode T4 §6.4 is built around, so the aliases are gone rather
 # than kept "just in case".
+# Full name and email, as upstream's setup-form asks them (used for git;
+# Enter skips either). Through deck_form_text_prompt, like the username, so
+# the on-screen keyboard and controller work. These were stubbed to empty
+# until 2026-09-24; the operator asked for them back on every install path.
+deck_form_full_name_body() { gum input --placeholder "Used for git authentication (hit return to skip)" --prompt "Full name> "; }
+deck_form_email_body() { gum input --placeholder "Used for git authentication (hit return to skip)" --prompt "Email address> "; }
 deck_form_identity_body() {
-  # (INFERRED variable names -- see the block comment above)
+  # (MEASURED global names: upstream's user_step recap reads $full_name /
+  # $email_address at configurator:297-298 and write_user_files persists them
+  # at :443-444 -- asserted in test/unit/test-deck-form.sh, not inferred.)
   # shellcheck disable=SC2034
-  full_name=""
+  full_name=$(deck_form_text_prompt deck_form_full_name_body) || return $?
   # shellcheck disable=SC2034
-  email_address=""
-  printf '\n'
+  email_address=$(deck_form_text_prompt deck_form_email_body) || return $?
 }
 omarchy_prompt_identity() { deck_form_identity_body; }
 

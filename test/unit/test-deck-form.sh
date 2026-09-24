@@ -1855,10 +1855,38 @@ fi
   fail "omarchy_prompt_hostname must set \$hostname (the name configurator reads), not some other name"
 pass "omarchy_prompt_hostname really sets \$hostname"
 
-( omarchy_prompt_identity >/dev/null 2>&1
-  [[ ${full_name+set} == set && ${email_address+set} == set ]] ) ||
+# Prompt through a stub: deck_form_text_prompt normally arms the OSK/mapper
+# and blocks on a tty, so each subshell below redefines it and dispatches on
+# the body-function name in $1 -- the same contract deck_form_identity_body
+# relies on -- instead of driving the real prompter with no tty here.
+( deck_form_text_prompt() {
+    case ${1:-} in
+      deck_form_full_name_body) printf 'Deck Tester' ;;
+      deck_form_email_body) printf 'deck@example.invalid' ;;
+      *) printf 'unexpected prompt body: %s\n' "${1:-<none>}" >&2; return 99 ;;
+    esac
+  }
+  omarchy_prompt_identity >/dev/null 2>&1
+  [[ ${full_name:-} == 'Deck Tester' && ${email_address:-} == 'deck@example.invalid' ]] ) ||
   fail "omarchy_prompt_identity must set \$full_name and \$email_address"
 pass "omarchy_prompt_identity really sets \$full_name and \$email_address"
+
+# Cancel propagation: user_form does `omarchy_prompt_identity || return $?`,
+# so an Esc/back non-zero from either prompt must surface unchanged.
+( deck_form_text_prompt() { return 1; }
+  set +e
+  omarchy_prompt_identity >/dev/null 2>&1; rc=$?
+  [[ $rc -eq 1 ]] ) ||
+  fail "omarchy_prompt_identity must return the prompt's non-zero status (Esc/back) unchanged"
+pass "omarchy_prompt_identity propagates a cancelled prompt's status"
+
+# Skip path: empty input (Enter on both) is a real answer -- both globals set
+# but empty, status 0 -- matching upstream setup-form.sh ("hit return to skip").
+( deck_form_text_prompt() { printf ''; return 0; }
+  omarchy_prompt_identity >/dev/null 2>&1; rc=$?
+  [[ $rc -eq 0 && ${full_name+set} == set && ${email_address+set} == set && -z ${full_name:-} && -z ${email_address:-} ]] ) ||
+  fail "omarchy_prompt_identity must leave \$full_name and \$email_address set-but-empty on skip, with status 0"
+pass "omarchy_prompt_identity leaves both empty (skip) with status 0"
 
 # ===========================================================================
 # S1: Wi-Fi (SSID list builder only)
