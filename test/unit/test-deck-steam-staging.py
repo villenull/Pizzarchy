@@ -137,8 +137,11 @@ from orchestrator.context import InstallContext  # noqa: E402
 
 print(f"# modules loaded from {PKG_ROOT}")
 
-TEST_UID = 1000
-TEST_GID = 1000
+# os.getuid() rather than a literal 1000 (the suite convention since §5.49):
+# chowning to yourself is permitted for a non-root process, so the REAL chown
+# path runs on a CI runner (uid 1001) too, instead of failing there only.
+TEST_UID = os.getuid()
+TEST_GID = os.getgid()
 # /tmp on dev/CI boxes can hold less than MIN_FREE_BYTES (4 GiB); the space
 # gate is bypassed here and covered by the existing bootstrap suite's nospace
 # case instead.
@@ -364,7 +367,7 @@ check("success: HOME was the staging dir", runner.home_seen, [str(target / STAGI
 check("success: staging home is 0700",
       f"{stat.S_IMODE(os.lstat(target / STAGING.lstrip('/')).st_mode):04o}", "0700")
 check("success: steam/status=done", (status_dir / "status").read_text().strip(), "done")
-check("success: child ran as uid 1000", "--reuid=1000" in runner.calls[0], True)
+check("success: child ran as the staging uid", f"--reuid={TEST_UID}" in runner.calls[0], True)
 check_in("success: it says so loudly", "staging home", out)
 
 # Timeout/stall without a marker -> incomplete, never installed.
