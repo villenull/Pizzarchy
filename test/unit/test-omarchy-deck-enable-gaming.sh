@@ -326,7 +326,7 @@ pkg_fields=$(
   ' _ "$PKGBUILD"
 ) || fail "the PKGBUILD sources with a stubbed makepkg environment"
 
-for need in omarchy-deck-enable-gaming omarchy-deck-enable-gaming.desktop deck-session.sh deck-input-mapper.py deck_osk_layout.py deck_osk_tty.py deck_osk_wayland.py; do
+for need in omarchy-deck-enable-gaming omarchy-deck-enable-gaming.desktop deck-session.sh deck-input-mapper.py deck-steam-desktop.py deck_osk_layout.py deck_osk_tty.py deck_osk_wayland.py; do
   grep -qw "$need" <<<"$pkg_fields" || fail "source=() declares $need"
 done
 count "source=() declares the action, the launcher, and the session payload"
@@ -340,12 +340,14 @@ grep -q 'pkgdir.*/usr/share/omarchy-deck/deck-session.sh' "$PKGBUILD" \
 count "package() installs the action (0755), the launcher, and the session copy"
 
 # Execute package() for real against a scratch pkgdir (no root, no makepkg).
-# The session payload (deck-session.sh + mapper/OSK siblings) is STAGED here
-# from canonical src/ -- the same derivation iso/bin/build performs before
-# docker (MAPPER_SRC_NAME/OSK_MODULES scraped from deck-session.sh itself):
-# build-time generated, never tracked. Fail if the derivation comes back
-# empty: an empty stage would make the byte-identity checks below pass over
-# nothing.
+# The session payload (deck-session.sh + mapper/Steam-launcher/OSK siblings)
+# is STAGED here from canonical src/ -- the same derivation iso/bin/build
+# performs before docker (MAPPER_SRC_NAME, STEAM_LAUNCHER_SRC_NAME and
+# OSK_MODULES scraped from deck-session.sh itself): build-time generated,
+# never tracked. The launcher was once left out of both this list and the
+# PKGBUILD, and the opt-in died at stage-steam-desktop-launcher in QEMU.
+# Fail if the derivation comes back empty: an empty stage would make the
+# byte-identity checks below pass over nothing.
 pkg_src="$work/src"
 pkg_dst="$work/pkg"
 mkdir -p "$pkg_src" "$pkg_dst"
@@ -358,7 +360,9 @@ osk_line=$(grep -m1 '^OSK_MODULES=(' "$SESSION_SRC") || fail "no OSK_MODULES=( a
 read -r -a osk_raw <<<"$(printf '%s' "$osk_line" | sed 's/^OSK_MODULES=(//; s/).*$//' | tr -d "\"'")"
 [[ ${#osk_raw[@]} -gt 0 ]] || fail "src/deck-session.sh OSK_MODULES is empty"
 osk_src_name=$(sed -n 's/^readonly OSK_SRC_NAME=\(.*\)$/\1/p' "$SESSION_SRC" | tr -d "\"'" | head -1)
-staged=(deck-session.sh "$mapper_name")
+launcher_name=$(sed -n 's/^readonly STEAM_LAUNCHER_SRC_NAME=\(.*\)$/\1/p' "$SESSION_SRC" | tr -d "\"'" | head -1)
+[[ -n $launcher_name ]] || fail "cannot derive STEAM_LAUNCHER_SRC_NAME from src/deck-session.sh"
+staged=(deck-session.sh "$mapper_name" "$launcher_name")
 for m in "${osk_raw[@]}"; do
   [[ $m == '$OSK_SRC_NAME' || $m == '${OSK_SRC_NAME}' ]] && m="$osk_src_name"
   [[ -n $m ]] || fail "unresolvable OSK module entry in src/deck-session.sh"
@@ -395,14 +399,16 @@ pkg_run_out=$(
   || fail "the .desktop launcher lands in /usr/share/applications"
 count "package() really installs an executable action and the launcher (executed, not grepped)"
 
-# Byte-identity with the canonical src/ originals (the T12 copy discipline):
-# stage-input-mapper requires the mapper + OSK modules BESIDE deck-session.sh,
-# so a stale copy is a Gaming Mode whose desktop navigation is missing.
-for f in deck-session.sh deck-input-mapper.py deck_osk_layout.py deck_osk_tty.py deck_osk_wayland.py; do
+# Byte-identity with the canonical src/ originals (the T12 copy discipline),
+# over the DERIVED set: every file deck-session.sh resolves beside itself must
+# be installed beside the packaged copy, or a stage dies on a live system.
+for f in "${staged[@]}"; do
+  [[ -f $pkg_dst/usr/share/omarchy-deck/$f ]] \
+    || fail "package() does not install $f beside deck-session.sh"
   cmp -s "$REPO_ROOT/src/$f" "$pkg_dst/usr/share/omarchy-deck/$f" \
     || fail "installed $f differs from src/$f"
 done
-count "the installed session payload is byte-identical to src/ (5 files, executed)"
+count "the installed session payload is byte-identical to src/ (${#staged[@]} files, executed)"
 
 # The launcher must elevate in the terminal, not just mention the binary in
 # a comment: without sudo the action exits at need_root and cannot install.

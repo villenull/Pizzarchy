@@ -153,6 +153,7 @@ source=('README'
   'omarchy-deck-greeter.metadata.desktop'
   'deck-session.sh'
   'deck-input-mapper.py'
+  'deck-steam-desktop.py'
   'deck_osk_layout.py'
   'deck_osk_tty.py'
   'deck_osk_wayland.py'
@@ -164,7 +165,7 @@ source=('README'
   '0030-screensaver-font-fits-panel.meta'
   '0040-limine-boot-timeout.patch'
   '0040-limine-boot-timeout.meta')
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 # The one place the patch payload's destination is written down. The applier's
 # own DEFAULT_PATCH_DIR is /usr/share/omarchy-deck/patches and deck_patches.py's
@@ -264,14 +265,19 @@ package() {
     "$pkgdir/usr/share/sddm/themes/omarchy-deck/Main.qml"
   install -Dm644 "$srcdir/omarchy-deck-greeter.metadata.desktop" \
     "$pkgdir/usr/share/sddm/themes/omarchy-deck/metadata.desktop"
-  # deck-session.sh beside its mapper/OSK siblings, exactly as stage-input-
-  # mapper requires ("sync the whole src/ directory, not just this script"):
-  # the script resolves MAPPER_SRC_NAME + OSK_MODULES beside $0 at bake time.
+  # deck-session.sh beside its mapper/OSK/Steam-launcher siblings, exactly as
+  # its stages require ("sync the whole src/ directory, not just this
+  # script"): it resolves MAPPER_SRC_NAME, OSK_MODULES and
+  # STEAM_LAUNCHER_SRC_NAME beside $0 at bake time. The launcher was missing
+  # here once, and the in-place Gaming opt-in failed at
+  # stage-steam-desktop-launcher in QEMU.
   # 0755: the opt-in runs its stages from this copy on a live system.
   install -Dm755 "$srcdir/deck-session.sh" \
     "$pkgdir/usr/share/omarchy-deck/deck-session.sh"
   install -Dm755 "$srcdir/deck-input-mapper.py" \
     "$pkgdir/usr/share/omarchy-deck/deck-input-mapper.py"
+  install -Dm644 "$srcdir/deck-steam-desktop.py" \
+    "$pkgdir/usr/share/omarchy-deck/deck-steam-desktop.py"
   install -Dm644 "$srcdir/deck_osk_layout.py" \
     "$pkgdir/usr/share/omarchy-deck/deck_osk_layout.py"
   install -Dm644 "$srcdir/deck_osk_tty.py" \

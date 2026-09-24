@@ -81,7 +81,7 @@ ISO_ROOT="$REPO_ROOT/iso"
 # section 2b proves the two are the same set, byte for byte.
 T12_SRC="$REPO_ROOT/src/omarchy-deck-patches"
 APPLIER_SRC="$T12_SRC/omarchy-deck-apply-patches"
-SESSION_PAYLOAD_FILES=(deck-session.sh deck-input-mapper.py deck_osk_layout.py deck_osk_tty.py deck_osk_wayland.py)
+SESSION_PAYLOAD_FILES=(deck-session.sh deck-input-mapper.py deck-steam-desktop.py deck_osk_layout.py deck_osk_tty.py deck_osk_wayland.py)
 C6_PACKAGE_FILES=(omarchy-deck-enable-gaming omarchy-deck-enable-gaming.desktop
   omarchy-deck-greeter.qml omarchy-deck-greeter.metadata.desktop)
 DECK_PATCHES_PY="$ISO_ROOT/overlay/configs/airootfs/usr/share/omarchy-iso/orchestrator/deck_patches.py"
