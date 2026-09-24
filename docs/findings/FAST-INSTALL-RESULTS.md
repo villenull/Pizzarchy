@@ -9,6 +9,51 @@ measured 82 MB/s. Not exercised: the physical controller, Wi-Fi radio, panel, ga
 rendering, audio, and the real form (cidata answers the form; `form-delay-seconds` simulates
 how long a human takes). A physical install wipes the Deck and needs the operator.
 
+## v4 — 4315c95 on top of v3, two-variant re-check (same day, evening)
+
+**Current ISO.** Supersedes v3 as the one to install.
+
+| | |
+|---|---|
+| File | `pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-v4-x86_64.iso` |
+| Size / sha256 | 6,875,340,800 B · `92325610412ee751516c74f8da060493f04b192b3f307f6b6399542b04c7981c` |
+| Source | commit `21d87fd` (branch `hw-feedback-1`), i.e. v3's `60cf667` + `4315c95` (docs-only `21d87fd` on top) |
+| Where | `~/.cache/omarchy-deck/release-2026.09.24-v4/` (ISO + `SHA256SUMS`, verified); build logs `~/.cache/omarchy-deck/build-v4.log` (first attempt) and `~/.cache/omarchy-deck/build-v4b.log` (retry) |
+| Build | `iso/bin/build` against scratch `~/.cache/omarchy-deck/iso-build-fast-variants`, all guards green (`6.1`, `6.3`, `6.4a`, `6.4b`, `6.5a`, `6.5b`, `6.6`, `6.7`, `6.8`), script's final size/sha lines present, staged artifact re-hashed to the logged sha |
+| Pins | unchanged: `omacom/omarchy@c668141e9c42` · `omacom/omarchy-iso@7cfb7111a068` · `omacom/omarchy-pkgs@5fe236736607` |
+
+What changed since v3 is exactly `4315c95` ("installer: close held-A wipe-confirm
+hole, 5 review follow-ups"): the wipe confirm drains pending input until a 0.6 s
+silence (`DECK_CONFIRM_QUIET_SECS`, capped) so typematic autorepeat from a held A
+can no longer confirm the wipe, `s0_wait_key` also accepts raw-mode CR, the early
+orchestrator propagates `render_early_config` failure so the precise 'too small'
+error survives, plus smaller `deck-form.sh` robustness fixes — each with a
+failing-first unit test.
+
+Build note: the first attempt died silently right after `[timing] mkarchiso end`
+— same shape as v3's first attempt (log ends there, no guards, no docker
+container left, ISO present but unguarded). Captured in `build-v4.log`; the
+retry (`build-v4b.log`) ran clean past that point on the first try. One
+convention recorded for the next build: `iso/bin/build` itself prints no
+`WRAPPER_EXIT` line (verified by grep — v3b's was the outer shell's echo), so a
+build counts when the script reaches its final sha line with no `build_fail`
+and the staged artifact re-hashes to the logged sha.
+
+QEMU on this ISO (`test/vm/vm-fast-install-test.sh`, `VM_FAST_REBOOT_CHECK=1`,
+form delay 90 s). Same odd-sized NVMe target as v3 (21,475,469,824 bytes, mod
+1 MiB = 633,344); neither harness log nor either serial log mentions "misalign"
+(the only matches anywhere are kernel/Rust strings inside the raw disk images).
+
+| pre-installs / Gaming | target | network | early stage | post-confirm (A) | of which waiting for early | reboot check | result | wall |
+|---|---|---|---|---|---|---|---|---|
+| no / no | NVMe (odd) | none | 30 s | 5 s | 0 s | login after 30 s | PASS | ~6 min |
+| no / yes | NVMe (odd) | user | 94 s | 11 s | 5 s | login after 35 s | PASS | ~4 min |
+
+Reading it: identical shape to v3's no/no and no/yes rows (28→30 s, 5→5 s;
+92→94 s, 11→11 s) — `4315c95` changes no timing path, as expected. The new wipe
+confirm, like the rest of the form, runs only in unit tests here (QEMU answers
+from cidata); it needs the Deck, as does everything else behind the v3 blocker.
+
 ## v3 — the hardware-blocker fix, odd-sized NVMe regression check (same day, evening)
 
 **Current ISO.** Supersedes v2 as the one to install.
