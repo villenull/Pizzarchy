@@ -545,6 +545,8 @@ if (( REBOOT_CHECK == 1 )) && (( status == 0 )); then
   qemu-system-x86_64 \
     "${ACCEL_ARGS[@]}" \
     -smp "$SMP" -m "$MEM_MB" \
+    -smbios type=1,manufacturer=Valve,product=Galileo,version=1 \
+    -smbios type=2,manufacturer=Valve,product=Galileo \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,file="$rb_vars" \
     -drive if=none,id=tgt,format=raw,file="$target_raw" \
@@ -563,6 +565,19 @@ if (( REBOOT_CHECK == 1 )) && (( status == 0 )); then
   while kill -0 "$rb_pid" 2>/dev/null; do
     sleep 5
     rb_elapsed=$((rb_elapsed + 5))
+    # The installed system's serial getty prints "<hostname> login:" once
+    # multi-user is up: exact, and independent of what the panel shows (the
+    # Gaming=No SDDM greeter is a logo and a password box -- no OCR-able
+    # text). The final screen is kept as rb-final.ppm for a human to check
+    # WHICH login surface came up; OCR remains a second route for text ones.
+    if LC_ALL=C command grep -aq "${HOSTNAME_} login:" "$rb_serial" 2>/dev/null; then
+      sleep 20
+      printf '{"execute":"qmp_capabilities"}\n{"execute":"screendump","arguments":{"filename":"%s/rb-final.ppm"}}\n' "$WORK" |
+        timeout 10 socat - "UNIX-CONNECT:${WORK}/qmp-reboot.sock" >/dev/null 2>&1 || true
+      log "reboot check: installed system reached '${HOSTNAME_} login:' on serial after ${rb_elapsed}s (screen: $WORK/rb-final.ppm)"
+      rb_found=1
+      break
+    fi
     if command -v tesseract >/dev/null 2>&1; then
       printf '{"execute":"qmp_capabilities"}\n{"execute":"screendump","arguments":{"filename":"%s/rb-shot.ppm"}}\n' "$WORK" |
         timeout 10 socat - "UNIX-CONNECT:${WORK}/qmp-reboot.sock" >/dev/null 2>&1 || true

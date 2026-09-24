@@ -4,7 +4,11 @@ Installs the requested offline package set into the already-restored target
 with ``arch-chroot pacman -S --needed``, from the bundled offline mirror
 (``SigLevel = Never`` + ``file://`` server, same as the pacstrap path -- no
 network, no keyring). Every transaction here runs before the Limine/UKI
-finalizer by phase order.
+finalizer by phase order. It runs AFTER omarchy-setup-system, whose
+post-install/pacman.sh has replaced the target's /etc/pacman.conf with the
+ONLINE repos, so the transaction passes the live ISO's offline-only config
+explicitly (``--config``) and reads package files straight out of the
+bind-mounted mirror (``--cachedir``) instead of copying GiBs into @pkg.
 
 Package names come from the live ISO manifests, never from copies kept here:
 
@@ -93,6 +97,14 @@ MISE_STUBS = (
     "playwright", "playwright-cli", "pi", "omp", "grok", "crush",
     "ghui", "hunk",
 )
+
+# The live ISO's own pacman.conf: [offline] only, file:// on the mirror. It is
+# the file upstream copies into the target before omarchy-apply-system.
+LIVE_PACMAN_CONF_REL = "etc/pacman.conf"
+# The mirror, at the same path live and in the target (upstream's bind).
+OFFLINE_MIRROR = "/var/cache/omarchy/mirror/offline"
+# Where the offline config is staged inside the target for one transaction.
+TARGET_OFFLINE_CONF = "/tmp/omarchy-deck-offline-pacman.conf"
 
 
 def _target_has_file(target: Path, abs_path: str) -> bool:
@@ -235,6 +247,49 @@ def _installed_names(target: Path) -> set[str]:
     return names
 
 
+def _stage_offline_pacman(target: Path, live_root) -> tuple[bool, str | None]:
+    """Make the target able to resolve and read the offline repo for one
+    transaction. Returns (mounted_here, error): mounted_here says whether this
+    call bind-mounted the mirror and so must unmount it afterwards."""
+    conf_src = Path(live_root) / LIVE_PACMAN_CONF_REL
+    try:
+        text = conf_src.read_text()
+    except OSError as exc:
+        return False, f"cannot read the live offline pacman.conf {conf_src}: {exc}"
+    if "[offline]" not in text or f"file://{OFFLINE_MIRROR}" not in text:
+        return False, (
+            f"{conf_src} is not the offline-mirror config ([offline] with "
+            f"Server = file://{OFFLINE_MIRROR}/); refusing to resolve the delta "
+            "against whatever repos it names"
+        )
+    conf_dst = target / TARGET_OFFLINE_CONF.lstrip("/")
+    conf_dst.parent.mkdir(parents=True, exist_ok=True)
+    conf_dst.write_text(text)
+    mirror_dst = target / OFFLINE_MIRROR.lstrip("/")
+    if os.path.ismount(mirror_dst):
+        return False, None
+    mirror_dst.mkdir(parents=True, exist_ok=True)
+    code, output = _run(["mount", "--bind", OFFLINE_MIRROR, str(mirror_dst)], 60)
+    if code != 0:
+        return False, f"could not bind-mount {OFFLINE_MIRROR} into the target: {_summarize(output) or code}"
+    return True, None
+
+
+def _unstage_offline_pacman(target: Path, mounted_here: bool) -> str | None:
+    """Undo _stage_offline_pacman. Returns an error string or None."""
+    problem = None
+    if mounted_here:
+        code, output = _run(["umount", str(target / OFFLINE_MIRROR.lstrip("/"))], 60)
+        if code != 0:
+            problem = f"could not unmount the offline mirror from the target: {_summarize(output) or code}"
+    try:
+        (target / TARGET_OFFLINE_CONF.lstrip("/")).unlink(missing_ok=True)
+    except OSError as exc:
+        problem = problem or f"could not remove {TARGET_OFFLINE_CONF} from the target: {exc}"
+    return problem
+
+
+
 def install_variant_delta(target, preinstalls: bool, gaming: bool, live_root=LIVE_ROOT) -> dict:
     """Install the requested offline delta. Returns the install record.
 
@@ -302,10 +357,20 @@ def install_variant_delta(target, preinstalls: bool, gaming: bool, live_root=LIV
         return record
 
     info(f"Variant delta: installing {' '.join(missing)} from the offline mirror")
-    code, output = _run(
-        ["arch-chroot", str(target), "pacman", "-S", "--needed", "--noconfirm", *missing],
-        DELTA_TIMEOUT_SECS,
-    )
+    mounted_here, stage_error = _stage_offline_pacman(target, live_root)
+    if stage_error:
+        record["status"] = "failed"
+        record["error"] = sanitize_text(stage_error, limit=400)
+        error(f"Variant delta: {record['error']}")
+        return record
+    try:
+        code, output = _run(
+            ["arch-chroot", str(target), "pacman", "--config", TARGET_OFFLINE_CONF,
+             "--cachedir", OFFLINE_MIRROR, "-S", "--needed", "--noconfirm", *missing],
+            DELTA_TIMEOUT_SECS,
+        )
+    finally:
+        unstage_error = _unstage_offline_pacman(target, mounted_here)
     record["exit_code"] = code
     record["output"] = _summarize(output)
     if code != 0:
@@ -315,6 +380,11 @@ def install_variant_delta(target, preinstalls: bool, gaming: bool, live_root=LIV
             f"Output: {record['output'] or '<none>'}",
             limit=400,
         )
+        error(f"Variant delta: {record['error']}")
+        return record
+    if unstage_error:
+        record["status"] = "failed"
+        record["error"] = sanitize_text(unstage_error, limit=400)
         error(f"Variant delta: {record['error']}")
         return record
 

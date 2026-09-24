@@ -281,19 +281,42 @@ rec = variants.install_variant_delta(t, False, False)
 check("no/no installs nothing with status ok", (rec["status"], rec["requested"]), ("ok", []))
 
 calls: list = []
+OFFLINE_CONF_TEXT = (
+    "[options]\nArchitecture = auto\n\n[offline]\nSigLevel = Never\n"
+    "Server = file:///var/cache/omarchy/mirror/offline/\n"
+)
+ONLINE_CONF_TEXT = "[options]\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n"
+conf_seen: list = []
+
+
+def _pacman_argv(argv):
+    return "pacman" in argv and "arch-chroot" in argv
+
+
+def _record_conf(target, argv):
+    """What the transaction's --config really says, read at call time."""
+    conf = argv[argv.index("--config") + 1] if "--config" in argv else "/etc/pacman.conf"
+    conf_seen.append((target / conf.lstrip("/")).read_text())
 
 
 def fake_run(argv, timeout):
     calls.append(list(argv))
+    if _pacman_argv(argv):
+        _record_conf(t2, argv)
     return 0, "ok"
 
 
 live2 = tmpdir("manifests-pre") / "iso"
 (live2 / "usr/share/omarchy-iso").mkdir(parents=True, exist_ok=True)
+(live2 / "etc").mkdir(parents=True, exist_ok=True)
+(live2 / "etc/pacman.conf").write_text(OFFLINE_CONF_TEXT)
 (live2 / "usr/share/omarchy-iso/deck-preinstalls.packages").write_text("aether\n")
 (live2 / "usr/share/omarchy-iso/deck-gaming.packages").write_text("gamescope\n")
 t2 = tmpdir("delta-pre") / "mnt"
-t2.mkdir(parents=True, exist_ok=True)
+(t2 / "etc").mkdir(parents=True, exist_ok=True)
+# By this phase omarchy-setup-system has rewritten the target's pacman.conf to
+# the ONLINE repos -- the first QEMU yes/no run died resolving against it.
+(t2 / "etc/pacman.conf").write_text(ONLINE_CONF_TEXT)
 make_db(t2, [])
 orig_run = variants._run
 variants._run = fake_run
@@ -302,17 +325,34 @@ try:
 finally:
     variants._run = orig_run
 check("preinstalls delta fails loudly when pacman wrote nothing", rec2["status"], "failed")
-check_true("preinstall transaction went through arch-chroot", any("arch-chroot" in a for a in calls[0]))
-check_true(
-    "offline mirror path implied (no -Sy sync call)",
-    all(a != "-Sy" for argv in calls for a in argv),
-)
+pacman_calls = [a for a in calls if _pacman_argv(a)]
+check("exactly one pacman transaction, inside the target", len(pacman_calls), 1)
+check("the transaction resolved against the offline repo only, not the target's online pacman.conf",
+      conf_seen, [OFFLINE_CONF_TEXT])
+check_true("package files read from the mirror in place (no copy into @pkg)",
+           pacman_calls and pacman_calls[0][pacman_calls[0].index("--cachedir") + 1]
+           == "/var/cache/omarchy/mirror/offline")
+check("the target's own pacman.conf is left as the runtime wrote it",
+      (t2 / "etc/pacman.conf").read_text(), ONLINE_CONF_TEXT)
+check("the staged offline config does not outlive the transaction",
+      (t2 / variants.TARGET_OFFLINE_CONF.lstrip("/")).exists(), False)
+check("a mirror this call bind-mounted is unmounted again",
+      [a[0] for a in calls if a[0] in ("mount", "umount")], ["mount", "umount"])
 
-
-def fake_run_ok(argv, timeout):
-    # Simulate pacman actually installing: seed the db from the argv tail.
-    names = [a for a in argv if not a.startswith("-") and a not in ("arch-chroot",)] or []
-    return 0, "ok"
+# A live config that is not the offline one must stop the delta before pacman.
+live_bad = tmpdir("manifests-bad") / "iso"
+(live_bad / "usr/share/omarchy-iso").mkdir(parents=True, exist_ok=True)
+(live_bad / "etc").mkdir(parents=True, exist_ok=True)
+(live_bad / "etc/pacman.conf").write_text(ONLINE_CONF_TEXT)
+(live_bad / "usr/share/omarchy-iso/deck-preinstalls.packages").write_text("aether\n")
+calls.clear()
+variants._run = fake_run
+try:
+    rec_bad = variants.install_variant_delta(t2, True, False, live_root=live_bad)
+finally:
+    variants._run = orig_run
+check("a non-offline live pacman.conf fails the delta before any transaction",
+      (rec_bad["status"], [a for a in calls if _pacman_argv(a)]), ("failed", []))
 
 
 t3 = tmpdir("delta-game") / "mnt"
@@ -323,8 +363,8 @@ seen: list = []
 
 def fake_run_seed(argv, timeout):
     seen.append(list(argv))
-    pkgs = argv[argv.index("--noconfirm") + 1:]
-    make_db(t3, pkgs)
+    if _pacman_argv(argv):
+        make_db(t3, argv[argv.index("--noconfirm") + 1:])
     return 0, "ok"
 
 
