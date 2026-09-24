@@ -697,6 +697,25 @@ check(
     True,
 )
 
+# upstream's user finalizer copies the installer's offline-only pacman.conf
+# into the target (_prepare_target_setup). In the split flow nothing rewrites
+# it afterwards, and QEMU installs shipped a system whose only repo was the
+# USB stick's mirror. The late phase must hand back the target's own file.
+ONLINE_TARGET_CONF = b"[options]\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n"
+
+
+def _copying_finalizer(c):
+    (c.target / "etc/pacman.conf").write_text("[offline]\nServer = file:///var/cache/omarchy/mirror/offline/\n")
+
+
+ctx_pc = FakeCtx(tmpdir("late-pacman-conf") / "mnt")
+(ctx_pc.target / "etc").mkdir(parents=True, exist_ok=True)
+(ctx_pc.target / "etc/pacman.conf").write_bytes(ONLINE_TARGET_CONF)
+impl_pc = _types.SimpleNamespace(**{**vars(fake_impl), "run_chroot_finalizer": _copying_finalizer})
+dict(split.late_phases(ctx_pc, impl_pc, full_phases()))["Finalizing user"](ctx_pc)
+check("late: the target keeps its own pacman.conf, not the installer's offline one",
+      (ctx_pc.target / "etc/pacman.conf").read_bytes(), ONLINE_TARGET_CONF)
+
 # ---------------------------------------------------------------------------
 # 4. Desktop greeter + preinstall marker + kernel assert
 # ---------------------------------------------------------------------------

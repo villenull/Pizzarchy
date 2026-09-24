@@ -439,6 +439,16 @@ if (( timing_needed )); then
           status=1
         fi
       done
+      # The installed system must keep the runtime's pacman.conf, never the
+      # installer's offline one: that repo is a mirror on the USB stick, and
+      # a Deck left pointing at it cannot update or install anything.
+      if LC_ALL=C command grep -aq '^\[offline\]' "$root_at/etc/pacman.conf" 2>/dev/null ||
+        ! LC_ALL=C command grep -aq '^\[core\]' "$root_at/etc/pacman.conf" 2>/dev/null; then
+        log "FAIL: the installed /etc/pacman.conf is the installer's offline config (repos: $(LC_ALL=C command grep -ao '^\[[a-z-]*\]' "$root_at/etc/pacman.conf" | tr '\n' ' '))"
+        status=1
+      else
+        log "installed pacman.conf repos: $(LC_ALL=C command grep -ao '^\[[a-z-]*\]' "$root_at/etc/pacman.conf" | grep -v options | tr '\n' ' ')"
+      fi
       if [[ $GAMING == yes ]]; then
         check assert::packages_present "$pacman_db" steam
         [[ -f $root_at/usr/lib/steam/bootstraplinux_ubuntu12_32.tar.xz ]] || { log "FAIL: gaming=yes but the Steam bootstrap tarball is absent on the target"; status=1; }

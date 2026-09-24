@@ -209,7 +209,7 @@ def late_phases(ctx, phases_impl, full) -> list:
         ("Creating user (uid 1000, offline)", _create_user_fn()),
         ("Recording installer variant (gaming/preinstalls)", _variant_record_fn()),
         ("Relocating Steam staging home (gaming=yes only)", _late_steam_fn()),
-        ("Finalizing user", user_finalizer),
+        ("Finalizing user", _keep_target_pacman_conf(user_finalizer)),
         ("Configuring login", configure_login),
         ("Configuring Steam Deck (late, user-dependent)", _late_deck_fn()),
         ("Configuring SSH access", configure_ssh),
@@ -220,6 +220,38 @@ def late_phases(ctx, phases_impl, full) -> list:
         ("Syncing disks", _sync_fn()),
         ("Creating factory snapshot", by_name["Creating factory snapshot"]),
     ]
+
+
+def _keep_target_pacman_conf(user_finalizer) -> Callable:
+    """Run upstream's user finalizer without letting it leave the INSTALLER's
+    pacman.conf on the target.
+
+    run_chroot_finalizer goes through phases_impl._prepare_target_setup, which
+    copies the live ISO's offline-only /etc/pacman.conf ([offline], file://
+    on the installer's mirror) into the target so the chroot can install
+    offline. In upstream's single pass that happens once, BEFORE
+    omarchy-setup-system writes the real configuration. The late stage is a
+    separate process, so it copies again AFTER -- and nothing rewrites it:
+    QEMU installs came out with a system whose only repo is a mirror that
+    vanishes with the USB stick (the in-place Gaming opt-in failed on
+    "Could not open file /var/cache/omarchy/mirror/offline/offline.db").
+    The finalizer keeps its offline config while it runs; the target's own
+    file is restored byte for byte afterwards and read back."""
+
+    def finalize_user(ctx) -> None:
+        conf = Path(ctx.target) / "etc/pacman.conf"
+        try:
+            before = conf.read_bytes()
+        except OSError as exc:
+            raise RuntimeError(f"cannot read the target's /etc/pacman.conf before user finalization: {exc}") from exc
+        try:
+            user_finalizer(ctx)
+        finally:
+            conf.write_bytes(before)
+        if conf.read_bytes() != before:
+            raise RuntimeError("the target's /etc/pacman.conf did not read back as restored after user finalization")
+
+    return finalize_user
 
 
 def select_phases(ctx, phases_impl, full) -> list:
