@@ -9,6 +9,69 @@ measured 82 MB/s. Not exercised: the physical controller, Wi-Fi radio, panel, ga
 rendering, audio, and the real form (cidata answers the form; `form-delay-seconds` simulates
 how long a human takes). A physical install wipes the Deck and needs the operator.
 
+## v5 — d76bab6, the interactive-install blocker + Steam=No screen trims (same day, evening)
+
+**Current ISO.** Supersedes v4 as the one to install.
+
+| | |
+|---|---|
+| File | `pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-v5-x86_64.iso` |
+| Size / sha256 | 6,875,340,800 B · `1cf7411e43162fb26c8a182a2bfb85b0e1f9fcc7c41427fbc5b0a4c688c06753` |
+| Source | commit `d76bab6` (branch `hw-feedback-1`) |
+| Where | `~/.cache/omarchy-deck/release-2026.09.24-v5/` (ISO + `SHA256SUMS`, verified); build log `~/.cache/omarchy-deck/build-v5.log` |
+| Build | `iso/bin/build` against scratch `~/.cache/omarchy-deck/iso-build-fast-variants`, all guards green (`6.1`, `6.3`, `6.4a`, `6.4b`, `6.5a`, `6.5b`, `6.6`, `6.7`, `6.8`), `WRAPPER_EXIT=0`, script's final size/sha lines present, staged artifact re-hashed to the logged sha |
+| Pins | unchanged: `omacom/omarchy@c668141e9c42` · `omacom/omarchy-iso@7cfb7111a068` · `omacom/omarchy-pkgs@5fe236736607` |
+
+What changed since v4 is exactly `d76bab6`: the interactive-install
+blocker (the cidata early-start block in `.automated_script.sh` was guarded
+only by `user_configuration.json` existing, which the interactive
+configurator writes too -- on a real interactive No/No install it errored
+with "cidata drive carries no 'preinstalls' file" and exited 1; it is now
+gated on `deck_cidata_taken`, set inside the cidata branch itself), plus
+the operator's items 7 and 8 (S5 never shows the "No network was found" note
+with Install Steam?=No; the pre-reboot notice shrinks to the reboot line
+alone for Steam=No) -- each with a failing-first unit test, and an audit
+finding no other patch assumes "user_configuration.json exists ⇒ cidata".
+
+Build note: byte size is identical to v4 (6,875,340,800 B) with a different
+sha -- the ISO layout pads to block boundaries, so small content changes do
+not always move the size. The `==> ERROR: Invalid option -k` line from the
+container's mkinitcpio step appears once, exactly as in v4b's log; it is
+pre-existing noise, not a guard failure (no FATAL anywhere, all guards
+green). The built tree was verified to carry both fixes (`deck_cidata_taken`
+in the patched `.automated_script.sh`, `deck_form_gaming_answer` in
+`deck-form.sh`); `deck-install-invocation.patch` applied cleanly in the
+build ("Applied patch to 'configs/airootfs/root/.automated_script.sh'
+cleanly").
+
+QEMU on this ISO (`test/vm/vm-fast-install-test.sh`, `VM_FAST_REBOOT_CHECK=1`,
+form delay 90 s). Same odd-sized NVMe target as v3/v4 (21,475,469,824 bytes,
+mod 1 MiB = 633,344); neither harness log nor either serial log mentions
+"misalign". Both runs show "Autoinstall configuration found on cidata drive
+... Deck early stage started" on screen -- i.e. the re-gated block still
+runs on the cidata path (starts the early stage, no refusal) -- and both
+reach `FASTINSTALL:DONE`. This proves the cidata path still works after the
+gating change.
+
+| pre-installs / Gaming | target | network | early stage | post-confirm (A) | of which waiting for early | reboot check | result | wall |
+|---|---|---|---|---|---|---|---|---|
+| no / no | NVMe (odd) | none | 28 s | 5 s | 0 s | login after 25 s | PASS | ~6 min |
+| no / yes | NVMe (odd) | user | 99 s | 16 s | 10 s | login after 35 s | PASS | ~4 min |
+
+Reading it: identical shape to v4's rows (30→28 s, 5→5 s; 94→99 s, 11→16 s)
+-- `d76bab6` changes no timing path, as expected. The Steam fetch inside the
+no/yes early stage took 38 s here (40–42 s in earlier runs; dev-box link
+variance, not a product change).
+
+**QEMU still cannot exercise the interactive path** -- every VM run takes
+the cidata branch, which is exactly why the blocker survived all prior VM
+runs. The new `test/unit/test-deck-install-invocation.sh` is what covers the
+interactive path: it runs the shipped block with the configurator-written
+JSON present and no choice files and requires exit 0 with no second early
+start (proven to reproduce the Deck's exact error against the old block).
+The Steam=No screen trims likewise run only in unit tests here; they need
+the Deck.
+
 ## v4 — 4315c95 on top of v3, two-variant re-check (same day, evening)
 
 **Current ISO.** Supersedes v3 as the one to install.
