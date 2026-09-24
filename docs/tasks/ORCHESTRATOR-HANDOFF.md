@@ -98,7 +98,7 @@ Item numbers match the feedback file.
 
 ## 4. Next steps, in order
 
-1. **v5 onto the USB stick** (as soon as the operator plugs it in; check
+1. ✅ DONE 2026-09-24 16:54 (v5 verified on stick, all older ISOs deleted). Routine for the next ISO — **ISO onto the USB stick** (as soon as the operator plugs it in; check
    `lsblk -o NAME,LABEL,MOUNTPOINTS | grep -i ventoy`): copy to
    `<name>.part`, `sync -f`, rename, `sync -f`, verify
    `dd if=<file> iflag=direct bs=4M status=none | sha256sum` == the sha above,
