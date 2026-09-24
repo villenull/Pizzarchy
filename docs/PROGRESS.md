@@ -4029,10 +4029,37 @@ need the next Deck install or `omarchy refresh pacman` to confirm.
 **Install-speed research, the same day:** `docs/findings/INSTALL-SPEED.md`, measured against
 the fresh 2026-09-23 Deck install (252 s total; 132 s of that is the Steam client download).
 
+### 5.50 🆕 FAST-INSTALL: FOUR INSTALL VARIANTS, ALL PASSING IN QEMU (2026-09-24, operator-authorised overnight run)
+
+**The installer now asks two questions** after the S0 wipe warning: **Omarchy pre-installs?**
+and **Gaming Mode?**, each Yes/No. Pressing A on S0 starts the install in the background:
+partition, restore a minimal common root image, and configure the identity-free parts.
+The form keeps running meanwhile. The optional package sets install from the ISO's offline
+mirror; Gaming=Yes needs internet only for Valve's Steam client. Pressing A on S5 runs the
+late stage (user, identity, login, snapshot). Spec: `docs/tasks/FAST-INSTALL.md`. Evidence,
+measurements and the 15 defects QEMU found: **`docs/findings/FAST-INSTALL-RESULTS.md`**.
+
+| | |
+|---|---|
+| Code | branch `fast-install`, fast-forwarded into `main` |
+| ISO | `pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-x86_64.iso`, 6,874,292,224 B, sha256 `8835528647421697f786e4b70ff9af7813c834520d80c9e2bfc56389911f94e1` |
+| Published | GitHub **prerelease** `v2026.09.24-fast-install`, ISO as four `.partN` assets (GitHub caps assets at 2 GiB) + `SHA256SUMS` |
+| QEMU | all four variants PASS with reboot to login; in-place Gaming opt-in PASS; late work after confirm 4–7 s; worst clock A 26 s (yes/yes, 90 s form) vs the 252 s baseline |
+| Gaming=No login | password greeter with an always-visible on-screen keyboard (`omarchy-deck` SDDM theme), typed and logged in by pointer alone in QEMU |
+| Gaming later | `/usr/bin/omarchy-deck-enable-gaming` (app launcher "Enable Gaming Mode"), online, no wipe, switches autologin only once ready |
+| CI | green on every push since the uid fix |
+
+⚠️ **Not on hardware.** No physical Deck install of this ISO has happened. See §6.
+
+
 ---
 
 ## 6. Blocked on human
 
+- 🆕 **Install the FAST-INSTALL ISO on the Deck OLED (§5.50) — wipes the drive.**
+  One install per variant is the proof QEMU cannot give: the real trackpad on
+  the greeter keyboard, Wi-Fi during the form, and Gaming=Yes first boot into Steam's UI.
+  Start with no/no (fastest), then no/yes. Operator present; nothing else is blocked on it.
 - 🆕 **P3.6 — bring the Deck to Omarchy 4.0.0 stable (operator-present).** Runbook
   ready: `docs/tasks/P36-deck-stable-update-runbook.md`. Needs the operator
   because it writes to the Deck (snapshot, channel switch, `omarchy-update`) and
@@ -4388,6 +4415,8 @@ backup rescue (the rebuild wipes both).
 ## 8. Session log
 
 One line each. Detail lives in git history and in the `FINDING-*.md` files.
+
+| 2026-09-24 | **FAST-INSTALL shipped to a prerelease (§5.50).** Four variants (pre-installs × Gaming) behind two Yes/No questions, a background early stage that restores a minimal image while the form runs, and a 4–7 s late stage. Twelve ISO builds overnight. Each QEMU run found the next real defect (15 in all, `docs/findings/FAST-INSTALL-RESULTS.md`), each fixed with a failing-first regression test. Ended with all four variants and the in-place Gaming opt-in passing. The Gaming=No greeter needed a new SDDM theme: InputMethod= alone shows no keyboard on Wayland. Not yet on hardware. |
 
 | 26 | **2026-08-13, session 26 — Phase 2 officially closed.** All remaining exit criteria and hardware tests are verified and complete. 🟢 **omarchy-sleep-lock.service mask:** `deck_configure.py` now correctly applies a global systemd user mask (`ln -s /dev/null`) during install, guaranteeing it doesn't race against upstream's first-run scripts. 🟢 **DPMS/above_lock fix:** verified on hardware. The Steam Deck suspends and wakes cleanly without being stuck on an unanswerable password screen. 🟢 **T10 extest Spike:** Steam-in-background trackpad typing was evaluated; decision is to **forego the Steam keyboard** and commit entirely to our own OSK (the Omarchy OSK) everywhere except Gaming Mode. 🟢 **Lid Switch question:** The `Lid Switch` node (`event1`) was tested on the hardware. It exists but does not spuriously assert on a handheld, proving `HandleLidSwitch=suspend` is safe to leave live. Phase 2 exit criteria (QEMU install automation, CI KVM runners, hardware locks) are now fully satisfied. |
 

@@ -8,7 +8,7 @@
 # with user-mode networking and the Galileo/Valve SMBIOS the Deck gates on,
 # logs in on the serial getty (the rotated fbcon defeats OCR), and runs exactly what the launcher
 # runs: `sudo /usr/bin/omarchy-deck-enable-gaming`. Its output and exit code
-# go to the serial port. After a clean ACPI poweroff the harness mounts the
+# go to the serial port. After a clean `systemctl poweroff` the harness mounts the
 # disk and asserts the OUTCOME on artifacts (pacman db, session file, SDDM
 # drop-in, readiness marker) -- never on log text.
 #
@@ -166,10 +166,13 @@ if [[ $rc != 0 ]]; then
   fail "omarchy-deck-enable-gaming exited $rc"
 fi
 
-log "clean ACPI poweroff before inspecting the disk"
-qmp '{"execute":"system_powerdown"}' >/dev/null
+# NOT an ACPI power-button event: the Deck layer maps the power key to
+# suspend (HandlePowerKey=suspend, T13), so QEMU's system_powerdown suspends
+# the guest instead. Power off from the logged-in shell, as root.
+log "clean systemctl poweroff before inspecting the disk"
+ser_send "printf '%s\\n' '$PASSWORD' | sudo -S systemctl poweroff"
 for _ in $(seq 1 60); do kill -0 "$qemu_pid" 2>/dev/null || break; sleep 2; done
-kill -0 "$qemu_pid" 2>/dev/null && fail "guest ignored ACPI poweroff for 120s"
+kill -0 "$qemu_pid" 2>/dev/null && fail "guest did not power off within 120s of systemctl poweroff"
 
 status=0
 check() { "$@" || status=1; }

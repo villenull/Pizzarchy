@@ -3,6 +3,52 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
+> ## 🆕 HANDOFF, 2026-09-24 — READ THIS FIRST (supersedes everything below)
+>
+> **State.** FAST-INSTALL is done in QEMU and merged to `main`: four install variants
+> (pre-installs × Gaming Mode), a background install during the form, a 4–7 s finish after
+> the last confirm, a controller-typable Gaming=No login screen, and an in-place "Enable
+> Gaming Mode" action. Record: `docs/PROGRESS.md` §5.50. Evidence:
+> `docs/findings/FAST-INSTALL-RESULTS.md`. **Next step is hardware** (§6's first item). It
+> wipes the Deck, so ask the operator first.
+>
+> **The ISO** is the GitHub prerelease `v2026.09.24-fast-install`. GitHub caps release assets
+> at 2 GiB, so it is in four parts:
+>
+> ```bash
+> gh release download v2026.09.24-fast-install -R villenull/Pizzarchy
+> cat pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-x86_64.iso.part? > pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-x86_64.iso
+> sha256sum -c SHA256SUMS --ignore-missing   # expect 8835528647421697f786e4b70ff9af7813c834520d80c9e2bfc56389911f94e1
+> ```
+>
+> **The dev PC was wiped after this session.** Nothing below lives outside git any more.
+> To rebuild the environment on a fresh Arch/Omarchy machine:
+>
+> 1. `git clone --recurse-submodules https://github.com/villenull/Pizzarchy` (the
+>    `iso/upstream` submodule is required).
+> 2. Host packages: `docker qemu-system-x86 qemu-img edk2-ovmf socat jq tesseract
+>    tesseract-data-eng imagemagick udisks2 dosfstools mtools shellcheck github-cli
+>    libarchive python`. `mtools` was missing here and had been run from a hand-extracted copy
+>    in `/var/tmp`; install it properly. Enable Docker and add yourself to `docker` and `kvm`.
+> 3. Build: `iso/bin/build`. With `iso/PKGS` present it clones the runtime and pkgs checkouts
+>    at their pins itself; the build caches (~250 GB here) are all regenerable. Scratch
+>    defaults to `~/.cache/omarchy-deck/`. It needs Docker `--network host` (bin/build does it).
+> 4. Test: `for f in test/unit/*.py; do python3 $f; done; for f in test/unit/test-*.sh; do bash $f; done`,
+>    then `test/vm/vm-fast-install-test.sh <iso> [workdir]` with `VM_PREINSTALLS`,
+>    `VM_GAMING`, `VM_NET=none|user`, `VM_FORM_DELAY_SEC`, `VM_FAST_REBOOT_CHECK=1`, and
+>    `test/vm/vm-enable-gaming-test.sh <installed target.raw>` for the opt-in.
+> 5. The Deck: `ssh steamdeck` needs the SSH key and `~/.ssh/config` alias, which were on the
+>    wiped PC. Recreate the key and re-authorise it on the Deck (or reinstall it, which is the
+>    next step anyway). The Internet Archive CLI config (`~/.config/ia.ini`) was also local.
+>
+> **Open decision for the operator:** `steamdeck-dsp` (Valve's speaker tuning) is
+> `Proprietary` with no licence text and is on every image, including the published ones.
+> `docs/findings/P16-redistribution-and-trademark.md` flagged it as the blocker for hosting
+> images. The Steam *client* is not on the ISO. It is downloaded from Valve during
+> install, because it is not clearly redistributable and needs the network on first launch
+> regardless.
+>
+
 > ## Where things stand (updated 2026-08-15, session 28 — READ THIS FIRST)
 >
 > *(Supersedes every block below wherever they disagree. Same rule: verify every

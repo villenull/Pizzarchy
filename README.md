@@ -88,6 +88,8 @@ image — see [Recovery](#recovery).
    sha256sum pizzarchy-omarchy-4.0.4-2026-09-20-x86_64.iso
    ```
 
+   **Prerelease, not yet tested on hardware:** [`v2026.09.24-fast-install`](https://github.com/villenull/Pizzarchy/releases/tag/v2026.09.24-fast-install). It asks two Yes/No questions (Omarchy pre-installs, Gaming Mode) and installs while you answer. It passed all four combinations in a VM. It is split into four parts; the release notes show how to join and check them.
+
 2. **Write it to a USB stick.** [Ventoy](https://www.ventoy.net) gets installed onto the stick once; after that you copy `.iso` files onto it like ordinary files, and it boots to a menu listing whatever you have dropped there.
 
 3. **Boot it.** Hold **Volume Down + Power** until the boot menu appears, then pick the USB stick.
