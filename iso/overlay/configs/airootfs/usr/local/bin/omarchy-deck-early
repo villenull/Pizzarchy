@@ -277,14 +277,33 @@ run_early_orchestrator() {
   return 0
 }
 
+# deck_early_layout <disk-bytes> -- prints "boot_start boot_size root_start
+# root_size" in bytes, every value a whole MiB. archinstall 4.4 refuses any
+# created partition whose start OR LENGTH is not MiB-aligned ("Partition is
+# misaligned", lib/models/device.py:214). Real drives are not a whole number
+# of MiB -- the Deck OLED's NVMe is not -- so the disk size is rounded DOWN to
+# a MiB before subtracting, exactly as upstream's configurator does
+# (`disk_size_in_mib=$((disk_size / mib * mib))`). Without the rounding every
+# hardware install failed at "loading configurator output" while QEMU, whose
+# test disks are round sizes, always passed
+# (docs/findings/HW-INSTALL-FEEDBACK-2026-09-24.md). The last MiB stays free
+# for the GPT backup header.
+deck_early_layout() {
+  local disk_bytes=$1 mib=1048576
+  local disk_mib_bytes boot_start boot_size root_start root_size
+  disk_mib_bytes=$(( disk_bytes / mib * mib ))
+  boot_start=$mib
+  boot_size=$(( 2048 * mib ))
+  root_start=$(( boot_start + boot_size ))
+  root_size=$(( disk_mib_bytes - root_start - mib ))
+  printf '%s %s %s %s\n' "$boot_start" "$boot_size" "$root_start" "$root_size"
+}
+
 render_early_config() {
   local device=$1 out=$2
   local disk_bytes boot_start boot_size root_start root_size
   disk_bytes=$(blockdev --getsize64 "$device" 2>/dev/null || echo 0)
-  boot_start=1048576
-  boot_size=2147483648
-  root_start=$((boot_start + boot_size))
-  root_size=$((disk_bytes - root_start - 1048576))
+  read -r boot_start boot_size root_start root_size < <(deck_early_layout "$disk_bytes")
   if (( root_size <= 0 )); then
     echo "$DECK_EARLY_PROG: disk $device is too small for a 2GiB ESP + any root" >&2
     printf 'disk %s is too small for the early install layout\n' "$device" >"$DECK_EARLY_ERROR_FILE"

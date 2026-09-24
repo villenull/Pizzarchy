@@ -706,15 +706,11 @@ deck_form_text_prompt() {
 # S0 -- Welcome and disclosure
 # ===========================================================================
 
+# 2026-09-24 hardware feedback: two lines, not eight. The operator cut
+# everything but the fact and the keys -- the wipe scope now lives on the
+# drive screen and the wipe confirm, where the choice is actually made.
 readonly -a DECK_S0_LINES=(
-  "Welcome to Omarchy. THIS WILL INSTALL OMARCHY ON YOUR STEAM DECK. PROCEED?"
-  ""
-  "Pressing A chooses the install drive next; the chosen drive is wiped immediately."
-  "Install to the internal SSD or the microSD card. USB drives are never targets."
-  "Stopping after choosing leaves no working system until an install finishes."
-  "It includes proprietary firmware from AMD and Valve -- graphics, Wi-Fi,"
-  "Bluetooth, audio DSP. The Deck does not work without it."
-  "Gaming Mode downloads Steam from Valve during setup; everything else is already on this USB stick."
+  "This will install Omarchy on your Steam Deck."
 )
 # The prompt names both keys: A installs, B cancels. The old "Press A to
 # erase the drive and begin" is retired with the bare-Enter greeter -- B is
@@ -757,6 +753,55 @@ deck_form_s0_wait_key() {
   done
 }
 
+# deck_form_draw_s0
+# The ONE way S0 is drawn: the big Omarchy logo the same way every other
+# screen draws it (clear_logo then echo) before the text. Greeter AND the
+# B-from-drive-screen path both call this, so the two can never drift into
+# showing different welcomes.
+deck_form_draw_s0() {
+  clear_logo
+  echo
+  deck_form_s0_text
+}
+
+# deck_form_drain_tty <tty> -- discard already-pending input. Always
+# returns 0: draining is best-effort hygiene before a destructive read,
+# never a gate.
+#
+# SAFETY (2026-09-24 hardware follow-up): the drive screen's gum choose is
+# answered with A (Enter), and a held or bouncing controller button -- or
+# key autorepeat from the mapper -- can leave a second Enter sitting in
+# the tty buffer. The wipe confirm's own wait_key would then consume that
+# STALE byte and confirm the wipe with nobody pressing anything. Draining
+# first means only a NEW press counts.
+#
+# Bounded (DECK_DRAIN_MAX_BYTES) and gated to character devices and fifos.
+# A regular file never consumes -- every open re-reads byte 1 -- so an
+# unbounded "until empty" loop would spin forever on the unit suite's own
+# file fixtures; pending input is a tty concept anyway, so files correctly
+# skip. Each iteration is a timed read, so an idle tty costs one timeout
+# and the bill is proportional to actual pending bytes, plus a loud word
+# when the bound itself runs out (a held key may still have input queued).
+# The read-write open (`<>`, not `<`) never blocks on a fifo with no
+# writer the way a read-only open does.
+readonly DECK_DRAIN_MAX_BYTES=64
+readonly DECK_DRAIN_POLL_SECS=0.05
+deck_form_drain_tty() {
+  local tty=$1 i=0 drained_byte
+  if [[ ! -c $tty && ! -p $tty ]]; then
+    return 0
+  fi
+  while (( i < DECK_DRAIN_MAX_BYTES )); do
+    # shellcheck disable=SC2034  # drained_byte is deliberately discarded -- draining IS the use
+    if ! IFS= read -r -t "$DECK_DRAIN_POLL_SECS" -n1 drained_byte <>"$tty" 2>/dev/null; then
+      return 0
+    fi
+    i=$(( i + 1 ))
+  done
+  deck_form_warn "discarded $i pending input bytes from $tty and stopped at the bound -- a held key may still have input queued"
+  return 0
+}
+
 # deck_form_s0_cancel_menu -- B on S0: the safe exit. Nothing is erased yet,
 # so this says so and offers Reboot / Power off (the existing dead-end
 # pattern: never a shell). Never returns on a real machine; under the suite's
@@ -782,11 +827,12 @@ deck_form_s0_cancel_menu() {
 # C1/C4; the binary itself is Stages' slice, this file only shells out to it)
 # ===========================================================================
 #
-# S0's A press IS the erase consent, so A starts the background install:
-# greeter resolves the single eligible disk (deck_form_eligible_disks +
-# deck_form_disk_autoselect -- the same resolver disk_form uses) and runs
-# `omarchy-deck-early start "$disk"`. Zero or 2+ disks reach the existing
-# dead end BEFORE anything is erased; a failed start aborts loudly.
+# The erase consent is TWO presses: S0's A (proceed to drive selection)
+# and the wipe confirm's A (start the wipe). Greeter runs S0, the drive
+# screen, and the wipe confirm in a loop (S0 -> drive list ⇄ confirm),
+# then runs `omarchy-deck-early start` on the CONFIRMED disk. Zero
+# eligible disks reach the existing dead end BEFORE anything is erased; a
+# failed start aborts loudly.
 #
 # DECK_EARLY_BIN exists so the [U] suite can point this at a fake instead
 # of starting a real background install on the test machine. The default is
@@ -794,6 +840,12 @@ deck_form_s0_cancel_menu() {
 readonly DECK_EARLY_BIN_DEFAULT=omarchy-deck-early
 readonly DECK_EARLY_ERROR_FILE_DEFAULT=/run/omarchy-deck/early/error
 readonly DECK_EARLY_PHASE_FILE_DEFAULT=/run/omarchy-deck/early/phase
+# The early stage's own log (omarchy-deck-early's DECK_EARLY_LOG). A
+# controller user cannot open it, so the failure menu prints its tail.
+# Overridable (DECK_EARLY_LOG_FILE) the way the other stage paths are, so
+# the unit suite can point it at a fixture.
+readonly DECK_EARLY_LOG_FILE_DEFAULT=/var/log/omarchy-deck-early.log
+readonly DECK_EARLY_LOG_TAIL_LINES=12
 readonly DECK_STEAM_STATUS_FILE_DEFAULT=/run/omarchy-deck/steam/status
 readonly DECK_STEAM_ERROR_FILE_DEFAULT=/run/omarchy-deck/steam/error
 readonly DECK_STEAM_PROGRESS_FILE_DEFAULT=/run/omarchy-deck/steam/progress
@@ -1081,12 +1133,15 @@ deck_form_format_mb() {
 # files appearing, so the screens below must never block the S0-A restore.
 # ===========================================================================
 #
-# SHAPE OF THE FLOW (2026-09-24): S0 welcome, drive selection (NVMe/microSD,
-# B back to welcome), early start on the SELECTED disk, preinstalls Yes/No,
-# Steam Yes/No, Wi-Fi iff Steam=yes, Steam progress iff Steam=yes, identity,
-# S5. B goes one screen back: Steam -> preinstalls, preinstalls -> welcome
-# (via the safe-exit power menu). After BOTH answers the files plus `locked`
-# are written atomically; preinstalls is then NOT revisable (the package
+# SHAPE OF THE FLOW (2026-09-24, revised per hardware feedback): S0 welcome,
+# drive selection (NVMe/microSD, B back to welcome), wipe confirm (A wipes,
+# B back to the list), early start on the CONFIRMED disk, preinstalls
+# Yes/No, Steam Yes/No, Wi-Fi iff Steam=yes, Steam progress iff Steam=yes,
+# identity, S5. B goes one screen back: Steam -> preinstalls; preinstalls B
+# is a no-op redraw (the wipe already started -- there is no cancel that
+# tells the truth any more, and B must never return to the confirm, the
+# drive list, or S0). After BOTH answers the files plus `locked` are
+# written atomically; preinstalls is then NOT revisable (the package
 # delta may already be installing). Wi-Fi B is the narrow exception: it
 # flips Steam yes->no (rewriting `gaming`, clearing any stale network-ready)
 # before network-ready ever fired -- there is no path back to preinstalls
@@ -1198,31 +1253,39 @@ deck_form_yesno_screen() {
 # promise: both No choices say they can be installed later from the desktop
 # (preinstalls via the existing menu action, Gaming via the conversion
 # script Steam builds) -- backed by real actions, never a bare promise.
+# The cursor starts on Yes (2026-09-24 hardware feedback).
 deck_form_preinstalls_screen() {
   deck_form_yesno_screen "$1" \
     "Install Omarchy pre-installs?" \
     "Yes: office, media and creative apps are ready on first boot." \
     "No: skip them now. (Can be installed later from the Omarchy desktop.)" \
-    no
+    yes
 }
 
 # deck_form_gaming_screen <result-var> -- the "Install Steam?" question.
 # Yes installs Steam / Gaming Mode and requires Internet; No says it can
 # be added later from the desktop (C6 conversion script). The stored value
 # stays `gaming` yes/no: Stages gates on it, so the name does not change.
+# The cursor starts on Yes (2026-09-24 hardware feedback).
 deck_form_gaming_screen() {
   deck_form_yesno_screen "$1" \
     "Install Steam?" \
     "Yes: installs Steam and boots into Gaming Mode. (Requires Internet.)" \
     "No: desktop-only Omarchy. (Can be installed later from the Omarchy desktop.)" \
-    no
+    yes
 }
 
 # deck_form_run_choice_screens -- preinstalls then Gaming, with B-back.
 # Writes NOTHING until both are answered, then publishes preinstalls +
 # gaming + locked atomically (locked LAST: Stages gates on it). Returns:
 #   0 both answered and locked (globals DECK_PREINSTALLS/DECK_GAMING set)
-#   1 user backed out of preinstalls to the power menu (caller aborts)
+#   1 only when publishing the answers fails (caller aborts)
+# B on preinstalls -- the first screen AFTER the wipe started -- is a
+# no-op that redraws the same screen (2026-09-24 hardware feedback). The
+# old behaviour called deck_form_s0_cancel_menu, whose "The drive was not
+# touched." is FALSE once the wipe has begun, and B must never return to
+# the wipe confirm, the drive list, or S0 from here. B on Gaming returns
+# to preinstalls.
 # Globals (shellcheck: set here, read by summary/S5): DECK_PREINSTALLS,
 # DECK_GAMING.
 deck_form_run_choice_screens() {
@@ -1231,9 +1294,8 @@ deck_form_run_choice_screens() {
     if [[ -z $pre ]]; then
       deck_form_preinstalls_screen pre
       if [[ $pre == back ]]; then
-        deck_form_s0_cancel_menu
-        abort "Install cancelled at the pre-installs choice."
-        return 1
+        pre=""
+        continue
       fi
     fi
     deck_form_gaming_screen game
@@ -1249,6 +1311,86 @@ deck_form_run_choice_screens() {
     deck_form_choice_write gaming "$game" || return 1
     deck_form_choices_lock || return 1
     return 0
+  done
+}
+
+# deck_form_choice_answer <name> -- the locked answer for `preinstalls` or
+# `gaming`: the global first (it mirrors the file), the persisted file
+# second. Prints "yes" or "no" and returns 0; returns 1 when neither has
+# an answer (e.g. a dry run where greeter never ran the choice screens).
+deck_form_choice_answer() {
+  local name=$1 val=""
+  case $name in
+    preinstalls) val=${DECK_PREINSTALLS:-} ;;
+    gaming)      val=${DECK_GAMING:-} ;;
+    *)           deck_form_warn "unknown choice '$name'"; return 1 ;;
+  esac
+  if [[ -z $val ]]; then
+    val=$(deck_form_choice_read "$name")
+  fi
+  if [[ $val != yes && $val != no ]]; then
+    return 1
+  fi
+  printf '%s\n' "$val"
+  return 0
+}
+
+# deck_form_readonly_screen <result-var> <title> <answer>
+# One Deck question shown READ-ONLY (2026-09-24 hardware feedback, operator
+# decision): the background install is already acting on the answer, so it
+# is shown but cannot be changed. Same logo + title as the real screen so
+# it is recognisably the same screen. Stores "forward" (A on Continue) or
+# "back" (B/Esc) in $result-var and returns 0. Never guesses: an
+# unrecognised row redraws.
+deck_form_readonly_screen() {
+  local resultvar=$1 title=$2 answer=$3
+  local choice ans answer_word=No
+  [[ $answer == yes ]] && answer_word=Yes
+  while true; do
+    clear_logo
+    echo
+    say "$title"
+    say "Your answer: $answer_word -- already being installed, can't be changed now."
+    say "Press A to continue, B to go back"
+    choice=$(printf 'Continue\n' | gum choose --header "Choose") || choice=""
+    case $choice in
+      Continue) ans=forward ;;
+      "")       ans=back ;;
+      *)        continue ;;
+    esac
+    printf -v "$resultvar" '%s' "$ans"
+    return 0
+  done
+}
+
+# deck_form_readonly_choices -- walk the locked Deck questions backwards
+# from the keyboard layout screen. One screen per B: Install Steam? first,
+# then pre-installs; B on pre-installs stays there (nothing before it is
+# reachable -- B must never return to the wipe confirm, the drive list, or
+# S0 once the wipe has started). A moves forward one screen; A on the last
+# one returns to the keyboard layout screen (returns 0).
+deck_form_readonly_choices() {
+  local screen=gaming answer nav title
+  while true; do
+    if [[ $screen == gaming ]]; then
+      title="Install Steam?"
+      answer=$(deck_form_choice_answer gaming) || return 1
+    else
+      title="Install Omarchy pre-installs?"
+      answer=$(deck_form_choice_answer preinstalls) || return 1
+    fi
+    deck_form_readonly_screen nav "$title" "$answer"
+    if [[ $screen == gaming ]]; then
+      if [[ $nav == back ]]; then
+        screen=preinstalls
+      else
+        return 0
+      fi
+    else
+      if [[ $nav == forward ]]; then
+        screen=gaming
+      fi
+    fi
   done
 }
 
@@ -1280,12 +1422,16 @@ greeter() {
   # the text screens. Never gated: a small font is not a reason to skip a
   # screen.
   deck_form_pin_console_font
-  deck_form_s0_text
+  deck_form_draw_s0
   deck_form_stty_sane "$tty"
   # S0's A/B answer: A proceeds to drive selection; B (Esc) is the safe
   # exit -- nothing erased yet. A bare read that accepts anything as
   # consent is how a typo becomes a wipe, so only these two bytes answer.
-  local s0_answer drive_choice=""
+  # Drained first like the confirm (trivial here, same helper): S0 is not
+  # destructive, but a stale Enter skipping the welcome is still a press
+  # nobody made.
+  local s0_answer drive_choice="" confirm_answer
+  deck_form_drain_tty "$tty"
   if ! s0_answer=$(deck_form_s0_wait_key "$tty"); then
     abort "Could not read the S0 answer -- refusing to guess consent."
     return 1
@@ -1295,17 +1441,21 @@ greeter() {
     abort "Install cancelled at the first screen."
     return 1
   fi
-  # Drive selection (2026-09-24): NVMe and microSD are both eligible; USB
-  # never is, and the boot medium is always excluded. The screen always
-  # draws -- even with one entry -- so the user sees what will be wiped.
-  # B here returns to the welcome screen. Zero eligible is the dead end.
-  # The chosen drive starts the early stage immediately (no second
-  # confirmation); a failed start aborts before anything else.
+  # Drive selection (2026-09-24, revised per hardware feedback): NVMe and
+  # microSD are both eligible; USB never is, and the boot medium is always
+  # excluded. The screen always draws -- even with one entry -- so the user
+  # sees what will be wiped. B here returns to the welcome screen (which
+  # redraws S0 through deck_form_draw_s0, the same logo + text as the first
+  # showing). Zero eligible is the dead end. After a drive is picked, the
+  # wipe confirm asks again -- and the wipe starts ONLY on that A. B on the
+  # confirm returns to the drive list. A failed start aborts before anything
+  # else. The loop is: S0 -> drive list ⇄ confirm -> start early install.
   while true; do
     deck_form_drive_screen drive_choice || return 1
     if [[ $drive_choice == back ]]; then
-      deck_form_s0_text
+      deck_form_draw_s0
       deck_form_stty_sane "$tty"
+      deck_form_drain_tty "$tty"
       if ! s0_answer=$(deck_form_s0_wait_key "$tty"); then
         abort "Could not read the S0 answer -- refusing to guess consent."
         return 1
@@ -1318,7 +1468,14 @@ greeter() {
       drive_choice=""
       continue
     fi
-    break
+    if ! deck_form_wipe_confirm confirm_answer "$drive_choice" "$tty"; then
+      abort "Could not read the wipe confirmation -- refusing to guess consent."
+      return 1
+    fi
+    if [[ $confirm_answer == proceed ]]; then
+      break
+    fi
+    drive_choice=""
   done
   deck_form_start_early_install "$drive_choice" || return 1
   # The two choice screens (preinstalls, then Steam/Gaming), with B-back
@@ -1504,7 +1661,22 @@ keyboard_form() {
                "$allow_defer_provisioning")
     case $action in
       accept) break ;;
-      reask) continue ;;
+      reask)
+        # B on the keyboard layout screen walks back to the Deck questions
+        # READ-ONLY (2026-09-24 hardware feedback, operator decision: the
+        # background install is already acting on those answers, so they
+        # are shown but cannot be changed). When the answers are empty --
+        # e.g. a dry run where greeter never ran the choice screens -- keep
+        # the old behaviour and re-ask the picker. A failed walk warns
+        # loudly and falls back to re-asking, never stops the install
+        # silently.
+        if deck_form_choice_answer preinstalls >/dev/null 2>&1 &&
+           deck_form_choice_answer gaming >/dev/null 2>&1; then
+          deck_form_readonly_choices ||
+            deck_form_warn "the read-only review of the Deck answers failed -- re-asking the keyboard layout instead of stopping"
+        fi
+        continue
+        ;;
       defer-offer)
         if confirm_prepare_for_another_owner; then
           # shellcheck disable=SC2034  # read by configurator:991
@@ -3246,6 +3418,10 @@ deck_form_steam_progress_screen() {
         echo
         say --foreground 1 "The Steam download failed."
         [[ -n $err ]] && say --foreground 1 "$err"
+        # The failure screen's own readily available log: the last progress
+        # line the stage wrote. Shown when there is one, skipped when not.
+        line=$(deck_form_steam_progress_line)
+        [[ -n $line ]] && say --foreground 1 "$line"
         say "Steam comes from Valve during setup; without it there is no Gaming Mode."
         echo
         choice=$(deck_form_steam_failure_items | gum choose --header "What next?") || choice=""
@@ -3735,22 +3911,6 @@ deck_form_disk_is_sd() {
   [[ ${1:-} =~ ^/dev/mmcblk[0-9]+$ ]]
 }
 
-# deck_form_disk_autoselect <newline-separated eligible devices>
-# RETIRED as a flow step (2026-09-24): with NVMe + microSD both eligible,
-# two drives is the NORMAL Deck case and the user must always choose -- no
-# autoselect, even with one entry (the screen shows what will be wiped).
-# Kept as a pure helper for tests: prints the device and succeeds when
-# there is EXACTLY one; fails (prints nothing) for zero or more than one.
-deck_form_disk_autoselect() {
-  local list=$1 count
-  count=$(printf '%s\n' "$list" | LC_ALL=C command grep -c .)
-  if [[ $count -eq 1 ]]; then
-    printf '%s\n' "$list"
-    return 0
-  fi
-  return 1
-}
-
 # deck_form_disk_label <device>
 # "Internal SSD (NVMe) <vendor+model> (<size>)" or "microSD card (<size>)";
 # falls back to the bare device path when lsblk has nothing to say. Used by
@@ -3792,13 +3952,11 @@ deck_form_disk_label() {
 # indirectly through a gum-driving function it cannot safely execute.
 deck_form_disk_encryption_mode() { printf 'false\n'; }
 
-# FAST-INSTALL C4 retired the S4 erase-confirm screen (consent moved to S0),
-# so the confirm-cursor constant below is gone with it: confirm_disk_overwrite
-# above returns 0 without drawing anything, and there is no gum confirm whose
-# default could drift back to the dangerous affirmative. The constant is
-# deleted, not left as a stale "false": a named value nothing reads is how
-# §6.4's "passes while asserting nothing" starts, and the S0 prompt line
-# ("Press A to erase the drive and begin") is now the tested safety wording.
+# Upstream's S4 erase-confirm screen is gone (the wipe confirm is now
+# `deck_form_wipe_confirm`, asked with S0's A/B key reader between the
+# drive list and the early start), so confirm_disk_overwrite below returns
+# 0 without drawing anything, and there is no gum confirm whose default
+# could drift back to the dangerous affirmative.
 
 readonly -a DECK_DISK_DEAD_END_ITEMS=(Reboot "Power off")
 
@@ -3903,7 +4061,10 @@ deck_form_drive_screen() {
     clear_logo
     echo
     say "Where should Omarchy be installed?"
-    say --foreground 8 "The drive you choose is wiped immediately. B goes back."
+    # Plain `say`, NOT --foreground 8: on hardware this line drew faint gray
+    # and read as decoration next to the question. It states the consequence
+    # of the choice below, so it draws in the question's own colour.
+    say "The drive you choose will be wiped. B goes back."
     choice=$(printf '%s' "$rows" | gum choose --header "Select install drive") || choice=""
     if [[ -z $choice ]]; then
       printf -v "$resultvar" '%s' "back"
@@ -3918,37 +4079,69 @@ deck_form_drive_screen() {
   done
 }
 
-# disk_form -- overrides upstream's own disk picker.
-# Reuses upstream's OWN `get_root_disk`/`get_disk_info` (still defined --
-# this file does not override them) rather than reimplementing the boot-
-# medium walk, per this file's general wrap philosophy: override only the
-# screen, not machinery upstream already got right.
-disk_form() {
-  step "Let's select where to install Omarchy..."
-
-  local eligible
-  if ! eligible=$(deck_form_eligible_disks); then
-    deck_form_disk_dead_end
-    abort "No eligible install disk was found."
-    return
+# deck_form_wipe_confirm <result-var> <disk> <tty> -- the "are you sure?"
+# screen. Stores "proceed" (A/Enter) or "back" (B/Esc) in $result-var and
+# returns 0; returns 1 only when the tty cannot be read at all (fail
+# loudly, never guess).
+# The answer is read with the same single-byte A/B reader as S0
+# (deck_form_s0_wait_key) -- NOT a gum confirm whose highlighted default
+# could turn A into the wrong answer on the destructive question. The wipe
+# starts ONLY on "proceed"; "back" returns to the drive list.
+#
+# The answer travels via printf -v, NOT stdout: this screen draws chrome
+# (clear_logo/echo/say all write the terminal) and capturing stdout would
+# swallow the blank `echo` line into the answer ("\\nproceed", which never
+# equals "proceed" -- an infinite drive-confirm loop, and on the real ISO,
+# not just under tests). Same reason deck_form_yesno_screen documents.
+deck_form_wipe_confirm() {
+  local resultvar=$1 disk=$2 tty=$3 label answer
+  label=$(deck_form_disk_label "$disk")
+  clear_logo
+  echo
+  say "Are you sure? This will wipe $label."
+  say "Press A to wipe and install, B to go back"
+  # A held or bouncing A from the drive screen's own answer may still be
+  # queued: drain it so only a NEW press confirms the wipe.
+  deck_form_drain_tty "$tty"
+  if ! answer=$(deck_form_s0_wait_key "$tty"); then
+    deck_form_warn "could not read the wipe confirmation from $tty -- refusing to guess consent"
+    return 1
   fi
+  if [[ $answer == proceed ]]; then
+    printf -v "$resultvar" '%s' "proceed"
+  else
+    printf -v "$resultvar" '%s' "back"
+  fi
+  return 0
+}
 
-  local sole
-  if sole=$(deck_form_disk_autoselect "$eligible"); then
-    disk=$sole
+# disk_form -- overrides upstream's own disk picker.
+#
+# FAST-INSTALL: the drive was already chosen on the drive screen and the
+# wipe confirm, and the early stage is already erasing it
+# (`deck_form_start_early_install` set the global `disk`). So this reuses
+# that disk and draws NOTHING: re-offering a picker here -- on the Deck
+# with NVMe + microSD, the old code did exactly that -- would offer a
+# choice that contradicts the running wipe.
+#
+# If `disk` is unset at this point, that is a bug in the flow (every path
+# that reaches here ran the drive screen first), so this fails loudly via
+# abort instead of silently picking one.
+#
+# The other paths that can reach the disk machinery cannot re-offer a
+# drive either: `confirm_disk_overwrite` draws nothing and returns 0, so
+# upstream's `select_installation` Full-disk branch (the only one reachable
+# -- `requires_full_disk_install` suppresses the mode picker) confirms
+# without asking; the deferred-provisioning `disk_form` loop (unreachable
+# on a Deck -- there is no Ctrl+C -- but reachable in a dry run) lands in
+# the abort below rather than guessing; and `deck_final_summary`'s
+# "Go back" re-runs `user_step` only, never `disk_form`.
+disk_form() {
+  if [[ -n ${disk:-} ]]; then
     return 0
   fi
-
-  local disk_options="" device disk_info
-  while IFS= read -r device; do
-    [[ -n $device ]] || continue
-    disk_info=$(get_disk_info "$device")
-    disk_options="$disk_options$disk_info"$'\n'
-  done <<<"$eligible"
-
-  local selected_display
-  selected_display=$(echo "$disk_options" | gum choose --header "Select install disk") || abort
-  disk=$(echo "$selected_display" | awk '{print $1}')
+  deck_form_warn "disk_form reached with no disk selected -- the drive screen should have set one before the early stage started. Refusing to guess which drive to erase."
+  abort "No install disk was selected."
 }
 
 # requires_full_disk_install -- overrides upstream's own free-space
@@ -3966,16 +4159,16 @@ requires_full_disk_install() { return 0; }
 
 # confirm_disk_overwrite -- overrides upstream's own S4 confirm screen.
 #
-# FAST-INSTALL C4 removed S4 as a screen (consent moved to S0's A press,
-# where `deck_form_start_early_install` already runs). Upstream still CALLS
+# Consent now lives earlier in the flow (S0's A plus the wipe confirm's A,
+# where `deck_form_start_early_install` runs). Upstream still CALLS
 # this name twice -- `select_installation`'s "Full disk install" branch and
 # the `until confirm_disk_overwrite` deferred-provisioning loop -- so it
 # must keep existing and must keep SUCCEEDING (return 0) without drawing
 # anything: re-prompting here would offer a disk choice that contradicts
-# the early stage already erasing one. `disk` was set by the S0-A start,
-# `encrypt_installation` stays the unconditional constant `false`, and
-# "Go back" paths that call disk_form/select_installation are themselves
-# replaced below (see deck_final_summary). The old gum-confirm body is
+# the early stage already erasing one. `disk` was set by the confirmed
+# start, `encrypt_installation` stays the unconditional constant `false`,
+# and `deck_final_summary`'s "Go back" re-runs `user_step` itself (never
+# `disk_form`/`select_installation`). The old gum-confirm body is
 # deleted, not kept as a fallback.
 confirm_disk_overwrite() {
   # shellcheck disable=SC2034
@@ -4138,6 +4331,39 @@ deck_form_summary_rows() {
 # If the early stage failed, S5 says so and offers the failure menu
 # (Reboot / Power off, never a shell -- the existing dead-end pattern)
 # instead of Install: there is nothing to wait for and no LATE to run.
+# deck_form_early_log_tail -- the last lines of the early stage's own log,
+# ANSI-stripped (the log carries colour codes a bare console would print
+# literally). Prints nothing and returns 1 when the log is missing,
+# unreadable, or empty -- the caller says so instead of printing nothing.
+deck_form_early_log_tail() {
+  local file=${DECK_EARLY_LOG_FILE:-$DECK_EARLY_LOG_FILE_DEFAULT}
+  local tail
+  if [[ ! -r $file ]]; then
+    return 1
+  fi
+  tail=$(tail -n "$DECK_EARLY_LOG_TAIL_LINES" -- "$file" 2>/dev/null | deck_form_strip_ansi)
+  [[ -n $tail ]] || return 1
+  printf '%s\n' "$tail"
+  return 0
+}
+
+# deck_form_early_failed_log_notice -- the failure menu's log block, split
+# out so the unit suite asserts it without driving the menu's own infinite
+# loop. Prints the tail in the error colour above the menu; when the log
+# cannot be shown, says that instead of printing nothing.
+deck_form_early_failed_log_notice() {
+  local file=${DECK_EARLY_LOG_FILE:-$DECK_EARLY_LOG_FILE_DEFAULT}
+  local line log_tail
+  if log_tail=$(deck_form_early_log_tail); then
+    say --foreground 1 "The early install log says:"
+    while IFS= read -r line; do
+      say --foreground 1 "$line"
+    done <<<"$log_tail"
+  else
+    say --foreground 1 "The early install log at $file could not be read -- it is missing or empty."
+  fi
+}
+
 deck_form_early_failed_menu() {
   local choice action err systemctl_bin=${DECK_SYSTEMCTL_BIN:-systemctl}
   err=$(deck_form_early_error)
@@ -4146,6 +4372,7 @@ deck_form_early_failed_menu() {
     echo
     say --foreground 1 "The background install failed before it finished."
     [[ -n $err ]] && say --foreground 1 "$err"
+    deck_form_early_failed_log_notice
     say "Nothing more can be installed from here, and Install is not offered."
     echo
     choice=$(deck_form_disk_dead_end_items | gum choose --header "What next?") || choice=""

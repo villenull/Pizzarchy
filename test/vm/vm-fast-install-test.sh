@@ -222,8 +222,17 @@ else
   GUEST_DEVICE=/dev/nvme0n1
 fi
 
-log "creating ${DISK_SIZE_GB}G sparse ${TARGET_KIND} target (guest device $GUEST_DEVICE)"
-truncate -s "${DISK_SIZE_GB}G" "$target_raw"
+# A real NVMe is not a whole number of MiB, and a round QEMU disk hid the
+# "Partition is misaligned" failure that stopped every hardware install
+# (docs/findings/HW-INSTALL-FEEDBACK-2026-09-24.md). So the NVMe target gets
+# an odd tail of 512-byte sectors. The SD target cannot: QEMU's sd-card
+# requires a power-of-two size.
+if [[ $TARGET_KIND != sd ]]; then
+  disk_bytes=$((disk_bytes + ${VM_DISK_ODD_TAIL_SECTORS:-1237} * 512))
+fi
+
+log "creating ${disk_bytes}-byte sparse ${TARGET_KIND} target (guest device $GUEST_DEVICE)"
+truncate -s "$disk_bytes" "$target_raw"
 
 cp "$OVMF_VARS_TEMPLATE" "$ovmf_vars"
 

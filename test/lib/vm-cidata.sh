@@ -28,7 +28,10 @@ cidata::render_config() {
   local device=$1 disk_bytes=$2 hostname=$3 out=$4
   local boot_start=1048576 boot_size=2147483648
   local root_start=$((boot_start + boot_size))
-  local root_size=$((disk_bytes - root_start - 1048576))
+  # Round the disk down to a whole MiB first: archinstall refuses a
+  # partition whose length is not MiB-aligned, and real drives (and the
+  # harness's deliberately odd NVMe target) are not a whole MiB.
+  local root_size=$((disk_bytes / 1048576 * 1048576 - root_start - 1048576))
 
   if [[ $root_size -le 0 ]]; then
     echo "cidata::render_config: disk_bytes=$disk_bytes too small for a 2GiB ESP + any root (need > $((root_start + 1048576)))" >&2

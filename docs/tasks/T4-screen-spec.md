@@ -449,30 +449,20 @@ failure states · verified by**. Verification tiers follow
 `docs/tasks/T5-fork-plan.md` §5's convention: **[U]** unit (seconds, no VM) ·
 **[V]** QEMU, against the real ISO · **[H]** hardware, T6 release gate.
 
-### S0 — Welcome and disclosure + drive selection (2026-09-24 flow)
+### S0 — Welcome (2026-09-24 hardware revision)
 
-- **Purpose.** One frame that says the machine is about to be installed, asks
-  the BIG proceed question, and warns that choosing a drive wipes it
-  immediately (internal SSD or microSD; USB never a target). §6.1a item 3's
-  "agreements" screen, merged into the greeter upstream already draws so it
-  costs no screen.
-- **On the console.** Upstream's centred Omarchy logo and tagline **(READ:
-  `greeter`)**, with the hint line replaced by (2026-09-24 rewrite — welcome,
-  wipe scope and A/B answers all live here):
-  *"Welcome to Omarchy. THIS WILL INSTALL OMARCHY ON YOUR STEAM DECK.
-  PROCEED?"* /
-  *"Pressing A chooses the install drive next; the chosen drive is wiped
-  immediately."* /
-  *"Install to the internal SSD or the microSD card. USB drives are never
-  targets."* /
-  *"Stopping after choosing leaves no working system until an install
-  finishes."* /
-  *"It includes proprietary firmware from AMD and Valve — graphics, Wi-Fi,
-  Bluetooth, audio DSP. The Deck does not work without it."* (split in two
-  only so no line wraps at the 121-column `say` budget) /
-  *"Gaming Mode downloads Steam from Valve during setup; everything else is
-  already on this USB stick."* Then **`Press A to install, B to cancel`**.
-- **After A: the drive screen, then the early stage starts — OLED-gated.**
+- **Purpose.** One frame that says the machine is about to be installed and
+  asks the proceed question. Nothing is wiped at S0.
+- **On the console.** The big Omarchy logo, drawn the same way every other
+  screen draws it (`clear_logo` then `echo`, via `deck_form_draw_s0` — the
+  ONE helper both the first showing and the B-from-drive-screen re-draw go
+  through), then exactly two lines:
+  *"This will install Omarchy on your Steam Deck."* /
+  *`Press A to install, B to cancel`*. The 2026-09-24 operator revision cut
+  everything else: the wipe scope lives on the drive screen and the wipe
+  confirm, where the choice is actually made.
+- **After A: the drive screen, then the wipe confirm, then the early stage
+  starts — OLED-gated.**
   A lists the eligible targets (`deck_form_drive_screen`: built-in NVMe
   `TYPE==disk RM==0 TRAN==nvme` AND the Deck's microSD reader
   `NAME ^/dev/mmcblk[0-9]+$ TYPE==disk`, regardless of TRAN/RM; USB never;
@@ -493,12 +483,15 @@ failure states · verified by**. Verification tiers follow
   (Esc) is the safe exit: nothing erased yet, Reboot / Power off menu, never
   a shell.
 - **Then the two choice screens** (D-pad `gum choose` Yes/No rows, default
-  No): **Install Omarchy pre-installs?** (No: *"Can be installed later from
+  **Yes** on both — 2026-09-24 hardware feedback): **Install Omarchy
+  pre-installs?** (No: *"Can be installed later from
   the Omarchy desktop."* — existing menu action) then **Install Steam?**
   (Yes: installs Steam, boots into Gaming Mode, *"(Requires Internet.)"*;
   No: *"Can be installed later from the Omarchy desktop."* — C6 conversion
-  script). B goes one screen back (Steam → preinstalls; preinstalls → power
-  menu). Both answered → `choices/{preinstalls,gaming}` + `choices/locked`
+  script). B on Steam returns to preinstalls; B on preinstalls (the first
+  screen after the wipe started) is a no-op redraw — the old cancel menu's
+  "The drive was not touched." is false once the wipe has begun, and B must
+  never return to the wipe confirm, the drive list, or S0. Both answered → `choices/{preinstalls,gaming}` + `choices/locked`
   written atomically (Stages gates on `locked`); preinstalls is then not
   revisable. Steam=yes requires Internet: Wi-Fi runs (B on the list returns
   to the Steam choice — yes→no flip, stale marker cleared), then the NEW
@@ -509,6 +502,17 @@ failure states · verified by**. Verification tiers follow
   (Stages skips its network gate too — no marker needed).
 - **Controls.** A = install (Enter), B = cancel/back (Esc). Single-byte
   read; anything else loops, never guesses consent.
+- **B-back rules (2026-09-24 hardware feedback).** B always returns to the
+  previous screen, EXCEPT it can never return to the wipe confirmation (or
+  the drive list / S0) once the wipe has started. B on the keyboard layout
+  screen therefore walks back to the Deck questions **read-only**
+  (operator decision: the background install is already acting on those
+  answers, so they are shown — same logo + title — but cannot be changed):
+  one screen per B, Install Steam? first, then pre-installs; B on
+  pre-installs read-only stays there. A moves forward one screen; A on the
+  last returns to the keyboard layout screen. With no locked answers (a
+  dry run where greeter never ran), B keeps the old behaviour and re-asks
+  the picker. B from Wi-Fi returns to the Steam question, unchanged.
 - **Text entry.** None.
 - **Failure states.** ⚠️ Upstream runs a `tte` colour animation here and **leaves
   the tty in raw/no-echo mode when killed**, which silently kills the gum prompts
@@ -516,9 +520,10 @@ failure states · verified by**. Verification tiers follow
   Our override must keep that `stty sane`. Losing it is invisible until S1
   refuses input.
 - **Verified by.**
-  - **[U]** the rendered text contains the BIG question, the wipe warning,
-    the SD promise, and the A/B prompt; asserted on the function's output,
-    not on a screenshot. Width ≤ 121 columns, one screen (9 lines).
+  - **[U]** the rendered text is exactly the install line plus the A/B
+    prompt (2 lines, asserted on the function's output, not on a
+    screenshot); S0 draws the logo through the same helper on both
+    showings. Width ≤ 121 columns.
   - **[U]** OLED wipe gate refuses Jupiter, generic NVMe, SD-only and
     unreadable DMI without invoking early (says why); disk filter keeps
     NVMe only (USB/microSD excluded even at RM=0); zero/2+ NVMe dead-ends
@@ -651,19 +656,31 @@ failure states · verified by**. Verification tiers follow
 > input to build and test, and the password it produces is also the `sudo`
 > password. One keyboard, used everywhere.
 
-### S4 — Drive selection (2026-09-24 flow: NVMe + microSD, explicit choice)
+### S4 — Drive selection + wipe confirm (2026-09-24 flow, revised per hardware feedback)
 
-- **Purpose.** The destructive step, now an explicit choice: after S0-A the
-  screen lists every eligible target — the built-in NVMe AND the microSD
-  card — and the chosen drive starts the early stage immediately, with no
-  second confirmation. USB drives are never targets.
+- **Purpose.** The destructive step, now an explicit choice AND an explicit
+  confirmation: after S0-A the screen lists every eligible target — the
+  built-in NVMe AND the microSD card — and after a drive is picked a second
+  screen asks again. The wipe starts ONLY on the confirm's A. USB drives
+  are never targets.
 - **On the console.** `Where should Omarchy be installed?` /
-  `The drive you choose is wiped immediately. B goes back.` then a `gum
-  choose` list (`Select install drive`). The screen ALWAYS draws, even with
-  exactly one entry, so the user sees what will be wiped. Rows read
-  `Internal SSD (NVMe) <vendor+model> (<size>)` for the built-in drive
-  (`deck_form_disk_label`) vs `microSD card (<size>)` for the card
-  (`deck_form_disk_is_sd`: `NAME ^/dev/mmcblk[0-9]+$`, whole disk).
+  `The drive you choose will be wiped. B goes back.` (plain `say`, in the
+  question's own colour — the old faint-gray `--foreground 8` read as
+  decoration on hardware) then a `gum choose` list (`Select install drive`).
+  The screen ALWAYS draws, even with exactly one entry, so the user sees
+  what will be wiped. Rows read `Internal SSD (NVMe) <vendor+model>
+  (<size>)` for the built-in drive (`deck_form_disk_label`) vs `microSD
+  card (<size>)` for the card (`deck_form_disk_is_sd`:
+  `NAME ^/dev/mmcblk[0-9]+$`, whole disk).
+- **The wipe confirm.** Logo, `Are you sure? This will wipe <label>.`
+  (the same `deck_form_disk_label`, so rows, confirm and summary can never
+  disagree about the drive), `Press A to wipe and install, B to go back`.
+  The answer is read with S0's own single-byte A/B reader
+  (`deck_form_s0_wait_key`) — NOT a gum confirm whose highlighted default
+  could turn A into the wrong answer — and travels via result-var, never
+  captured stdout. A starts the early stage
+  (`deck_form_start_early_install`); B returns to the drive list. Greeter's
+  loop is S0 → drive list ⇄ confirm → start early install.
 - **Controls.** D-pad/stick = move, A = select, B (Esc) = back to the
   welcome screen (the greeter redraws S0 and re-asks A/B; nothing erased
   yet). Unrecognised rows redraw, never guess at a wipe target.
@@ -687,14 +704,20 @@ failure states · verified by**. Verification tiers follow
   laptop disk, an empty selection, or unreadable DMI is the dead end with
   the reason said, BEFORE `early start` is ever invoked. A failed start
   aborts loudly; nothing continues silently.
-- **What remains of the old S4.** `disk_form` stays as the disk *resolver*
-  for upstream's own later flow (shared `deck_form_disk_list`/`deck_form_disk_autoselect`,
-  boot-medium exclusion, dead end when nothing is eligible).
-  `confirm_disk_overwrite` keeps overriding upstream's name but draws nothing
-  and always returns 0, so upstream's `select_installation` branch and the
-  `until confirm_disk_overwrite` loop cannot re-prompt for a disk that is
-  already erasing; `encrypt_installation` stays the unconditional constant
-  `false`.
+- **What remains of the old S4.** `disk_form` stays under upstream's name
+  but is now the disk *reuser*, not a resolver: the drive was chosen on
+  the drive screen, confirmed, and the early stage is already erasing it
+  (the global `disk`), so it returns 0 drawing nothing. A second picker
+  here re-offered the drive on NVMe + microSD Decks; contradicting the
+  running wipe is worse than asking twice. `disk` unset at this point is a
+  bug in the flow and aborts loudly instead of silently picking one.
+  `confirm_disk_overwrite` keeps overriding upstream's name but draws
+  nothing and always returns 0, so upstream's `select_installation` branch
+  and the `until confirm_disk_overwrite` loop cannot re-prompt for a disk
+  that is already erasing; `encrypt_installation` stays the unconditional
+  constant `false`. The deferred-provisioning `disk_form` loop (no Ctrl+C
+  on this hardware, but reachable in a dry run) lands in the same abort
+  rather than guessing.
 - **Verified by.**
   - **[U]** the eligibility filter over `lsblk` fixtures: NVMe kept, microSD
     kept regardless of TRAN/RM, USB and non-disk TYPEs excluded, the boot
@@ -702,10 +725,19 @@ failure states · verified by**. Verification tiers follow
     result is an error rather than an empty list.
   - **[U]** the drive screen draws the chooser with zero/one/two eligible
     disks (never autoselects — even one entry is shown), honours the chosen
-    row, answers `back` on B/Esc, and dead-ends on zero eligible; early start
-    receives the SELECTED disk (NVMe and microSD both start); a failed start
-    aborts.
+    row, answers `back` on B/Esc, and dead-ends on zero eligible; the
+    confirm answers proceed/back through S0's key reader (never a gum
+    confirm); early start receives the CONFIRMED disk (NVMe and microSD
+    both start); a failed start aborts.
+  - **[U]** `disk_form` reuses the set `disk` drawing nothing, and aborts
+    when `disk` is empty.
   - **[U]** `confirm_disk_overwrite` draws no prompt and always returns 0.
+  - **[U]** the confirm answers proceed on A and back on B through S0's
+    key reader (never a gum confirm, answer via result-var never captured
+    stdout); B returns to the list without starting the wipe, and the wipe
+    starts only on the later A.
+  - **[U]** `disk_form` reuses the set `disk` drawing nothing, and aborts
+    when `disk` is empty.
   - **[V]** the artefact: `.disk_config.device_modifications[0].device` is the
     intended disk and `.wipe` is `true`; `.disk_config` carries **no**
     `disk_encryption` block, and `/root/user_encrypt_installation.txt` is `false`.
@@ -730,7 +762,13 @@ failure states · verified by**. Verification tiers follow
   consented at S0-A; nothing here re-asks it).
 - **Text entry.** None.
 - **Failure states.** Early `failed` → the failure menu (Reboot / Power off,
-  never a shell) instead of Install, with the stage's one-line reason shown.
+  never a shell) instead of Install, with the stage's one-line reason AND
+  the last ~12 lines of the early stage's own log
+  (`/var/log/omarchy-deck-early.log`, ANSI-stripped, in the error colour)
+  above the menu — a controller user cannot open the log file the old
+  screen only named. A missing or empty log is said, not printed as
+  nothing. The Steam failure screen likewise shows the last progress line
+  the stage wrote, when there is one.
   `Go back` re-runs `user_step` only (identity may change; the disk may not —
   the early stage is already erasing it).
 - **Verified by.**
@@ -738,6 +776,9 @@ failure states · verified by**. Verification tiers follow
     — assert on the *pair*, so a screen that shows one thing and writes another
     fails. This is the only screen whose bug would be invisible in both a
     screenshot and an artefact taken alone.
+  - **[U]** the early-failure menu prints the stage log's last ~12 lines
+    ANSI-stripped in the error colour (and says so when the log is
+    missing), reading the path omarchy-deck-early actually writes.
   - **[V]** every row shown on `/dev/vcs1` matches the corresponding `jq` value in
     `user_configuration.json` / `user_credentials.json`, field by field.
   - **[V]** `Encryption: Off` is present **and** the installed target later has no

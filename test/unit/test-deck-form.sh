@@ -651,32 +651,46 @@ pass "text_prompt does not clobber a pre-existing EXIT trap; it warns and skips 
 echo "--- S0 (deck_form_s0_text / greeter) ------------------------------------"
 
 s0=$(deck_form_s0_text)
-# 2026-09-24 flow: welcome + choose-drive-next wording, SSD/microSD targets,
-# USB never a target, and the no-working-system consequence.
-LC_ALL=C grep -qF "Welcome to Omarchy" <<<"$s0" ||
-  fail "S0 text must welcome to Omarchy" "$s0"
-LC_ALL=C grep -qF "THIS WILL INSTALL OMARCHY ON YOUR STEAM DECK. PROCEED?" <<<"$s0" ||
-  fail "S0 text must contain the BIG proceed question" "$s0"
-LC_ALL=C grep -qF "chooses the install drive next" <<<"$s0" ||
-  fail "S0 text must say A chooses the install drive next" "$s0"
-LC_ALL=C grep -qF "chosen drive is wiped immediately" <<<"$s0" ||
-  fail "S0 text must say the chosen drive is wiped immediately" "$s0"
-LC_ALL=C grep -qF "internal SSD or the microSD card" <<<"$s0" ||
-  fail "S0 text must name the internal SSD and the microSD card as targets" "$s0"
-LC_ALL=C grep -qF "USB drives are never targets" <<<"$s0" ||
-  fail "S0 text must say USB drives are never targets" "$s0"
-LC_ALL=C grep -qF "no working system until an install finishes" <<<"$s0" ||
-  fail "S0 text must say stopping after choosing leaves no working system" "$s0"
+# 2026-09-24 hardware feedback: exactly two lines -- the fact and the keys.
+# The wipe scope moved to the drive screen and the wipe confirm, where the
+# choice is actually made; S0 no longer promises, warns, or discloses.
+[[ $s0 == "This will install Omarchy on your Steam Deck."$'\n'"Press A to install, B to cancel" ]] ||
+  fail "S0 text must be exactly the install line plus the A/B prompt line" "$s0"
 LC_ALL=C grep -qF "Press A to install, B to cancel" <<<"$s0" ||
   fail "S0 text must name BOTH keys (A installs, B cancels)" "$s0"
-pass "deck_form_s0_text contains the welcome, the BIG question, the wipe warning, the SSD/microSD targets, and the A/B prompt"
+if LC_ALL=C grep -qF "wiped" <<<"$s0"; then
+  fail "S0 text must NOT mention wiping any more -- that lives on the drive screen and the wipe confirm" "$s0"
+fi
+pass "deck_form_s0_text is the install line plus the A/B prompt (2026-09-24 rewrite)"
 
-# FAST-INSTALL C4 row budget: S0 grew two lines (the warning that consent
-# moved here). The console is 50 rows x 160 columns (measured, asserted again
-# below); `say` pads left by (160-81)/2 = 39, so a line over 121 columns
-# WRAPS and silently costs a row (§5.40). Both the width and the row count
-# are asserted here so a longer sentence cannot push the prompt off the
-# panel the way the font change once pushed the password prompts off.
+# S0 draws the big Omarchy logo the same way every other screen does
+# (clear_logo then echo) before the text -- and every re-draw of S0 goes
+# through the same helper, so the two can never drift.
+draw_saved=$(declare -f clear_logo)
+: >"$work/s0-logo.log"
+clear_logo() { printf 'CLEAR_LOGO\n' >>"$work/s0-logo.log"; }
+: >"$work/s0-draw.log"
+deck_form_draw_s0 >"$work/s0-draw.log"
+eval "$draw_saved"; unset draw_saved
+LC_ALL=C grep -qF "CLEAR_LOGO" "$work/s0-logo.log" ||
+  fail "deck_form_draw_s0 must draw the logo (clear_logo) before the text"
+LC_ALL=C grep -qF "This will install Omarchy on your Steam Deck." "$work/s0-draw.log" ||
+  fail "deck_form_draw_s0 must draw the S0 text after the logo" "$(cat "$work/s0-draw.log")"
+LC_ALL=C grep -qF "Press A to install, B to cancel" "$work/s0-draw.log" ||
+  fail "deck_form_draw_s0 must draw the A/B prompt" "$(cat "$work/s0-draw.log")"
+body=$(declare -f greeter)
+LC_ALL=C grep -qF 'deck_form_draw_s0' <<<"$body" ||
+  fail "greeter must draw S0 through deck_form_draw_s0 (logo + text), not raw deck_form_s0_text"
+[[ $(LC_ALL=C command grep -c 'deck_form_draw_s0' <<<"$body") -ge 2 ]] ||
+  fail "greeter must use deck_form_draw_s0 for BOTH the first showing and the B-from-drive-screen re-draw" "$body"
+pass "S0 draws the logo then the two lines, through one helper used by both showings"
+
+# S0 row budget: two lines (the install line plus the prompt). The console
+# is 50 rows x 160 columns (measured, asserted again below); `say` pads
+# left by (160-81)/2 = 39, so a line over 121 columns WRAPS and silently
+# costs a row (§5.40). Both the width and the row count are asserted here so
+# a longer sentence cannot push the prompt off the panel the way the font
+# change once pushed the password prompts off.
 s0_width=121
 s0_line=""
 s0_n=0
@@ -685,9 +699,9 @@ while IFS= read -r s0_line; do
   [[ ${#s0_line} -le $s0_width ]] ||
     fail "S0 line $s0_n is ${#s0_line} columns, over the ${s0_width}-column say() budget -- it WRAPS and costs a row" "$s0_line"
 done <<<"$s0"
-[[ $s0_n -eq 9 ]] ||
-  fail "S0 must fit on one screen: 8 content lines plus the prompt line (9 total)" "got $s0_n lines: $s0"
-pass "S0 fits the width budget ($s0_width columns) and the one-screen row budget (9 lines)"
+[[ $s0_n -eq 2 ]] ||
+  fail "S0 must be exactly the install line plus the prompt line (2 total)" "got $s0_n lines: $s0"
+pass "S0 fits the width budget ($s0_width columns) and the row budget (2 lines)"
 
 
 # a fake `stty` on PATH that just records it was invoked with 'sane'.
@@ -699,7 +713,7 @@ exit 0
 EOF
 chmod +x "$work/bin/stty"
 
-printf '\n' >"$work/fake-tty-input"   # one Enter byte: A. read -n1 takes one byte; anything else loops.
+printf '\n\n' >"$work/fake-tty-input"   # two Enter bytes: A on S0, A on the wipe confirm. read -n1 takes one byte; anything else loops.
 # ⚠️ STTY_MARKER must be a genuine environment-prefix on the COMMAND itself
 # (inside the command substitution), not a plain shell-variable assignment
 # ahead of `out=$(...)` -- the latter never reaches the fake `stty`, since
@@ -776,11 +790,13 @@ out=$(STTY_MARKER="$work/stty.marker" PATH="$work/bin:$work/bin-fakegum:$PATH" \
       greeter)
 [[ -f "$work/stty.marker" ]] ||
   fail "greeter must call 'stty sane' -- losing it silently kills every gum prompt after S0 (T4-screen-spec.md §4 S0)"
-LC_ALL=C grep -qF "THIS WILL INSTALL OMARCHY" <<<"$out" ||
-  fail "greeter's own output must include the S0 BIG question, not just stty side effects"
-LC_ALL=C grep -qF "chosen drive is wiped immediately" <<<"$out" ||
-  fail "greeter's own output must include the chosen-drive wipe warning" "$out"
-pass "greeter calls 'stty sane' and prints the S0 disclosure text"
+LC_ALL=C grep -qF "This will install Omarchy on your Steam Deck." <<<"$out" ||
+  fail "greeter's own output must include the S0 install line, not just stty side effects"
+LC_ALL=C grep -qF "Press A to install, B to cancel" <<<"$out" ||
+  fail "greeter's own output must include the S0 A/B prompt" "$out"
+LC_ALL=C grep -qF "Are you sure? This will wipe" "$work/s0-say.log" ||
+  fail "greeter must show the wipe confirm after the drive screen -- the wipe starts ONLY on that A" "$(cat "$work/s0-say.log")"
+pass "greeter calls 'stty sane', prints the S0 text, and asks the wipe confirm"
 
 # Four-variant flow: this greeter run answers preinstalls No + gaming No
 # via the choose queue, so Wi-Fi is SKIPPED (gaming=no never needs the
@@ -908,6 +924,196 @@ PATH="$work/bin-fakegum:$PATH" \
   fail "boot-medium SD must be excluded, leaving the NVMe"
 [[ $drive_bootsd == /dev/nvme0n1 ]] || fail "boot-medium SD must not be listed" "got: $drive_bootsd"
 pass "an SD card that is the boot medium is excluded from the drive list"
+
+# The wipe line draws in the question's own colour (plain say), not faint
+# gray: on hardware the --foreground 8 version read as decoration next to
+# the choice it warns about.
+printf '/dev/nvme0n1 | Internal SSD (NVMe) 512G (512G)\n' >"$work/drive-colour.q"
+: >"$work/drive-colour-say.log"
+drive_colour=""
+DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-one-row" DECK_TEST_ROOT_DISK="" \
+DECK_TEST_SAY_LOG="$work/drive-colour-say.log" \
+FAKE_GUM_CHOOSE_QUEUE="$work/drive-colour.q" FAKE_GUM_LOG="$work/drive-two-gum.log" \
+PATH="$work/bin-fakegum:$PATH" \
+  deck_form_drive_screen drive_colour ||
+  fail "drive screen must complete for the colour assertion"
+LC_ALL=C grep -qF "The drive you choose will be wiped. B goes back." "$work/drive-colour-say.log" ||
+  fail "drive screen must carry the new wipe wording in the question's colour" "$(cat "$work/drive-colour-say.log")"
+if LC_ALL=C grep -F "will be wiped" "$work/drive-colour-say.log" | LC_ALL=C grep -qF "foreground 8"; then
+  fail "the wipe line must NOT be faint gray (--foreground 8) any more" "$(cat "$work/drive-colour-say.log")"
+fi
+pass "drive screen wipe line draws in the question's colour with the new wording"
+
+echo "--- wipe confirm: A starts the wipe, B returns to the list -----------------"
+
+# A on the confirm answers proceed: the label names the picked drive (the
+# same deck_form_disk_label the drive rows and S5 use, so the three can
+# never disagree about which drive is about to be wiped).
+printf '\n' >"$work/confirm-a-tty"
+: >"$work/confirm-a-say.log"
+confirm_a=""
+DECK_TEST_SAY_LOG="$work/confirm-a-say.log" \
+DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-one-row" \
+  deck_form_wipe_confirm confirm_a /dev/nvme0n1 "$work/confirm-a-tty" >"$work/confirm-a-stdout.log" ||
+  fail "A on the wipe confirm must answer, not fail"
+[[ $confirm_a == proceed ]] || fail "A on the wipe confirm must answer proceed" "got: $confirm_a"
+# The screen's chrome (the blank echo spacing line) may go to the terminal,
+# but the ANSWER must not: a caller capturing stdout would swallow chrome
+# into the answer ("\\nproceed" never equals "proceed" -- an infinite
+# drive-confirm loop). deck_form_yesno_screen's own stdout-capture rule.
+if LC_ALL=C grep -qF "proceed" "$work/confirm-a-stdout.log"; then
+  fail "the confirm's answer must travel via the result var, never stdout" "$(cat "$work/confirm-a-stdout.log")"
+fi
+LC_ALL=C grep -qF "Are you sure? This will wipe" "$work/confirm-a-say.log" ||
+  fail "the confirm must ask 'Are you sure? This will wipe ...'" "$(cat "$work/confirm-a-say.log")"
+LC_ALL=C grep -qF "Internal SSD (NVMe)" "$work/confirm-a-say.log" ||
+  fail "the confirm must name the picked drive with its disk label" "$(cat "$work/confirm-a-say.log")"
+LC_ALL=C grep -qF "Press A to wipe and install, B to go back" "$work/confirm-a-say.log" ||
+  fail "the confirm must name BOTH keys with their consequences" "$(cat "$work/confirm-a-say.log")"
+pass "A on the wipe confirm answers proceed with the drive's label"
+
+# B on the confirm answers back -- and starts NOTHING (the wipe starts only
+# on the A above; the greeter loops back to the drive list).
+printf '\033' >"$work/confirm-b-tty"
+confirm_b=""
+DECK_TEST_SAY_LOG="$work/confirm-a-say.log" \
+DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-one-row" \
+  deck_form_wipe_confirm confirm_b /dev/nvme0n1 "$work/confirm-b-tty" ||
+  fail "B on the wipe confirm must answer, not fail"
+[[ $confirm_b == back ]] || fail "B on the wipe confirm must answer back" "got: $confirm_b"
+pass "B on the wipe confirm answers back without starting anything"
+
+# The confirm reads with S0's own single-byte A/B reader -- never a gum
+# confirm whose highlighted default could turn A into the wrong answer on
+# the destructive question.
+confirm_body=$(declare -f deck_form_wipe_confirm)
+LC_ALL=C grep -qF 'deck_form_s0_wait_key' <<<"$confirm_body" ||
+  fail "the wipe confirm must read the answer with deck_form_s0_wait_key (S0's A/B reader)" "$confirm_body"
+if LC_ALL=C grep -qF 'gum confirm' <<<"$confirm_body"; then
+  fail "the wipe confirm must NOT use gum confirm -- a highlighted default could turn A into the wrong answer" "$confirm_body"
+fi
+pass "the wipe confirm uses S0's A/B key reader, never a gum confirm"
+
+echo "--- wipe confirm drains stale input: only a NEW press counts -------------"
+
+# SAFETY: the drive screen's gum choose is answered with A (Enter), and a
+# held/bouncing button or autorepeat can leave another Enter queued. The
+# confirm must drain it first, or the wipe confirms itself.
+#
+# Helper level, deterministic: a fifo pre-filled by a writer. Drain must
+# consume every byte, so a later timed read finds nothing instead of the
+# stale bytes. (The writer is reaped AFTER the drain: its open is what lets
+# the fifo open at all.)
+mkfifo "$work/drain-fifo"
+(printf 'ab\n') >"$work/drain-fifo" &
+drain_writer=$!
+deck_form_drain_tty "$work/drain-fifo"
+wait "$drain_writer"
+if IFS= read -r -t 0.2 -n1 _ <>"$work/drain-fifo" 2>/dev/null; then
+  fail "drain must consume pre-filled fifo bytes -- a later read still found one"
+fi
+pass "deck_form_drain_tty consumes every queued byte"
+# An idle fifo costs one poll timeout and nothing else.
+mkfifo "$work/drain-idle-fifo"
+(printf 'x') >"$work/drain-idle-fifo" &
+idle_writer=$!
+deck_form_drain_tty "$work/drain-idle-fifo" ||
+  fail "drain must always return 0 -- it is hygiene, never a gate"
+wait "$idle_writer"
+pass "drain always succeeds, even with input queued"
+# Regular files skip: they never consume (every open re-reads byte 1), so
+# draining them would loop to the bound -- and pending input is a tty
+# concept anyway. This is also what keeps every file-tty fixture in this
+# suite at full speed.
+printf 'stale\n' >"$work/drain-regular"
+deck_form_drain_tty "$work/drain-regular" ||
+  fail "drain of a regular file must return 0"
+[[ $(cat "$work/drain-regular") == "stale" ]] ||
+  fail "drain must not touch a regular file" "$(cat "$work/drain-regular")"
+pass "drain skips regular files (the unit fixtures), draining only ttys and fifos"
+
+# Confirm level, failing-first: a STALE B (the queued press from the drive
+# screen's own A) followed by a fresh A must answer proceed. Without the
+# drain, the wait_key reads the stale Esc and answers back -- the wipe
+# would confirm itself on the next stale Enter instead.
+mkfifo "$work/confirm-stale-fifo"
+(printf '\033'; sleep 1; printf '\n') >"$work/confirm-stale-fifo" &
+stale_writer=$!
+: >"$work/confirm-stale-say.log"
+confirm_stale=""
+DECK_TEST_SAY_LOG="$work/confirm-stale-say.log" \
+DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-one-row" \
+  deck_form_wipe_confirm confirm_stale /dev/nvme0n1 "$work/confirm-stale-fifo" ||
+  fail "confirm with a stale B then a fresh A must answer, not fail"
+wait "$stale_writer" 2>/dev/null || true
+[[ $confirm_stale == proceed ]] ||
+  fail "a STALE queued press must be drained -- only the NEW A counts" "got: $confirm_stale"
+pass "a stale queued press does not answer the confirm; the fresh A does"
+# And the drain is really wired into the confirm, not just present.
+confirm_body=$(declare -f deck_form_wipe_confirm)
+LC_ALL=C grep -qF 'deck_form_drain_tty' <<<"$confirm_body" ||
+  fail "deck_form_wipe_confirm must drain the tty before reading -- a held A would confirm the wipe by itself" "$confirm_body"
+pass "the wipe confirm drains before it reads"
+
+# Greeter-level: B on the confirm returns to the drive list (second row
+# picked), and only that run's A starts the wipe. The confirm is stubbed
+# with a queued answer file -- a regular-file tty re-reads byte 1 on every
+# open, so one fixture cannot answer S0, confirm-B and confirm-A in
+# sequence (on the real /dev/tty reads consume; only the fixture re-reads).
+# The confirm's own tty reading is proven directly above; this proves the
+# greeter's loop wiring around it.
+printf '/dev/nvme0n1 | Internal SSD (NVMe) 512G (512G)\n/dev/mmcblk0 | microSD card 512G (512G)\nNo\nNo\n' >"$work/confirm-b-q"
+printf 'back\nproceed\n' >"$work/confirm-b-answers"
+printf '\n' >"$work/confirm-b-tty"
+cat >"$work/bin-fakeearly/lsblk-confirm" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM,TRAN" ]]; then
+  printf '/dev/nvme0n1 disk 0 nvme\n/dev/mmcblk0 disk 1 mmc\n'
+  exit 0
+fi
+field=$3
+case "$field" in
+  SIZE) echo "512G" ;;
+  *) : ;;
+esac
+EOF
+chmod +x "$work/bin-fakeearly/lsblk-confirm"
+wipe_saved=$(declare -f deck_form_wipe_confirm)
+deck_form_wipe_confirm() {
+  local ans
+  ans=$(head -1 "$FAKE_CONFIRM_QUEUE" 2>/dev/null)
+  [[ -n $ans ]] || { printf -v "$1" '%s' "back"; return 0; }
+  tail -n +2 "$FAKE_CONFIRM_QUEUE" >"$FAKE_CONFIRM_QUEUE.tmp" && mv "$FAKE_CONFIRM_QUEUE.tmp" "$FAKE_CONFIRM_QUEUE"
+  printf -v "$1" '%s' "$ans"
+  return 0
+}
+rm -rf "$work/confirm-b-choices"
+: >"$work/confirm-b-early.log"
+STTY_MARKER="$work/stty-confirm-b.marker" PATH="$work/bin:$work/bin-fakegum:$PATH" \
+  DECK_S0_TTY="$work/confirm-b-tty" \
+  DECK_NET_SYSFS="$work/net-empty" \
+  DECK_IP_BIN=/bin/false \
+  DECK_NET_STATE_DIR="$work/s0-state" \
+  DECK_TEST_SAY_LOG="$work/confirm-b-say.log" \
+  DECK_LSBLK_BIN="$work/bin-fakeearly/lsblk-confirm" \
+  DECK_TEST_ROOT_DISK="" \
+  DECK_EARLY_BIN="$work/bin-fakeearly/omarchy-deck-early" \
+  DECK_EARLY_LOG="$work/confirm-b-early.log" \
+  DECK_DMI_PRODUCT="$work/dmi-oled/product_name" \
+  DECK_DMI_VENDOR="$work/dmi-oled/sys_vendor" \
+  DECK_CHOICES_DIR="$work/confirm-b-choices" \
+  FAKE_GUM_CHOOSE_QUEUE="$work/confirm-b-q" \
+  FAKE_GUM_LOG="$work/confirm-b-gum.log" \
+  FAKE_CONFIRM_QUEUE="$work/confirm-b-answers" \
+  greeter >/dev/null 2>&1 ||
+  fail "greeter with B-on-confirm then A must complete"
+eval "$wipe_saved"; unset wipe_saved
+LC_ALL=C grep -qxF "start /dev/mmcblk0" "$work/confirm-b-early.log" ||
+  fail "after B-on-confirm the SECOND drive pick is the one the wipe starts on" "$(cat "$work/confirm-b-early.log")"
+if LC_ALL=C grep -qF "start /dev/nvme0n1" "$work/confirm-b-early.log"; then
+  fail "B-on-confirm must NOT have started the wipe on the first pick" "$(cat "$work/confirm-b-early.log")"
+fi
+pass "B on the confirm returns to the drive list; the wipe starts only on the later A"
 
 # Early start takes the SELECTED disk (NVMe and SD both start).
 : >"$work/s0-early-sel-nvme.log"
@@ -1342,18 +1548,28 @@ eval "$deck_form_steam_progress_screen_saved"
 pass "greeter pins the console font, so S0 and S1 are drawn at the bigger size as well"
 
 # --- the rest of upstream's loop, kept rather than quietly dropped ---------
+#
+# ⚠️ ISOLATED FROM THE LOCKED CHOICES. Earlier greeter runs in this suite
+# set DECK_PREINSTALLS/DECK_GAMING globally, and B (reask) with answers
+# present now walks the read-only screens (gum) instead of re-asking the
+# picker. These tests prove the OLD branch -- no answers, straight re-ask
+# (the dry-run shape) -- so they clear both sources of answers first.
+# Without that, the re-ask below would reach for a real gum and hang.
 
 printf 'us:10\nlatam:0\n' >"$work/kb.queue"
 : >"$work/lk.log"
 keyboard=
+unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
+mkdir -p "$work/kb-nochoices"
 FAKE_KB_QUEUE="$work/kb.queue" DECK_FORM_TTY_OVERRIDE=/dev/tty1 \
+DECK_CHOICES_DIR="$work/kb-nochoices" \
 FAKE_LOADKEYS_LOG="$work/lk.log" PATH="$KEYS_PATH" keyboard_form true ||
   fail "Esc (OMARCHY_FORM_BACK) must re-ask the picker, then accept the second answer"
 [[ $keyboard == latam ]] ||
   fail "the SECOND pick must be the one that survives the re-ask loop" "keyboard='$keyboard'"
 [[ ! -s "$work/kb.queue" ]] ||
   fail "the picker must have been called twice (the queue should be drained)" "$(cat "$work/kb.queue")"
-pass "keyboard_form re-asks on Esc and keeps the answer from the successful pass"
+pass "keyboard_form re-asks on Esc and keeps the answer from the successful pass (no locked answers)"
 
 printf 'us:11\n' >"$work/kb.queue"
 : >"$work/lk.log"
@@ -3479,21 +3695,14 @@ out=$(deck_form_disk_list "$work/lsblk.none.disks" 2>&1) && fail "disk_list must
 LC_ALL=C grep -qF "no eligible install disk" <<<"$out" || fail "disk_list must SAY why it found nothing, not go silent" "got: $out"
 pass "disk_list fails loudly (nonzero, says why) rather than returning a silently empty list -- §4 S4's own verified-by row"
 
-echo "--- S4 picker auto-skip with exactly one eligible disk -----------------------"
-
-got=$(deck_form_disk_autoselect $'/dev/nvme0n1') || fail "autoselect must succeed with exactly one device"
-[[ $got == /dev/nvme0n1 ]] || fail "autoselect must print the sole device" "got: $got"
-pass "autoselect succeeds and prints the device when exactly one is eligible"
-
-if deck_form_disk_autoselect $'/dev/nvme0n1\n/dev/mmcblk0' >/dev/null; then
-  fail "autoselect must NOT auto-pick when more than one disk is eligible -- a picker is required"
+# deck_form_disk_autoselect is gone (2026-09-24 hardware revision): with
+# NVMe + microSD both eligible the user always chooses -- no autoselect,
+# even with one entry -- and disk_form reuses the confirmed disk instead
+# of resolving. A helper nothing calls is dead code, not coverage.
+if declare -f deck_form_disk_autoselect >/dev/null 2>&1; then
+  fail "deck_form_disk_autoselect must be deleted -- nothing calls it any more, and a tested helper with no callers is §6.4's false confidence"
 fi
-pass "autoselect declines (a picker is needed) when more than one disk is eligible"
-
-if deck_form_disk_autoselect "" >/dev/null; then
-  fail "autoselect must not succeed on an empty list"
-fi
-pass "autoselect declines on an empty list"
+pass "no auto-pick helper remains: every wipe target is chosen and confirmed"
 
 echo "--- S4 disk label formatting -------------------------------------------------"
 
@@ -3628,137 +3837,77 @@ pass "the dead-end menu offers only Reboot and Power off, never a shell"
 [[ $(deck_form_disk_dead_end_action_for "anything else") == redraw ]] || fail "an unrecognised choice must redraw, never guess"
 pass "dead-end action mapping: cancel/unrecognised redraw, never act; Reboot/Power off map correctly"
 
-echo "--- S4 disk_form: auto-skips the picker with exactly one eligible disk -------"
+echo "--- disk_form reuses the wiped disk and draws nothing -------------------------"
 
-unset disk 2>/dev/null || true
-# This fake lsblk answers BOTH the `-dpno NAME,TYPE,RM` query disk_form
-# itself makes (one eligible disk, one removable) AND the `-dno SIZE`-style
-# query deck_form_disk_label makes internally (via get_disk_info, not
-# exercised on the auto-select path, but kept consistent).
-cat >"$work/bin-fakelsblk/lsblk" <<'EOF'
-#!/usr/bin/env bash
-if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM,TRAN" ]]; then
-  printf '/dev/nvme0n1 disk 0 nvme\n/dev/sda disk 1 usb\n'
-  exit 0
-fi
-field=$3
-case "$field" in
-  SIZE) echo "512G" ;;
-  *) : ;;
-esac
-EOF
+# 2026-09-24 hardware feedback: with NVMe + microSD the old disk_form drew
+# a SECOND picker after the account screens, although the drive screen had
+# already chosen. The drive was chosen on the drive screen and confirmed,
+# and the early stage is already erasing it -- so when the global `disk`
+# is set, disk_form reuses it and draws NOTHING (no step header, no
+# picker, no dead end).
+disk=/dev/mmcblk0
 : >"$work/gum.log"
-DECK_TEST_ROOT_DISK="" \
-DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" \
+: >"$work/reuse-say.log"
+DECK_TEST_SAY_LOG="$work/reuse-say.log" \
 FAKE_GUM_LOG="$work/gum.log" \
-PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
-  disk_form
-[[ $disk == /dev/nvme0n1 ]] || fail "disk_form must auto-select the sole eligible disk without showing a picker" "got: ${disk:-unset}"
+PATH="$work/bin-fakegum:$PATH" \
+  disk_form ||
+  fail "disk_form must succeed when the early stage already set 'disk'"
+[[ $disk == /dev/mmcblk0 ]] || fail "disk_form must KEEP the early stage's disk, not replace it" "got: ${disk:-unset}"
 if LC_ALL=C grep -qF "choose" "$work/gum.log"; then
-  fail "disk_form must not have invoked the picker (gum choose) when only one disk was eligible" "$(cat "$work/gum.log")"
+  fail "disk_form must not draw a picker when reusing the wiped disk -- it would re-offer a choice contradicting the running wipe" "$(cat "$work/gum.log")"
 fi
-pass "disk_form auto-selects the sole eligible disk, skipping the picker entirely"
-
-echo "--- S4 disk_form: shows a picker with more than one eligible disk ------------"
-
-cat >"$work/bin-fakelsblk/lsblk" <<'EOF'
-#!/usr/bin/env bash
-if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM,TRAN" ]]; then
-  printf '/dev/nvme0n1 disk 0 nvme\n/dev/nvme1n1 disk 0 nvme\n'
-  exit 0
+if LC_ALL=C grep -qF "confirm" "$work/gum.log"; then
+  fail "disk_form must not draw a confirm when reusing the wiped disk" "$(cat "$work/gum.log")"
 fi
-field=$3
-case "$field" in
-  SIZE) echo "512G" ;;
-  *) : ;;
-esac
-EOF
+[[ ! -s "$work/reuse-say.log" ]] ||
+  fail "disk_form must draw NOTHING when reusing the wiped disk (no step header either)" "$(cat "$work/reuse-say.log")"
+pass "disk_form reuses the early stage's disk and draws nothing"
+
+echo "--- disk_form with no disk aborts loudly, never picks one --------------------"
+
+# If `disk` is unset here, that is a bug in the flow (every path that
+# reaches disk_form ran the drive screen first). Fail loudly via abort --
+# never silently pick one. (`abort` is the non-fatal test stub here, so
+# the assertion is on its return, not on a dead process.)
 unset disk 2>/dev/null || true
 : >"$work/gum.log"
-DECK_TEST_ROOT_DISK="" \
-DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" \
+set +e
+DECK_TEST_SAY_LOG="$work/reuse-say.log" \
 FAKE_GUM_LOG="$work/gum.log" \
-FAKE_GUM_CHOOSE_OUTPUT="/dev/nvme1n1 (512G) - 512G" \
-PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
-  disk_form
-[[ $disk == /dev/nvme1n1 ]] || fail "disk_form must set 'disk' to whatever the (faked) picker returned" "got: ${disk:-unset}"
-LC_ALL=C grep -qF "choose" "$work/gum.log" || fail "disk_form must have actually invoked a picker when two disks were eligible" "$(cat "$work/gum.log")"
-pass "disk_form shows a picker (and honours its answer) when more than one disk is eligible"
-
-echo "--- S4 disk_form: zero eligible disks -> dead-end, NEVER falls through to a picker ---"
-
-# ⚠️ MUTATION-FOUND GAP, closed: neither test above ever drives disk_form
-# with ZERO eligible disks. A mutation that drops the
-# `if ! eligible=$(deck_form_disk_list ...); then ... fi` guard entirely
-# (falling through with eligible="" instead of routing to the dead-end
-# screen) survived every earlier assertion, because none of them exercise
-# this path at all -- it would silently show an EMPTY gum choose picker
-# instead of the "Reboot / Power off, never a shell" screen §4 S4 requires.
-#
-# The real dead-end screen (deck_form_disk_dead_end) is a `while true`
-# loop -- same [V]-only precedent as S8's failure_menu, not driven live
-# here. Shadowed with a logging stub so THIS test proves disk_form CALLS
-# it, without needing to survive dead_end's own infinite loop.
-: >"$work/dead-end.log"
-deck_form_disk_dead_end() { printf 'DEAD_END_CALLED\n' >>"$work/dead-end.log"; return 0; }
-
-cat >"$work/bin-fakelsblk/lsblk" <<'EOF'
-#!/usr/bin/env bash
-if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM,TRAN" ]]; then
-  printf '/dev/sda disk 1 usb\n'   # USB removable -- nothing eligible
-  exit 0
-fi
-exit 0
-EOF
-unset disk 2>/dev/null || true
-: >"$work/gum.log"
-DECK_TEST_ROOT_DISK="" \
-DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" \
-FAKE_GUM_LOG="$work/gum.log" \
-PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
-  disk_form || true
-LC_ALL=C grep -qF "DEAD_END_CALLED" "$work/dead-end.log" ||
-  fail "disk_form must call the dead-end screen when no disk is eligible"
+PATH="$work/bin-fakegum:$PATH" \
+  disk_form >/dev/null 2>"$work/nodisk-err.log"
+nodisk_rc=$?
+set -e
+[[ $nodisk_rc -ne 0 ]] ||
+  fail "disk_form with no disk selected must FAIL, not return 0"
+LC_ALL=C grep -qF "ABORT" "$work/nodisk-err.log" ||
+  fail "disk_form with no disk must abort LOUDLY (no silent pick)" "$(cat "$work/nodisk-err.log")"
 if LC_ALL=C grep -qF "choose" "$work/gum.log"; then
-  fail "disk_form must NEVER show the picker when no disk is eligible -- it must reach the dead end, not silently fall through to an empty gum choose"
+  fail "disk_form with no disk must NEVER fall through to a picker -- it must abort instead of guessing" "$(cat "$work/gum.log")"
 fi
-[[ -z ${disk:-} ]] || fail "disk_form must not set 'disk' to anything when no disk was eligible" "got: $disk"
-pass "disk_form calls the dead-end screen (never falls through to an empty picker) when no disk is eligible"
+[[ -z ${disk:-} ]] || fail "disk_form must not set 'disk' to anything when it aborts" "got: $disk"
+pass "disk_form with no disk aborts loudly and never silently picks one"
 
-echo "--- S4 disk_form: the boot/install medium is actually excluded end-to-end ----"
-
-# ⚠️ MUTATION-FOUND GAP, closed: every earlier disk_form test above uses
-# DECK_TEST_ROOT_DISK="" (the get_root_disk stub returns nothing), so a
-# mutation that stopped wiring exclude_disk into deck_form_disk_list at all
-# (e.g. `exclude_disk=""` hardcoded, ignoring get_root_disk's answer)
-# survived every one of them -- they never gave it a real value to drop.
-# Two disks are eligible by RM alone; get_root_disk is stubbed to name ONE
-# of them as the boot medium, so only exclusion (not the RM filter, already
-# proven above) can be what narrows it down to a single auto-select.
-cat >"$work/bin-fakelsblk/lsblk" <<'EOF'
-#!/usr/bin/env bash
-if [[ "$1" == "-dpno" && "$2" == "NAME,TYPE,RM,TRAN" ]]; then
-  printf '/dev/nvme0n1 disk 0 nvme\n/dev/nvme1n1 disk 0 nvme\n'
-  exit 0
+# The deferred-provisioning loop and select_installation cannot re-offer a
+# drive either, by construction: confirm_disk_overwrite draws nothing and
+# returns 0 (proven above), and requires_full_disk_install suppresses the
+# install-mode picker (proven below), so select_installation's only
+# reachable branch confirms without asking and its disk_form fallbacks are
+# unreachable. Asserted on the bodies, so a future edit that re-adds a
+# prompt fails here instead of on hardware.
+select_body=$(declare -f select_installation 2>/dev/null || true)
+if [[ -n $select_body ]]; then
+  fail "select_installation must NOT be defined in deck-form.sh -- upstream's own version (with our silent confirm + suppressed mode picker) is the one that runs"
 fi
-field=$3
-case "$field" in
-  SIZE) echo "512G" ;;
-  *) : ;;
-esac
-EOF
-unset disk 2>/dev/null || true
-: >"$work/gum.log"
-DECK_TEST_ROOT_DISK="/dev/nvme0n1" \
-DECK_LSBLK_BIN="$work/bin-fakelsblk/lsblk" \
-FAKE_GUM_LOG="$work/gum.log" \
-PATH="$work/bin-fakelsblk:$work/bin-fakegum:$PATH" \
-  disk_form
-[[ $disk == /dev/nvme1n1 ]] || fail "disk_form must exclude the boot/install medium (get_root_disk's answer), leaving only the other disk to auto-select" "got: ${disk:-unset}"
-if LC_ALL=C grep -qF "choose" "$work/gum.log"; then
-  fail "with the boot medium excluded, only ONE disk should remain -- the picker must not have been shown"
+disk_body=$(declare -f disk_form)
+if LC_ALL=C grep -qF 'gum choose' <<<"$disk_body"; then
+  fail "disk_form must contain no picker any more -- the disk is already decided when it runs" "$disk_body"
 fi
-pass "disk_form actually excludes the boot/install medium (not just deck_form_disk_list in isolation) -- both eligible disks pass RM, only exclusion narrows it to one"
+if LC_ALL=C grep -qF 'deck_form_eligible_disks' <<<"$disk_body"; then
+  fail "disk_form must not re-resolve eligible disks -- it reuses the wiped one" "$disk_body"
+fi
+pass "no path through select_installation or the deferred loop can re-offer a drive"
 
 # ===========================================================================
 # S5: Summary
@@ -3889,7 +4038,9 @@ echo "--- S5 failed early: failure menu instead of Install ---------------------
 # (Reboot / Power off, never Install) instead of the summary gate. The real
 # menu loops forever, so it is stubbed with a logging stand-in -- the same
 # technique as the disk dead-end case -- and the assertion is that it is
-# CALLED and Install is never offered.
+# CALLED and Install is never offered. Saved and restored (not unset: later
+# tests assert on the real menu's body).
+early_failed_menu_saved=$(declare -f deck_form_early_failed_menu)
 deck_form_early_failed_menu() { printf 'EARLY_FAILED_MENU_CALLED\n' >>"$work/s5-failed-menu.log"; return 0; }
 : >"$work/s5-failed-menu.log"
 : >"$work/gum.log"
@@ -3912,8 +4063,72 @@ LC_ALL=C grep -qF "EARLY_FAILED_MENU_CALLED" "$work/s5-failed-menu.log" ||
 if LC_ALL=C grep -qF "confirm" "$work/gum.log"; then
   fail "when the early stage failed, S5 must NEVER offer Install -- the confirm gate must not be drawn" "$(cat "$work/gum.log")"
 fi
-unset -f deck_form_early_failed_menu
+eval "$early_failed_menu_saved"; unset early_failed_menu_saved
 pass "S5 with a failed early stage shows the failure menu and never offers Install"
+
+echo "--- failure menu shows the early log tail, never just a path --------------"
+
+# 2026-09-24 hardware feedback: the old screen printed only
+# "see /var/log/omarchy-deck-early.log" -- a file in the live ISO's RAM
+# that no controller user can open, destroyed by the power-off the same
+# screen offers. The menu now prints the last lines above the Reboot /
+# Power off rows, ANSI-stripped, in the error colour.
+printf 'line %02d\n' $(seq 1 20) >"$work/early-tail.log"
+printf '\033[31mred failure\033[0m\n' >>"$work/early-tail.log"
+tail_out=$(DECK_EARLY_LOG_FILE="$work/early-tail.log" deck_form_early_log_tail) ||
+  fail "the tail helper must succeed when the log exists"
+[[ $(printf '%s\n' "$tail_out" | LC_ALL=C command grep -c .) -eq "$DECK_EARLY_LOG_TAIL_LINES" ]] ||
+  fail "the tail helper must print exactly DECK_EARLY_LOG_TAIL_LINES ($DECK_EARLY_LOG_TAIL_LINES) lines" "$tail_out"
+LC_ALL=C grep -qF "line 10" <<<"$tail_out" ||
+  fail "with 21 lines logged, the 12-line tail must start at line 10" "$tail_out"
+if LC_ALL=C grep -qF "line 09" <<<"$tail_out"; then
+  fail "the tail must NOT include lines older than the last $DECK_EARLY_LOG_TAIL_LINES" "$tail_out"
+fi
+if printf '%s' "$tail_out" | LC_ALL=C command grep -qF $'\033'; then
+  fail "the tail must be ANSI-stripped -- a bare console prints escapes literally" "$tail_out"
+fi
+LC_ALL=C grep -qF "red failure" <<<"$tail_out" ||
+  fail "stripping must keep the text, only the escapes go" "$tail_out"
+pass "the log tail prints the last $DECK_EARLY_LOG_TAIL_LINES lines, ANSI-stripped"
+
+# Missing or unreadable log: the helper fails, and the notice says so
+# rather than printing nothing.
+if DECK_EARLY_LOG_FILE="$work/does-not-exist.log" deck_form_early_log_tail >/dev/null 2>&1; then
+  fail "the tail helper must FAIL when the log is missing -- the caller says so instead"
+fi
+: >"$work/empty-early.log"
+if DECK_EARLY_LOG_FILE="$work/empty-early.log" deck_form_early_log_tail >/dev/null 2>&1; then
+  fail "the tail helper must FAIL when the log is empty -- printing nothing is the old bug"
+fi
+: >"$work/missing-say.log"
+DECK_TEST_SAY_LOG="$work/missing-say.log" \
+DECK_EARLY_LOG_FILE="$work/does-not-exist.log" \
+  deck_form_early_failed_log_notice
+LC_ALL=C grep -qF "could not be read" "$work/missing-say.log" ||
+  fail "with no log, the notice must SAY the log could not be read" "$(cat "$work/missing-say.log")"
+: >"$work/tail-say.log"
+DECK_TEST_SAY_LOG="$work/tail-say.log" \
+DECK_EARLY_LOG_FILE="$work/early-tail.log" \
+  deck_form_early_failed_log_notice
+LC_ALL=C grep -qF "red failure" "$work/tail-say.log" ||
+  fail "with a log, the notice must print its tail" "$(cat "$work/tail-say.log")"
+if LC_ALL=C grep -F "red failure" "$work/tail-say.log" | LC_ALL=C grep -qvF "foreground 1"; then
+  fail "the tail must print in the error colour, above the menu" "$(cat "$work/tail-say.log")"
+fi
+pass "the failure notice prints the tail in the error colour, or says the log is missing"
+
+# The default log path is the early stage's own log, not an invention here.
+[[ $DECK_EARLY_LOG_FILE_DEFAULT == /var/log/omarchy-deck-early.log ]] ||
+  fail "DECK_EARLY_LOG_FILE_DEFAULT must be omarchy-deck-early's own log path" "got: $DECK_EARLY_LOG_FILE_DEFAULT"
+early_log_path=$(LC_ALL=C grep -E '^readonly DECK_EARLY_LOG=' "$REPO_ROOT/iso/overlay/configs/airootfs/usr/local/bin/omarchy-deck-early" | cut -d= -f2)
+[[ $early_log_path == "$DECK_EARLY_LOG_FILE_DEFAULT" ]] ||
+  fail "the failure menu must read the log omarchy-deck-early actually writes ($early_log_path), not a second path" "got: $DECK_EARLY_LOG_FILE_DEFAULT"
+# And the real menu calls the notice -- otherwise the helper above is dead
+# code and the screen still shows only a path.
+failed_menu_body=$(declare -f deck_form_early_failed_menu)
+LC_ALL=C grep -qF 'deck_form_early_failed_log_notice' <<<"$failed_menu_body" ||
+  fail "deck_form_early_failed_menu must call deck_form_early_failed_log_notice -- the tail must actually reach the screen" "$failed_menu_body"
+pass "the failure menu reads the stage's own log path and prints it"
 
 echo "--- S5 Go back re-runs identity only, never the disk ---------------------------"
 
@@ -3987,6 +4202,21 @@ FAKE_GUM_CHOOSE_QUEUE="$work/yn-yes.q" FAKE_GUM_LOG="$work/yn.log" PATH="$work/b
 printf 'No\n' >"$work/yn-no.q"
 FAKE_GUM_CHOOSE_QUEUE="$work/yn-no.q" FAKE_GUM_LOG="$work/yn.log" PATH="$work/bin-fakegum:$PATH" deck_form_gaming_screen yn_ans
 [[ $yn_ans == no ]] || fail "No row must answer no" "got: $yn_ans"
+
+# 2026-09-24 hardware feedback: the cursor starts on Yes for BOTH
+# questions. Asserted on what the screens ASK gum for (--selected), not on
+# which row a queue happened to pick.
+: >"$work/yn-default.log"
+printf 'Yes\n' >"$work/yn-def-pre.q"
+FAKE_GUM_CHOOSE_QUEUE="$work/yn-def-pre.q" FAKE_GUM_LOG="$work/yn-default.log" PATH="$work/bin-fakegum:$PATH" deck_form_preinstalls_screen yn_ans >/dev/null
+printf 'Yes\n' >"$work/yn-def-game.q"
+FAKE_GUM_CHOOSE_QUEUE="$work/yn-def-game.q" FAKE_GUM_LOG="$work/yn-default.log" PATH="$work/bin-fakegum:$PATH" deck_form_gaming_screen yn_ans >/dev/null
+[[ $(LC_ALL=C command grep -cF -- "--selected Yes" "$work/yn-default.log") -eq 2 ]] ||
+  fail "BOTH choice screens must ask gum with --selected Yes (cursor starts on Yes)" "$(cat "$work/yn-default.log")"
+if LC_ALL=C grep -qF -- "--selected No" "$work/yn-default.log"; then
+  fail "neither choice screen may default to No any more" "$(cat "$work/yn-default.log")"
+fi
+pass "pre-installs and Install Steam? both default to Yes"
 printf '<CANCEL>\n' >"$work/yn-back.q"
 FAKE_GUM_CHOOSE_QUEUE="$work/yn-back.q" FAKE_GUM_LOG="$work/yn.log" PATH="$work/bin-fakegum:$PATH" deck_form_preinstalls_screen yn_ans
 [[ $yn_ans == back ]] || fail "B/Esc on a choice screen must go back, never guess" "got: $yn_ans"
@@ -4045,13 +4275,10 @@ for combo in "Yes Yes" "Yes No" "No Yes" "No No"; do
 done
 pass "four combos lock the right yes/no files + locked marker, globals mirror files"
 
-# B-back: gaming back re-asks preinstalls; preinstalls back reaches the
-# power menu (stubbed, logging) and aborts.
+# B-back: gaming back re-asks preinstalls; re-answers lock the new values.
 printf 'Yes\n<CANCEL>\nNo\nNo\n' >"$work/choice-back.q"
 rm -rf "$work/choice-backdir"
 unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
-cancel_saved=$(declare -f deck_form_s0_cancel_menu)
-deck_form_s0_cancel_menu() { printf 'CANCEL_MENU\n' >>"$work/choice-back.log"; return 0; }
 : >"$work/choice-back.log"
 set +e
 DECK_CHOICES_DIR="$work/choice-backdir" \
@@ -4064,8 +4291,157 @@ set -e
 [[ $back_rc -eq 0 ]] || fail "gaming B-back then re-answer must still complete" "rc=$back_rc"
 [[ $(cat "$work/choice-backdir/preinstalls") == no ]] || fail "re-asked preinstalls must hold the NEW answer"
 [[ $(cat "$work/choice-backdir/gaming") == no ]] || fail "gaming must hold the new answer"
-eval "$cancel_saved"; unset cancel_saved
 pass "gaming B goes back to preinstalls; re-answers lock the new values"
+
+# B on pre-installs -- the first screen AFTER the wipe started -- is a
+# no-op redraw (2026-09-24 hardware feedback). It must NEVER call the
+# cancel menu: "The drive was not touched." is FALSE once the wipe has
+# begun, and B must never return to the confirm, the drive list, or S0.
+printf '<CANCEL>\nYes\nNo\n' >"$work/choice-pre-back.q"
+rm -rf "$work/choice-predir"
+unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
+cancel_saved=$(declare -f deck_form_s0_cancel_menu)
+deck_form_s0_cancel_menu() { printf 'CANCEL_MENU\n' >>"$work/choice-pre-back.log"; return 0; }
+: >"$work/choice-pre-back.log"
+set +e
+DECK_CHOICES_DIR="$work/choice-predir" \
+FAKE_GUM_CHOOSE_QUEUE="$work/choice-pre-back.q" \
+FAKE_GUM_LOG="$work/choice-pre-back.log" \
+PATH="$work/bin-fakegum:$PATH" \
+  deck_form_run_choice_screens >/dev/null 2>&1
+pre_back_rc=$?
+set -e
+eval "$cancel_saved"; unset cancel_saved
+[[ $pre_back_rc -eq 0 ]] || fail "B on pre-installs then re-answer must still complete (redraw, not cancel)" "rc=$pre_back_rc"
+if LC_ALL=C grep -qF "CANCEL_MENU" "$work/choice-pre-back.log"; then
+  fail "B on pre-installs must NOT call the cancel menu -- the drive WAS touched (the wipe started)" "$(cat "$work/choice-pre-back.log")"
+fi
+[[ $(cat "$work/choice-predir/preinstalls") == yes ]] || fail "redrawn pre-installs must hold the NEW answer"
+[[ $(cat "$work/choice-predir/gaming") == no ]] || fail "gaming must hold its answer"
+pass "B on pre-installs redraws the same screen; the cancel menu is never offered"
+
+echo "--- read-only Deck questions from the keyboard screen ------------------------"
+
+# deck_form_choice_answer: globals first, files second, failure when unset.
+unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
+rm -rf "$work/ro-choices"
+mkdir -p "$work/ro-choices"
+DECK_CHOICES_DIR="$work/ro-choices" deck_form_choice_write gaming no ||
+  fail "setup: seed gaming=no"
+DECK_PREINSTALLS=yes DECK_CHOICES_DIR="$work/ro-choices" \
+  deck_form_choice_answer preinstalls >/dev/null ||
+  fail "a set global must answer even when the file disagrees"
+[[ $(DECK_PREINSTALLS=yes DECK_CHOICES_DIR="$work/ro-choices" deck_form_choice_answer preinstalls) == yes ]] ||
+  fail "the global (which mirrors the file) wins over the file"
+[[ $(DECK_CHOICES_DIR="$work/ro-choices" deck_form_choice_answer gaming) == no ]] ||
+  fail "with no global, the persisted file answers"
+if DECK_CHOICES_DIR="$work/ro-choices" deck_form_choice_answer preinstalls >/dev/null 2>&1; then
+  fail "with neither global nor file, the answer must be missing (not a guessed yes/no)"
+fi
+export -n DECK_CHOICES_DIR 2>/dev/null || true
+pass "choice_answer reads global-then-file and fails when unset"
+
+# The read-only screen shows the locked answer and cannot change it: A on
+# Continue moves forward, B/Esc moves back, anything else redraws.
+printf 'Continue\n' >"$work/ro-fwd.q"
+: >"$work/ro-fwd-say.log"
+ro_nav=""
+DECK_TEST_SAY_LOG="$work/ro-fwd-say.log" \
+FAKE_GUM_CHOOSE_QUEUE="$work/ro-fwd.q" FAKE_GUM_LOG="$work/ro-fwd-gum.log" \
+PATH="$work/bin-fakegum:$PATH" \
+  deck_form_readonly_screen ro_nav "Install Steam?" no ||
+  fail "A on the read-only screen must move forward, not fail"
+[[ $ro_nav == forward ]] || fail "A on Continue must answer forward" "got: $ro_nav"
+LC_ALL=C grep -qF "Install Steam?" "$work/ro-fwd-say.log" ||
+  fail "the read-only screen must carry the REAL screen's title" "$(cat "$work/ro-fwd-say.log")"
+LC_ALL=C grep -qF "can't be changed now" "$work/ro-fwd-say.log" ||
+  fail "the read-only screen must say the answer is already being installed" "$(cat "$work/ro-fwd-say.log")"
+LC_ALL=C grep -qF "Your answer: No" "$work/ro-fwd-say.log" ||
+  fail "the read-only screen must show the chosen answer capitalised like the real rows (Yes/No)" "$(cat "$work/ro-fwd-say.log")"
+LC_ALL=C grep -qF "Press A to continue, B to go back" "$work/ro-fwd-say.log" ||
+  fail "the read-only screen must say A continues" "$(cat "$work/ro-fwd-say.log")"
+printf '<CANCEL>\n' >"$work/ro-back.q"
+DECK_TEST_SAY_LOG="$work/ro-fwd-say.log" \
+FAKE_GUM_CHOOSE_QUEUE="$work/ro-back.q" FAKE_GUM_LOG="$work/ro-fwd-gum.log" \
+PATH="$work/bin-fakegum:$PATH" \
+  deck_form_readonly_screen ro_nav "Install Omarchy pre-installs?" yes ||
+  fail "B on the read-only screen must go back, not fail"
+[[ $ro_nav == back ]] || fail "B/Esc must answer back" "got: $ro_nav"
+pass "read-only screen: same title, locked answer shown, A forwards, B backs"
+
+# The walk: one screen per B from the keyboard layout -- Install Steam?
+# first, then pre-installs; B on pre-installs stays there; A moves
+# forward; A on the last returns to the keyboard screen.
+printf '<CANCEL>\n<CANCEL>\nContinue\nContinue\n' >"$work/ro-walk.q"
+: >"$work/ro-walk-say.log"
+DECK_PREINSTALLS=yes DECK_GAMING=no \
+DECK_TEST_SAY_LOG="$work/ro-walk-say.log" \
+FAKE_GUM_CHOOSE_QUEUE="$work/ro-walk.q" FAKE_GUM_LOG="$work/ro-walk-gum.log" \
+PATH="$work/bin-fakegum:$PATH" \
+  deck_form_readonly_choices ||
+  fail "the read-only walk must return 0 when A leaves the last screen"
+unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
+steam_pos=$(LC_ALL=C command grep -nF "Install Steam?" "$work/ro-walk-say.log" | head -1 | cut -d: -f1)
+pre_pos=$(LC_ALL=C command grep -nF "Install Omarchy pre-installs?" "$work/ro-walk-say.log" | head -1 | cut -d: -f1)
+[[ -n $steam_pos && -n $pre_pos ]] ||
+  fail "the walk must show BOTH read-only screens" "$(cat "$work/ro-walk-say.log")"
+[[ $steam_pos -lt $pre_pos ]] ||
+  fail "the walk must show Install Steam? BEFORE pre-installs (one screen per B, backwards)" "$(cat "$work/ro-walk-say.log")"
+LC_ALL=C grep -qF "Your answer: No" "$work/ro-walk-say.log" ||
+  fail "the Steam screen must show the locked gaming answer capitalised" "$(cat "$work/ro-walk-say.log")"
+LC_ALL=C grep -qF "Your answer: Yes" "$work/ro-walk-say.log" ||
+  fail "the pre-installs screen must show the locked preinstalls answer capitalised" "$(cat "$work/ro-walk-say.log")"
+pass "the read-only walk goes Steam? -> pre-installs per B, shows both locked answers, and returns on A"
+
+# keyboard_form B (reask): with locked answers it walks the read-only
+# screens and comes back to the picker; without answers it re-asks
+# directly (the dry-run shape, where greeter never ran).
+printf 'us:10\nlatam:0\n' >"$work/kb-ro.queue"
+: >"$work/kb-ro-say.log"
+printf 'Continue\n' >"$work/kb-ro-choose.q"
+: >"$work/kb-ro-lk.log"
+keyboard=
+DECK_PREINSTALLS=yes DECK_GAMING=no \
+FAKE_KB_QUEUE="$work/kb-ro.queue" DECK_FORM_TTY_OVERRIDE=/dev/tty1 \
+DECK_TEST_SAY_LOG="$work/kb-ro-say.log" \
+FAKE_GUM_CHOOSE_QUEUE="$work/kb-ro-choose.q" FAKE_GUM_LOG="$work/kb-ro-gum.log" \
+FAKE_LOADKEYS_LOG="$work/kb-ro-lk.log" PATH="$work/bin-fakegum:$KEYS_PATH" \
+  keyboard_form true ||
+  fail "keyboard_form B with locked answers must walk read-only and return to the picker"
+unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
+[[ $keyboard == latam ]] ||
+  fail "after the read-only walk the picker's second answer must survive" "keyboard='$keyboard'"
+[[ ! -s "$work/kb-ro.queue" ]] ||
+  fail "the picker must have been reached twice (B then accept)" "$(cat "$work/kb-ro.queue")"
+LC_ALL=C grep -qF "Install Steam?" "$work/kb-ro-say.log" ||
+  fail "B on the keyboard screen must reach the read-only Deck questions" "$(cat "$work/kb-ro-say.log")"
+pass "B on the keyboard screen walks the read-only screens and returns to the picker"
+
+# A failed read-only walk warns LOUDLY and falls back to re-asking the
+# picker -- never `|| true` (CLAUDE.md: never silently swallow a failure).
+# The walk is stubbed to fail; the queue then proves the picker was
+# re-asked and kept its answer, and stderr proves the failure was said.
+ro_walk_saved=$(declare -f deck_form_readonly_choices)
+deck_form_readonly_choices() { return 1; }
+printf 'us:10\nlatam:0\n' >"$work/kb-ro-fail.queue"
+: >"$work/kb-ro-fail-say.log"
+: >"$work/kb-ro-fail-lk.log"
+keyboard=
+DECK_PREINSTALLS=yes DECK_GAMING=no \
+FAKE_KB_QUEUE="$work/kb-ro-fail.queue" DECK_FORM_TTY_OVERRIDE=/dev/tty1 \
+DECK_TEST_SAY_LOG="$work/kb-ro-fail-say.log" \
+FAKE_LOADKEYS_LOG="$work/kb-ro-fail-lk.log" PATH="$KEYS_PATH" \
+  keyboard_form true 2>"$work/kb-ro-fail-err.log" ||
+  fail "a failed read-only walk must fall back to re-asking, not abort"
+eval "$ro_walk_saved"; unset ro_walk_saved
+unset DECK_PREINSTALLS DECK_GAMING 2>/dev/null || true
+[[ $keyboard == latam ]] ||
+  fail "after a failed walk the picker's second answer must survive" "keyboard='$keyboard'"
+[[ ! -s "$work/kb-ro-fail.queue" ]] ||
+  fail "the picker must have been reached twice (failed walk, then accept)" "$(cat "$work/kb-ro-fail.queue")"
+LC_ALL=C grep -qF "read-only review" "$work/kb-ro-fail-err.log" ||
+  fail "a failed walk must WARN loudly instead of swallowing the failure" "$(cat "$work/kb-ro-fail-err.log")"
+pass "a failed read-only walk warns and re-asks the picker"
 echo "--- Wi-Fi gaming gate: list back row, B-to-gaming reversal ------------------"
 
 # Row mapping: the back row maps to gaming-back (new action), and plain
