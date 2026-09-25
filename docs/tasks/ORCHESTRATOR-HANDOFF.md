@@ -69,7 +69,7 @@ review what they return, commit and push, and keep this file current.
 | Build/QEMU results per ISO | `docs/findings/FAST-INSTALL-RESULTS.md` (## v3, v4, v5 …) |
 | ISOs | `~/.cache/omarchy-deck/release-2026.09.24-vN/…-vN-x86_64.iso` + `SHA256SUMS` |
 | Previous ISO | v5: `~/.cache/omarchy-deck/release-2026.09.24-v5/pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-v5-x86_64.iso`, sha256 `1cf7411e43162fb26c8a182a2bfb85b0e1f9fcc7c41427fbc5b0a4c688c06753`, QEMU no/no + no/yes PASS |
-| Latest ISO | **v6** (on the stick: NO — pending operator plugging it in): `~/.cache/omarchy-deck/release-2026.09.24-v6/pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-v6-x86_64.iso`, sha256 `b94ea1188cbbc26f7e10961dc57d98578adf8a8083ad62c8ffcc20ffa1fd092b`, QEMU no/no + no/yes PASS (cee3b15) |
+| Latest ISO | **v6** (ON THE STICK since 2026-09-24 18:29, readback-verified; v5 deleted): `~/.cache/omarchy-deck/release-2026.09.24-v6/pizzarchy-omarchy-4.0.4-fast-install-2026-09-24-v6-x86_64.iso`, sha256 `b94ea1188cbbc26f7e10961dc57d98578adf8a8083ad62c8ffcc20ffa1fd092b`, QEMU no/no + no/yes PASS (cee3b15) |
 | Build + QEMU brief template | `docs/tasks/agent-briefs/v5-blocker-fix-build.md` §4 |
 | Ventoy USB stick | label `Ventoy`, mounts at `/run/media/villenull/Ventoy` (exFAT, user-writable, no password) |
 
@@ -99,7 +99,7 @@ Item numbers match the feedback file.
 
 ## 4. Next steps, in order
 
-0. **NOW: put v6 on the stick** when the operator plugs it in (routine in step 1 below; delete v5 after the v6 copy verifies).
+0. ✅ DONE 18:29 — v6 on the stick, verified, v5 deleted. NOW: operator tests v6 on the Deck (step 4); log every result/request in the feedback file.
 
 1. ✅ DONE 2026-09-24 16:54 (v5 verified on stick, all older ISOs deleted). Routine for the next ISO — **ISO onto the USB stick** (as soon as the operator plugs it in; check
    `lsblk -o NAME,LABEL,MOUNTPOINTS | grep -i ventoy`): copy to
