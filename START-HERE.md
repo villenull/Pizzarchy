@@ -1,15 +1,21 @@
-# Orchestrator handoff — READ THIS FIRST if you are taking over (2026-09-24)
+# START HERE — handoff (updated 2026-09-24, evening)
+
+If you are picking up this project (human, or an orchestrator agent such as Meta
+Muse 1.3), read this file first. It is the live state: rules, how to run
+sub-agents, what is done, and what is next. The long project history and
+build/test setup live in `docs/START-HERE.md`; read its top HANDOFF block after
+this one.
 
 You are the **orchestrator** for the Omarchy Deck installer (Pizzarchy). The
 operator is testing the installer live on their Steam Deck OLED and sends
 feedback. Your job: turn feedback into decisions, hand ALL work to sub-agents,
-review what they return, commit and push, and keep this file current.
+review what they return, commit and push, and keep this file (repo-root `START-HERE.md`) current.
 
 ## 0. Rules (operator's instructions — do not deviate)
 
 1. **You never do the work yourself.** No code, no tests, no builds. You write a
    brief, launch a sub-agent, review its report, verify, commit/push, update the
-   status table below. Trivial reads needed to write a brief or check a result
+   status table below (§3). Trivial reads needed to write a brief or check a result
    are fine.
 2. **Model = whatever the operator names.** Voice dictation garbles names
    ("MetaMuse", "Luna 6"), so resolve against the live list first:

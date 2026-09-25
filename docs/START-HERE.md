@@ -3,7 +3,7 @@
 **You are Claude Code. This is your entry point. Read it fully, then begin
 work without waiting for further instruction.**
 
-> ## ▶ ORCHESTRATOR SESSION IN PROGRESS (2026-09-24 evening) — read `docs/tasks/ORCHESTRATOR-HANDOFF.md` first.
+> ## ▶ ORCHESTRATOR SESSION IN PROGRESS (2026-09-24 evening) — read the repo-root `START-HERE.md` first.
 > It has the live status table, the sub-agent recipe, and the next steps.
 >
 > ## 🆕 HANDOFF, 2026-09-24 — READ THIS FIRST (supersedes everything below)
