@@ -1,0 +1,237 @@
+diff --git a/iso/overlay/configs/airootfs/usr/local/bin/omarchy-deck-early b/iso/overlay/configs/airootfs/usr/local/bin/omarchy-deck-early
+index d0c171d..7aa1ac2 100755
+--- a/iso/overlay/configs/airootfs/usr/local/bin/omarchy-deck-early
++++ b/iso/overlay/configs/airootfs/usr/local/bin/omarchy-deck-early
+@@ -78,7 +78,9 @@ deck_early_require_oled() {
+   if [[ $product == Galileo && $vendor == *Valve* ]]; then
+     return 0
+   fi
+-  echo "$DECK_EARLY_PROG: refusing to wipe on unverified hardware (product='${product:-unreadable}', vendor='${vendor:-unreadable}'): OLED Steam Deck (Galileo/Valve) with internal SSD or microSD only" >&2
++  local msg="refusing to wipe on unverified hardware (product='${product:-unreadable}', vendor='${vendor:-unreadable}'): OLED Steam Deck (Galileo/Valve) with internal SSD or microSD only"
++  echo "$DECK_EARLY_PROG: $msg" >&2
++  deck_early_log "$msg"
+   return 2
+ }
+ 
+@@ -93,8 +95,10 @@ deck_early_require_target_disk() {
+   local base=${disk#/dev/}
+   local row
+   row=$("$lsblk_bin" -dpno NAME,TYPE,RM,TRAN "$disk" 2>/dev/null | head -n 1 || true)
++  deck_early_log "require_target_disk '$disk': lsblk row='$row'"
+   if [[ -z $row ]]; then
+     echo "$DECK_EARLY_PROG: refusing '$disk': not visible to lsblk as a disk" >&2
++    deck_early_log "refusing '$disk': lsblk returned no row for it"
+     return 2
+   fi
+   local _discard="" type="" rm="" tran=""
+@@ -102,10 +106,12 @@ deck_early_require_target_disk() {
+   if [[ $disk =~ ^/dev/mmcblk[0-9]+$ ]]; then
+     if [[ $type != disk ]]; then
+       echo "$DECK_EARLY_PROG: refusing '$disk': not a microSD whole disk (TYPE=$type; USB never a target)" >&2
++      deck_early_log "refusing '$disk': TYPE=$type, expected 'disk' for a microSD whole-disk device"
+       return 2
+     fi
+   elif [[ $type != disk || $rm != 0 || $tran != nvme ]]; then
+     echo "$DECK_EARLY_PROG: refusing '$disk': not an internal SSD or microSD card (TYPE=$type RM=$rm TRAN=$tran; USB never a target)" >&2
++    deck_early_log "refusing '$disk': TYPE=$type RM=$rm TRAN=$tran did not match the microSD-name path or the NVMe (disk,RM=0,TRAN=nvme) path"
+     return 2
+   fi
+   local boot_source boot_disk
+@@ -114,8 +120,10 @@ deck_early_require_target_disk() {
+   if [[ -n $boot_source ]]; then
+     boot_disk=$("$lsblk_bin" -no PKNAME "$boot_source" 2>/dev/null || true)
+     [[ -n $boot_disk ]] || boot_disk=$boot_source
++    deck_early_log "require_target_disk '$disk': boot_source='$boot_source' boot_disk='$boot_disk'"
+     if [[ $disk == "$boot_disk" || $disk == "$boot_source" || $base == "${boot_disk#/dev/}" ]]; then
+       echo "$DECK_EARLY_PROG: refusing '$disk': it is the live boot medium, not the install target" >&2
++      deck_early_log "refusing '$disk': matched the resolved boot medium ('$boot_disk' / '$boot_source')"
+       return 2
+     fi
+   fi
+@@ -130,7 +138,17 @@ cmd_network_ready() {
+ 
+ cmd_start() {
+   local disk=${1:-}
+-  [[ -n $disk ]] || usage
++  # Log file created FIRST, before any gate runs: previously it was only
++  # touched after every check below had already passed (see the old
++  # `touch "$DECK_EARLY_LOG"` further down), so a rejection at any of these
++  # gates -- exactly the failures most likely to explain "the install never
++  # began" -- went to the tty only and left the log file either absent or
++  # stale. mkdir -p is safe to call twice; the second call later is now a
++  # no-op.
++  mkdir -p "$DECK_EARLY_STATE_DIR" 2>/dev/null || true
++  touch "$DECK_EARLY_LOG" 2>/dev/null || true
++  deck_early_log "cmd_start invoked with disk='${disk}'"
++  [[ -n $disk ]] || { deck_early_log "usage error: no disk argument given"; usage; }
+   # Internal SSD or microSD only: USB sticks (usb/sd*) are never targets,
+   # and a /dev/vd* name is a VM disk. The form's own resolver
+   # (deck_form_disk_list: NVMe TYPE==disk RM==0 TRAN==nvme, or microSD
+@@ -138,12 +156,24 @@ cmd_start() {
+   # enforces the same so calling it directly cannot bypass the wipe gate.
+   case $disk in
+     /dev/nvme[0-9]n[0-9]|/dev/mmcblk[0-9]) ;;
+-    *) echo "$DECK_EARLY_PROG: refusing '$disk' (internal SSD or microSD only; USB never a target)" >&2; exit 2 ;;
++    *)
++      deck_early_log "refusing '$disk': fails the internal-SSD-or-microSD name pattern"
++      echo "$DECK_EARLY_PROG: refusing '$disk' (internal SSD or microSD only; USB never a target)" >&2
++      exit 2 ;;
+   esac
+-  [[ -b $disk ]] || { echo "$DECK_EARLY_PROG: no such block device '$disk'" >&2; exit 2; }
+-  deck_early_require_oled
+-  deck_early_require_target_disk "$disk"
+-  mkdir -p "$DECK_EARLY_STATE_DIR"
++  if [[ ! -b $disk ]]; then
++    deck_early_log "refusing '$disk': no such block device (not yet enumerated by the kernel?)"
++    echo "$DECK_EARLY_PROG: no such block device '$disk'" >&2
++    exit 2
++  fi
++  if ! deck_early_require_oled; then
++    deck_early_log "refusing '$disk': hardware failed the verified-OLED gate"
++    exit 2
++  fi
++  if ! deck_early_require_target_disk "$disk"; then
++    deck_early_log "refusing '$disk': failed deck_early_require_target_disk (see message above)"
++    exit 2
++  fi
+   if [[ -f $DECK_EARLY_DISK_FILE ]]; then
+     local prior
+     prior=$(cat "$DECK_EARLY_DISK_FILE" 2>/dev/null || true)
+@@ -151,11 +181,15 @@ cmd_start() {
+       local st
+       st=$(deck_early_status_word)
+       case $st in
+-        running|done) exit 0 ;;
+-        failed) echo "$DECK_EARLY_PROG: early stage for $disk already failed; see $DECK_EARLY_ERROR_FILE" >&2; exit 1 ;;
++        running|done) deck_early_log "'$disk' already $st; no-op"; exit 0 ;;
++        failed)
++          deck_early_log "early stage for '$disk' already failed; see $DECK_EARLY_ERROR_FILE"
++          echo "$DECK_EARLY_PROG: early stage for $disk already failed; see $DECK_EARLY_ERROR_FILE" >&2
++          exit 1 ;;
+       esac
+       # A stale non-terminal state (e.g. `absent`) with the same disk: restart below.
+     else
++      deck_early_log "refusing '$disk': early stage already bound to a different disk '$prior'"
+       echo "$DECK_EARLY_PROG: early stage already bound to '$prior'; refusing a different disk '$disk'" >&2
+       exit 2
+     fi
+diff --git a/iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh b/iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh
+index 1cfc535..de5acde 100755
+--- a/iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh
++++ b/iso/overlay/configs/airootfs/usr/share/omarchy-iso/deck-form.sh
+@@ -179,12 +179,56 @@ set -uo pipefail
+ 
+ readonly DECK_FORM_PROG=deck-form
+ 
+-deck_form_log()  { printf '[%s] %s\n' "$DECK_FORM_PROG" "$*" >&2; }
+-deck_form_warn() { printf '[%s] WARNING: %s\n' "$DECK_FORM_PROG" "$*" >&2; }
++# DECK_FORM_LOG -- every deck_form_log/warn/die/abort call is echoed to stderr
++# (the visible tty, as before) AND appended here. Before this, a failure
++# during the pre-install form (drive detection, the early-stage handoff --
++# anything upstream of omarchy-install-dashboard, which is the only thing
++# that ever wrote a persistent record, in /var/log/omarchy-deck-install.json)
++# left nothing on disk: the tty text scrolled away the moment the wrapping
++# `.automated_script.sh` exited and dropped to a shell, so "no relevant
++# logs" was the correct, literal description of what a failed pre-install
++# form left behind. Overridable so the [U] suite (and anyone debugging by
++# hand) can point it elsewhere; falls back to /tmp if /var/log is not yet
++# writable (e.g. very early boot, before the overlay mount is live).
++readonly DECK_FORM_LOG_DEFAULT=/var/log/omarchy-deck-form.log
++deck_form_log_path() { printf '%s\n' "${DECK_FORM_LOG:-$DECK_FORM_LOG_DEFAULT}"; }
++
++deck_form_log_write() {
++  local path
++  path=$(deck_form_log_path)
++  if ! printf '[%s] %s\n' "$(date -u +%FT%TZ 2>/dev/null || echo '?')" "$*" >>"$path" 2>/dev/null; then
++    # /var/log unwritable this early: fall back once to /tmp so the record
++    # still exists somewhere, rather than silently dropping it.
++    printf '[%s] %s\n' "$(date -u +%FT%TZ 2>/dev/null || echo '?')" "$*" >>/tmp/omarchy-deck-form.log 2>/dev/null || true
++  fi
++}
++
++deck_form_log()  { printf '[%s] %s\n' "$DECK_FORM_PROG" "$*" >&2; deck_form_log_write "$*"; }
++deck_form_warn() { printf '[%s] WARNING: %s\n' "$DECK_FORM_PROG" "$*" >&2; deck_form_log_write "WARNING: $*"; }
+ # Never exits (see SOURCE-SAFETY above) -- logs and returns 1. Callers that
+ # need to stop must return themselves; this only stops itself from being
+ # silent about why.
+-deck_form_die()  { printf '[%s] ERROR: %s\n' "$DECK_FORM_PROG" "$*" >&2; return 1; }
++deck_form_die()  { printf '[%s] ERROR: %s\n' "$DECK_FORM_PROG" "$*" >&2; deck_form_log_write "ERROR: $*"; return 1; }
++
++# abort -- overrides upstream's own abort() (configs/airootfs/root/configurator,
++# see abort() there): draws the same on-screen message via the same `gum
++# style` calls, so nothing visible changes, but ALSO writes the reason to
++# DECK_FORM_LOG first. Same wrap technique this whole file already uses
++# (bash keeps the last definition of a name; this is sourced after
++# `configurator` defines its own abort, before any screen runs). Every
++# `abort "..."` call anywhere in the form or in this file's own S0/drive
++# code now leaves a line in the log even though the process exits 1 right
++# after -- which is the one thing upstream's abort could never do, because
++# it did not know this file, or this ISO's log path, existed.
++abort() {
++  local msg=${1:-Aborted installation}
++  deck_form_log_write "ABORT: $msg"
++  gum style "$msg"
++  echo
++  gum style "You can retry later by running: ./.automated_script.sh"
++  gum style --foreground 8 "Details: $(deck_form_log_path)"
++  exit 1
++}
+ 
+ # ===========================================================================
+ # §2.3 -- bounded text-entry mode
+@@ -832,6 +876,7 @@ deck_form_start_early_install() {
+   # shellcheck disable=SC2034
+   disk=$chosen
+   early_bin=$(deck_form_early_bin)
++  deck_form_log_write "start-early-install: chosen='$chosen' early_bin='$early_bin'"
+   say "Installing to $chosen -- this drive is being wiped now."
+   if ! "$early_bin" start "$disk"; then
+     deck_form_warn "'$early_bin start $disk' failed -- the background install never started, and nothing was erased by it"
+@@ -3852,6 +3897,14 @@ deck_form_eligible_disks() {
+   local lsblk_tmp
+   lsblk_tmp=$(mktemp) || { deck_form_die "mktemp failed"; return 1; }
+   "$lsblk_bin" -dpno NAME,TYPE,RM,TRAN >"$lsblk_tmp" 2>/dev/null
++  # Diagnostic snapshot, written on every call (not just on failure): the
++  # drive screen is the one path in this file never run outside a
++  # fixture-fed unit test (docs/PROGRESS.md 5.50, "not exercised anywhere
++  # yet: the new screens themselves ... need the Deck"). If a real card
++  # reader enumerates slowly, reports unexpected lsblk columns, or gets
++  # excluded as the boot medium by mistake, this line is what makes that
++  # visible afterwards instead of only a transient message on screen.
++  deck_form_log_write "eligible-disks: exclude='$exclude_disk' lsblk-rows: $(tr '\n' ';' <"$lsblk_tmp")"
+   deck_form_disk_list "$lsblk_tmp" "$exclude_disk"
+   local rc=$?
+   rm -f "$lsblk_tmp"
+diff --git a/iso/overlay/patches/deck-install-invocation.patch b/iso/overlay/patches/deck-install-invocation.patch
+index 28bece1..6c2f3ca 100644
+--- a/iso/overlay/patches/deck-install-invocation.patch
++++ b/iso/overlay/patches/deck-install-invocation.patch
+@@ -2,7 +2,7 @@ diff --git a/configs/airootfs/root/.automated_script.sh b/configs/airootfs/root/
+ index 22b68fe..eb39faf 100644
+ --- a/configs/airootfs/root/.automated_script.sh
+ +++ b/configs/airootfs/root/.automated_script.sh
+-@@ -123,6 +123,55 @@ else
++@@ -101,6 +101,66 @@
+    ./configurator
+  fi
+  
+@@ -15,7 +15,18 @@ index 22b68fe..eb39faf 100644
+ +# from boot); gaming=no stays fully offline. The late stage runs through the
+ +# dashboard below, exactly as the interactive path. Missing/invalid choice
+ +# files abort loudly -- installing an unanswered variant is never a default.
+-+if [[ ${OMARCHY_DECK_CIDATA_EARLY:-} != 0 ]] && [[ -f /root/user_configuration.json ]]; then
+++# Gated on OMARCHY_UI_INTERACTIVE=no -- the exact flag the cidata branch a
+++# few lines up already sets on success -- not on a private variable of its
+++# own: a bare `${OMARCHY_DECK_CIDATA_EARLY:-} != 0` is true whenever the
+++# variable is unset (nothing anywhere ever set it), so this block ran
+++# unconditionally on EVERY install, cidata or fully interactive. It still
+++# "passed" the VM cidata suite, because a cidata run really does drop
+++# /root/preinstalls and /root/gaming, so the accidental unconditional
+++# execution happened to find what it expected there. A real interactive
+++# install has no cidata drive and neither file, and hit the exit 1 below
+++# after everything else -- disk partitioning, Early install, Steam
+++# download -- had already finished, on the last screen this script owns.
+++if [[ ${OMARCHY_UI_INTERACTIVE:-yes} == no ]] && [[ -f /root/user_configuration.json ]]; then
+ +  deck_early_disk=$(jq -r '.disk_config.device_modifications[0].device // empty' /root/user_configuration.json 2>/dev/null || true)
+ +  if [[ -n $deck_early_disk && -x /usr/local/bin/omarchy-deck-early ]]; then
+ +    mkdir -p /run/omarchy-deck/choices
